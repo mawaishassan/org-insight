@@ -60,9 +60,10 @@ async def get_entries_overview(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List assigned KPIs for the given year with entry status and first 2 field preview (for cards)."""
+    """List KPIs with entry status and first 2 field preview. For admins, shows assigned user's entry (same source as data entry operator)."""
     org_id = _org_id(current_user, organization_id)
-    items = await list_entries_overview(db, current_user.id, org_id, year)
+    as_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+    items = await list_entries_overview(db, current_user.id, org_id, year, as_admin=as_admin)
     return items
 
 
