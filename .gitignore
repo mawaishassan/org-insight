@@ -5,6 +5,9 @@ frontend/dist/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+frontend/.next/
+frontend/.next/cache/
+
 
 # ---------- Python (Backend) ----------
 backend/venv/
@@ -29,3 +32,8 @@ Thumbs.db
 # ---------- IDE ----------
 .vscode/
 .idea/
+backend/app/entries/__pycache__/routes.cpython-312.pyc
+backend/app/entries/__pycache__/routes.cpython-312.pyc
+backend/app/entries/__pycache__/routes.cpython-312.pyc
+backend/app/entries/__pycache__/routes.cpython-312.pyc
+backend/app/entries/__pycache__/service.cpython-312.pyc
