@@ -1,0 +1,1 @@
+"""KPI data entry module."""

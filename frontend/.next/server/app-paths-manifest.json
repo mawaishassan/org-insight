@@ -1,0 +1,9 @@
+{
+  "/login/page": "app/login/page.js",
+  "/dashboard/kpis/page": "app/dashboard/kpis/page.js",
+  "/dashboard/organizations/[id]/page": "app/dashboard/organizations/[id]/page.js",
+  "/dashboard/domains/[id]/page": "app/dashboard/domains/[id]/page.js",
+  "/dashboard/page": "app/dashboard/page.js",
+  "/dashboard/domains/page": "app/dashboard/domains/page.js",
+  "/dashboard/domains/[id]/categories/[categoryId]/attach-kpis/page": "app/dashboard/domains/[id]/categories/[categoryId]/attach-kpis/page.js"
+}

@@ -1,0 +1,300 @@
+"""KPI entry CRUD, submit, lock; formula evaluation for formula fields."""
+
+from datetime import datetime
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from app.core.models import (
+    KPIEntry,
+    KPIFieldValue,
+    KPIField,
+    KPI,
+    Domain,
+    KPIAssignment,
+    User,
+)
+from app.core.models import FieldType
+from app.entries.schemas import FieldValueInput, EntryCreate
+from app.formula_engine.evaluator import evaluate_formula
+
+
+async def _resolve_org_and_kpi(db: AsyncSession, kpi_id: int) -> int | None:
+    """Return organization_id for KPI or None."""
+    result = await db.execute(
+        select(Domain.organization_id).join(KPI, KPI.domain_id == Domain.id).where(KPI.id == kpi_id)
+    )
+    row = result.one_or_none()
+    return row[0] if row else None
+
+
+async def _get_entry(db: AsyncSession, entry_id: int, user_id: int) -> KPIEntry | None:
+    result = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.user_id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _get_entry_admin(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry | None:
+    result = await db.execute(
+        select(KPIEntry)
+        .join(KPIEntry.kpi)
+        .join(KPI.domain)
+        .where(KPIEntry.id == entry_id, Domain.organization_id == org_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_or_create_entry(
+    db: AsyncSession, user_id: int, org_id: int, kpi_id: int, year: int
+) -> tuple[KPIEntry | None, bool]:
+    """Get existing entry or create new one. Returns (entry, created)."""
+    result = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.user_id == user_id,
+            KPIEntry.year == year,
+        )
+    )
+    entry = result.scalar_one_or_none()
+    if entry:
+        return entry, False
+    kpi_org = await _resolve_org_and_kpi(db, kpi_id)
+    if kpi_org != org_id:
+        return None, False
+    entry = KPIEntry(kpi_id=kpi_id, user_id=user_id, year=year, is_draft=True)
+    db.add(entry)
+    await db.flush()
+    return entry, True
+
+
+async def user_can_edit_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool:
+    """Check if user is assigned to KPI or is org admin."""
+    result = await db.execute(
+        select(User).where(User.id == user_id)
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        return False
+    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return True
+    result = await db.execute(
+        select(KPIAssignment).where(
+            KPIAssignment.user_id == user_id,
+            KPIAssignment.kpi_id == kpi_id,
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def save_entry_values(
+    db: AsyncSession,
+    entry_id: int,
+    user_id: int,
+    values: list[FieldValueInput],
+    kpi_id: int,
+    org_id: int,
+) -> KPIEntry | None:
+    """Save or update field values for entry; evaluate formula fields."""
+    entry = await _get_entry(db, entry_id, user_id)
+    if not entry or entry.kpi_id != kpi_id or entry.is_locked:
+        return None
+    # Load KPI and fields
+    result = await db.execute(
+        select(KPI).where(KPI.id == kpi_id).options(selectinload(KPI.fields))
+    )
+    kpi = result.scalar_one_or_none()
+    if not kpi:
+        return None
+    key_to_field = {f.key: f for f in kpi.fields}
+    value_by_key: dict[str, float | int] = {}
+    for v in values:
+        f = next((x for x in kpi.fields if x.id == v.field_id), None)
+        if not f:
+            continue
+        if f.field_type == FieldType.formula:
+            continue  # computed below
+        fv = (
+            await db.execute(
+                select(KPIFieldValue).where(
+                    KPIFieldValue.entry_id == entry_id,
+                    KPIFieldValue.field_id == v.field_id,
+                )
+            )
+        ).scalar_one_or_none()
+        num_val = None
+        if v.value_number is not None:
+            num_val = float(v.value_number) if not isinstance(v.value_number, (int, float)) else v.value_number
+        if f.field_type == FieldType.number and num_val is not None:
+            value_by_key[f.key] = num_val
+        if fv is None:
+            fv = KPIFieldValue(entry_id=entry_id, field_id=v.field_id)
+            db.add(fv)
+        fv.value_text = v.value_text
+        fv.value_number = v.value_number
+        fv.value_json = v.value_json
+        fv.value_boolean = v.value_boolean
+        if v.value_date:
+            fv.value_date = v.value_date if isinstance(v.value_date, datetime) else None
+        if num_val is not None:
+            value_by_key[f.key] = num_val
+
+    # Formula fields
+    for f in kpi.fields:
+        if f.field_type != FieldType.formula or not f.formula_expression:
+            continue
+        computed = evaluate_formula(f.formula_expression, value_by_key)
+        fv = (
+            await db.execute(
+                select(KPIFieldValue).where(
+                    KPIFieldValue.entry_id == entry_id,
+                    KPIFieldValue.field_id == f.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if fv is None:
+            fv = KPIFieldValue(entry_id=entry_id, field_id=f.id)
+            db.add(fv)
+        fv.value_number = computed
+        if computed is not None:
+            value_by_key[f.key] = computed
+
+    await db.flush()
+    return entry
+
+
+async def submit_entry(db: AsyncSession, entry_id: int, user_id: int) -> KPIEntry | None:
+    """Mark entry as submitted (no longer draft)."""
+    entry = await _get_entry(db, entry_id, user_id)
+    if not entry or entry.is_locked:
+        return None
+    entry.is_draft = False
+    entry.submitted_at = datetime.utcnow()
+    await db.flush()
+    return entry
+
+
+async def lock_entry(
+    db: AsyncSession, entry_id: int, org_id: int, is_locked: bool
+) -> KPIEntry | None:
+    """Lock or unlock entry (admin)."""
+    entry = await _get_entry_admin(db, entry_id, org_id)
+    if not entry:
+        return None
+    entry.is_locked = is_locked
+    await db.flush()
+    return entry
+
+
+async def list_available_kpis(db: AsyncSession, user_id: int, org_id: int) -> list[KPI]:
+    """Return KPIs the user can enter data for (assigned KPIs for USER, all org KPIs for ORG_ADMIN/SUPER_ADMIN)."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        return []
+    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        q = select(KPI).join(KPI.domain).where(Domain.organization_id == org_id).order_by(KPI.year.desc(), KPI.name)
+        res = await db.execute(q)
+        return list(res.scalars().all())
+    # USER: only assigned KPIs
+    q = (
+        select(KPI)
+        .join(KPIAssignment, KPIAssignment.kpi_id == KPI.id)
+        .where(KPIAssignment.user_id == user_id)
+        .order_by(KPI.year.desc(), KPI.name)
+    )
+    res = await db.execute(q)
+    return list(res.scalars().all())
+
+
+async def list_entries(
+    db: AsyncSession,
+    user_id: int,
+    org_id: int,
+    kpi_id: int | None = None,
+    year: int | None = None,
+    as_admin: bool = False,
+) -> list[KPIEntry]:
+    """List entries for user (or for org if as_admin)."""
+    if as_admin:
+        q = (
+            select(KPIEntry)
+            .join(KPIEntry.kpi)
+            .join(KPI.domain)
+            .where(Domain.organization_id == org_id)
+        )
+        if kpi_id is not None:
+            q = q.where(KPIEntry.kpi_id == kpi_id)
+        if year is not None:
+            q = q.where(KPIEntry.year == year)
+    else:
+        q = select(KPIEntry).where(KPIEntry.user_id == user_id)
+        if kpi_id is not None:
+            q = q.where(KPIEntry.kpi_id == kpi_id)
+        if year is not None:
+            q = q.where(KPIEntry.year == year)
+    q = q.order_by(KPIEntry.year.desc(), KPIEntry.kpi_id).options(selectinload(KPIEntry.field_values))
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+def _format_field_value(fv) -> str:
+    """Format a field value for display."""
+    if fv.value_text is not None:
+        return str(fv.value_text)[:80]
+    if fv.value_number is not None:
+        return str(fv.value_number)
+    if fv.value_boolean is not None:
+        return "Yes" if fv.value_boolean else "No"
+    if fv.value_date is not None:
+        return str(fv.value_date)[:10] if hasattr(fv.value_date, "isoformat") else str(fv.value_date)
+    if fv.value_json is not None:
+        return str(fv.value_json)[:80]
+    return ""
+
+
+async def list_entries_overview(
+    db: AsyncSession, user_id: int, org_id: int, year: int
+) -> list[dict]:
+    """
+    For the given year, return assigned KPIs with entry status and first 2 field preview.
+    Each item: kpi_id, kpi_name, kpi_year, entry: null | { id, is_draft, is_locked, submitted_at, preview: [{ field_name, value }] }.
+    """
+    kpis = await list_available_kpis(db, user_id, org_id)
+    result = []
+    for kpi in kpis:
+        # Get entry for this user, this KPI, this year
+        q = select(KPIEntry).where(
+            KPIEntry.user_id == user_id,
+            KPIEntry.kpi_id == kpi.id,
+            KPIEntry.year == year,
+        ).options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
+        res = await db.execute(q)
+        entry = res.scalar_one_or_none()
+        item = {
+            "kpi_id": kpi.id,
+            "kpi_name": kpi.name,
+            "kpi_year": kpi.year,
+            "entry": None,
+        }
+        if entry:
+            # First 2 fields by sort_order (field has sort_order)
+            field_values = list(entry.field_values or [])
+            # Sort by field.sort_order then field_id
+            field_values.sort(key=lambda fv: (fv.field.sort_order if fv.field else 0, fv.field_id))
+            preview = []
+            for fv in field_values[:2]:
+                if fv.field:
+                    preview.append({
+                        "field_name": fv.field.name,
+                        "value": _format_field_value(fv),
+                    })
+            item["entry"] = {
+                "id": entry.id,
+                "is_draft": entry.is_draft,
+                "is_locked": entry.is_locked,
+                "submitted_at": entry.submitted_at.isoformat() if entry.submitted_at else None,
+                "preview": preview,
+            }
+        result.append(item)
+    return result

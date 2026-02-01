@@ -1,0 +1,1 @@
+"""Categories within a domain."""
