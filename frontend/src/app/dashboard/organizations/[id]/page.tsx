@@ -21,6 +21,14 @@ const FIELD_TYPES = [
 
 const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean"] as const;
 
+const GROUP_FUNCTIONS = [
+  { value: "SUM_ITEMS", label: "SUM (total)" },
+  { value: "AVG_ITEMS", label: "AVG (average)" },
+  { value: "COUNT_ITEMS", label: "COUNT" },
+  { value: "MIN_ITEMS", label: "MIN" },
+  { value: "MAX_ITEMS", label: "MAX" },
+] as const;
+
 type TabId = "domains" | "kpis" | "fields" | "tags";
 
 interface SubFieldDef {
@@ -1310,7 +1318,12 @@ function FieldsSection({
             {createForm.watch("field_type") === "formula" && (
               <div className="form-group">
                 <label>Formula</label>
-                <input {...createForm.register("formula_expression")} placeholder="field_a + field_b" />
+                <input {...createForm.register("formula_expression")} placeholder="e.g. total_count + SUM_ITEMS(students, score)" style={{ width: "100%", marginBottom: "0.5rem" }} />
+                <FormulaBuilder
+                  formulaValue={createForm.watch("formula_expression") ?? ""}
+                  onInsert={(text) => createForm.setValue("formula_expression", (createForm.getValues("formula_expression") ?? "") + text)}
+                  fields={list.filter((f) => f.field_type === "number" || f.field_type === "multi_line_items")}
+                />
               </div>
             )}
             {createForm.watch("field_type") === "multi_line_items" && (
@@ -1426,6 +1439,7 @@ function FieldsSection({
                 {editingId === f.id ? (
                   <FieldEditForm
                     field={f}
+                    list={list}
                     onSave={(data, subFields) => onUpdateSubmit(f.id, data, subFields)}
                     onCancel={() => setEditingId(null)}
                   />
@@ -1467,19 +1481,88 @@ function FieldsSection({
   );
 }
 
+function FormulaBuilder({
+  formulaValue,
+  onInsert,
+  fields,
+}: {
+  formulaValue: string;
+  onInsert: (text: string) => void;
+  fields: KpiField[];
+}) {
+  const [refFieldId, setRefFieldId] = useState<number | "">("");
+  const [refSubKey, setRefSubKey] = useState("");
+  const [refGroupFn, setRefGroupFn] = useState<string>("SUM_ITEMS");
+  const refField = refFieldId === "" ? null : fields.find((f) => f.id === refFieldId);
+  const subFields = refField?.field_type === "multi_line_items" ? (refField.sub_fields ?? []) : [];
+  const canInsertNumber = refField?.field_type === "number";
+  const isCountItemsOnly = refGroupFn === "COUNT_ITEMS";
+  const canInsertItems = refField?.field_type === "multi_line_items" && (isCountItemsOnly || (subFields.length > 0 && !!refSubKey));
+
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: "6px", padding: "0.75rem", background: "var(--bg-subtle, #f8f9fa)" }}>
+      <div style={{ fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>Insert reference</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "flex-end" }}>
+        <div>
+          <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Field</label>
+          <select value={refFieldId} onChange={(e) => { setRefFieldId(e.target.value ? Number(e.target.value) : ""); setRefSubKey(""); }} style={{ minWidth: "160px" }}>
+            <option value="">— Select field —</option>
+            {fields.map((f) => (
+              <option key={f.id} value={f.id}>{f.name} ({f.key}) — {f.field_type.replace(/_/g, " ")}</option>
+            ))}
+          </select>
+        </div>
+        {refField?.field_type === "multi_line_items" && subFields.length > 0 && (
+          <>
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Sub-field</label>
+              <select value={refSubKey} onChange={(e) => setRefSubKey(e.target.value)} style={{ minWidth: "140px" }}>
+                <option value="">{refGroupFn === "COUNT_ITEMS" ? "Row count (no sub-field)" : "— Select —"}</option>
+                {subFields.map((s) => (
+                  <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Group function</label>
+              <select value={refGroupFn} onChange={(e) => setRefGroupFn(e.target.value)} style={{ minWidth: "120px" }}>
+                {GROUP_FUNCTIONS.map((g) => (
+                  <option key={g.value} value={g.value}>{g.label}</option>
+                ))}
+              </select>
+            </div>
+          </>
+        )}
+        {canInsertNumber && <button type="button" className="btn btn-primary" onClick={() => refField && onInsert(refField.key)}>Insert field</button>}
+        {canInsertItems && refField && (
+          <button type="button" className="btn btn-primary" onClick={() => onInsert(isCountItemsOnly && !refSubKey ? `COUNT_ITEMS(${refField.key})` : `${refGroupFn}(${refField.key}, ${refSubKey})`)}>Insert</button>
+        )}
+      </div>
+      <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
+        <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Operators:</span>
+        {[" + ", " - ", " * ", " / ", " ( ", " ) "].map((op) => (
+          <button key={op} type="button" className="btn" onClick={() => onInsert(op)} style={{ padding: "0.25rem 0.5rem", fontSize: "0.9rem" }}>{op.trim() || op}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function FieldEditForm({
   field,
+  list,
   onSave,
   onCancel,
 }: {
   field: KpiField;
+  list: KpiField[];
   onSave: (data: FieldUpdateFormData, subFields?: SubFieldDef[]) => void;
   onCancel: () => void;
 }) {
   const [editSubFields, setEditSubFields] = useState<SubFieldDef[]>(
     () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0 }))
   );
-  const { register, handleSubmit, watch, formState: { errors, isSubmitting } } = useForm<FieldUpdateFormData>({
+  const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting } } = useForm<FieldUpdateFormData>({
     resolver: zodResolver(fieldUpdateSchema),
     defaultValues: {
       name: field.name,
@@ -1514,7 +1597,12 @@ function FieldEditForm({
       {currentFieldType === "formula" && (
         <div className="form-group">
           <label>Formula</label>
-          <input {...register("formula_expression")} />
+          <input {...register("formula_expression")} style={{ width: "100%", marginBottom: "0.5rem" }} />
+          <FormulaBuilder
+            formulaValue={watch("formula_expression") ?? ""}
+            onInsert={(text) => setValue("formula_expression", (watch("formula_expression") ?? "") + text)}
+            fields={list.filter((f) => f.id !== field.id && (f.field_type === "number" || f.field_type === "multi_line_items"))}
+          />
         </div>
       )}
       {currentFieldType === "multi_line_items" && (
