@@ -69,3 +69,11 @@ class KPIFieldResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class KPIFieldChildDataSummary(BaseModel):
+    """Summary of child records for a KPI field (for delete confirmation)."""
+
+    field_values_count: int = 0
+    report_template_fields_count: int = 0
+    has_child_data: bool = False

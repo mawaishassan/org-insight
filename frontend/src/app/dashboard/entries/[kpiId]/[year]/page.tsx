@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 
@@ -35,10 +35,21 @@ interface EntryRow {
   values: FieldValueResp[];
 }
 
+function qs(params: Record<string, string | number | undefined>) {
+  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
+  return new URLSearchParams(entries as Record<string, string>).toString();
+}
+
 export default function EntryDetailPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const kpiId = Number(params.kpiId);
   const year = Number(params.year);
+  const orgIdParam = searchParams.get("organization_id");
+  const organizationId = orgIdParam ? Number(orgIdParam) : undefined;
+  const fromDomainId = searchParams.get("from_domain");
+  const domainId = fromDomainId ? Number(fromDomainId) : undefined;
+
   const [kpiName, setKpiName] = useState<string>("");
   const [fields, setFields] = useState<FieldDef[]>([]);
   const [existingEntry, setExistingEntry] = useState<EntryRow | null>(null);
@@ -47,30 +58,46 @@ export default function EntryDetailPage() {
 
   const token = getAccessToken();
 
+  const entriesQuery = organizationId != null ? `?${qs({ kpi_id: kpiId, year, organization_id: organizationId })}` : `?kpi_id=${kpiId}&year=${year}`;
+  const fieldsQuery = organizationId != null ? `?${qs({ kpi_id: kpiId, organization_id: organizationId })}` : `?kpi_id=${kpiId}`;
+  const availableKpisQuery = organizationId != null ? `?${qs({ organization_id: organizationId })}` : "";
+
   useEffect(() => {
     if (!token || !kpiId || !year) return;
     setError(null);
     Promise.all([
-      api<{ id: number; name: string; year: number }[]>(`/entries/available-kpis`, { token }).then((kpis) => {
+      api<{ id: number; name: string; year: number }[]>(`/entries/available-kpis${availableKpisQuery}`, { token }).then((kpis) => {
         const k = kpis.find((x) => x.id === kpiId);
         if (k) setKpiName(k.name);
       }),
-      api<FieldDef[]>(`/entries/fields?kpi_id=${kpiId}`, { token }).then(setFields).catch(() => setFields([])),
-      api<EntryRow[]>(`/entries?kpi_id=${kpiId}&year=${year}`, { token })
+      api<FieldDef[]>(`/entries/fields${fieldsQuery}`, { token }).then(setFields).catch(() => setFields([])),
+      api<EntryRow[]>(`/entries${entriesQuery}`, { token })
         .then((entries) => setExistingEntry(entries[0] ?? null))
         .catch(() => setExistingEntry(null)),
     ])
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
-  }, [token, kpiId, year]);
+  }, [token, kpiId, year, entriesQuery, fieldsQuery, availableKpisQuery]);
 
   if (!kpiId || !year) return <p>Invalid KPI or year.</p>;
   if (loading) return <p>Loading...</p>;
 
+  const backDomainHref =
+    domainId != null
+      ? organizationId != null
+        ? `/dashboard/domains/${domainId}?organization_id=${organizationId}`
+        : `/dashboard/domains/${domainId}`
+      : null;
+
   const content = (
     <div>
-      <div style={{ marginBottom: "1rem" }}>
-        <Link href="/dashboard/entries" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{"\u2190"} Back to Data entry</Link>
+      <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+        {backDomainHref != null && (
+          <Link href={backDomainHref} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{"\u2190"} Back to Domain</Link>
+        )}
+        <Link href="/dashboard/entries" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+          {backDomainHref != null ? "Data entry" : "\u2190 Back to Data entry"}
+        </Link>
       </div>
       <h1 style={{ marginBottom: "0.5rem", fontSize: "1.5rem" }}>{kpiName || `KPI #${kpiId}`}</h1>
       <p style={{ color: "var(--muted)", marginBottom: "1.5rem" }}>Year {year}</p>
@@ -91,6 +118,7 @@ export default function EntryDetailPage() {
             existingEntry={existingEntry}
             setExistingEntry={setExistingEntry}
             token={token!}
+            organizationId={organizationId}
           />
         </div>
       )}
@@ -107,6 +135,7 @@ function EntryForm({
   existingEntry,
   setExistingEntry,
   token,
+  organizationId,
 }: {
   kpiId: number;
   year: number;
@@ -115,6 +144,7 @@ function EntryForm({
   existingEntry: EntryRow | null;
   setExistingEntry: (e: EntryRow | null) => void;
   token: string;
+  organizationId?: number;
 }) {
   const [formValues, setFormValues] = useState<Record<number, { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string }>>(() => {
     const o: Record<number, { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string }> = {};
@@ -163,7 +193,8 @@ function EntryForm({
             value_date: v.value_date || null,
           };
         });
-      const entry = await api<EntryRow>("/entries", {
+      const saveQuery = organizationId != null ? `?${qs({ organization_id: organizationId })}` : "";
+      const entry = await api<EntryRow>(`/entries${saveQuery}`, {
         method: "POST",
         body: JSON.stringify({ kpi_id: kpiId, year, is_draft: true, values }),
         token,

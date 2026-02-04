@@ -1,10 +1,26 @@
 """KPI CRUD with tenant isolation via domain."""
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.orm import selectinload
 
-from app.core.models import KPI, User, KPIAssignment, Domain, Category, KPIDomain, KPICategory, KPIOrganizationTag, OrganizationTag
+from app.core.models import (
+    KPI,
+    User,
+    KPIAssignment,
+    Domain,
+    Category,
+    KPIDomain,
+    KPICategory,
+    KPIOrganizationTag,
+    OrganizationTag,
+    KPIEntry,
+    KPIFieldValue,
+    KPIField,
+    KPIFieldOption,
+    ReportTemplateField,
+    ReportTemplateKPI,
+)
 from app.kpis.schemas import KPICreate, KPIUpdate
 
 
@@ -15,8 +31,16 @@ async def _domain_org_id(db: AsyncSession, domain_id: int) -> int | None:
     return d.organization_id if d else None
 
 
+async def _next_sort_order_for_org(db: AsyncSession, org_id: int) -> int:
+    """Return the next sort_order for a new KPI in this organization (max + 1, or 0)."""
+    r = await db.execute(select(func.coalesce(func.max(KPI.sort_order), -1)).where(KPI.organization_id == org_id))
+    max_order = r.scalar() or -1
+    return max_order + 1
+
+
 async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | None:
-    """Create KPI in organization; domain is optional (can attach domains later)."""
+    """Create KPI in organization; domain is optional (can attach domains later). sort_order is set to next in org."""
+    next_order = await _next_sort_order_for_org(db, org_id)
     if data.domain_id is not None:
         if await _domain_org_id(db, data.domain_id) != org_id:
             return None
@@ -26,7 +50,7 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
             name=data.name,
             description=data.description,
             year=data.year,
-            sort_order=data.sort_order,
+            sort_order=next_order,
         )
     else:
         kpi = KPI(
@@ -35,7 +59,7 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
             name=data.name,
             description=data.description,
             year=data.year,
-            sort_order=data.sort_order,
+            sort_order=next_order,
         )
     db.add(kpi)
     await db.flush()
@@ -60,6 +84,22 @@ async def get_kpi_with_tags(db: AsyncSession, kpi_id: int, org_id: int) -> KPI |
     result = await db.execute(
         select(KPI)
         .where(KPI.id == kpi_id, KPI.organization_id == org_id)
+        .options(
+            selectinload(KPI.domain),
+            selectinload(KPI.domain_tags).selectinload(KPIDomain.domain),
+            selectinload(KPI.category_tags).selectinload(KPICategory.category).selectinload(Category.domain),
+            selectinload(KPI.organization_tags).selectinload(KPIOrganizationTag.tag),
+            selectinload(KPI.assignments).selectinload(KPIAssignment.user),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_kpi_with_tags_by_id(db: AsyncSession, kpi_id: int) -> KPI | None:
+    """Get KPI by id only (no org filter). For super admin when organization_id is not in context."""
+    result = await db.execute(
+        select(KPI)
+        .where(KPI.id == kpi_id)
         .options(
             selectinload(KPI.domain),
             selectinload(KPI.domain_tags).selectinload(KPIDomain.domain),
@@ -186,6 +226,8 @@ async def update_kpi(
         kpi.year = data.year
     if data.sort_order is not None:
         kpi.sort_order = data.sort_order
+    if data.card_display_field_ids is not None:
+        kpi.card_display_field_ids = data.card_display_field_ids
     await db.flush()
     if data.domain_ids is not None:
         await _sync_kpi_domains(db, kpi_id, org_id, data.domain_ids)
@@ -196,11 +238,48 @@ async def update_kpi(
     return kpi
 
 
+async def get_kpi_child_data_summary(
+    db: AsyncSession, kpi_id: int, org_id: int
+) -> dict[str, int] | None:
+    """Return counts of child records for a KPI (for delete confirmation). None if KPI not found."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return None
+    assignments_count = (await db.execute(select(func.count()).select_from(KPIAssignment).where(KPIAssignment.kpi_id == kpi_id))).scalar() or 0
+    entries_count = (await db.execute(select(func.count()).select_from(KPIEntry).where(KPIEntry.kpi_id == kpi_id))).scalar() or 0
+    fields_count = (await db.execute(select(func.count()).select_from(KPIField).where(KPIField.kpi_id == kpi_id))).scalar() or 0
+    subq_entries = select(KPIEntry.id).where(KPIEntry.kpi_id == kpi_id)
+    field_values_count = (await db.execute(select(func.count()).select_from(KPIFieldValue).where(KPIFieldValue.entry_id.in_(subq_entries)))).scalar() or 0
+    report_template_kpis_count = (await db.execute(select(func.count()).select_from(ReportTemplateKPI).where(ReportTemplateKPI.kpi_id == kpi_id))).scalar() or 0
+    total = assignments_count + entries_count + fields_count + field_values_count + report_template_kpis_count
+    return {
+        "assignments_count": assignments_count,
+        "entries_count": entries_count,
+        "fields_count": fields_count,
+        "field_values_count": field_values_count,
+        "report_template_kpis_count": report_template_kpis_count,
+        "has_child_data": total > 0,
+    }
+
+
 async def delete_kpi(db: AsyncSession, kpi_id: int, org_id: int) -> bool:
-    """Delete KPI."""
+    """Delete KPI and all child records (assignments, entries, field values, fields, report refs, tags)."""
     kpi = await get_kpi(db, kpi_id, org_id)
     if not kpi:
         return False
+    # Delete in FK-safe order so SQLAlchemy does not try to null out child FKs
+    subq_entries = select(KPIEntry.id).where(KPIEntry.kpi_id == kpi_id)
+    subq_fields = select(KPIField.id).where(KPIField.kpi_id == kpi_id)
+    await db.execute(delete(KPIFieldValue).where(KPIFieldValue.entry_id.in_(subq_entries)))
+    await db.execute(delete(ReportTemplateField).where(ReportTemplateField.kpi_field_id.in_(subq_fields)))
+    await db.execute(delete(KPIFieldOption).where(KPIFieldOption.field_id.in_(subq_fields)))
+    await db.execute(delete(KPIField).where(KPIField.kpi_id == kpi_id))
+    await db.execute(delete(KPIEntry).where(KPIEntry.kpi_id == kpi_id))
+    await db.execute(delete(KPIAssignment).where(KPIAssignment.kpi_id == kpi_id))
+    await db.execute(delete(ReportTemplateKPI).where(ReportTemplateKPI.kpi_id == kpi_id))
+    await db.execute(delete(KPIDomain).where(KPIDomain.kpi_id == kpi_id))
+    await db.execute(delete(KPICategory).where(KPICategory.kpi_id == kpi_id))
+    await db.execute(delete(KPIOrganizationTag).where(KPIOrganizationTag.kpi_id == kpi_id))
     await db.delete(kpi)
     await db.flush()
     return True

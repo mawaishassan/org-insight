@@ -4,13 +4,13 @@ from pydantic import BaseModel, Field
 
 
 class KPICreate(BaseModel):
-    """Create KPI (domain optional; can attach domain/category/org tags on create)."""
+    """Create KPI (domain optional; can attach domain/category/org tags on create). sort_order is auto-set to next in org."""
 
     domain_id: int | None = None
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
     year: int = Field(..., ge=2000, le=2100)
-    sort_order: int = 0
+    sort_order: int | None = None  # ignored on create; set automatically to next in organization
     domain_ids: list[int] = Field(default_factory=list, description="Domain tags to attach")
     category_ids: list[int] = Field(default_factory=list, description="Category tags to attach (one per domain)")
     organization_tag_ids: list[int] = Field(default_factory=list, description="Organization tags for search")
@@ -23,7 +23,7 @@ class KPIAssignUserBody(BaseModel):
 
 
 class KPIUpdate(BaseModel):
-    """Update KPI (optionally replace domain/category/org tags)."""
+    """Update KPI (optionally replace domain/category/org tags, card display fields)."""
 
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
@@ -32,6 +32,7 @@ class KPIUpdate(BaseModel):
     domain_ids: list[int] | None = Field(None, description="Replace domain tags with this list")
     category_ids: list[int] | None = Field(None, description="Replace category tags with this list")
     organization_tag_ids: list[int] | None = Field(None, description="Replace organization tags for search")
+    card_display_field_ids: list[int] | None = Field(None, description="Field IDs to show on domain KPI card (order preserved)")
 
 
 class DomainTagRef(BaseModel):
@@ -75,6 +76,7 @@ class KPIResponse(BaseModel):
     description: str | None
     year: int
     sort_order: int
+    card_display_field_ids: list[int] | None = None
     domain_tags: list[DomainTagRef] = []
     category_tags: list[CategoryTagRef] = []
     organization_tags: list[OrganizationTagRef] = []
@@ -82,3 +84,14 @@ class KPIResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class KPIChildDataSummary(BaseModel):
+    """Summary of child records for a KPI (for delete confirmation)."""
+
+    assignments_count: int = 0
+    entries_count: int = 0
+    fields_count: int = 0
+    field_values_count: int = 0
+    report_template_kpis_count: int = 0
+    has_child_data: bool = False

@@ -10,6 +10,7 @@ from app.kpis.schemas import (
     KPICreate,
     KPIUpdate,
     KPIResponse,
+    KPIChildDataSummary,
     KPIAssignUserBody,
     DomainTagRef,
     CategoryTagRef,
@@ -20,9 +21,11 @@ from app.kpis.service import (
     create_kpi,
     get_kpi,
     get_kpi_with_tags,
+    get_kpi_with_tags_by_id,
     list_kpis,
     update_kpi,
     delete_kpi,
+    get_kpi_child_data_summary,
     add_kpi_domain,
     remove_kpi_domain,
     add_kpi_category,
@@ -77,6 +80,7 @@ def _kpi_to_response(k):
         description=k.description,
         year=k.year,
         sort_order=k.sort_order,
+        card_display_field_ids=getattr(k, "card_display_field_ids", None) or None,
         domain_tags=domain_tags,
         category_tags=category_tags,
         organization_tags=organization_tags,
@@ -127,9 +131,12 @@ async def get_org_kpi(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Get KPI by id with domain and category tags."""
-    org_id = _org_id(current_user, organization_id)
-    kpi = await get_kpi_with_tags(db, kpi_id, org_id)
+    """Get KPI by id with domain and category tags. Super admin without organization_id gets KPI by id (org resolved from KPI)."""
+    if current_user.role.value == "SUPER_ADMIN" and organization_id is None:
+        kpi = await get_kpi_with_tags_by_id(db, kpi_id)
+    else:
+        org_id = _org_id(current_user, organization_id)
+        kpi = await get_kpi_with_tags(db, kpi_id, org_id)
     if not kpi:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
     return _kpi_to_response(kpi)
@@ -144,6 +151,12 @@ async def update_org_kpi(
     current_user: User = Depends(require_org_admin),
 ):
     """Update KPI."""
+    # Only SUPER_ADMIN may control which fields show on domain KPI cards
+    if body.card_display_field_ids is not None and current_user.role.value != "SUPER_ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Super Admin may set KPI card display fields",
+        )
     org_id = _org_id(current_user, organization_id)
     kpi = await update_kpi(db, kpi_id, org_id, body)
     if not kpi:
@@ -153,6 +166,21 @@ async def update_org_kpi(
     return _kpi_to_response(k)
 
 
+@router.get("/{kpi_id}/child_data_summary", response_model=KPIChildDataSummary)
+async def get_kpi_child_data(
+    kpi_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Return counts of child records (assignments, entries, fields, etc.) for delete confirmation."""
+    org_id = _org_id(current_user, organization_id)
+    summary = await get_kpi_child_data_summary(db, kpi_id, org_id)
+    if summary is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    return KPIChildDataSummary(**summary)
+
+
 @router.delete("/{kpi_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_org_kpi(
     kpi_id: int,
@@ -160,7 +188,7 @@ async def delete_org_kpi(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Delete KPI."""
+    """Delete KPI and all child records (assignments, entries, fields, stored values, report refs)."""
     org_id = _org_id(current_user, organization_id)
     ok = await delete_kpi(db, kpi_id, org_id)
     if not ok:

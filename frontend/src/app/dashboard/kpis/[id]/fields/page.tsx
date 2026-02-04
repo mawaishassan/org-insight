@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { getAccessToken } from "@/lib/auth";
+import { getAccessToken, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 
 const FIELD_TYPES = [
@@ -35,6 +35,8 @@ interface KpiInfo {
   id: number;
   name: string;
   year: number;
+  organization_id: number;
+  card_display_field_ids?: number[] | null;
 }
 
 const createSchema = z.object({
@@ -62,36 +64,58 @@ export default function KpiFieldsPage() {
   const params = useParams();
   const kpiId = Number(params.id);
   const [kpi, setKpi] = useState<KpiInfo | null>(null);
+  const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [list, setList] = useState<KpiField[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [cardDisplayFieldIds, setCardDisplayFieldIds] = useState<number[]>([]);
+  const [savingCardDisplay, setSavingCardDisplay] = useState(false);
+  const [cardDisplaySaved, setCardDisplaySaved] = useState(false);
+  const [cardDisplaySaveError, setCardDisplaySaveError] = useState<string | null>(null);
+  const autosaveTimerRef = useRef<number | null>(null);
 
   const token = getAccessToken();
 
-  const loadKpi = () => {
-    if (!token || !kpiId) return;
-    api<KpiInfo>(`/kpis/${kpiId}`, { token })
-      .then(setKpi)
-      .catch(() => setKpi(null));
+  useEffect(() => {
+    if (!token) return;
+    api<{ role: UserRole }>("/auth/me", { token })
+      .then((me) => setUserRole(me.role))
+      .catch(() => setUserRole(null));
+  }, [token]);
+
+  const orgId = kpi?.organization_id;
+  const fieldsQuery = (o?: number) => {
+    const id = o ?? orgId;
+    return id != null ? `kpi_id=${kpiId}&organization_id=${id}` : `kpi_id=${kpiId}`;
   };
 
-  const loadList = () => {
+  const loadList = (organizationId?: number) => {
     if (!token || !kpiId) return;
     setError(null);
-    api<KpiField[]>(`/fields?kpi_id=${kpiId}`, { token })
+    api<KpiField[]>(`/fields?${fieldsQuery(organizationId)}`, { token })
       .then(setList)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => {
-    loadKpi();
-  }, [kpiId]);
+  const loadKpi = () => {
+    if (!token || !kpiId) return;
+    api<KpiInfo>(`/kpis/${kpiId}`, { token })
+      .then((data) => {
+        setKpi(data);
+        setCardDisplayFieldIds(Array.isArray(data.card_display_field_ids) ? [...data.card_display_field_ids] : []);
+        loadList(data.organization_id);
+      })
+      .catch(() => {
+        setKpi(null);
+        setLoading(false);
+      });
+  };
 
   useEffect(() => {
-    loadList();
+    loadKpi();
   }, [kpiId]);
 
   const createForm = useForm<CreateFormData>({
@@ -107,10 +131,10 @@ export default function KpiFieldsPage() {
   });
 
   const onCreateSubmit = async (data: CreateFormData) => {
-    if (!token || !kpiId) return;
+    if (!token || !kpiId || orgId == null) return;
     setError(null);
     try {
-      await api("/fields", {
+      await api(`/fields?${fieldsQuery()}`, {
         method: "POST",
         body: JSON.stringify({
           kpi_id: kpiId,
@@ -140,10 +164,10 @@ export default function KpiFieldsPage() {
   };
 
   const onUpdateSubmit = async (fieldId: number, data: UpdateFormData) => {
-    if (!token) return;
+    if (!token || orgId == null) return;
     setError(null);
     try {
-      await api(`/fields/${fieldId}`, {
+      await api(`/fields/${fieldId}?${fieldsQuery()}`, {
         method: "PATCH",
         body: JSON.stringify({
           name: data.name,
@@ -162,12 +186,55 @@ export default function KpiFieldsPage() {
     }
   };
 
+  const onSaveCardDisplayFields = async (ids: number[]) => {
+    if (!token || !kpiId) return;
+    setSavingCardDisplay(true);
+    setCardDisplaySaveError(null);
+    try {
+      const orderedIds = list.filter((f) => ids.includes(f.id)).map((f) => f.id);
+      const query = orgId != null ? `?organization_id=${orgId}` : "";
+      await api(`/kpis/${kpiId}${query}`, {
+        method: "PATCH",
+        body: JSON.stringify({ card_display_field_ids: orderedIds }),
+        token,
+      });
+      setKpi((prev) => (prev ? { ...prev, card_display_field_ids: orderedIds } : null));
+      setCardDisplayFieldIds(orderedIds);
+      setCardDisplaySaved(true);
+    } catch (e) {
+      setCardDisplaySaveError(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSavingCardDisplay(false);
+    }
+  };
+
+  const onToggleCardDisplayField = (fieldId: number, checked: boolean) => {
+    const next = checked
+      ? [...cardDisplayFieldIds, fieldId]
+      : cardDisplayFieldIds.filter((id) => id !== fieldId);
+    setCardDisplayFieldIds(next);
+    setCardDisplaySaved(false);
+    setCardDisplaySaveError(null);
+    if (autosaveTimerRef.current != null) window.clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = window.setTimeout(() => {
+      onSaveCardDisplayFields(next);
+      autosaveTimerRef.current = null;
+    }, 500);
+  };
+
   const onDelete = async (fieldId: number) => {
-    if (!token) return;
-    if (!confirm("Delete this field? Stored values will be removed.")) return;
+    if (!token || orgId == null) return;
     setError(null);
     try {
-      await api(`/fields/${fieldId}`, { method: "DELETE", token });
+      const summary = await api<{ has_child_data: boolean; field_values_count: number; report_template_fields_count: number }>(
+        `/fields/${fieldId}/child_data_summary?${fieldsQuery()}`,
+        { token }
+      );
+      const message = summary.has_child_data
+        ? `This field has ${summary.field_values_count} stored value(s) and ${summary.report_template_fields_count} report template reference(s). Deleting will remove them. Continue?`
+        : "Delete this field?";
+      if (!confirm(message)) return;
+      await api(`/fields/${fieldId}?${fieldsQuery()}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
     } catch (e) {
@@ -184,9 +251,16 @@ export default function KpiFieldsPage() {
         <Link href="/dashboard/kpis" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{"\u2190"} KPIs</Link>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
-        <h1 style={{ fontSize: "1.5rem" }}>
-          Fields for {kpi ? `${kpi.name} (${kpi.year})` : `KPI #${kpiId}`}
-        </h1>
+        <div>
+          <h1 style={{ fontSize: "1.5rem", margin: 0 }}>
+            Fields for {kpi ? `${kpi.name} (${kpi.year})` : `KPI #${kpiId}`}
+          </h1>
+          {userRole === "SUPER_ADMIN" && (
+            <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
+              Use &quot;Show on card&quot; next to each field to choose which fields appear on this KPI&apos;s card on the domain page.
+            </p>
+          )}
+        </div>
         <button
           type="button"
           className="btn btn-primary"
@@ -255,6 +329,27 @@ export default function KpiFieldsPage() {
           <p style={{ color: "var(--muted)" }}>No fields yet. Add one above to build the data entry form for this KPI.</p>
         ) : (
           <ul style={{ listStyle: "none" }}>
+            {userRole === "SUPER_ADMIN" && (
+              <li style={{ padding: "0 0 0.75rem 0", borderBottom: "1px solid var(--border)", marginBottom: "0.75rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
+                  <div>
+                    <strong>Shown on domain KPI card</strong>
+                    <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
+                      Tick fields below to show on KPI cards on the domain page.
+                    </p>
+                    {savingCardDisplay && (
+                      <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>Saving…</p>
+                    )}
+                    {!savingCardDisplay && cardDisplaySaved && !cardDisplaySaveError && (
+                      <p style={{ color: "var(--success)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>Saved</p>
+                    )}
+                    {cardDisplaySaveError && (
+                      <p className="form-error" style={{ margin: "0.25rem 0 0" }}>{cardDisplaySaveError}</p>
+                    )}
+                  </div>
+                </div>
+              </li>
+            )}
             {list.map((f) => (
               <li key={f.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
                 {editingId === f.id ? (
@@ -276,7 +371,17 @@ export default function KpiFieldsPage() {
                         </span>
                       )}
                     </div>
-                    <div style={{ display: "flex", gap: "0.5rem" }}>
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                      {userRole === "SUPER_ADMIN" && (
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", color: "var(--muted)" }}>
+                          <input
+                            type="checkbox"
+                            checked={cardDisplayFieldIds.includes(f.id)}
+                            onChange={(e) => onToggleCardDisplayField(f.id, e.target.checked)}
+                          />
+                          Show on card
+                        </label>
+                      )}
                       <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
                       <button type="button" className="btn" onClick={() => onDelete(f.id)} style={{ color: "var(--error)" }}>Delete</button>
                     </div>

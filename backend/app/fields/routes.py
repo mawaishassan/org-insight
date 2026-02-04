@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.auth.dependencies import require_org_admin
 from app.core.models import User
-from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldResponse, KPIFieldOptionResponse
-from app.fields.service import create_field, get_field, list_fields, update_field, delete_field
+from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldResponse, KPIFieldOptionResponse, KPIFieldChildDataSummary
+from app.fields.service import create_field, get_field, list_fields, update_field, delete_field, get_field_child_data_summary
 
 router = APIRouter(prefix="/fields", tags=["fields"])
 
@@ -103,6 +103,21 @@ async def update_kpi_field(
     return _field_to_response(field)
 
 
+@router.get("/{field_id}/child_data_summary", response_model=KPIFieldChildDataSummary)
+async def get_field_child_data(
+    field_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Return counts of child records (field values, report template refs) for delete confirmation."""
+    org_id = _org_id(current_user, organization_id)
+    summary = await get_field_child_data_summary(db, field_id, org_id)
+    if summary is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field not found")
+    return KPIFieldChildDataSummary(**summary)
+
+
 @router.delete("/{field_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_kpi_field(
     field_id: int,
@@ -110,7 +125,7 @@ async def delete_kpi_field(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Delete KPI field."""
+    """Delete KPI field and all child records (stored values, report template refs)."""
     org_id = _org_id(current_user, organization_id)
     ok = await delete_field(db, field_id, org_id)
     if not ok:

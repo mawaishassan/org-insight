@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { getAccessToken } from "@/lib/auth";
+import { getAccessToken, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 
 const FIELD_TYPES = [
@@ -184,6 +184,7 @@ export default function OrganizationDetailPage() {
   const [kpiEditingId, setKpiEditingId] = useState<number | null>(null);
   const [fieldShowCreate, setFieldShowCreate] = useState(false);
   const [fieldEditingId, setFieldEditingId] = useState<number | null>(null);
+  const [userRole, setUserRole] = useState<UserRole | null>(null);
 
   const loadOrg = () => {
     if (!token || !orgId) return;
@@ -243,6 +244,13 @@ export default function OrganizationDetailPage() {
     if (selectedKpiId) loadFields();
     else setFields([]);
   }, [selectedKpiId, orgId]);
+
+  useEffect(() => {
+    if (!token) return;
+    api<{ role: UserRole }>("/auth/me", { token })
+      .then((me) => setUserRole(me.role))
+      .catch(() => setUserRole(null));
+  }, [token]);
 
   const domainById = (id: number) => domains.find((d) => d.id === id)?.name ?? `Domain #${id}`;
   const selectedKpi = selectedKpiId ? kpis.find((k) => k.id === selectedKpiId) : null;
@@ -363,6 +371,7 @@ export default function OrganizationDetailPage() {
           setShowCreate={setFieldShowCreate}
           editingId={fieldEditingId}
           setEditingId={setFieldEditingId}
+          userRole={userRole}
         />
       )}
     </div>
@@ -809,8 +818,19 @@ function KpisSection({
   };
 
   const onDelete = async (kpiId: number) => {
-    if (!confirm("Delete this KPI? All fields and entries under it will be removed.")) return;
     try {
+      const summary = await api<{
+        has_child_data: boolean;
+        assignments_count: number;
+        entries_count: number;
+        fields_count: number;
+        field_values_count: number;
+        report_template_kpis_count: number;
+      }>(`/kpis/${kpiId}/child_data_summary?${qs({ organization_id: orgId })}`, { token });
+      const message = summary.has_child_data
+        ? `This KPI has ${summary.assignments_count} assignment(s), ${summary.entries_count} entry/entries, ${summary.fields_count} field(s), ${summary.field_values_count} stored value(s), and ${summary.report_template_kpis_count} report template reference(s). Deleting will remove all of them. Continue?`
+        : "Delete this KPI?";
+      if (!confirm(message)) return;
       await api(`/kpis/${kpiId}?${qs({ organization_id: orgId })}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
@@ -1038,6 +1058,7 @@ function FieldsSection({
   setShowCreate,
   editingId,
   setEditingId,
+  userRole,
 }: {
   orgId: number;
   token: string;
@@ -1050,8 +1071,15 @@ function FieldsSection({
   setShowCreate: (v: boolean) => void;
   editingId: number | null;
   setEditingId: (v: number | null) => void;
+  userRole: UserRole | null;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [cardDisplayFieldIds, setCardDisplayFieldIds] = useState<number[]>([]);
+  const [savingCardDisplay, setSavingCardDisplay] = useState(false);
+  const [cardDisplaySaved, setCardDisplaySaved] = useState(false);
+  const [cardDisplaySaveError, setCardDisplaySaveError] = useState<string | null>(null);
+  const autosaveTimerRef = useRef<number | null>(null);
+
   const createForm = useForm<FieldCreateFormData>({
     resolver: zodResolver(fieldCreateSchema),
     defaultValues: {
@@ -1119,8 +1147,15 @@ function FieldsSection({
   };
 
   const onDelete = async (fieldId: number) => {
-    if (!confirm("Delete this field? Stored values will be removed.")) return;
     try {
+      const summary = await api<{ has_child_data: boolean; field_values_count: number; report_template_fields_count: number }>(
+        `/fields/${fieldId}/child_data_summary?${qs({ organization_id: orgId })}`,
+        { token }
+      );
+      const message = summary.has_child_data
+        ? `This field has ${summary.field_values_count} stored value(s) and ${summary.report_template_fields_count} report template reference(s). Deleting will remove them. Continue?`
+        : "Delete this field?";
+      if (!confirm(message)) return;
       await api(`/fields/${fieldId}?${qs({ organization_id: orgId })}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
@@ -1128,6 +1163,47 @@ function FieldsSection({
       setError(e instanceof Error ? e.message : "Delete failed");
     }
   };
+
+  const saveCardDisplayFields = async (ids: number[]) => {
+    if (!selectedKpiId) return;
+    setSavingCardDisplay(true);
+    setCardDisplaySaveError(null);
+    try {
+      const orderedIds = list.filter((f) => ids.includes(f.id)).map((f) => f.id);
+      await api(`/kpis/${selectedKpiId}?${qs({ organization_id: orgId })}`, {
+        method: "PATCH",
+        body: JSON.stringify({ card_display_field_ids: orderedIds }),
+        token,
+      });
+      setCardDisplayFieldIds(orderedIds);
+      setCardDisplaySaved(true);
+    } catch (e) {
+      setCardDisplaySaveError(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSavingCardDisplay(false);
+    }
+  };
+
+  const onToggleCardDisplayField = (fieldId: number, checked: boolean) => {
+    const next = checked
+      ? [...cardDisplayFieldIds, fieldId]
+      : cardDisplayFieldIds.filter((id) => id !== fieldId);
+    setCardDisplayFieldIds(next);
+    setCardDisplaySaved(false);
+    setCardDisplaySaveError(null);
+    if (autosaveTimerRef.current != null) window.clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = window.setTimeout(() => {
+      saveCardDisplayFields(next);
+      autosaveTimerRef.current = null;
+    }, 500);
+  };
+
+  useEffect(() => {
+    if (!selectedKpiId || !token) return;
+    api<{ card_display_field_ids?: number[] | null }>(`/kpis/${selectedKpiId}?${qs({ organization_id: orgId })}`, { token })
+      .then((data) => setCardDisplayFieldIds(Array.isArray(data.card_display_field_ids) ? [...data.card_display_field_ids] : []))
+      .catch(() => setCardDisplayFieldIds([]));
+  }, [selectedKpiId, orgId, token]);
 
   if (!selectedKpiId) {
     return (
@@ -1224,6 +1300,17 @@ function FieldsSection({
           <p style={{ color: "var(--muted)" }}>No fields for this KPI yet. Add one above.</p>
         ) : (
           <ul style={{ listStyle: "none" }}>
+            {userRole === "SUPER_ADMIN" && (
+              <li style={{ padding: "0 0 0.75rem 0", borderBottom: "1px solid var(--border)", marginBottom: "0.75rem" }}>
+                <strong>Show on KPI card</strong>
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
+                  Tick fields below to show them on this KPI&apos;s card on the domain page.
+                </p>
+                {savingCardDisplay && <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>Saving…</p>}
+                {!savingCardDisplay && cardDisplaySaved && !cardDisplaySaveError && <p style={{ color: "var(--success)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>Saved</p>}
+                {cardDisplaySaveError && <p className="form-error" style={{ margin: "0.25rem 0 0" }}>{cardDisplaySaveError}</p>}
+              </li>
+            )}
             {list.map((f) => (
               <li key={f.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
                 {editingId === f.id ? (
@@ -1240,7 +1327,17 @@ function FieldsSection({
                       <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>— {f.field_type.replace(/_/g, " ")}</span>
                       {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
                     </div>
-                    <div style={{ display: "flex", gap: "0.5rem" }}>
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                      {userRole === "SUPER_ADMIN" && (
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", color: "var(--muted)" }}>
+                          <input
+                            type="checkbox"
+                            checked={cardDisplayFieldIds.includes(f.id)}
+                            onChange={(e) => onToggleCardDisplayField(f.id, e.target.checked)}
+                          />
+                          Show on card
+                        </label>
+                      )}
                       <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
                       <button type="button" className="btn" onClick={() => onDelete(f.id)} style={{ color: "var(--error)" }}>Delete</button>
                     </div>

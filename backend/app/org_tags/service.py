@@ -1,9 +1,9 @@
 """Organization tag CRUD."""
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
-from app.core.models import OrganizationTag, Organization
+from app.core.models import OrganizationTag, Organization, KPIOrganizationTag
 from app.org_tags.schemas import OrganizationTagCreate, OrganizationTagUpdate
 
 
@@ -58,10 +58,12 @@ async def update_org_tag(
 async def delete_org_tag(
     db: AsyncSession, org_id: int, tag_id: int
 ) -> bool:
-    """Delete tag."""
+    """Delete tag. Remove all KPI–tag links first so KPIs are no longer tagged with this tag."""
     tag = await get_org_tag(db, org_id, tag_id)
     if not tag:
         return False
+    await db.execute(delete(KPIOrganizationTag).where(KPIOrganizationTag.organization_tag_id == tag_id))
+    await db.flush()
     await db.delete(tag)
     await db.flush()
     return True

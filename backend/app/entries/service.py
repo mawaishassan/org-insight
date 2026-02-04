@@ -10,7 +10,6 @@ from app.core.models import (
     KPIFieldValue,
     KPIField,
     KPI,
-    Domain,
     KPIAssignment,
     User,
 )
@@ -20,10 +19,8 @@ from app.formula_engine.evaluator import evaluate_formula
 
 
 async def _resolve_org_and_kpi(db: AsyncSession, kpi_id: int) -> int | None:
-    """Return organization_id for KPI or None."""
-    result = await db.execute(
-        select(Domain.organization_id).join(KPI, KPI.domain_id == Domain.id).where(KPI.id == kpi_id)
-    )
+    """Return organization_id for KPI or None (KPI has organization_id directly)."""
+    result = await db.execute(select(KPI.organization_id).where(KPI.id == kpi_id))
     row = result.one_or_none()
     return row[0] if row else None
 
@@ -39,8 +36,7 @@ async def _get_entry_admin(db: AsyncSession, entry_id: int, org_id: int) -> KPIE
     result = await db.execute(
         select(KPIEntry)
         .join(KPIEntry.kpi)
-        .join(KPI.domain)
-        .where(KPIEntry.id == entry_id, Domain.organization_id == org_id)
+        .where(KPIEntry.id == entry_id, KPI.organization_id == org_id)
     )
     return result.scalar_one_or_none()
 
@@ -193,7 +189,7 @@ async def list_available_kpis(db: AsyncSession, user_id: int, org_id: int) -> li
     if not user:
         return []
     if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
-        q = select(KPI).join(KPI.domain).where(Domain.organization_id == org_id).order_by(KPI.year.desc(), KPI.name)
+        q = select(KPI).where(KPI.organization_id == org_id).order_by(KPI.year.desc(), KPI.name)
         res = await db.execute(q)
         return list(res.scalars().all())
     # USER: only assigned KPIs
@@ -220,8 +216,7 @@ async def list_entries(
         q = (
             select(KPIEntry)
             .join(KPIEntry.kpi)
-            .join(KPI.domain)
-            .where(Domain.organization_id == org_id)
+            .where(KPI.organization_id == org_id)
         )
         if kpi_id is not None:
             q = q.where(KPIEntry.kpi_id == kpi_id)
@@ -319,17 +314,29 @@ async def list_entries_overview(
             "entry": None,
         }
         if entry:
-            # First 2 fields by sort_order (field has sort_order)
             field_values = list(entry.field_values or [])
-            # Sort by field.sort_order then field_id
-            field_values.sort(key=lambda fv: (fv.field.sort_order if fv.field else 0, fv.field_id))
-            preview = []
-            for fv in field_values[:2]:
-                if fv.field:
-                    preview.append({
-                        "field_name": fv.field.name,
-                        "value": _format_field_value(fv),
-                    })
+            card_ids = getattr(kpi, "card_display_field_ids", None)
+            if isinstance(card_ids, list) and len(card_ids) > 0:
+                # Show only selected fields in configured order
+                id_to_fv = {fv.field_id: fv for fv in field_values if fv.field}
+                preview = []
+                for field_id in card_ids:
+                    fv = id_to_fv.get(field_id)
+                    if fv and fv.field:
+                        preview.append({
+                            "field_name": fv.field.name,
+                            "value": _format_field_value(fv),
+                        })
+            else:
+                # Fallback: first 2 fields by sort_order
+                field_values.sort(key=lambda fv: (fv.field.sort_order if fv.field else 0, fv.field_id))
+                preview = []
+                for fv in field_values[:2]:
+                    if fv.field:
+                        preview.append({
+                            "field_name": fv.field.name,
+                            "value": _format_field_value(fv),
+                        })
             item["entry"] = {
                 "id": entry.id,
                 "is_draft": entry.is_draft,

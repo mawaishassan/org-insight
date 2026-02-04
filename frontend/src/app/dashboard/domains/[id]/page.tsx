@@ -368,42 +368,54 @@ export default function DomainDetailPage() {
               const hasEntry = item?.entry != null;
               const status = !hasEntry ? "not_entered" : item.entry!.is_locked ? "locked" : item.entry!.is_draft ? "draft" : "submitted";
               const preview = hasEntry && item.entry!.preview ? item.entry!.preview : [];
+              const entryHref =
+                effectiveOrgId != null
+                  ? `/dashboard/entries/${kpi.id}/${selectedYear}?organization_id=${effectiveOrgId}&from_domain=${domainId}`
+                  : `/dashboard/entries/${kpi.id}/${selectedYear}?from_domain=${domainId}`;
               return (
-                <div key={kpi.id} className="card" style={{ marginBottom: 0 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.5rem", gap: "0.5rem" }}>
-                    <h3 style={{ fontSize: "1.05rem", fontWeight: 600, margin: 0, flex: 1 }}>{kpi.name}</h3>
-                    <span
-                      style={{
-                        fontSize: "0.75rem",
-                        fontWeight: 600,
-                        padding: "0.25rem 0.5rem",
-                        borderRadius: 4,
-                        flexShrink: 0,
-                        ...(status === "not_entered"
-                          ? { background: "var(--warning)", color: "var(--bg)" }
-                          : status === "draft"
-                          ? { background: "var(--warning)", color: "var(--bg)" }
-                          : status === "submitted"
-                          ? { background: "var(--success)", color: "var(--bg)" }
-                          : { background: "var(--muted)", color: "var(--text)" }),
-                      }}
-                    >
-                      {status === "not_entered" ? "Not entered" : status === "draft" ? "Draft" : status === "submitted" ? "Submitted" : "Locked"}
-                    </span>
+                <Link
+                  key={kpi.id}
+                  href={entryHref}
+                  style={{ textDecoration: "none", color: "inherit", display: "block" }}
+                  className="card"
+                >
+                  <div style={{ marginBottom: 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.5rem", gap: "0.5rem" }}>
+                      <h3 style={{ fontSize: "1.05rem", fontWeight: 600, margin: 0, flex: 1 }}>{kpi.name}</h3>
+                      <span
+                        style={{
+                          fontSize: "0.75rem",
+                          fontWeight: 600,
+                          padding: "0.25rem 0.5rem",
+                          borderRadius: 4,
+                          flexShrink: 0,
+                          ...(status === "not_entered"
+                            ? { background: "var(--warning)", color: "var(--bg)" }
+                            : status === "draft"
+                            ? { background: "var(--warning)", color: "var(--bg)" }
+                            : status === "submitted"
+                            ? { background: "var(--success)", color: "var(--bg)" }
+                            : { background: "var(--muted)", color: "var(--text)" }),
+                        }}
+                      >
+                        {status === "not_entered" ? "Not entered" : status === "draft" ? "Draft" : status === "submitted" ? "Submitted" : "Locked"}
+                      </span>
+                    </div>
+                    <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginBottom: "0.5rem" }}>Year {selectedYear}</p>
+                    {preview.length > 0 ? (
+                      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                        {preview.map((p, i) => (
+                          <li key={i} style={{ fontSize: "0.9rem", marginBottom: "0.35rem", color: "var(--muted)" }}>
+                            <strong style={{ color: "var(--text)" }}>{p.field_name}:</strong> {p.value || "—"}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{hasEntry ? "No field values yet" : "No data for this year"}</p>
+                    )}
+                    <p style={{ marginTop: "0.5rem", fontSize: "0.85rem", color: "var(--primary)" }}>View full data entry →</p>
                   </div>
-                  <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginBottom: "0.5rem" }}>Year {selectedYear}</p>
-                  {preview.length > 0 ? (
-                    <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                      {preview.map((p, i) => (
-                        <li key={i} style={{ fontSize: "0.9rem", marginBottom: "0.35rem", color: "var(--muted)" }}>
-                          <strong style={{ color: "var(--text)" }}>{p.field_name}:</strong> {p.value || "—"}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{hasEntry ? "No field values yet" : "No data for this year"}</p>
-                  )}
-                </div>
+                </Link>
               );
             })}
           </div>

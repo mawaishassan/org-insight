@@ -282,10 +282,21 @@ export default function KPIsPage() {
 
   const onDelete = async (kpiId: number) => {
     if (!token) return;
-    if (!confirm("Delete this KPI? All fields and entries under it will be removed.")) return;
     setError(null);
     try {
       const query = effectiveOrgId != null ? `?organization_id=${effectiveOrgId}` : "";
+      const summary = await api<{
+        has_child_data: boolean;
+        assignments_count: number;
+        entries_count: number;
+        fields_count: number;
+        field_values_count: number;
+        report_template_kpis_count: number;
+      }>(`/kpis/${kpiId}/child_data_summary${query}`, { token });
+      const message = summary.has_child_data
+        ? `This KPI has ${summary.assignments_count} assignment(s), ${summary.entries_count} entry/entries, ${summary.fields_count} field(s), ${summary.field_values_count} stored value(s), and ${summary.report_template_kpis_count} report template reference(s). Deleting will remove all of them. Continue?`
+        : "Delete this KPI?";
+      if (!confirm(message)) return;
       await api(`/kpis/${kpiId}${query}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
