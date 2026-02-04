@@ -6,6 +6,35 @@ from typing import Any
 from app.core.models import FieldType
 
 
+# Allowed sub-field types for multi_line_items (one column type per sub-field)
+SUB_FIELD_TYPES = (FieldType.single_line_text, FieldType.number, FieldType.date, FieldType.boolean)
+
+
+class KPIFieldSubFieldCreate(BaseModel):
+    """Sub-field for multi_line_items (column definition)."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    key: str = Field(..., min_length=1, max_length=100)
+    field_type: FieldType = Field(...)  # single_line_text, number, date, boolean recommended
+    is_required: bool = False
+    sort_order: int = 0
+
+
+class KPIFieldSubFieldResponse(BaseModel):
+    """Sub-field in API response."""
+
+    id: int
+    field_id: int
+    name: str
+    key: str
+    field_type: FieldType
+    is_required: bool
+    sort_order: int
+
+    class Config:
+        from_attributes = True
+
+
 class KPIFieldOptionCreate(BaseModel):
     """Option for dropdown-style field."""
 
@@ -26,6 +55,7 @@ class KPIFieldCreate(BaseModel):
     sort_order: int = 0
     config: dict[str, Any] | None = None
     options: list[KPIFieldOptionCreate] = Field(default_factory=list)
+    sub_fields: list[KPIFieldSubFieldCreate] = Field(default_factory=list, description="For multi_line_items: column definitions")
 
 
 class KPIFieldUpdate(BaseModel):
@@ -39,6 +69,7 @@ class KPIFieldUpdate(BaseModel):
     sort_order: int | None = None
     config: dict[str, Any] | None = None
     options: list[KPIFieldOptionCreate] | None = None
+    sub_fields: list[KPIFieldSubFieldCreate] | None = Field(None, description="For multi_line_items: replace column definitions")
 
 
 class KPIFieldOptionResponse(BaseModel):
@@ -66,6 +97,7 @@ class KPIFieldResponse(BaseModel):
     sort_order: int
     config: dict[str, Any] | None
     options: list[KPIFieldOptionResponse] = []
+    sub_fields: list[KPIFieldSubFieldResponse] = []
 
     class Config:
         from_attributes = True

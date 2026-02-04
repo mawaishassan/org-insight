@@ -19,6 +19,18 @@ const FIELD_TYPES = [
   "formula",
 ] as const;
 
+const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean"] as const;
+
+interface SubFieldDef {
+  id?: number;
+  field_id?: number;
+  name: string;
+  key: string;
+  field_type: string;
+  is_required: boolean;
+  sort_order: number;
+}
+
 interface KpiField {
   id: number;
   kpi_id: number;
@@ -29,6 +41,7 @@ interface KpiField {
   is_required: boolean;
   sort_order: number;
   options: Array<{ id: number; value: string; label: string; sort_order: number }>;
+  sub_fields?: SubFieldDef[];
 }
 
 interface KpiInfo {
@@ -118,6 +131,8 @@ export default function KpiFieldsPage() {
     loadKpi();
   }, [kpiId]);
 
+  const [createSubFields, setCreateSubFields] = useState<Array<{ name: string; key: string; field_type: string; is_required: boolean; sort_order: number }>>([]);
+
   const createForm = useForm<CreateFormData>({
     resolver: zodResolver(createSchema),
     defaultValues: {
@@ -134,18 +149,28 @@ export default function KpiFieldsPage() {
     if (!token || !kpiId || orgId == null) return;
     setError(null);
     try {
+      const body: Record<string, unknown> = {
+        kpi_id: kpiId,
+        name: data.name,
+        key: data.key,
+        field_type: data.field_type,
+        formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
+        is_required: data.is_required,
+        sort_order: data.sort_order,
+        options: [],
+      };
+      if (data.field_type === "multi_line_items" && createSubFields.length > 0) {
+        body.sub_fields = createSubFields.map((s, i) => ({
+          name: s.name,
+          key: s.key,
+          field_type: s.field_type,
+          is_required: s.is_required,
+          sort_order: s.sort_order ?? i,
+        }));
+      }
       await api(`/fields?${fieldsQuery()}`, {
         method: "POST",
-        body: JSON.stringify({
-          kpi_id: kpiId,
-          name: data.name,
-          key: data.key,
-          field_type: data.field_type,
-          formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
-          is_required: data.is_required,
-          sort_order: data.sort_order,
-          options: [],
-        }),
+        body: JSON.stringify(body),
         token,
       });
       createForm.reset({
@@ -156,6 +181,7 @@ export default function KpiFieldsPage() {
         is_required: false,
         sort_order: list.length + 1,
       });
+      setCreateSubFields([]);
       setShowCreate(false);
       loadList();
     } catch (e) {
@@ -163,20 +189,30 @@ export default function KpiFieldsPage() {
     }
   };
 
-  const onUpdateSubmit = async (fieldId: number, data: UpdateFormData) => {
+  const onUpdateSubmit = async (fieldId: number, data: UpdateFormData, subFields?: SubFieldDef[]) => {
     if (!token || orgId == null) return;
     setError(null);
     try {
+      const body: Record<string, unknown> = {
+        name: data.name,
+        key: data.key,
+        field_type: data.field_type,
+        formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
+        is_required: data.is_required,
+        sort_order: data.sort_order,
+      };
+      if (data.field_type === "multi_line_items" && subFields != null) {
+        body.sub_fields = subFields.map((s, i) => ({
+          name: s.name,
+          key: s.key,
+          field_type: s.field_type,
+          is_required: s.is_required,
+          sort_order: s.sort_order ?? i,
+        }));
+      }
       await api(`/fields/${fieldId}?${fieldsQuery()}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          name: data.name,
-          key: data.key,
-          field_type: data.field_type,
-          formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
-          is_required: data.is_required,
-          sort_order: data.sort_order,
-        }),
+        body: JSON.stringify(body),
         token,
       });
       setEditingId(null);
@@ -304,6 +340,50 @@ export default function KpiFieldsPage() {
                 <input {...createForm.register("formula_expression")} placeholder="field_a + field_b" />
               </div>
             )}
+            {createForm.watch("field_type") === "multi_line_items" && (
+              <div className="form-group">
+                <label>Sub-fields (columns for each row)</label>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+                  Define columns so data entry uses a table instead of raw JSON.
+                </p>
+                {createSubFields.map((s, idx) => (
+                  <div key={idx} style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
+                    <input
+                      placeholder="Name"
+                      value={s.name}
+                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
+                      style={{ width: "120px" }}
+                    />
+                    <input
+                      placeholder="key"
+                      value={s.key}
+                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, key: e.target.value } : x)))}
+                      style={{ width: "100px" }}
+                    />
+                    <select
+                      value={s.field_type}
+                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+                    >
+                      {SUB_FIELD_TYPES.map((t) => (
+                        <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                      ))}
+                    </select>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.9rem" }}>
+                      <input
+                        type="checkbox"
+                        checked={s.is_required}
+                        onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                      />
+                      Required
+                    </label>
+                    <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => prev.filter((_, i) => i !== idx))}>Remove</button>
+                  </div>
+                ))}
+                <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length }])}>
+                  Add sub-field
+                </button>
+              </div>
+            )}
             <div className="form-group">
               <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 <input type="checkbox" {...createForm.register("is_required")} />
@@ -355,7 +435,7 @@ export default function KpiFieldsPage() {
                 {editingId === f.id ? (
                   <FieldEditForm
                     field={f}
-                    onSave={(data) => onUpdateSubmit(f.id, data)}
+                    onSave={(data, subFields) => onUpdateSubmit(f.id, data, subFields)}
                     onCancel={() => setEditingId(null)}
                   />
                 ) : (
@@ -368,6 +448,11 @@ export default function KpiFieldsPage() {
                       {f.field_type === "formula" && f.formula_expression && (
                         <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
                           Formula: {f.formula_expression}
+                        </span>
+                      )}
+                      {f.field_type === "multi_line_items" && f.sub_fields && f.sub_fields.length > 0 && (
+                        <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                          Sub-fields: {f.sub_fields.map((s) => s.name).join(", ")}
                         </span>
                       )}
                     </div>
@@ -403,9 +488,12 @@ function FieldEditForm({
   onCancel,
 }: {
   field: KpiField;
-  onSave: (data: UpdateFormData) => void;
+  onSave: (data: UpdateFormData, subFields?: SubFieldDef[]) => void;
   onCancel: () => void;
 }) {
+  const [editSubFields, setEditSubFields] = useState<SubFieldDef[]>(
+    () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0 }))
+  );
   const { register, handleSubmit, watch, formState: { errors, isSubmitting } } = useForm<UpdateFormData>({
     resolver: zodResolver(updateSchema),
     defaultValues: {
@@ -417,9 +505,10 @@ function FieldEditForm({
       sort_order: field.sort_order,
     },
   });
+  const currentFieldType = watch("field_type");
 
   return (
-    <form onSubmit={handleSubmit(onSave)} style={{ width: "100%" }}>
+    <form onSubmit={handleSubmit((data) => onSave(data, currentFieldType === "multi_line_items" ? editSubFields : undefined))} style={{ width: "100%" }}>
       <div className="form-group">
         <label>Name *</label>
         <input {...register("name")} />
@@ -438,10 +527,51 @@ function FieldEditForm({
           ))}
         </select>
       </div>
-      {watch("field_type") === "formula" && (
+      {currentFieldType === "formula" && (
         <div className="form-group">
           <label>Formula</label>
           <input {...register("formula_expression")} />
+        </div>
+      )}
+      {currentFieldType === "multi_line_items" && (
+        <div className="form-group">
+          <label>Sub-fields (columns for each row)</label>
+          {editSubFields.map((s, idx) => (
+            <div key={s.id ?? idx} style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
+              <input
+                placeholder="Name"
+                value={s.name}
+                onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
+                style={{ width: "120px" }}
+              />
+              <input
+                placeholder="key"
+                value={s.key}
+                onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, key: e.target.value } : x)))}
+                style={{ width: "100px" }}
+              />
+              <select
+                value={s.field_type}
+                onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+              >
+                {SUB_FIELD_TYPES.map((t) => (
+                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                ))}
+              </select>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.9rem" }}>
+                <input
+                  type="checkbox"
+                  checked={s.is_required}
+                  onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                />
+                Required
+              </label>
+              <button type="button" className="btn" onClick={() => setEditSubFields((prev) => prev.filter((_, i) => i !== idx))}>Remove</button>
+            </div>
+          ))}
+          <button type="button" className="btn" onClick={() => setEditSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length }])}>
+            Add sub-field
+          </button>
         </div>
       )}
       <div className="form-group">

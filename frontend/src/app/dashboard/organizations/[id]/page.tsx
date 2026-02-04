@@ -19,7 +19,19 @@ const FIELD_TYPES = [
   "formula",
 ] as const;
 
+const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean"] as const;
+
 type TabId = "domains" | "kpis" | "fields" | "tags";
+
+interface SubFieldDef {
+  id?: number;
+  field_id?: number;
+  name: string;
+  key: string;
+  field_type: string;
+  is_required: boolean;
+  sort_order: number;
+}
 
 interface OrgInfo {
   id: number;
@@ -89,6 +101,7 @@ interface KpiField {
   is_required: boolean;
   sort_order: number;
   options: Array<{ id: number; value: string; label: string; sort_order: number }>;
+  sub_fields?: SubFieldDef[];
 }
 
 const domainCreateSchema = z.object({
@@ -1074,6 +1087,7 @@ function FieldsSection({
   userRole: UserRole | null;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [createSubFields, setCreateSubFields] = useState<Array<{ name: string; key: string; field_type: string; is_required: boolean; sort_order: number }>>([]);
   const [cardDisplayFieldIds, setCardDisplayFieldIds] = useState<number[]>([]);
   const [savingCardDisplay, setSavingCardDisplay] = useState(false);
   const [cardDisplaySaved, setCardDisplaySaved] = useState(false);
@@ -1096,18 +1110,28 @@ function FieldsSection({
     if (!selectedKpiId) return;
     setError(null);
     try {
+      const body: Record<string, unknown> = {
+        kpi_id: selectedKpiId,
+        name: data.name,
+        key: data.key,
+        field_type: data.field_type,
+        formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
+        is_required: data.is_required,
+        sort_order: data.sort_order,
+        options: [],
+      };
+      if (data.field_type === "multi_line_items" && createSubFields.length > 0) {
+        body.sub_fields = createSubFields.map((s, i) => ({
+          name: s.name,
+          key: s.key,
+          field_type: s.field_type,
+          is_required: s.is_required,
+          sort_order: s.sort_order ?? i,
+        }));
+      }
       await api(`/fields?${qs({ organization_id: orgId })}`, {
         method: "POST",
-        body: JSON.stringify({
-          kpi_id: selectedKpiId,
-          name: data.name,
-          key: data.key,
-          field_type: data.field_type,
-          formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
-          is_required: data.is_required,
-          sort_order: data.sort_order,
-          options: [],
-        }),
+        body: JSON.stringify(body),
         token,
       });
       createForm.reset({
@@ -1118,6 +1142,7 @@ function FieldsSection({
         is_required: false,
         sort_order: list.length + 1,
       });
+      setCreateSubFields([]);
       setShowCreate(false);
       loadList();
     } catch (e) {
@@ -1125,18 +1150,28 @@ function FieldsSection({
     }
   };
 
-  const onUpdateSubmit = async (fieldId: number, data: FieldUpdateFormData) => {
+  const onUpdateSubmit = async (fieldId: number, data: FieldUpdateFormData, subFields?: SubFieldDef[]) => {
     try {
+      const body: Record<string, unknown> = {
+        name: data.name,
+        key: data.key,
+        field_type: data.field_type,
+        formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
+        is_required: data.is_required,
+        sort_order: data.sort_order,
+      };
+      if (data.field_type === "multi_line_items" && subFields != null) {
+        body.sub_fields = subFields.map((s, i) => ({
+          name: s.name,
+          key: s.key,
+          field_type: s.field_type,
+          is_required: s.is_required,
+          sort_order: s.sort_order ?? i,
+        }));
+      }
       await api(`/fields/${fieldId}?${qs({ organization_id: orgId })}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          name: data.name,
-          key: data.key,
-          field_type: data.field_type,
-          formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
-          is_required: data.is_required,
-          sort_order: data.sort_order,
-        }),
+        body: JSON.stringify(body),
         token,
       });
       setEditingId(null);
@@ -1278,6 +1313,81 @@ function FieldsSection({
                 <input {...createForm.register("formula_expression")} placeholder="field_a + field_b" />
               </div>
             )}
+            {createForm.watch("field_type") === "multi_line_items" && (
+              <div className="form-group">
+                <label>Sub-fields (columns for each row)</label>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+                  Define columns so data entry uses a table instead of raw JSON.
+                </p>
+                <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                        <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                        <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {createSubFields.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                            No sub-fields yet. Click &quot;Add sub-field&quot; below.
+                          </td>
+                        </tr>
+                      ) : createSubFields.map((s, idx) => (
+                        <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <input
+                              placeholder="Display name"
+                              value={s.name}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
+                              style={{ width: "100%", minWidth: "100px" }}
+                            />
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <input
+                              placeholder="key_name"
+                              value={s.key}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, key: e.target.value } : x)))}
+                              style={{ width: "100%", minWidth: "90px" }}
+                            />
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <select
+                              value={s.field_type}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+                              style={{ minWidth: "120px" }}
+                            >
+                              {SUB_FIELD_TYPES.map((t) => (
+                                <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={s.is_required}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                              title="Required"
+                            />
+                            {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button type="button" className="btn btn-primary" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length }])}>
+                  Add sub-field
+                </button>
+              </div>
+            )}
             <div className="form-group">
               <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 <input type="checkbox" {...createForm.register("is_required")} />
@@ -1316,7 +1426,7 @@ function FieldsSection({
                 {editingId === f.id ? (
                   <FieldEditForm
                     field={f}
-                    onSave={(data) => onUpdateSubmit(f.id, data)}
+                    onSave={(data, subFields) => onUpdateSubmit(f.id, data, subFields)}
                     onCancel={() => setEditingId(null)}
                   />
                 ) : (
@@ -1326,6 +1436,11 @@ function FieldsSection({
                       <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>({f.key})</span>
                       <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>— {f.field_type.replace(/_/g, " ")}</span>
                       {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
+                      {f.field_type === "multi_line_items" && f.sub_fields && f.sub_fields.length > 0 && (
+                        <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                          Sub-fields: {f.sub_fields.map((s) => s.name).join(", ")}
+                        </span>
+                      )}
                     </div>
                     <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
                       {userRole === "SUPER_ADMIN" && (
@@ -1358,9 +1473,12 @@ function FieldEditForm({
   onCancel,
 }: {
   field: KpiField;
-  onSave: (data: FieldUpdateFormData) => void;
+  onSave: (data: FieldUpdateFormData, subFields?: SubFieldDef[]) => void;
   onCancel: () => void;
 }) {
+  const [editSubFields, setEditSubFields] = useState<SubFieldDef[]>(
+    () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0 }))
+  );
   const { register, handleSubmit, watch, formState: { errors, isSubmitting } } = useForm<FieldUpdateFormData>({
     resolver: zodResolver(fieldUpdateSchema),
     defaultValues: {
@@ -1372,8 +1490,9 @@ function FieldEditForm({
       sort_order: field.sort_order,
     },
   });
+  const currentFieldType = watch("field_type");
   return (
-    <form onSubmit={handleSubmit(onSave)} style={{ width: "100%" }}>
+    <form onSubmit={handleSubmit((data) => onSave(data, currentFieldType === "multi_line_items" ? editSubFields : undefined))} style={{ width: "100%" }}>
       <div className="form-group">
         <label>Name *</label>
         <input {...register("name")} />
@@ -1392,10 +1511,82 @@ function FieldEditForm({
           ))}
         </select>
       </div>
-      {watch("field_type") === "formula" && (
+      {currentFieldType === "formula" && (
         <div className="form-group">
           <label>Formula</label>
           <input {...register("formula_expression")} />
+        </div>
+      )}
+      {currentFieldType === "multi_line_items" && (
+        <div className="form-group">
+          <label>Sub-fields (columns for each row)</label>
+          <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                  <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                  <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
+                </tr>
+              </thead>
+              <tbody>
+                {editSubFields.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                      No sub-fields yet. Click &quot;Add sub-field&quot; below.
+                    </td>
+                  </tr>
+                ) : editSubFields.map((s, idx) => (
+                  <tr key={s.id ?? idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <input
+                        placeholder="Display name"
+                        value={s.name}
+                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
+                        style={{ width: "100%", minWidth: "100px" }}
+                      />
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <input
+                        placeholder="key_name"
+                        value={s.key}
+                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, key: e.target.value } : x)))}
+                        style={{ width: "100%", minWidth: "90px" }}
+                      />
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <select
+                        value={s.field_type}
+                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+                        style={{ minWidth: "120px" }}
+                      >
+                        {SUB_FIELD_TYPES.map((t) => (
+                          <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={s.is_required}
+                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                        title="Required"
+                      />
+                      {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <button type="button" className="btn" onClick={() => setEditSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button type="button" className="btn btn-primary" onClick={() => setEditSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length }])}>
+            Add sub-field
+          </button>
         </div>
       )}
       <div className="form-group">

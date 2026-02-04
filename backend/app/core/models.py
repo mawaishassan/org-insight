@@ -259,6 +259,9 @@ class KPIField(Base):
 
     kpi = relationship("KPI", back_populates="fields")
     options = relationship("KPIFieldOption", back_populates="field", lazy="selectin")
+    sub_fields = relationship(
+        "KPIFieldSubField", back_populates="field", lazy="selectin", order_by="KPIFieldSubField.sort_order"
+    )
     values = relationship("KPIFieldValue", back_populates="field", lazy="selectin")
     report_template_fields = relationship(
         "ReportTemplateField", back_populates="kpi_field", lazy="selectin"
@@ -279,6 +282,24 @@ class KPIFieldOption(Base):
     sort_order = Column(Integer, default=0)
 
     field = relationship("KPIField", back_populates="options")
+
+
+class KPIFieldSubField(Base):
+    """Sub-field definition for multi_line_items KPI field (structured columns per row)."""
+
+    __tablename__ = "kpi_field_sub_fields"
+
+    id = Column(Integer, primary_key=True, index=True)
+    field_id = Column(
+        Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(255), nullable=False)
+    key = Column(String(100), nullable=False, index=True)
+    field_type = Column(Enum(FieldType), nullable=False)  # single_line_text, number, date, boolean only
+    is_required = Column(Boolean, default=False)
+    sort_order = Column(Integer, default=0)
+
+    field = relationship("KPIField", back_populates="sub_fields")
 
 
 class KPIAssignment(Base):

@@ -103,6 +103,10 @@ async def get_entry_fields(
             "is_required": f.is_required,
             "sort_order": f.sort_order,
             "options": [{"value": o.value, "label": o.label} for o in (f.options or [])],
+            "sub_fields": [
+                {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order}
+                for s in (getattr(f, "sub_fields", None) or [])
+            ],
         }
         for f in fields
     ]

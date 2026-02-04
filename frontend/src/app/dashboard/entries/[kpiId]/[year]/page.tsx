@@ -6,6 +6,16 @@ import { useParams, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 
+interface SubFieldDef {
+  id: number;
+  field_id: number;
+  name: string;
+  key: string;
+  field_type: string;
+  is_required: boolean;
+  sort_order: number;
+}
+
 interface FieldDef {
   id: number;
   key: string;
@@ -13,6 +23,7 @@ interface FieldDef {
   field_type: string;
   is_required: boolean;
   formula_expression?: string | null;
+  sub_fields?: SubFieldDef[];
 }
 
 interface FieldValueResp {
@@ -146,8 +157,8 @@ function EntryForm({
   token: string;
   organizationId?: number;
 }) {
-  const [formValues, setFormValues] = useState<Record<number, { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string }>>(() => {
-    const o: Record<number, { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string }> = {};
+  const [formValues, setFormValues] = useState<Record<number, { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] }>>(() => {
+    const o: Record<number, { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] }> = {};
     fields.forEach((f) => {
       if (f.field_type === "formula") return;
       const v = existingEntry?.values?.find((x) => x.field_id === f.id);
@@ -157,8 +168,9 @@ function EntryForm({
         if (v.value_number != null) o[f.id].value_number = v.value_number;
         if (v.value_boolean != null) o[f.id].value_boolean = v.value_boolean;
         if (v.value_date) o[f.id].value_date = v.value_date;
+        if (f.field_type === "multi_line_items" && Array.isArray(v.value_json)) o[f.id].value_json = v.value_json as Record<string, unknown>[];
       } else {
-        o[f.id] = {};
+        o[f.id] = f.field_type === "multi_line_items" ? { value_json: [] } : {};
       }
     });
     return o;
@@ -168,7 +180,7 @@ function EntryForm({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const updateField = (fieldId: number, key: string, value: string | number | boolean | undefined) => {
+  const updateField = (fieldId: number, key: string, value: string | number | boolean | undefined | Record<string, unknown>[]) => {
     setFormValues((prev) => ({
       ...prev,
       [fieldId]: { ...prev[fieldId], [key]: value },
@@ -185,13 +197,17 @@ function EntryForm({
         .filter((f) => f.field_type !== "formula")
         .map((f) => {
           const v = formValues[f.id] || {};
-          return {
+          const payload: { field_id: number; value_text?: string | null; value_number?: number | null; value_boolean?: boolean | null; value_date?: string | null; value_json?: Record<string, unknown>[] | null } = {
             field_id: f.id,
             value_text: v.value_text ?? null,
             value_number: typeof v.value_number === "number" ? v.value_number : null,
             value_boolean: v.value_boolean ?? null,
             value_date: v.value_date || null,
           };
+          if (f.field_type === "multi_line_items" && Array.isArray(v.value_json)) {
+            payload.value_json = v.value_json;
+          }
+          return payload;
         });
       const saveQuery = organizationId != null ? `?${qs({ organization_id: organizationId })}` : "";
       const entry = await api<EntryRow>(`/entries${saveQuery}`, {
@@ -308,14 +324,111 @@ function EntryForm({
           );
         }
         if (f.field_type === "multi_line_items") {
+          const subFields = f.sub_fields ?? [];
+          const rows = Array.isArray(val?.value_json) ? val.value_json : [];
+          if (subFields.length > 0) {
+            return (
+              <div key={f.id} className="form-group">
+                <label>{f.name}{f.is_required ? " *" : ""}</label>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                    <thead>
+                      <tr>
+                        {subFields.map((s) => (
+                          <th key={s.id} style={{ textAlign: "left", padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>{s.name}{s.is_required ? " *" : ""}</th>
+                        ))}
+                        <th style={{ width: "80px", borderBottom: "1px solid var(--border)" }} />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row, rowIdx) => (
+                        <tr key={rowIdx}>
+                          {subFields.map((s) => {
+                            const cellVal = row[s.key];
+                            return (
+                              <td key={s.id} style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                {s.field_type === "number" ? (
+                                  <input
+                                    type="number"
+                                    step="any"
+                                    value={typeof cellVal === "number" ? cellVal : ""}
+                                    onChange={(e) => {
+                                      const next = [...rows];
+                                      next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value === "" ? undefined : Number(e.target.value) };
+                                      updateField(f.id, "value_json", next);
+                                    }}
+                                    disabled={isLocked}
+                                    style={{ width: "100%", maxWidth: "140px" }}
+                                  />
+                                ) : s.field_type === "date" ? (
+                                  <input
+                                    type="date"
+                                    value={typeof cellVal === "string" ? cellVal : ""}
+                                    onChange={(e) => {
+                                      const next = [...rows];
+                                      next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value || undefined };
+                                      updateField(f.id, "value_json", next);
+                                    }}
+                                    disabled={isLocked}
+                                    style={{ width: "100%", maxWidth: "140px" }}
+                                  />
+                                ) : s.field_type === "boolean" ? (
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(cellVal)}
+                                    onChange={(e) => {
+                                      const next = [...rows];
+                                      next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.checked };
+                                      updateField(f.id, "value_json", next);
+                                    }}
+                                    disabled={isLocked}
+                                  />
+                                ) : (
+                                  <input
+                                    type="text"
+                                    value={typeof cellVal === "string" ? cellVal : String(cellVal ?? "")}
+                                    onChange={(e) => {
+                                      const next = [...rows];
+                                      next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value };
+                                      updateField(f.id, "value_json", next);
+                                    }}
+                                    disabled={isLocked}
+                                    style={{ width: "100%", minWidth: "80px" }}
+                                  />
+                                )}
+                              </td>
+                            );
+                          })}
+                          <td style={{ borderBottom: "1px solid var(--border)" }}>
+                            <button type="button" className="btn" onClick={() => { const next = rows.filter((_, i) => i !== rowIdx); updateField(f.id, "value_json", next); }} disabled={isLocked}>Remove</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button type="button" className="btn" style={{ marginTop: "0.5rem" }} onClick={() => { const newRow: Record<string, unknown> = {}; subFields.forEach((s) => { newRow[s.key] = s.field_type === "boolean" ? false : s.field_type === "number" ? undefined : ""; }); updateField(f.id, "value_json", [...rows, newRow]); }} disabled={isLocked}>
+                  Add row
+                </button>
+              </div>
+            );
+          }
           return (
             <div key={f.id} className="form-group">
               <label>{f.name}{f.is_required ? " *" : ""}</label>
               <textarea
                 rows={4}
-                value={val?.value_text ?? ""}
-                onChange={(e) => updateField(f.id, "value_text", e.target.value)}
-                placeholder="One item per line or JSON"
+                value={typeof val?.value_text === "string" ? val.value_text : (Array.isArray(val?.value_json) ? JSON.stringify(val.value_json, null, 2) : "")}
+                onChange={(e) => {
+                  const t = e.target.value;
+                  try {
+                    const parsed = JSON.parse(t);
+                    if (Array.isArray(parsed)) updateField(f.id, "value_json", parsed); else updateField(f.id, "value_text", t);
+                  } catch {
+                    updateField(f.id, "value_text", t);
+                  }
+                }}
+                placeholder="JSON array of objects, or paste text"
                 disabled={isLocked}
               />
             </div>
