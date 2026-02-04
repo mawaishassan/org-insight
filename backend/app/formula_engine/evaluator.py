@@ -1,7 +1,9 @@
 """
 Secure formula evaluator.
-Supports: +, -, *, /, SUM(), AVG(), COUNT(), field references, and group functions
-on multi_line_items: SUM_ITEMS(field_key, sub_key), AVG_ITEMS, COUNT_ITEMS, MIN_ITEMS, MAX_ITEMS.
+Supports: +, -, *, /, SUM(), AVG(), COUNT(), field references; group functions on
+multi_line_items: SUM_ITEMS(field_key, sub_key), AVG_ITEMS, COUNT_ITEMS, MIN_ITEMS, MAX_ITEMS;
+and conditional group functions: SUM_ITEMS_WHERE(field_key, value_sub_key, filter_sub_key, op_xx, value),
+COUNT_ITEMS_WHERE(field_key, filter_sub_key, op_xx, value), etc. Use op_eq, op_neq, op_gt, op_gte, op_lt, op_lte.
 """
 
 import re
@@ -47,6 +49,64 @@ def _items_values(data: MultiLineItemsData, field_key: str, sub_key: str) -> lis
     return out
 
 
+def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value: float) -> bool:
+    """True if row[filter_sub_key] op filter_value (numeric comparison)."""
+    cell = row.get(filter_sub_key)
+    n = _to_num(cell)
+    if n is None:
+        return op == "neq"  # null != value
+    if op == "eq":
+        return n == filter_value
+    if op == "neq":
+        return n != filter_value
+    if op == "gt":
+        return n > filter_value
+    if op == "gte":
+        return n >= filter_value
+    if op == "lt":
+        return n < filter_value
+    if op == "lte":
+        return n <= filter_value
+    return False
+
+
+def _items_values_where(
+    data: MultiLineItemsData,
+    field_key: str,
+    value_sub_key: str,
+    filter_sub_key: str,
+    op: str,
+    filter_value: float,
+) -> list[float]:
+    """Get numeric values for value_sub_key over rows where filter_sub_key op filter_value."""
+    rows = data.get(field_key) if isinstance(data, dict) else []
+    if not isinstance(rows, list):
+        return []
+    out: list[float] = []
+    for row in rows:
+        if not isinstance(row, dict) or not _row_matches(row, filter_sub_key, op, filter_value):
+            continue
+        v = row.get(value_sub_key)
+        n = _to_num(v)
+        if n is not None:
+            out.append(n)
+    return out
+
+
+def _rows_where(
+    data: MultiLineItemsData,
+    field_key: str,
+    filter_sub_key: str,
+    op: str,
+    filter_value: float,
+) -> list[dict[str, Any]]:
+    """Get rows where filter_sub_key op filter_value."""
+    rows = data.get(field_key) if isinstance(data, dict) else []
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict) and _row_matches(r, filter_sub_key, op, filter_value)]
+
+
 def _make_evaluator(
     field_values: dict[str, float | int],
     multi_line_items_data: MultiLineItemsData | None = None,
@@ -69,6 +129,9 @@ def _make_evaluator(
     for sk in sub_keys:
         if sk not in s.names:  # do not overwrite number field with same key
             s.names[sk] = sk
+    # Operator names for conditional group functions: SUM_ITEMS_WHERE(field, val_sk, filter_sk, op_eq, 2023)
+    for op_name in ("op_eq", "op_neq", "op_gt", "op_gte", "op_lt", "op_lte"):
+        s.names[op_name] = op_name.replace("op_", "")
 
     def sum_items(field_key: str, sub_key: str) -> float:
         return sum(_items_values(items_data, field_key, sub_key))
@@ -93,6 +156,34 @@ def _make_evaluator(
         vals = _items_values(items_data, field_key, sub_key)
         return max(vals) if vals else None
 
+    def sum_items_where(
+        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
+    ) -> float:
+        return sum(_items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value))
+
+    def avg_items_where(
+        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
+    ) -> float:
+        vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def count_items_where(
+        field_key: str, filter_sub_key: str, op: str, filter_value: float
+    ) -> float:
+        return float(len(_rows_where(items_data, field_key, filter_sub_key, op, filter_value)))
+
+    def min_items_where(
+        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
+    ) -> float | None:
+        vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
+        return min(vals) if vals else None
+
+    def max_items_where(
+        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
+    ) -> float | None:
+        vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
+        return max(vals) if vals else None
+
     s.functions = {
         "SUM": lambda *a: sum(a) if a else 0,
         "AVG": lambda *a: sum(a) / len(a) if a else 0,
@@ -105,6 +196,11 @@ def _make_evaluator(
         "COUNT_ITEMS": count_items,
         "MIN_ITEMS": min_items,
         "MAX_ITEMS": max_items,
+        "SUM_ITEMS_WHERE": sum_items_where,
+        "AVG_ITEMS_WHERE": avg_items_where,
+        "COUNT_ITEMS_WHERE": count_items_where,
+        "MIN_ITEMS_WHERE": min_items_where,
+        "MAX_ITEMS_WHERE": max_items_where,
     }
     return s
 

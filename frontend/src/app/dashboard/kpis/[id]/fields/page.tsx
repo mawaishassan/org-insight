@@ -29,6 +29,23 @@ const GROUP_FUNCTIONS = [
   { value: "MAX_ITEMS", label: "MAX" },
 ] as const;
 
+const CONDITIONAL_GROUP_FUNCTIONS = [
+  { value: "SUM_ITEMS_WHERE", label: "SUM where" },
+  { value: "AVG_ITEMS_WHERE", label: "AVG where" },
+  { value: "COUNT_ITEMS_WHERE", label: "COUNT where" },
+  { value: "MIN_ITEMS_WHERE", label: "MIN where" },
+  { value: "MAX_ITEMS_WHERE", label: "MAX where" },
+] as const;
+
+const WHERE_OPERATORS = [
+  { value: "op_eq", label: "equals (=)" },
+  { value: "op_neq", label: "not equals (≠)" },
+  { value: "op_gt", label: "greater than (>)" },
+  { value: "op_gte", label: "greater or equal (≥)" },
+  { value: "op_lt", label: "less than (<)" },
+  { value: "op_lte", label: "less or equal (≤)" },
+] as const;
+
 interface SubFieldDef {
   id?: number;
   field_id?: number;
@@ -508,11 +525,38 @@ function FormulaBuilder({
   const [refFieldId, setRefFieldId] = useState<number | "">("");
   const [refSubKey, setRefSubKey] = useState("");
   const [refGroupFn, setRefGroupFn] = useState<string>("SUM_ITEMS");
+  const [useConditional, setUseConditional] = useState(false);
+  const [refFilterSubKey, setRefFilterSubKey] = useState("");
+  const [refWhereOp, setRefWhereOp] = useState<string>("op_eq");
+  const [refWhereValue, setRefWhereValue] = useState<string>("0");
   const refField = refFieldId === "" ? null : fields.find((f) => f.id === refFieldId);
   const subFields = refField?.field_type === "multi_line_items" ? (refField.sub_fields ?? []) : [];
   const canInsertNumber = refField?.field_type === "number";
   const isCountItemsOnly = refGroupFn === "COUNT_ITEMS";
-  const canInsertItems = refField?.field_type === "multi_line_items" && (isCountItemsOnly || (subFields.length > 0 && !!refSubKey));
+  const isConditionalWhere = useConditional && refField?.field_type === "multi_line_items" && !!refFilterSubKey;
+  const isCountWhere = refGroupFn === "COUNT_ITEMS" || refGroupFn === "COUNT_ITEMS_WHERE";
+  const canInsertItems = refField?.field_type === "multi_line_items" && (
+    isConditionalWhere
+      ? (isCountWhere ? !!refFilterSubKey : (subFields.length > 0 && !!refSubKey && !!refFilterSubKey))
+      : (isCountItemsOnly || (subFields.length > 0 && !!refSubKey))
+  );
+
+  const handleInsertItems = () => {
+    if (!refField) return;
+    if (isConditionalWhere) {
+      const op = refWhereOp;
+      const val = refWhereValue.trim() === "" ? "0" : refWhereValue;
+      // When conditional is checked, always use the _WHERE variant (map COUNT_ITEMS -> COUNT_ITEMS_WHERE etc.)
+      const whereFn = refGroupFn.endsWith("_WHERE") ? refGroupFn : refGroupFn + "_WHERE";
+      if (whereFn === "COUNT_ITEMS_WHERE") {
+        onInsert(`COUNT_ITEMS_WHERE(${refField.key}, ${refFilterSubKey}, ${op}, ${val})`);
+      } else {
+        onInsert(`${whereFn}(${refField.key}, ${refSubKey}, ${refFilterSubKey}, ${op}, ${val})`);
+      }
+      return;
+    }
+    onInsert(isCountItemsOnly && !refSubKey ? `COUNT_ITEMS(${refField.key})` : `${refGroupFn}(${refField.key}, ${refSubKey})`);
+  };
 
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: "6px", padding: "0.75rem", background: "var(--bg-subtle, #f8f9fa)" }}>
@@ -522,7 +566,7 @@ function FormulaBuilder({
           <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Field</label>
           <select
             value={refFieldId}
-            onChange={(e) => { setRefFieldId(e.target.value ? Number(e.target.value) : ""); setRefSubKey(""); }}
+            onChange={(e) => { setRefFieldId(e.target.value ? Number(e.target.value) : ""); setRefSubKey(""); setRefFilterSubKey(""); }}
             style={{ minWidth: "160px" }}
           >
             <option value="">— Select field —</option>
@@ -536,7 +580,7 @@ function FormulaBuilder({
             <div>
               <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Sub-field</label>
               <select value={refSubKey} onChange={(e) => setRefSubKey(e.target.value)} style={{ minWidth: "140px" }}>
-                <option value="">{refGroupFn === "COUNT_ITEMS" ? "Row count (no sub-field)" : "— Select —"}</option>
+                <option value="">{(refGroupFn === "COUNT_ITEMS" || refGroupFn === "COUNT_ITEMS_WHERE") && !useConditional ? "Row count (no sub-field)" : refGroupFn === "COUNT_ITEMS_WHERE" ? "— N/A for COUNT where —" : "— Select —"}</option>
                 {subFields.map((s) => (
                   <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
                 ))}
@@ -548,21 +592,47 @@ function FormulaBuilder({
                 {GROUP_FUNCTIONS.map((g) => (
                   <option key={g.value} value={g.value}>{g.label}</option>
                 ))}
+                {CONDITIONAL_GROUP_FUNCTIONS.map((g) => (
+                  <option key={g.value} value={g.value}>{g.label}</option>
+                ))}
               </select>
             </div>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", marginBottom: "0.25rem" }}>
+              <input type="checkbox" checked={useConditional} onChange={(e) => setUseConditional(e.target.checked)} />
+              Conditional (where)
+            </label>
+            {useConditional && (
+              <>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Filter sub-field</label>
+                  <select value={refFilterSubKey} onChange={(e) => setRefFilterSubKey(e.target.value)} style={{ minWidth: "120px" }}>
+                    <option value="">— Select —</option>
+                    {subFields.map((s) => (
+                      <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Operator</label>
+                  <select value={refWhereOp} onChange={(e) => setRefWhereOp(e.target.value)} style={{ minWidth: "100px" }}>
+                    {WHERE_OPERATORS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value (number)</label>
+                  <input type="number" step="any" value={refWhereValue} onChange={(e) => setRefWhereValue(e.target.value)} style={{ width: "80px" }} placeholder="0" />
+                </div>
+              </>
+            )}
           </>
         )}
         {canInsertNumber && (
           <button type="button" className="btn btn-primary" onClick={() => refField && onInsert(refField.key)}>Insert field</button>
         )}
         {canInsertItems && refField && (
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => onInsert(isCountItemsOnly && !refSubKey ? `COUNT_ITEMS(${refField.key})` : `${refGroupFn}(${refField.key}, ${refSubKey})`)}
-          >
-            Insert
-          </button>
+          <button type="button" className="btn btn-primary" onClick={handleInsertItems}>Insert</button>
         )}
       </div>
       <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
