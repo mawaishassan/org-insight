@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
 from sqlalchemy.orm import selectinload
 
-from app.core.models import KPIField, KPIFieldOption, KPI, KPIFieldValue, ReportTemplateField
+from app.core.models import KPIField, KPIFieldOption, KPIFieldSubField, KPI, KPIFieldValue, ReportTemplateField
 from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldOptionCreate
 
 
@@ -40,6 +40,17 @@ async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> K
                 sort_order=opt.sort_order if opt.sort_order else i,
             )
         )
+    for i, sub in enumerate(data.sub_fields or []):
+        db.add(
+            KPIFieldSubField(
+                field_id=field.id,
+                name=sub.name,
+                key=sub.key,
+                field_type=sub.field_type,
+                is_required=sub.is_required,
+                sort_order=sub.sort_order if sub.sort_order else i,
+            )
+        )
     await db.flush()
     return field
 
@@ -50,7 +61,7 @@ async def get_field(db: AsyncSession, field_id: int, org_id: int) -> KPIField | 
         select(KPIField)
         .join(KPIField.kpi)
         .where(KPIField.id == field_id, KPI.organization_id == org_id)
-        .options(selectinload(KPIField.options))
+        .options(selectinload(KPIField.options), selectinload(KPIField.sub_fields))
     )
     return result.scalar_one_or_none()
 
@@ -62,7 +73,7 @@ async def list_fields(db: AsyncSession, kpi_id: int, org_id: int) -> list[KPIFie
         .join(KPIField.kpi)
         .where(KPIField.kpi_id == kpi_id, KPI.organization_id == org_id)
         .order_by(KPIField.sort_order, KPIField.id)
-        .options(selectinload(KPIField.options))
+        .options(selectinload(KPIField.options), selectinload(KPIField.sub_fields))
     )
     return list(result.scalars().all())
 
@@ -97,6 +108,19 @@ async def update_field(
                     value=opt.value,
                     label=opt.label,
                     sort_order=opt.sort_order if opt.sort_order else i,
+                )
+            )
+    if data.sub_fields is not None:
+        await db.execute(delete(KPIFieldSubField).where(KPIFieldSubField.field_id == field_id))
+        for i, sub in enumerate(data.sub_fields):
+            db.add(
+                KPIFieldSubField(
+                    field_id=field_id,
+                    name=sub.name,
+                    key=sub.key,
+                    field_type=sub.field_type,
+                    is_required=sub.is_required,
+                    sort_order=sub.sort_order if sub.sort_order else i,
                 )
             )
     await db.flush()
@@ -135,6 +159,7 @@ async def delete_field(db: AsyncSession, field_id: int, org_id: int) -> bool:
     await db.execute(delete(KPIFieldValue).where(KPIFieldValue.field_id == field_id))
     await db.execute(delete(ReportTemplateField).where(ReportTemplateField.kpi_field_id == field_id))
     await db.execute(delete(KPIFieldOption).where(KPIFieldOption.field_id == field_id))
+    await db.execute(delete(KPIFieldSubField).where(KPIFieldSubField.field_id == field_id))
     await db.delete(field)
     await db.flush()
     return True

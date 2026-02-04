@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.auth.dependencies import require_org_admin
 from app.core.models import User
-from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldResponse, KPIFieldOptionResponse, KPIFieldChildDataSummary
+from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldResponse, KPIFieldOptionResponse, KPIFieldSubFieldResponse, KPIFieldChildDataSummary
 from app.fields.service import create_field, get_field, list_fields, update_field, delete_field, get_field_child_data_summary
 
 router = APIRouter(prefix="/fields", tags=["fields"])
@@ -21,7 +21,7 @@ def _org_id(user: User, org_id_param: int | None) -> int:
 
 
 def _field_to_response(f):
-    """Build KPIFieldResponse with options."""
+    """Build KPIFieldResponse with options and sub_fields."""
     return KPIFieldResponse(
         id=f.id,
         kpi_id=f.kpi_id,
@@ -33,6 +33,7 @@ def _field_to_response(f):
         sort_order=f.sort_order,
         config=f.config,
         options=[KPIFieldOptionResponse.model_validate(o) for o in (f.options or [])],
+        sub_fields=[KPIFieldSubFieldResponse.model_validate(s) for s in (getattr(f, "sub_fields", None) or [])],
     )
 
 
@@ -62,9 +63,7 @@ async def create_kpi_field(
     if not field:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
     await db.commit()
-    await db.refresh(field)
-    if field.options is None:
-        field.options = []
+    field = await get_field(db, field.id, org_id)
     return _field_to_response(field)
 
 
@@ -97,9 +96,7 @@ async def update_kpi_field(
     if not field:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field not found")
     await db.commit()
-    await db.refresh(field)
-    if field.options is None:
-        field.options = []
+    field = await get_field(db, field_id, org_id)
     return _field_to_response(field)
 
 
