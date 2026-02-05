@@ -367,6 +367,8 @@ export default function KpiFieldsPage() {
                   formulaValue={createForm.watch("formula_expression") ?? ""}
                   onInsert={(text) => createForm.setValue("formula_expression", (createForm.getValues("formula_expression") ?? "") + text)}
                   fields={list.filter((f) => f.field_type === "number" || f.field_type === "multi_line_items")}
+                  organizationId={kpi?.organization_id}
+                  currentKpiId={kpiId}
                 />
               </div>
             )}
@@ -468,6 +470,8 @@ export default function KpiFieldsPage() {
                     list={list}
                     onSave={(data, subFields) => onUpdateSubmit(f.id, data, subFields)}
                     onCancel={() => setEditingId(null)}
+                    organizationId={kpi?.organization_id}
+                    currentKpiId={kpiId}
                   />
                 ) : (
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -513,14 +517,25 @@ export default function KpiFieldsPage() {
   return content;
 }
 
+interface FormulaRefKpi {
+  id: number;
+  name: string;
+  year: number;
+  fields: Array<{ key: string; name: string; field_type: string }>;
+}
+
 function FormulaBuilder({
   formulaValue,
   onInsert,
   fields,
+  organizationId,
+  currentKpiId,
 }: {
   formulaValue: string;
   onInsert: (text: string) => void;
   fields: KpiField[];
+  organizationId?: number;
+  currentKpiId?: number;
 }) {
   const [refFieldId, setRefFieldId] = useState<number | "">("");
   const [refSubKey, setRefSubKey] = useState("");
@@ -529,6 +544,17 @@ function FormulaBuilder({
   const [refFilterSubKey, setRefFilterSubKey] = useState("");
   const [refWhereOp, setRefWhereOp] = useState<string>("op_eq");
   const [refWhereValue, setRefWhereValue] = useState<string>("0");
+  const [otherKpis, setOtherKpis] = useState<FormulaRefKpi[]>([]);
+  const [refOtherKpiId, setRefOtherKpiId] = useState<number | "">("");
+  const [refOtherFieldKey, setRefOtherFieldKey] = useState("");
+  const token = getAccessToken();
+  useEffect(() => {
+    if (!token || organizationId == null || currentKpiId == null) return;
+    const qs = new URLSearchParams({ organization_id: String(organizationId), exclude_kpi_id: String(currentKpiId) });
+    api<FormulaRefKpi[]>(`/kpis/formula-refs?${qs}`, { token })
+      .then(setOtherKpis)
+      .catch(() => setOtherKpis([]));
+  }, [token, organizationId, currentKpiId]);
   const refField = refFieldId === "" ? null : fields.find((f) => f.id === refFieldId);
   const subFields = refField?.field_type === "multi_line_items" ? (refField.sub_fields ?? []) : [];
   const canInsertNumber = refField?.field_type === "number";
@@ -540,6 +566,9 @@ function FormulaBuilder({
       ? (isCountWhere ? !!refFilterSubKey : (subFields.length > 0 && !!refSubKey && !!refFilterSubKey))
       : (isCountItemsOnly || (subFields.length > 0 && !!refSubKey))
   );
+  const selectedOtherKpi = refOtherKpiId === "" ? null : otherKpis.find((k) => k.id === refOtherKpiId);
+  const otherKpiFields = selectedOtherKpi?.fields ?? [];
+  const canInsertOtherKpiField = refOtherKpiId !== "" && refOtherFieldKey !== "";
 
   const handleInsertItems = () => {
     if (!refField) return;
@@ -634,6 +663,33 @@ function FormulaBuilder({
         {canInsertItems && refField && (
           <button type="button" className="btn btn-primary" onClick={handleInsertItems}>Insert</button>
         )}
+        {organizationId != null && currentKpiId != null && otherKpis.length > 0 && (
+          <>
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Other KPI</label>
+              <select value={refOtherKpiId} onChange={(e) => { setRefOtherKpiId(e.target.value ? Number(e.target.value) : ""); setRefOtherFieldKey(""); }} style={{ minWidth: "180px" }}>
+                <option value="">— Select KPI —</option>
+                {otherKpis.map((k) => (
+                  <option key={k.id} value={k.id}>{k.name} (year {k.year})</option>
+                ))}
+              </select>
+            </div>
+            {selectedOtherKpi && (
+              <div>
+                <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Field</label>
+                <select value={refOtherFieldKey} onChange={(e) => setRefOtherFieldKey(e.target.value)} style={{ minWidth: "140px" }}>
+                  <option value="">— Select —</option>
+                  {otherKpiFields.map((f) => (
+                    <option key={f.key} value={f.key}>{f.name} ({f.key})</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {canInsertOtherKpiField && (
+              <button type="button" className="btn btn-primary" onClick={() => onInsert(`KPI_FIELD(${refOtherKpiId}, "${refOtherFieldKey}")`)}>Insert other KPI field</button>
+            )}
+          </>
+        )}
       </div>
       <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
         <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Operators:</span>
@@ -650,11 +706,15 @@ function FieldEditForm({
   list,
   onSave,
   onCancel,
+  organizationId,
+  currentKpiId,
 }: {
   field: KpiField;
   list: KpiField[];
   onSave: (data: UpdateFormData, subFields?: SubFieldDef[]) => void;
   onCancel: () => void;
+  organizationId?: number;
+  currentKpiId?: number;
 }) {
   const [editSubFields, setEditSubFields] = useState<SubFieldDef[]>(
     () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0 }))
@@ -700,6 +760,8 @@ function FieldEditForm({
             formulaValue={watch("formula_expression") ?? ""}
             onInsert={(text) => setValue("formula_expression", (watch("formula_expression") ?? "") + text)}
             fields={list.filter((f) => f.id !== field.id && (f.field_type === "number" || f.field_type === "multi_line_items"))}
+            organizationId={organizationId}
+            currentKpiId={currentKpiId}
           />
         </div>
       )}

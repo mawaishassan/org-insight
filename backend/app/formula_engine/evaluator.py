@@ -2,8 +2,8 @@
 Secure formula evaluator.
 Supports: +, -, *, /, SUM(), AVG(), COUNT(), field references; group functions on
 multi_line_items: SUM_ITEMS(field_key, sub_key), AVG_ITEMS, COUNT_ITEMS, MIN_ITEMS, MAX_ITEMS;
-and conditional group functions: SUM_ITEMS_WHERE(field_key, value_sub_key, filter_sub_key, op_xx, value),
-COUNT_ITEMS_WHERE(field_key, filter_sub_key, op_xx, value), etc. Use op_eq, op_neq, op_gt, op_gte, op_lt, op_lte.
+conditional group functions: SUM_ITEMS_WHERE(...), COUNT_ITEMS_WHERE(field_key, filter_sub_key, op_xx, value), etc.;
+and cross-KPI refs: KPI_FIELD(kpi_id, "field_key") for numeric fields from the same user's entry for another KPI (same org, same year).
 """
 
 import re
@@ -17,6 +17,22 @@ except ImportError:
 
 # Optional: multi_line_items field_key -> list of row dicts (sub_key -> value)
 MultiLineItemsData = dict[str, list[dict[str, Any]]]
+
+# Optional: (kpi_id, field_key) -> numeric value for KPI_FIELD(kpi_id, field_key) cross-KPI refs
+OtherKpiValues = dict[tuple[int, str], float]
+
+
+class _SafeNames(dict):
+    """Namespace that returns 0 for missing keys or None values, so formula refs to empty fields don't fail."""
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            v = super().__getitem__(key)
+            if v is None:
+                return 0
+            return v
+        except KeyError:
+            return 0
 
 
 def _to_num(x: Any) -> float | None:
@@ -110,13 +126,16 @@ def _rows_where(
 def _make_evaluator(
     field_values: dict[str, float | int],
     multi_line_items_data: MultiLineItemsData | None = None,
+    other_kpi_values: OtherKpiValues | None = None,
 ) -> "SimpleEval":
-    """Build SimpleEval with field values and optional multi_line_items data for group functions."""
+    """Build SimpleEval with field values, optional multi_line_items data, and optional other-KPI refs."""
     if SimpleEval is None:
         raise RuntimeError("simpleeval is required for formula evaluation. pip install simpleeval")
     s = SimpleEval()
     s.operators = {**s.operators}
-    s.names = dict(field_values)
+    # Missing or None field values -> 0 so formulas don't fail when a referenced field has no value
+    s.names = _SafeNames(dict(field_values))
+    ref_values = other_kpi_values or {}
     items_data = multi_line_items_data or {}
     # So SUM_ITEMS(field_key, sub_key) works: inject field keys and sub_keys as string names
     for field_key in items_data:
@@ -148,13 +167,13 @@ def _make_evaluator(
             return float(len(rows))
         return float(len([r for r in rows if isinstance(r, dict) and r.get(sub_key) is not None]))
 
-    def min_items(field_key: str, sub_key: str) -> float | None:
+    def min_items(field_key: str, sub_key: str) -> float:
         vals = _items_values(items_data, field_key, sub_key)
-        return min(vals) if vals else None
+        return min(vals) if vals else 0.0
 
-    def max_items(field_key: str, sub_key: str) -> float | None:
+    def max_items(field_key: str, sub_key: str) -> float:
         vals = _items_values(items_data, field_key, sub_key)
-        return max(vals) if vals else None
+        return max(vals) if vals else 0.0
 
     def sum_items_where(
         field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
@@ -174,22 +193,42 @@ def _make_evaluator(
 
     def min_items_where(
         field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
-    ) -> float | None:
+    ) -> float:
         vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
-        return min(vals) if vals else None
+        return min(vals) if vals else 0.0
 
     def max_items_where(
         field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
-    ) -> float | None:
+    ) -> float:
         vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
-        return max(vals) if vals else None
+        return max(vals) if vals else 0.0
+
+    def kpi_field(kpi_id: int, field_key: str) -> float:
+        """Return numeric value of a field from another KPI (same user, same year, same org). Missing => 0."""
+        return ref_values.get((kpi_id, field_key), 0.0)
+
+    def _safe_sum(*a: Any) -> float:
+        nums = [float(x) for x in a if x is not None and isinstance(x, (int, float))]
+        return sum(nums)
+
+    def _safe_avg(*a: Any) -> float:
+        nums = [float(x) for x in a if x is not None and isinstance(x, (int, float))]
+        return sum(nums) / len(nums) if nums else 0.0
+
+    def _safe_min(*a: Any) -> float:
+        nums = [float(x) for x in a if x is not None and isinstance(x, (int, float))]
+        return min(nums) if nums else 0.0
+
+    def _safe_max(*a: Any) -> float:
+        nums = [float(x) for x in a if x is not None and isinstance(x, (int, float))]
+        return max(nums) if nums else 0.0
 
     s.functions = {
-        "SUM": lambda *a: sum(a) if a else 0,
-        "AVG": lambda *a: sum(a) / len(a) if a else 0,
+        "SUM": _safe_sum,
+        "AVG": _safe_avg,
         "COUNT": lambda *a: len([x for x in a if x is not None]),
-        "MIN": lambda *a: min(a) if a else None,
-        "MAX": lambda *a: max(a) if a else None,
+        "MIN": _safe_min,
+        "MAX": _safe_max,
         "ROUND": round,
         "SUM_ITEMS": sum_items,
         "AVG_ITEMS": avg_items,
@@ -201,6 +240,7 @@ def _make_evaluator(
         "COUNT_ITEMS_WHERE": count_items_where,
         "MIN_ITEMS_WHERE": min_items_where,
         "MAX_ITEMS_WHERE": max_items_where,
+        "KPI_FIELD": kpi_field,
     }
     return s
 
@@ -209,12 +249,13 @@ def evaluate_formula(
     expression: str,
     field_values: dict[str, float | int],
     multi_line_items_data: MultiLineItemsData | None = None,
+    other_kpi_values: OtherKpiValues | None = None,
 ) -> float | int | None:
     """
     Safely evaluate a formula string.
     field_values: map of field key -> numeric value (number fields and formula results).
     multi_line_items_data: optional map of multi_line_items field key -> list of row dicts.
-    Supports SUM_ITEMS("field_key", "sub_key"), AVG_ITEMS, COUNT_ITEMS("field_key") or ("field_key", "sub_key"), MIN_ITEMS, MAX_ITEMS.
+    other_kpi_values: optional (kpi_id, field_key) -> value for KPI_FIELD(kpi_id, "field_key") cross-KPI refs.
     Returns computed value or None on error.
     """
     if not expression or not expression.strip():
@@ -224,7 +265,7 @@ def evaluate_formula(
     if not re.match(r"^[\w\s+\-*/().,\"\']+$", expression):
         return None
     try:
-        ev = _make_evaluator(field_values, multi_line_items_data)
+        ev = _make_evaluator(field_values, multi_line_items_data, other_kpi_values)
         result = ev.eval(expression)
         if result is None:
             return None

@@ -18,7 +18,7 @@ from app.core.models import FieldType
 # Type for multi_line_items data passed to formula evaluator
 MultiLineItemsData = dict[str, list[dict]]
 from app.entries.schemas import FieldValueInput, EntryCreate
-from app.formula_engine.evaluator import evaluate_formula
+from app.formula_engine.evaluator import evaluate_formula, OtherKpiValues
 
 
 async def _resolve_org_and_kpi(db: AsyncSession, kpi_id: int) -> int | None:
@@ -84,6 +84,37 @@ async def user_can_edit_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool
         )
     )
     return result.scalar_one_or_none() is not None
+
+
+async def _load_other_kpi_values(
+    db: AsyncSession, user_id: int, year: int, org_id: int, exclude_kpi_id: int
+) -> OtherKpiValues:
+    """Load numeric field values from same user's entries for other KPIs (same org, same year)."""
+    out: OtherKpiValues = {}
+    q = (
+        select(KPIEntry)
+        .join(KPIEntry.kpi)
+        .where(
+            KPIEntry.user_id == user_id,
+            KPIEntry.year == year,
+            KPI.organization_id == org_id,
+            KPIEntry.kpi_id != exclude_kpi_id,
+        )
+        .options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
+    )
+    res = await db.execute(q)
+    for other_entry in res.scalars().all():
+        kid = other_entry.kpi_id
+        for fv in other_entry.field_values or []:
+            if not fv.field or fv.value_number is None:
+                continue
+            if fv.field.field_type not in (FieldType.number, FieldType.formula):
+                continue
+            try:
+                out[(kid, fv.field.key)] = float(fv.value_number)
+            except (TypeError, ValueError):
+                pass
+    return out
 
 
 async def save_entry_values(
@@ -158,11 +189,16 @@ async def save_entry_values(
         if existing and isinstance(existing.value_json, list):
             multi_line_items_data[f.key] = existing.value_json
 
+    # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
+    other_kpi_values = await _load_other_kpi_values(db, user_id, entry.year, org_id, kpi_id)
+
     # Formula fields
     for f in kpi.fields:
         if f.field_type != FieldType.formula or not f.formula_expression:
             continue
-        computed = evaluate_formula(f.formula_expression, value_by_key, multi_line_items_data)
+        computed = evaluate_formula(
+            f.formula_expression, value_by_key, multi_line_items_data, other_kpi_values
+        )
         fv = (
             await db.execute(
                 select(KPIFieldValue).where(
