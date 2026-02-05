@@ -19,6 +19,7 @@ from app.core.models import (
 from app.reports.schemas import ReportTemplateCreate, ReportTemplateUpdate, ReportTemplateKPIAdd
 from app.formula_engine.evaluator import evaluate_formula
 from app.core.models import FieldType
+from app.entries.service import _load_other_kpi_values
 
 
 async def create_report_template(
@@ -251,6 +252,7 @@ async def generate_report_data(
             fv_by_field = {fv.field_id: fv for fv in entry.field_values}
             value_by_key = {}
             field_values_out = []
+            multi_line_items_data = {}
             for f in fields_to_include:
                 fv = fv_by_field.get(f.id)
                 val = None
@@ -260,13 +262,24 @@ async def generate_report_data(
                         val = fv.value_date.isoformat() if hasattr(fv.value_date, "isoformat") else str(fv.value_date)
                     if f.field_type == FieldType.number and fv.value_number is not None:
                         value_by_key[f.key] = fv.value_number
+                    if f.field_type == FieldType.multi_line_items and isinstance(fv.value_json, list):
+                        multi_line_items_data[f.key] = fv.value_json
                 field_values_out.append({"field_key": f.key, "field_name": f.name, "value": val})
                 if val is not None and f.field_type == FieldType.number:
                     value_by_key[f.key] = val
-            # Formula fields
+            # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
+            other_kpi_values = await _load_other_kpi_values(
+                db, entry.user_id, entry.year, org_id, kpi.id
+            )
+            # Formula fields (with multi_line_items support for SUM_ITEMS etc.)
             for f in fields_to_include:
                 if f.field_type == FieldType.formula and f.formula_expression:
-                    computed = evaluate_formula(f.formula_expression, value_by_key)
+                    computed = evaluate_formula(
+                        f.formula_expression,
+                        value_by_key,
+                        multi_line_items_data,
+                        other_kpi_values,
+                    )
                     field_values_out.append({"field_key": f.key, "field_name": f.name, "value": computed})
                     if computed is not None:
                         value_by_key[f.key] = computed

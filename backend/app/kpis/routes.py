@@ -23,6 +23,7 @@ from app.kpis.service import (
     get_kpi_with_tags,
     get_kpi_with_tags_by_id,
     list_kpis,
+    list_kpis_for_formula_refs,
     update_kpi,
     delete_kpi,
     get_kpi_child_data_summary,
@@ -86,6 +87,19 @@ def _kpi_to_response(k):
         organization_tags=organization_tags,
         assigned_users=assigned_users,
     )
+
+
+@router.get("/formula-refs")
+async def list_kpis_for_formula_refs_api(
+    organization_id: int | None = Query(None),
+    exclude_kpi_id: int | None = Query(None, description="Exclude this KPI (e.g. current KPI when building formula)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """List KPIs in organization with numeric fields only, for KPI_FIELD(kpi_id, field_key) formula references."""
+    org_id = _org_id(current_user, organization_id)
+    items = await list_kpis_for_formula_refs(db, org_id, exclude_kpi_id=exclude_kpi_id)
+    return items
 
 
 @router.get("", response_model=list[KPIResponse])

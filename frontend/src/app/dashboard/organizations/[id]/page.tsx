@@ -21,6 +21,31 @@ const FIELD_TYPES = [
 
 const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean"] as const;
 
+const GROUP_FUNCTIONS = [
+  { value: "SUM_ITEMS", label: "SUM (total)" },
+  { value: "AVG_ITEMS", label: "AVG (average)" },
+  { value: "COUNT_ITEMS", label: "COUNT" },
+  { value: "MIN_ITEMS", label: "MIN" },
+  { value: "MAX_ITEMS", label: "MAX" },
+] as const;
+
+const CONDITIONAL_GROUP_FUNCTIONS = [
+  { value: "SUM_ITEMS_WHERE", label: "SUM where" },
+  { value: "AVG_ITEMS_WHERE", label: "AVG where" },
+  { value: "COUNT_ITEMS_WHERE", label: "COUNT where" },
+  { value: "MIN_ITEMS_WHERE", label: "MIN where" },
+  { value: "MAX_ITEMS_WHERE", label: "MAX where" },
+] as const;
+
+const WHERE_OPERATORS = [
+  { value: "op_eq", label: "equals (=)" },
+  { value: "op_neq", label: "not equals (≠)" },
+  { value: "op_gt", label: "greater than (>)" },
+  { value: "op_gte", label: "greater or equal (≥)" },
+  { value: "op_lt", label: "less than (<)" },
+  { value: "op_lte", label: "less or equal (≤)" },
+] as const;
+
 type TabId = "domains" | "kpis" | "fields" | "tags";
 
 interface SubFieldDef {
@@ -1310,7 +1335,14 @@ function FieldsSection({
             {createForm.watch("field_type") === "formula" && (
               <div className="form-group">
                 <label>Formula</label>
-                <input {...createForm.register("formula_expression")} placeholder="field_a + field_b" />
+                <input {...createForm.register("formula_expression")} placeholder="e.g. total_count + SUM_ITEMS(students, score)" style={{ width: "100%", marginBottom: "0.5rem" }} />
+                <FormulaBuilder
+                  formulaValue={createForm.watch("formula_expression") ?? ""}
+                  onInsert={(text) => createForm.setValue("formula_expression", (createForm.getValues("formula_expression") ?? "") + text)}
+                  fields={list.filter((f) => f.field_type === "number" || f.field_type === "multi_line_items")}
+                  organizationId={orgId}
+                  currentKpiId={selectedKpiId ?? undefined}
+                />
               </div>
             )}
             {createForm.watch("field_type") === "multi_line_items" && (
@@ -1426,8 +1458,11 @@ function FieldsSection({
                 {editingId === f.id ? (
                   <FieldEditForm
                     field={f}
+                    list={list}
                     onSave={(data, subFields) => onUpdateSubmit(f.id, data, subFields)}
                     onCancel={() => setEditingId(null)}
+                    organizationId={orgId}
+                    currentKpiId={selectedKpiId ?? undefined}
                   />
                 ) : (
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -1467,19 +1502,203 @@ function FieldsSection({
   );
 }
 
+interface FormulaRefKpi {
+  id: number;
+  name: string;
+  year: number;
+  fields: Array<{ key: string; name: string; field_type: string }>;
+}
+
+function FormulaBuilder({
+  formulaValue,
+  onInsert,
+  fields,
+  organizationId,
+  currentKpiId,
+}: {
+  formulaValue: string;
+  onInsert: (text: string) => void;
+  fields: KpiField[];
+  organizationId?: number;
+  currentKpiId?: number;
+}) {
+  const [refFieldId, setRefFieldId] = useState<number | "">("");
+  const [refSubKey, setRefSubKey] = useState("");
+  const [refGroupFn, setRefGroupFn] = useState<string>("SUM_ITEMS");
+  const [useConditional, setUseConditional] = useState(false);
+  const [refFilterSubKey, setRefFilterSubKey] = useState("");
+  const [refWhereOp, setRefWhereOp] = useState<string>("op_eq");
+  const [refWhereValue, setRefWhereValue] = useState<string>("0");
+  const [otherKpis, setOtherKpis] = useState<FormulaRefKpi[]>([]);
+  const [refOtherKpiId, setRefOtherKpiId] = useState<number | "">("");
+  const [refOtherFieldKey, setRefOtherFieldKey] = useState("");
+  const token = getAccessToken();
+  useEffect(() => {
+    if (!token || organizationId == null || currentKpiId == null) return;
+    const qs = new URLSearchParams({ organization_id: String(organizationId), exclude_kpi_id: String(currentKpiId) });
+    api<FormulaRefKpi[]>(`/kpis/formula-refs?${qs}`, { token })
+      .then(setOtherKpis)
+      .catch(() => setOtherKpis([]));
+  }, [token, organizationId, currentKpiId]);
+  const refField = refFieldId === "" ? null : fields.find((f) => f.id === refFieldId);
+  const subFields = refField?.field_type === "multi_line_items" ? (refField.sub_fields ?? []) : [];
+  const canInsertNumber = refField?.field_type === "number";
+  const isCountItemsOnly = refGroupFn === "COUNT_ITEMS";
+  const isConditionalWhere = useConditional && refField?.field_type === "multi_line_items" && !!refFilterSubKey;
+  const isCountWhere = refGroupFn === "COUNT_ITEMS" || refGroupFn === "COUNT_ITEMS_WHERE";
+  const canInsertItems = refField?.field_type === "multi_line_items" && (
+    isConditionalWhere
+      ? (isCountWhere ? !!refFilterSubKey : (subFields.length > 0 && !!refSubKey && !!refFilterSubKey))
+      : (isCountItemsOnly || (subFields.length > 0 && !!refSubKey))
+  );
+  const selectedOtherKpi = refOtherKpiId === "" ? null : otherKpis.find((k) => k.id === refOtherKpiId);
+  const otherKpiFields = selectedOtherKpi?.fields ?? [];
+  const canInsertOtherKpiField = refOtherKpiId !== "" && refOtherFieldKey !== "";
+
+  const handleInsertItems = () => {
+    if (!refField) return;
+    if (isConditionalWhere) {
+      const op = refWhereOp;
+      const val = refWhereValue.trim() === "" ? "0" : refWhereValue;
+      // When conditional is checked, always use the _WHERE variant (map COUNT_ITEMS -> COUNT_ITEMS_WHERE etc.)
+      const whereFn = refGroupFn.endsWith("_WHERE") ? refGroupFn : refGroupFn + "_WHERE";
+      if (whereFn === "COUNT_ITEMS_WHERE") {
+        onInsert(`COUNT_ITEMS_WHERE(${refField.key}, ${refFilterSubKey}, ${op}, ${val})`);
+      } else {
+        onInsert(`${whereFn}(${refField.key}, ${refSubKey}, ${refFilterSubKey}, ${op}, ${val})`);
+      }
+      return;
+    }
+    onInsert(isCountItemsOnly && !refSubKey ? `COUNT_ITEMS(${refField.key})` : `${refGroupFn}(${refField.key}, ${refSubKey})`);
+  };
+
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: "6px", padding: "0.75rem", background: "var(--bg-subtle, #f8f9fa)" }}>
+      <div style={{ fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>Insert reference</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "flex-end" }}>
+        <div>
+          <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Field</label>
+          <select value={refFieldId} onChange={(e) => { setRefFieldId(e.target.value ? Number(e.target.value) : ""); setRefSubKey(""); setRefFilterSubKey(""); }} style={{ minWidth: "160px" }}>
+            <option value="">— Select field —</option>
+            {fields.map((f) => (
+              <option key={f.id} value={f.id}>{f.name} ({f.key}) — {f.field_type.replace(/_/g, " ")}</option>
+            ))}
+          </select>
+        </div>
+        {refField?.field_type === "multi_line_items" && subFields.length > 0 && (
+          <>
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Sub-field</label>
+              <select value={refSubKey} onChange={(e) => setRefSubKey(e.target.value)} style={{ minWidth: "140px" }}>
+                <option value="">{(refGroupFn === "COUNT_ITEMS" || refGroupFn === "COUNT_ITEMS_WHERE") && !useConditional ? "Row count (no sub-field)" : refGroupFn === "COUNT_ITEMS_WHERE" ? "— N/A for COUNT where —" : "— Select —"}</option>
+                {subFields.map((s) => (
+                  <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Group function</label>
+              <select value={refGroupFn} onChange={(e) => setRefGroupFn(e.target.value)} style={{ minWidth: "120px" }}>
+                {GROUP_FUNCTIONS.map((g) => (
+                  <option key={g.value} value={g.value}>{g.label}</option>
+                ))}
+                {CONDITIONAL_GROUP_FUNCTIONS.map((g) => (
+                  <option key={g.value} value={g.value}>{g.label}</option>
+                ))}
+              </select>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", marginBottom: "0.25rem" }}>
+              <input type="checkbox" checked={useConditional} onChange={(e) => setUseConditional(e.target.checked)} />
+              Conditional (where)
+            </label>
+            {useConditional && (
+              <>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Filter sub-field</label>
+                  <select value={refFilterSubKey} onChange={(e) => setRefFilterSubKey(e.target.value)} style={{ minWidth: "120px" }}>
+                    <option value="">— Select —</option>
+                    {subFields.map((s) => (
+                      <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Operator</label>
+                  <select value={refWhereOp} onChange={(e) => setRefWhereOp(e.target.value)} style={{ minWidth: "100px" }}>
+                    {WHERE_OPERATORS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value (number)</label>
+                  <input type="number" step="any" value={refWhereValue} onChange={(e) => setRefWhereValue(e.target.value)} style={{ width: "80px" }} placeholder="0" />
+                </div>
+              </>
+            )}
+          </>
+        )}
+        {canInsertNumber && <button type="button" className="btn btn-primary" onClick={() => refField && onInsert(refField.key)}>Insert field</button>}
+        {canInsertItems && refField && (
+          <button type="button" className="btn btn-primary" onClick={handleInsertItems}>Insert</button>
+        )}
+        {organizationId != null && currentKpiId != null && otherKpis.length > 0 && (
+          <>
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Other KPI</label>
+              <select value={refOtherKpiId} onChange={(e) => { setRefOtherKpiId(e.target.value ? Number(e.target.value) : ""); setRefOtherFieldKey(""); }} style={{ minWidth: "180px" }}>
+                <option value="">— Select KPI —</option>
+                {otherKpis.map((k) => (
+                  <option key={k.id} value={k.id}>{k.name} (year {k.year})</option>
+                ))}
+              </select>
+            </div>
+            {selectedOtherKpi && (
+              <div>
+                <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Field</label>
+                <select value={refOtherFieldKey} onChange={(e) => setRefOtherFieldKey(e.target.value)} style={{ minWidth: "140px" }}>
+                  <option value="">— Select —</option>
+                  {otherKpiFields.map((f) => (
+                    <option key={f.key} value={f.key}>{f.name} ({f.key})</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {canInsertOtherKpiField && (
+              <button type="button" className="btn btn-primary" onClick={() => onInsert(`KPI_FIELD(${refOtherKpiId}, "${refOtherFieldKey}")`)}>Insert other KPI field</button>
+            )}
+          </>
+        )}
+      </div>
+      <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
+        <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Operators:</span>
+        {[" + ", " - ", " * ", " / ", " ( ", " ) "].map((op) => (
+          <button key={op} type="button" className="btn" onClick={() => onInsert(op)} style={{ padding: "0.25rem 0.5rem", fontSize: "0.9rem" }}>{op.trim() || op}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function FieldEditForm({
   field,
+  list,
   onSave,
   onCancel,
+  organizationId,
+  currentKpiId,
 }: {
   field: KpiField;
+  list: KpiField[];
   onSave: (data: FieldUpdateFormData, subFields?: SubFieldDef[]) => void;
   onCancel: () => void;
+  organizationId?: number;
+  currentKpiId?: number;
 }) {
   const [editSubFields, setEditSubFields] = useState<SubFieldDef[]>(
     () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0 }))
   );
-  const { register, handleSubmit, watch, formState: { errors, isSubmitting } } = useForm<FieldUpdateFormData>({
+  const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting } } = useForm<FieldUpdateFormData>({
     resolver: zodResolver(fieldUpdateSchema),
     defaultValues: {
       name: field.name,
@@ -1514,7 +1733,14 @@ function FieldEditForm({
       {currentFieldType === "formula" && (
         <div className="form-group">
           <label>Formula</label>
-          <input {...register("formula_expression")} />
+          <input {...register("formula_expression")} style={{ width: "100%", marginBottom: "0.5rem" }} />
+          <FormulaBuilder
+            formulaValue={watch("formula_expression") ?? ""}
+            onInsert={(text) => setValue("formula_expression", (watch("formula_expression") ?? "") + text)}
+            fields={list.filter((f) => f.id !== field.id && (f.field_type === "number" || f.field_type === "multi_line_items"))}
+            organizationId={organizationId}
+            currentKpiId={currentKpiId}
+          />
         </div>
       )}
       {currentFieldType === "multi_line_items" && (

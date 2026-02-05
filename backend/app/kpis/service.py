@@ -20,6 +20,7 @@ from app.core.models import (
     KPIFieldOption,
     ReportTemplateField,
     ReportTemplateKPI,
+    FieldType,
 )
 from app.kpis.schemas import KPICreate, KPIUpdate
 
@@ -153,6 +154,30 @@ async def list_kpis(
         )
     result = await db.execute(q)
     return list(result.unique().scalars().all())
+
+
+async def list_kpis_for_formula_refs(
+    db: AsyncSession, org_id: int, exclude_kpi_id: int | None = None
+) -> list[dict]:
+    """List KPIs in org with only numeric fields (number, formula) for KPI_FIELD() formula refs."""
+    q = select(KPI).where(KPI.organization_id == org_id).order_by(KPI.sort_order, KPI.name)
+    if exclude_kpi_id is not None:
+        q = q.where(KPI.id != exclude_kpi_id)
+    q = q.options(selectinload(KPI.fields))
+    result = await db.execute(q)
+    kpis = list(result.unique().scalars().all())
+    out: list[dict] = []
+    for k in kpis:
+        numeric_fields = [
+            f for f in (k.fields or []) if f.field_type in (FieldType.number, FieldType.formula)
+        ]
+        out.append({
+            "id": k.id,
+            "name": k.name,
+            "year": k.year,
+            "fields": [{"key": f.key, "name": f.name, "field_type": f.field_type.value} for f in numeric_fields],
+        })
+    return out
 
 
 async def _sync_kpi_domains(
