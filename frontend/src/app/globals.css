@@ -1,13 +1,24 @@
 :root {
-  --bg: #0f1419;
-  --surface: #1a2332;
-  --border: #2d3a4f;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #58a6ff;
-  --success: #3fb950;
-  --warning: #d29922;
-  --error: #f85149;
+  /* Light theme — white and clean */
+  --bg: #f8fafc;
+  --bg-subtle: #f1f5f9;
+  --surface: #ffffff;
+  --border: #e2e8f0;
+  --border-focus: #94a3b8;
+  --text: #0f172a;
+  --text-secondary: #475569;
+  --muted: #64748b;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --primary: #2563eb;
+  --success: #059669;
+  --warning: #d97706;
+  --warn: #d97706;
+  --error: #dc2626;
+  --on-muted: #ffffff;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
 }
 
 * {
@@ -22,7 +33,8 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.5;
 }
 
 a {
@@ -55,8 +67,9 @@ textarea {
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 1.25rem;
+  box-shadow: var(--shadow);
 }
 
 .btn {
@@ -64,25 +77,27 @@ textarea {
   align-items: center;
   justify-content: center;
   padding: 0.5rem 1rem;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  transition: background 0.2s, border-color 0.2s;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
 }
 
 .btn:hover {
-  background: var(--border);
+  background: var(--bg-subtle);
+  border-color: var(--border-focus);
 }
 
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--bg);
+  color: #fff;
 }
 
 .btn-primary:hover {
-  filter: brightness(1.1);
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 .form-group {
@@ -92,7 +107,7 @@ textarea {
 .form-group label {
   display: block;
   margin-bottom: 0.35rem;
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: 0.9rem;
 }
 
@@ -101,9 +116,9 @@ textarea {
 .form-group textarea {
   width: 100%;
   padding: 0.5rem 0.75rem;
-  background: var(--bg);
+  background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text);
 }
 
@@ -112,10 +127,22 @@ textarea {
 .form-group textarea:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
 }
 
 .form-error {
   font-size: 0.85rem;
   color: var(--error);
   margin-top: 0.25rem;
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+  .print-report {
+    background: #fff !important;
+    border-color: #e2e8f0 !important;
+    box-shadow: none !important;
+  }
 }

@@ -68,13 +68,13 @@ async def get_domain_summary(
     entries_draft = 0
     entries_not_entered = kpi_count
 
-    if user_id is not None and year is not None and kpi_count > 0:
-        # Count entries for this user/year in domain KPIs: draft vs submitted
+    if year is not None and kpi_count > 0:
+        # Count entries for this org/year in domain KPIs: draft vs submitted (one entry per KPI)
         draft_q = (
             select(func.count(KPIEntry.id))
             .select_from(KPIEntry)
             .where(
-                KPIEntry.user_id == user_id,
+                KPIEntry.organization_id == org_id,
                 KPIEntry.year == year,
                 KPIEntry.is_draft.is_(True),
                 KPIEntry.kpi_id.in_(select(kpi_ids_subq.c.kpi_id)),
@@ -84,7 +84,7 @@ async def get_domain_summary(
             select(func.count(KPIEntry.id))
             .select_from(KPIEntry)
             .where(
-                KPIEntry.user_id == user_id,
+                KPIEntry.organization_id == org_id,
                 KPIEntry.year == year,
                 KPIEntry.is_draft.is_(False),
                 KPIEntry.kpi_id.in_(select(kpi_ids_subq.c.kpi_id)),

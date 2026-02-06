@@ -67,6 +67,14 @@ interface OverviewItem {
   } | null;
 }
 
+interface ReportTemplateRow {
+  id: number;
+  organization_id: number;
+  name: string;
+  description: string | null;
+  year: number;
+}
+
 const createSchema = z.object({
   name: z.string().min(1, "Name required"),
   description: z.string().optional(),
@@ -107,6 +115,11 @@ export default function DomainDetailPage() {
   const [selectedYear, setSelectedYear] = useState(currentYear);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
   const [overview, setOverview] = useState<OverviewItem[]>([]);
+  const [domainTemplates, setDomainTemplates] = useState<ReportTemplateRow[]>([]);
+  const [allTemplates, setAllTemplates] = useState<ReportTemplateRow[]>([]);
+  const [attachTemplateId, setAttachTemplateId] = useState<number | "">("");
+  const [attaching, setAttaching] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
   const [orgTags, setOrgTags] = useState<OrgTagRow[]>([]);
   const [kpiFilterTagId, setKpiFilterTagId] = useState<number | "">("");
   const [kpiFilterName, setKpiFilterName] = useState("");
@@ -157,6 +170,20 @@ export default function DomainDetailPage() {
       .catch(() => setOrgTags([]));
   };
 
+  const loadDomainTemplates = () => {
+    if (!token || effectiveOrgId == null || !domainId) return;
+    api<ReportTemplateRow[]>(`/reports/domains/${domainId}/templates?${qs({ organization_id: effectiveOrgId })}`, { token })
+      .then(setDomainTemplates)
+      .catch(() => setDomainTemplates([]));
+  };
+
+  const loadAllTemplates = () => {
+    if (!token || effectiveOrgId == null) return;
+    api<ReportTemplateRow[]>(`/reports/templates?${qs({ organization_id: effectiveOrgId })}`, { token })
+      .then(setAllTemplates)
+      .catch(() => setAllTemplates([]));
+  };
+
   const filteredKpis = useMemo(() => {
     const searchLower = kpiFilterName.trim().toLowerCase();
     if (!searchLower) return kpis;
@@ -196,8 +223,31 @@ export default function DomainDetailPage() {
   }, [effectiveOrgId]);
 
   useEffect(() => {
+    loadDomainTemplates();
+    if (userRole === "SUPER_ADMIN") loadAllTemplates();
+  }, [effectiveOrgId, domainId, userRole]);
+
+  useEffect(() => {
     setKpis([]);
   }, [domainId]);
+
+  const onAttachTemplate = async () => {
+    if (!token || effectiveOrgId == null || attachTemplateId === "" || !domainId) return;
+    setAttaching(true);
+    setAttachError(null);
+    try {
+      await api(`/reports/templates/${attachTemplateId}/domains/${domainId}?${qs({ organization_id: effectiveOrgId })}`, {
+        method: "POST",
+        token,
+      });
+      setAttachTemplateId("");
+      loadDomainTemplates();
+    } catch (e) {
+      setAttachError(e instanceof Error ? e.message : "Failed to attach");
+    } finally {
+      setAttaching(false);
+    }
+  };
 
   useEffect(() => {
     if (!canEdit && effectiveOrgId != null && domainId) loadKpis();
@@ -390,11 +440,11 @@ export default function DomainDetailPage() {
                           borderRadius: 4,
                           flexShrink: 0,
                           ...(status === "not_entered"
-                            ? { background: "var(--warning)", color: "var(--bg)" }
+                            ? { background: "var(--warning)", color: "var(--on-muted)" }
                             : status === "draft"
-                            ? { background: "var(--warning)", color: "var(--bg)" }
+                            ? { background: "var(--warning)", color: "var(--on-muted)" }
                             : status === "submitted"
-                            ? { background: "var(--success)", color: "var(--bg)" }
+                            ? { background: "var(--success)", color: "var(--on-muted)" }
                             : { background: "var(--muted)", color: "var(--text)" }),
                         }}
                       >
@@ -424,6 +474,54 @@ export default function DomainDetailPage() {
               {kpis.length === 0 ? "No KPIs in this domain." : "No KPIs match the filters."}
             </p>
           )}
+        </>
+      )}
+
+      {effectiveOrgId != null && (
+        <>
+          <h2 style={{ fontSize: "1.1rem", margin: "1.25rem 0 0.75rem" }}>Reports</h2>
+          <div className="card" style={{ marginBottom: "1rem" }}>
+            <p style={{ color: "var(--muted)", marginTop: 0 }}>
+              Reports attached to this domain can be viewed and printed by Organization Admins.
+            </p>
+            {userRole === "SUPER_ADMIN" && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "flex-end", marginBottom: "0.75rem" }}>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Attach template</label>
+                  <select value={attachTemplateId} onChange={(e) => setAttachTemplateId(e.target.value ? Number(e.target.value) : "")} style={{ minWidth: "220px" }}>
+                    <option value="">— Select template —</option>
+                    {allTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name} (Year {t.year})</option>
+                    ))}
+                  </select>
+                </div>
+                <button type="button" className="btn btn-primary" onClick={onAttachTemplate} disabled={attaching || attachTemplateId === ""}>
+                  {attaching ? "Attaching…" : "Attach"}
+                </button>
+                {attachError && <p className="form-error" style={{ margin: 0 }}>{attachError}</p>}
+              </div>
+            )}
+            {domainTemplates.length === 0 ? (
+              <p style={{ color: "var(--muted)", marginBottom: 0 }}>No reports attached yet.</p>
+            ) : (
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {domainTemplates.map((t) => (
+                  <li key={t.id} style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+                      <div>
+                        <strong>{t.name}</strong>
+                        <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>Year {t.year}</span>
+                        {t.description && <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{t.description}</div>}
+                      </div>
+                      <Link className="btn btn-primary" href={`/dashboard/reports/${t.id}`}>
+                        View / Print
+                      </Link>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </>
       )}
 

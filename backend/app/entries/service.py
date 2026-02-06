@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, case
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.models import (
@@ -28,30 +28,30 @@ async def _resolve_org_and_kpi(db: AsyncSession, kpi_id: int) -> int | None:
     return row[0] if row else None
 
 
-async def _get_entry(db: AsyncSession, entry_id: int, user_id: int) -> KPIEntry | None:
+async def _get_entry(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry | None:
+    """Get entry by id and organization (one entry per org/kpi/year)."""
     result = await db.execute(
-        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.user_id == user_id)
+        select(KPIEntry).where(
+            KPIEntry.id == entry_id,
+            KPIEntry.organization_id == org_id,
+        )
     )
     return result.scalar_one_or_none()
 
 
 async def _get_entry_admin(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry | None:
-    result = await db.execute(
-        select(KPIEntry)
-        .join(KPIEntry.kpi)
-        .where(KPIEntry.id == entry_id, KPI.organization_id == org_id)
-    )
-    return result.scalar_one_or_none()
+    """Alias for consistency; same as _get_entry (org-scoped)."""
+    return await _get_entry(db, entry_id, org_id)
 
 
 async def get_or_create_entry(
     db: AsyncSession, user_id: int, org_id: int, kpi_id: int, year: int
 ) -> tuple[KPIEntry | None, bool]:
-    """Get existing entry or create new one. Returns (entry, created)."""
+    """Get existing entry or create new one (one per organization per KPI per year). Returns (entry, created)."""
     result = await db.execute(
         select(KPIEntry).where(
+            KPIEntry.organization_id == org_id,
             KPIEntry.kpi_id == kpi_id,
-            KPIEntry.user_id == user_id,
             KPIEntry.year == year,
         )
     )
@@ -61,7 +61,13 @@ async def get_or_create_entry(
     kpi_org = await _resolve_org_and_kpi(db, kpi_id)
     if kpi_org != org_id:
         return None, False
-    entry = KPIEntry(kpi_id=kpi_id, user_id=user_id, year=year, is_draft=True)
+    entry = KPIEntry(
+        organization_id=org_id,
+        kpi_id=kpi_id,
+        user_id=user_id,
+        year=year,
+        is_draft=True,
+    )
     db.add(entry)
     await db.flush()
     return entry, True
@@ -87,17 +93,15 @@ async def user_can_edit_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool
 
 
 async def _load_other_kpi_values(
-    db: AsyncSession, user_id: int, year: int, org_id: int, exclude_kpi_id: int
+    db: AsyncSession, year: int, org_id: int, exclude_kpi_id: int
 ) -> OtherKpiValues:
-    """Load numeric field values from same user's entries for other KPIs (same org, same year)."""
+    """Load numeric field values from org's entries for other KPIs (same org, same year)."""
     out: OtherKpiValues = {}
     q = (
         select(KPIEntry)
-        .join(KPIEntry.kpi)
         .where(
-            KPIEntry.user_id == user_id,
+            KPIEntry.organization_id == org_id,
             KPIEntry.year == year,
-            KPI.organization_id == org_id,
             KPIEntry.kpi_id != exclude_kpi_id,
         )
         .options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
@@ -126,7 +130,7 @@ async def save_entry_values(
     org_id: int,
 ) -> KPIEntry | None:
     """Save or update field values for entry; evaluate formula fields."""
-    entry = await _get_entry(db, entry_id, user_id)
+    entry = await _get_entry(db, entry_id, org_id)
     if not entry or entry.kpi_id != kpi_id or entry.is_locked:
         return None
     # Load KPI and fields (with sub_fields for multi_line_items formula support)
@@ -190,7 +194,7 @@ async def save_entry_values(
             multi_line_items_data[f.key] = existing.value_json
 
     # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
-    other_kpi_values = await _load_other_kpi_values(db, user_id, entry.year, org_id, kpi_id)
+    other_kpi_values = await _load_other_kpi_values(db, entry.year, org_id, kpi_id)
 
     # Formula fields
     for f in kpi.fields:
@@ -218,9 +222,11 @@ async def save_entry_values(
     return entry
 
 
-async def submit_entry(db: AsyncSession, entry_id: int, user_id: int) -> KPIEntry | None:
+async def submit_entry(
+    db: AsyncSession, entry_id: int, user_id: int, org_id: int
+) -> KPIEntry | None:
     """Mark entry as submitted (no longer draft)."""
-    entry = await _get_entry(db, entry_id, user_id)
+    entry = await _get_entry(db, entry_id, org_id)
     if not entry or entry.is_locked:
         return None
     entry.is_draft = False
@@ -270,44 +276,22 @@ async def list_entries(
     year: int | None = None,
     as_admin: bool = False,
 ) -> list[KPIEntry]:
-    """List entries for user (or for org if as_admin). When admin and kpi_id given, assigned user's entry first (same as card)."""
-    if as_admin:
-        q = (
-            select(KPIEntry)
-            .join(KPIEntry.kpi)
-            .where(KPI.organization_id == org_id)
+    """List entries for org (one per KPI per year). Non-admin: only KPIs the user is assigned to."""
+    q = select(KPIEntry).where(KPIEntry.organization_id == org_id)
+    if kpi_id is not None:
+        q = q.where(KPIEntry.kpi_id == kpi_id)
+    if year is not None:
+        q = q.where(KPIEntry.year == year)
+    if not as_admin:
+        # Restrict to KPIs the user is assigned to
+        q = q.join(
+            KPIAssignment,
+            (KPIAssignment.kpi_id == KPIEntry.kpi_id) & (KPIAssignment.user_id == user_id),
         )
-        if kpi_id is not None:
-            q = q.where(KPIEntry.kpi_id == kpi_id)
-        if year is not None:
-            q = q.where(KPIEntry.year == year)
-        # When admin requests a specific KPI, put assigned user's entry first so detail page shows same as card
-        assigned_user_id = None
-        if kpi_id is not None:
-            assign_res = await db.execute(
-                select(KPIAssignment.user_id).where(KPIAssignment.kpi_id == kpi_id).limit(1)
-            )
-            row = assign_res.one_or_none()
-            if row is not None:
-                assigned_user_id = row[0]
-        if assigned_user_id is not None:
-            q = q.order_by(
-                case((KPIEntry.user_id == assigned_user_id, 0), else_=1),
-                KPIEntry.year.desc(),
-                KPIEntry.kpi_id,
-            )
-        else:
-            q = q.order_by(KPIEntry.year.desc(), KPIEntry.kpi_id)
-    else:
-        q = select(KPIEntry).where(KPIEntry.user_id == user_id)
-        if kpi_id is not None:
-            q = q.where(KPIEntry.kpi_id == kpi_id)
-        if year is not None:
-            q = q.where(KPIEntry.year == year)
-        q = q.order_by(KPIEntry.year.desc(), KPIEntry.kpi_id)
+    q = q.order_by(KPIEntry.year.desc(), KPIEntry.kpi_id)
     q = q.options(selectinload(KPIEntry.field_values))
     result = await db.execute(q)
-    return list(result.scalars().all())
+    return list(result.unique().scalars().all())
 
 
 def _format_field_value(fv) -> str:
@@ -326,13 +310,13 @@ def _format_field_value(fv) -> str:
 
 
 async def _get_entry_for_overview(
-    db: AsyncSession, user_id: int, kpi_id: int, year: int
+    db: AsyncSession, org_id: int, kpi_id: int, year: int
 ) -> KPIEntry | None:
-    """Load one entry with field_values and field for overview preview."""
+    """Load the single entry (org/kpi/year) with field_values and field for overview preview."""
     q = (
         select(KPIEntry)
         .where(
-            KPIEntry.user_id == user_id,
+            KPIEntry.organization_id == org_id,
             KPIEntry.kpi_id == kpi_id,
             KPIEntry.year == year,
         )
@@ -347,25 +331,12 @@ async def list_entries_overview(
 ) -> list[dict]:
     """
     For the given year, return KPIs with entry status and first 2 field preview.
-    For data entry users: entry = current user's entry.
-    For org admin/super admin: entry = assigned data entry user's entry (same source as operator).
+    One entry per organization per KPI per year.
     """
     kpis = await list_available_kpis(db, user_id, org_id)
     result = []
     for kpi in kpis:
-        if as_admin:
-            # Show the assigned data entry user's entry (same source as operator), not the admin's
-            assign_res = await db.execute(
-                select(KPIAssignment.user_id).where(KPIAssignment.kpi_id == kpi.id).limit(1)
-            )
-            row = assign_res.one_or_none()
-            entry_user_id = row[0] if row is not None else None
-            if entry_user_id is not None:
-                entry = await _get_entry_for_overview(db, entry_user_id, kpi.id, year)
-            else:
-                entry = None
-        else:
-            entry = await _get_entry_for_overview(db, user_id, kpi.id, year)
+        entry = await _get_entry_for_overview(db, org_id, kpi.id, year)
         item = {
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,

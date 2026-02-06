@@ -38,7 +38,8 @@ interface FieldValueResp {
 interface EntryRow {
   id: number;
   kpi_id: number;
-  user_id: number;
+  organization_id: number;
+  user_id: number | null;
   year: number;
   is_draft: boolean;
   is_locked: boolean;

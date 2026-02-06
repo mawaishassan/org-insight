@@ -116,11 +116,11 @@ export default function EntriesPage() {
                         borderRadius: 4,
                         flexShrink: 0,
                         ...(status === "not_entered"
-                          ? { background: "var(--warning)", color: "var(--bg)" }
+                          ? { background: "var(--warning)", color: "var(--on-muted)" }
                           : status === "draft"
-                          ? { background: "var(--warning)", color: "var(--bg)" }
+                          ? { background: "var(--warning)", color: "var(--on-muted)" }
                           : status === "submitted"
-                          ? { background: "var(--success)", color: "var(--bg)" }
+                          ? { background: "var(--success)", color: "var(--on-muted)" }
                           : { background: "var(--muted)", color: "var(--text)" }),
                       }}
                     >

@@ -34,6 +34,7 @@ def _entry_to_response(entry):
     return EntryResponse(
         id=entry.id,
         kpi_id=entry.kpi_id,
+        organization_id=entry.organization_id,
         user_id=entry.user_id,
         year=entry.year,
         is_draft=entry.is_draft,
@@ -152,11 +153,13 @@ async def create_or_update_entry(
 @router.post("/submit", response_model=EntryResponse)
 async def submit_entry_route(
     body: EntrySubmit,
+    organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Submit entry (no longer draft)."""
-    entry = await submit_entry(db, body.entry_id, current_user.id)
+    org_id = _org_id(current_user, organization_id)
+    entry = await submit_entry(db, body.entry_id, current_user.id, org_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found or locked")
     await db.commit()
