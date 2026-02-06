@@ -1,11 +1,15 @@
 """KPI entry API routes (data entry + admin lock)."""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from io import BytesIO
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_org_admin
-from app.core.models import User
+from app.core.models import User, KPIEntry, KPIField, KPIFieldValue, KPI, FieldType
 from app.entries.schemas import EntryCreate, EntrySubmit, EntryLock, EntryResponse, FieldValueResponse
 from app.entries.service import (
     get_or_create_entry,
@@ -52,6 +56,185 @@ def _entry_to_response(entry):
             for fv in (entry.field_values or [])
         ],
     )
+
+
+async def _load_multi_items_field(db: AsyncSession, org_id: int, field_id: int) -> KPIField | None:
+    """Load a multi_line_items field with sub_fields, scoped to org."""
+    res = await db.execute(
+        select(KPIField)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPIField.id == field_id, KPI.organization_id == org_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    field = res.scalar_one_or_none()
+    if not field or field.field_type != FieldType.multi_line_items:
+        return None
+    return field
+
+
+def _xlsx_bytes_for_multi_items_template(field: KPIField) -> bytes:
+    """Create an empty Excel template for multi_line_items sub_fields."""
+    # Import here so app can start even if optional dependency isn't installed yet.
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Items"
+
+    sub_fields = list(field.sub_fields or [])
+    # Header row uses sub-field keys (stable API identifiers).
+    ws.append([s.key for s in sub_fields])
+    # Empty sample row (user fills in).
+    ws.append(["" for _ in sub_fields])
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
+    """Parse uploaded xlsx into list[dict[sub_key] = value] for the field's sub_fields."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(filename=BytesIO(content), data_only=True)
+    ws = wb.active
+
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    header = [str(x).strip() if x is not None else "" for x in rows[0]]
+    key_to_idx = {k: i for i, k in enumerate(header) if k}
+    allowed = {s.key: s for s in (field.sub_fields or [])}
+
+    # Accept either key or name as column header (keys preferred).
+    name_to_key = {s.name.strip(): s.key for s in (field.sub_fields or []) if s.name}
+
+    def resolve_col_to_key(col: str) -> str | None:
+        if col in allowed:
+            return col
+        if col in name_to_key:
+            return name_to_key[col]
+        return None
+
+    out: list[dict] = []
+    for r in rows[1:]:
+        if r is None:
+            continue
+        item: dict = {}
+        empty = True
+        for col, idx in key_to_idx.items():
+            key = resolve_col_to_key(col)
+            if not key:
+                continue
+            raw = r[idx] if idx < len(r) else None
+            if raw is None or raw == "":
+                continue
+            empty = False
+            sf = allowed[key]
+            if sf.field_type == FieldType.number:
+                try:
+                    item[key] = float(raw)
+                except Exception:
+                    # keep as string if can't coerce
+                    item[key] = str(raw)
+            elif sf.field_type == FieldType.boolean:
+                if isinstance(raw, bool):
+                    item[key] = raw
+                else:
+                    s = str(raw).strip().lower()
+                    item[key] = s in ("1", "true", "yes", "y")
+            elif sf.field_type == FieldType.date:
+                # Store ISO date string (matches UI expectation for <input type=\"date\">)
+                if hasattr(raw, "date"):
+                    try:
+                        item[key] = raw.date().isoformat()
+                    except Exception:
+                        item[key] = str(raw)
+                else:
+                    item[key] = str(raw)
+            else:
+                item[key] = str(raw)
+        if not empty:
+            out.append(item)
+    return out
+
+
+@router.get("/multi-items/template")
+async def download_multi_items_template(
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download an empty Excel template for a multi_line_items field (any user who can edit this KPI)."""
+    org_id = _org_id(current_user, organization_id)
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    content = _xlsx_bytes_for_multi_items_template(field)
+    filename = f"multi_items_{field.key}_{field.id}.xlsx"
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/multi-items/upload")
+async def upload_multi_items_excel(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    append: bool = Query(False, description="If true, append rows; otherwise replace"),
+    file: UploadFile = File(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload Excel and set/append multi_line_items value_json for an entry+field (any user who can edit this KPI)."""
+    org_id = _org_id(current_user, organization_id)
+
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    if entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry is locked")
+
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if field:
+        can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+        if not can_edit:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+    if not field:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    if field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Field does not belong to entry KPI")
+
+    content = await file.read()
+    items = _parse_multi_items_xlsx(content, field)
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if fv is None:
+        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id)
+        db.add(fv)
+    if append and isinstance(fv.value_json, list):
+        fv.value_json = list(fv.value_json) + items
+    else:
+        fv.value_json = items
+    entry.user_id = current_user.id  # track last editor (optional)
+    await db.commit()
+
+    return {"entry_id": entry.id, "field_id": field.id, "items": fv.value_json, "append": append}
 
 
 @router.get("/overview")

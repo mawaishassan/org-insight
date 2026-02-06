@@ -180,6 +180,8 @@ function EntryForm({
   const [submitLoading, setSubmitLoading] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [uploadingFieldId, setUploadingFieldId] = useState<number | null>(null);
+  const [appendExcelUpload, setAppendExcelUpload] = useState(true);
 
   const updateField = (fieldId: number, key: string, value: string | number | boolean | undefined | Record<string, unknown>[]) => {
     setFormValues((prev) => ({
@@ -331,6 +333,94 @@ function EntryForm({
             return (
               <div key={f.id} className="form-group">
                 <label>{f.name}{f.is_required ? " *" : ""}</label>
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "0.5rem" }}>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={async () => {
+                      const q = organizationId != null ? `?field_id=${f.id}&organization_id=${organizationId}` : `?field_id=${f.id}`;
+                      const base =
+                        typeof window !== "undefined" && window.location.origin
+                          ? ""
+                          : process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+                      const url = base
+                        ? `${base}/api/entries/multi-items/template${q}`
+                        : `/api/entries/multi-items/template${q}`;
+                      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                      if (!res.ok) return;
+                      const blob = await res.blob();
+                      const a = document.createElement("a");
+                      a.href = URL.createObjectURL(blob);
+                      a.download = `multi_items_${f.key}_${year}.xlsx`;
+                      a.click();
+                      URL.revokeObjectURL(a.href);
+                    }}
+                    disabled={uploadingFieldId === f.id}
+                  >
+                    Download Excel template
+                  </button>
+                  <label className="btn" style={{ gap: "0.5rem", ...(existingEntry ? {} : { opacity: 0.7, cursor: "not-allowed" }) }}>
+                    {uploadingFieldId === f.id ? "Uploading…" : "Upload Excel"}
+                    <input
+                      type="file"
+                      accept=".xlsx"
+                      style={{ display: "none" }}
+                      disabled={isLocked || uploadingFieldId === f.id || !existingEntry}
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = "";
+                        if (!file || !existingEntry) return;
+                        setUploadingFieldId(f.id);
+                        try {
+                          const form = new FormData();
+                          form.append("file", file);
+                          const q =
+                            organizationId != null
+                              ? `?entry_id=${existingEntry.id}&field_id=${f.id}&organization_id=${organizationId}`
+                              : `?entry_id=${existingEntry.id}&field_id=${f.id}`;
+                          const q2 = `${q}&append=${appendExcelUpload ? "true" : "false"}`;
+                          const base =
+                            typeof window !== "undefined" && window.location.origin
+                              ? ""
+                              : process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+                          const url = base
+                            ? `${base}/api/entries/multi-items/upload${q2}`
+                            : `/api/entries/multi-items/upload${q2}`;
+                          const res = await fetch(url, {
+                            method: "POST",
+                            headers: { Authorization: `Bearer ${token}` },
+                            body: form,
+                          });
+                          if (!res.ok) {
+                            setSaveError("Excel upload failed");
+                            return;
+                          }
+                          const json = await res.json();
+                          if (Array.isArray(json.items)) {
+                            updateField(f.id, "value_json", json.items);
+                            setSaved(false);
+                          }
+                        } finally {
+                          setUploadingFieldId(null);
+                        }
+                      }}
+                    />
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", color: "var(--muted)" }}>
+                    <input
+                      type="checkbox"
+                      checked={appendExcelUpload}
+                      onChange={(e) => setAppendExcelUpload(e.target.checked)}
+                      disabled={isLocked || uploadingFieldId === f.id || !existingEntry}
+                    />
+                    Append
+                  </label>
+                  <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                    {existingEntry
+                      ? "If unchecked, upload replaces all rows for this field."
+                      : "Save draft first to upload Excel."}
+                  </span>
+                </div>
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                     <thead>
