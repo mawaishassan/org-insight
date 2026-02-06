@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -48,6 +48,8 @@ interface KpiRow {
   description: string | null;
   year: number;
   sort_order: number;
+  entry_mode?: string;
+  api_endpoint_url?: string | null;
   domain_tags: DomainTagRef[];
   category_tags: CategoryTagRef[];
   organization_tags?: OrganizationTagRef[];
@@ -80,6 +82,8 @@ const createSchema = z.object({
   description: z.string().optional(),
   year: z.coerce.number().int().min(2000).max(2100),
   sort_order: z.coerce.number().int().min(0),
+  entry_mode: z.enum(["manual", "api"]),
+  api_endpoint_url: z.string().max(2048).optional(),
 });
 
 const updateSchema = z.object({
@@ -87,6 +91,8 @@ const updateSchema = z.object({
   description: z.string().optional(),
   year: z.coerce.number().int().min(2000).max(2100),
   sort_order: z.coerce.number().int().min(0),
+  entry_mode: z.enum(["manual", "api"]),
+  api_endpoint_url: z.string().max(2048).optional(),
 });
 
 type CreateFormData = z.infer<typeof createSchema>;
@@ -95,6 +101,69 @@ type UpdateFormData = z.infer<typeof updateSchema>;
 function qs(params: Record<string, string | number | undefined>) {
   const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "" && v !== 0);
   return new URLSearchParams(entries as Record<string, string>).toString();
+}
+
+interface ApiContractField {
+  key: string;
+  name: string;
+  field_type: string;
+  sub_field_keys?: string[];
+  example_value?: unknown;
+  accepted_value_hint?: string | null;
+}
+
+type ApiContract = Record<string, unknown>;
+
+const contractBlockStyle = { marginTop: "0.5rem", padding: "0.75rem", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 8, fontSize: "0.85rem" } as const;
+
+function ApiContractBlock({ contract }: { contract: ApiContract }) {
+  const exampleBody = contract.example_request_body as Record<string, unknown> | undefined;
+  const fields = (contract.fields ?? []) as ApiContractField[];
+  const exampleResponse = contract.example_response as Record<string, unknown> | undefined;
+  const hasDetails = Array.isArray(fields) && fields.length >= 1 && Boolean(exampleBody && exampleResponse);
+
+  return React.createElement(
+    "div",
+    { style: contractBlockStyle },
+    React.createElement("p", null, React.createElement("strong", null, "Request we send (POST)")),
+    React.createElement("p", { style: { color: "var(--muted)", margin: "0.25rem 0 0.5rem 0" } }, "Body (JSON):"),
+    React.createElement(
+      "pre",
+      { style: { margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" } },
+      React.createElement(
+        "code",
+        null,
+        JSON.stringify(exampleBody ?? { year: "int", kpi_id: "int", organization_id: "int" }, null, 2)
+      )
+    ),
+    React.createElement("p", { style: { marginTop: "1rem" } }, React.createElement("strong", null, "Response your API must return")),
+    React.createElement("p", { style: { color: "var(--muted)", margin: "0.25rem 0 0.5rem 0" } }, "Top-level: ", React.createElement("code", null, "year"), " (int), ", React.createElement("code", null, "values"), " (object – field_key to value). Override or append is chosen in the UI when you sync."),
+    hasDetails && React.createElement(React.Fragment, null,
+      React.createElement("p", { style: { marginTop: "0.75rem", fontWeight: 600 } }, "Fields to include in ", React.createElement("code", null, "values"), " (use exact key):"),
+      React.createElement(
+        "ul",
+        { style: { margin: "0.25rem 0 0", paddingLeft: "1.25rem" } },
+        fields.map((f) =>
+          React.createElement(
+            "li",
+            { key: f.key, style: { marginBottom: "0.35rem" } },
+            React.createElement("code", null, f.key),
+            " — ",
+            f.name,
+            " ",
+            React.createElement("strong", null, "(", f.field_type, ")"),
+            f.field_type === "formula" && React.createElement("span", { style: { color: "var(--muted)", marginLeft: "0.35rem" } }, "(computed server-side – do not include in response)"),
+            f.accepted_value_hint && React.createElement("span", { style: { color: "var(--muted)", marginLeft: "0.35rem" } }, "— Accepted: ", f.accepted_value_hint),
+            f.sub_field_keys && f.sub_field_keys.length >= 1 && React.createElement("span", { style: { color: "var(--muted)" } }, " Row keys: ", f.sub_field_keys.join(", ")),
+            f.field_type !== "formula" && f.example_value !== undefined && f.example_value !== null && React.createElement("div", { style: { marginTop: "0.2rem", padding: "0.35rem", background: "var(--bg)", borderRadius: 4, fontSize: "0.8rem" } }, "Example: ", React.createElement("code", null, typeof f.example_value === "object" ? JSON.stringify(f.example_value) : String(f.example_value)))
+          )
+        )
+      ),
+      React.createElement("p", { style: { marginTop: "0.75rem", fontWeight: 600 } }, "Full example response:"),
+      React.createElement("pre", { style: { margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" } }, React.createElement("code", null, JSON.stringify(exampleResponse, null, 2)))
+    ),
+    !hasDetails && React.createElement("pre", { style: { margin: "0.5rem 0 0", whiteSpace: "pre-wrap" } }, React.createElement("code", null, JSON.stringify({ year: "int", values: "object (field_key to value)" }, null, 2)))
+  );
 }
 
 export default function KPIsPage() {
@@ -227,6 +296,8 @@ export default function KPIsPage() {
       description: "",
       year: new Date().getFullYear(),
       sort_order: 0,
+      entry_mode: "manual",
+      api_endpoint_url: "",
     },
   });
 
@@ -242,6 +313,8 @@ export default function KPIsPage() {
           description: data.description || null,
           year: data.year,
           sort_order: data.sort_order,
+          entry_mode: data.entry_mode ?? "manual",
+          api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
         }),
         token,
       });
@@ -250,6 +323,8 @@ export default function KPIsPage() {
         description: "",
         year: new Date().getFullYear(),
         sort_order: 0,
+        entry_mode: "manual",
+        api_endpoint_url: "",
       });
       setShowCreate(false);
       loadList();
@@ -270,6 +345,8 @@ export default function KPIsPage() {
           description: data.description || null,
           year: data.year,
           sort_order: data.sort_order,
+          entry_mode: data.entry_mode ?? "manual",
+          api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
         }),
         token,
       });
@@ -415,6 +492,27 @@ export default function KPIsPage() {
               <label>Sort order</label>
               <input type="number" min={0} {...createForm.register("sort_order")} />
             </div>
+            <div className="form-group">
+              <label>Entry mode</label>
+              <select {...createForm.register("entry_mode")}>
+                <option value="manual">Manual (default)</option>
+                <option value="api">API</option>
+              </select>
+              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>
+                API: system will call your endpoint to fetch entry data. Provide URL below.
+              </p>
+            </div>
+            {createForm.watch("entry_mode") === "api" && (
+              <div className="form-group">
+                <label>API endpoint URL</label>
+                <input
+                  type="url"
+                  placeholder="https://your-server.com/kpi-data"
+                  {...createForm.register("api_endpoint_url")}
+                  style={{ width: "100%", maxWidth: "480px" }}
+                />
+              </div>
+            )}
             <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
               <button type="submit" className="btn btn-primary" disabled={createForm.formState.isSubmitting}>
                 {createForm.formState.isSubmitting ? "Creating…" : "Create"}
@@ -446,13 +544,19 @@ export default function KPIsPage() {
             {editingId === k.id ? (
               <KpiEditForm
                 kpi={k}
+                orgId={effectiveOrgId ?? undefined}
+                token={token ?? ""}
                 onSave={(data) => onUpdateSubmit(k.id, data)}
                 onCancel={() => setEditingId(null)}
+                onSyncSuccess={() => loadList()}
               />
             ) : (
               <>
                 <div style={{ marginBottom: "0.75rem" }}>
                   <strong style={{ fontSize: "1.05rem" }}>{k.name}</strong>
+                  {(k.entry_mode === "api" && k.api_endpoint_url) && (
+                    <span style={{ fontSize: "0.75rem", marginLeft: "0.5rem", color: "var(--muted)" }} title="API entry">(API)</span>
+                  )}
                   <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
                     Year {k.year}
                     {k.description && ` — ${k.description}`}
@@ -551,22 +655,47 @@ export default function KPIsPage() {
 
 function KpiEditForm({
   kpi,
+  orgId,
+  token,
   onSave,
   onCancel,
+  onSyncSuccess,
 }: {
   kpi: KpiRow;
+  orgId: number | undefined;
+  token: string;
   onSave: (data: UpdateFormData) => void;
   onCancel: () => void;
+  onSyncSuccess: () => void;
 }) {
-  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<UpdateFormData>({
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncMode, setSyncMode] = useState<"override" | "append">("override");
+  const [contractOpen, setContractOpen] = useState(false);
+  const [contract, setContract] = useState<Record<string, unknown> | null>(null);
+  const { register, handleSubmit, watch, formState: { errors, isSubmitting } } = useForm<UpdateFormData>({
     resolver: zodResolver(updateSchema),
     defaultValues: {
       name: kpi.name,
       description: kpi.description ?? "",
       year: kpi.year,
       sort_order: kpi.sort_order,
+      entry_mode: kpi.entry_mode ?? "manual",
+      api_endpoint_url: kpi.api_endpoint_url ?? "",
     },
   });
+  const isApiMode = watch("entry_mode") === "api";
+  const fetchContract = async () => {
+    if (contract !== null) { setContractOpen((o) => !o); return; }
+    if (orgId == null || !token) return;
+    try {
+      const c = await api<Record<string, unknown>>(`/kpis/${kpi.id}/api-contract?${qs({ organization_id: orgId })}`, { token });
+      setContract(c);
+      setContractOpen(true);
+    } catch {
+      setContract({});
+      setContractOpen(true);
+    }
+  };
 
   return (
     <form onSubmit={handleSubmit(onSave)} style={{ width: "100%" }}>
@@ -588,6 +717,66 @@ function KpiEditForm({
         <label>Sort order</label>
         <input type="number" min={0} {...register("sort_order")} />
       </div>
+      <div className="form-group">
+        <label>Entry mode</label>
+        <select {...register("entry_mode")}>
+          <option value="manual">Manual (default)</option>
+          <option value="api">API</option>
+        </select>
+      </div>
+      {isApiMode && (
+        <>
+          <div className="form-group">
+            <label>API endpoint URL</label>
+            <input
+              type="url"
+              placeholder="https://your-server.com/kpi-data"
+              {...register("api_endpoint_url")}
+              style={{ width: "100%", maxWidth: "480px" }}
+            />
+          </div>
+          <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+            <button type="button" className="btn" onClick={fetchContract}>
+              {contractOpen ? "Hide" : "Show"} operation contract
+            </button>
+            {contractOpen && contract && (
+              <ApiContractBlock contract={contract} />
+            )}
+          </div>
+          {kpi.entry_mode === "api" && kpi.api_endpoint_url && orgId != null && token && (
+            <div className="form-group">
+              <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.35rem" }}>When syncing:</p>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                  <input type="radio" name={`syncMode-${kpi.id}`} checked={syncMode === "override"} onChange={() => setSyncMode("override")} />
+                  Override existing data
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                  <input type="radio" name={`syncMode-${kpi.id}`} checked={syncMode === "append"} onChange={() => setSyncMode("append")} />
+                  Append to existing (multi-line rows)
+                </label>
+              </div>
+              <button
+                type="button"
+                className="btn"
+                disabled={syncLoading}
+                onClick={async () => {
+                  setSyncLoading(true);
+                  try {
+                    await api(`/kpis/${kpi.id}/sync-from-api?${qs({ year: kpi.year, organization_id: orgId, sync_mode: syncMode })}`, { method: "POST", token });
+                    onSyncSuccess();
+                  } finally {
+                    setSyncLoading(false);
+                  }
+                }}
+              >
+                {syncLoading ? "Syncing…" : "Sync from API now"}
+              </button>
+              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for year {kpi.year} from your endpoint. Override or append is chosen above.</p>
+            </div>
+          )}
+        </>
+      )}
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
         <button type="submit" className="btn btn-primary" disabled={isSubmitting}>{isSubmitting ? "Saving…" : "Save"}</button>
         <button type="button" className="btn" onClick={onCancel}>Cancel</button>

@@ -1,6 +1,10 @@
 """KPI CRUD with tenant isolation via domain."""
 
+import logging
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import select, delete, func
 from sqlalchemy.orm import selectinload
 
@@ -23,6 +27,8 @@ from app.core.models import (
     FieldType,
 )
 from app.kpis.schemas import KPICreate, KPIUpdate
+from app.entries.service import get_or_create_entry, save_entry_values
+from app.entries.schemas import FieldValueInput
 
 
 async def _domain_org_id(db: AsyncSession, domain_id: int) -> int | None:
@@ -42,6 +48,10 @@ async def _next_sort_order_for_org(db: AsyncSession, org_id: int) -> int:
 async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | None:
     """Create KPI in organization; domain is optional (can attach domains later). sort_order is set to next in org."""
     next_order = await _next_sort_order_for_org(db, org_id)
+    entry_mode = (data.entry_mode or "manual").strip().lower() if getattr(data, "entry_mode", None) else "manual"
+    if entry_mode not in ("manual", "api"):
+        entry_mode = "manual"
+    api_url = getattr(data, "api_endpoint_url", None) if entry_mode == "api" else None
     if data.domain_id is not None:
         if await _domain_org_id(db, data.domain_id) != org_id:
             return None
@@ -52,6 +62,8 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
             description=data.description,
             year=data.year,
             sort_order=next_order,
+            entry_mode=entry_mode,
+            api_endpoint_url=api_url,
         )
     else:
         kpi = KPI(
@@ -61,6 +73,8 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
             description=data.description,
             year=data.year,
             sort_order=next_order,
+            entry_mode=entry_mode,
+            api_endpoint_url=api_url,
         )
     db.add(kpi)
     await db.flush()
@@ -251,6 +265,13 @@ async def update_kpi(
         kpi.year = data.year
     if data.sort_order is not None:
         kpi.sort_order = data.sort_order
+    if data.entry_mode is not None:
+        em = data.entry_mode.strip().lower()
+        kpi.entry_mode = em if em in ("manual", "api") else "manual"
+        if kpi.entry_mode != "api":
+            kpi.api_endpoint_url = None
+    if data.api_endpoint_url is not None and kpi.entry_mode == "api":
+        kpi.api_endpoint_url = data.api_endpoint_url.strip() or None
     if data.card_display_field_ids is not None:
         kpi.card_display_field_ids = data.card_display_field_ids
     await db.flush()
@@ -440,3 +461,222 @@ async def unassign_user_from_kpi(db: AsyncSession, kpi_id: int, user_id: int, or
     await db.delete(link)
     await db.flush()
     return True
+
+
+def _normalized_field_type(f) -> str:
+    """Return field type as lowercase string for consistent comparison."""
+    ft = getattr(f, "field_type", None)
+    if hasattr(ft, "value"):
+        return (ft.value or "single_line_text").lower()
+    return (str(ft) if ft else "single_line_text").lower()
+
+
+def _normalize_api_boolean(raw) -> bool | None:
+    """Convert API value to bool. Accepts bool, 1, 0, '1', '0', 'true', 'false' (case-insensitive). Returns None if not recognized."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        if raw == 0:
+            return False
+        if raw == 1:
+            return True
+        return None
+    if isinstance(raw, float) and raw == int(raw):
+        return _normalize_api_boolean(int(raw))
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in ("1", "true", "yes"):
+            return True
+        if s in ("0", "false", "no"):
+            return False
+        return None
+    return None
+
+
+async def sync_kpi_entry_from_api(
+    db: AsyncSession,
+    kpi_id: int,
+    org_id: int,
+    year: int,
+    user_id: int,
+    *,
+    force_override: bool = False,
+    sync_mode: str = "override",  # "override" = replace; "append" = for multi_line_items append rows (ignores API override_existing)
+) -> dict | None:
+    """
+    Call the KPI's API endpoint to fetch entry data and apply it.
+    force_override: always apply even when API returns override_existing=false.
+    sync_mode: "override" = replace existing; "append" = for multi_line_items append API rows to existing (other fields still overwritten).
+    """
+    def _log(msg: str, *args: object) -> None:
+        logger.info(msg, *args)
+        try:
+            out = msg % args if args else msg
+        except (TypeError, ValueError):
+            out = msg + " " + " ".join(repr(a) for a in args)
+        print(f"[sync-from-api] {out}")
+
+    _log("START kpi_id=%s org_id=%s year=%s user_id=%s", kpi_id, org_id, year, user_id)
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        _log("KPI not found or not in org: kpi_id=%s org_id=%s", kpi_id, org_id)
+        return None
+    entry_mode = getattr(kpi, "entry_mode", None) or "manual"
+    api_url = (getattr(kpi, "api_endpoint_url", None) or "").strip()
+    if entry_mode != "api" or not api_url:
+        _log("KPI not in API mode or no URL: kpi_id=%s entry_mode=%s api_url=%s", kpi_id, entry_mode, api_url or "(empty)")
+        return None
+    payload = {"year": year, "kpi_id": kpi_id, "organization_id": org_id}
+    _log("Calling API POST %s payload=%s", api_url, payload)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(api_url, json=payload)
+            _log("Response status=%s", resp.status_code)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        logger.exception("[sync-from-api] API request failed: %s", e)
+        print(f"[sync-from-api] API request failed: {e}")
+        return None
+    if not isinstance(data, dict):
+        _log("API response is not a dict: type=%s", type(data).__name__)
+        return None
+    resp_year = data.get("year")
+    values_map = data.get("values")
+    override_existing = data.get("override_existing", True)
+    _log("Response keys: year=%s values_keys=%s override_existing=%s", resp_year, list(values_map.keys()) if isinstance(values_map, dict) else values_map, override_existing)
+    if resp_year is None or not isinstance(values_map, dict):
+        _log("Missing year or values dict: resp_year=%s values_type=%s", resp_year, type(values_map).__name__)
+        return None
+    resp_year = int(resp_year) if resp_year is not None else year
+    if resp_year != year:
+        _log("Year mismatch: response year=%s requested year=%s", resp_year, year)
+        return None
+    # When user explicitly triggers sync from UI, we can force overwrite regardless of API's override_existing
+    effective_override = override_existing or force_override
+    if force_override and not override_existing:
+        _log("force_override=true: will apply data even though API returned override_existing=false")
+    _log("values from API (key -> value): %s", {k: v for k, v in (values_map or {}).items()})
+
+    # Load KPI with fields
+    result = await db.execute(
+        select(KPI).where(KPI.id == kpi_id).options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+    )
+    kpi_with_fields = result.scalar_one_or_none()
+    if not kpi_with_fields or not kpi_with_fields.fields:
+        _log("KPI has no fields: kpi_id=%s", kpi_id)
+        return None
+    _log("KPI fields (key, name, type): %s", [(f.key, f.name, _normalized_field_type(f)) for f in kpi_with_fields.fields])
+
+    # Check existing entry and override_existing
+    entry_res = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == year,
+        )
+    )
+    existing_entry = entry_res.scalar_one_or_none()
+    if not effective_override and existing_entry:
+        fv_count = await db.execute(
+            select(func.count()).select_from(KPIFieldValue).where(KPIFieldValue.entry_id == existing_entry.id)
+        )
+        if (fv_count.scalar() or 0) > 0:
+            _log("Skipped: entry has data and override_existing=false (use force_override=true to overwrite)")
+            return {"skipped": True, "reason": "Entry already has data and override_existing is false. Use force_override=true to overwrite."}
+
+    entry, _ = await get_or_create_entry(db, user_id, org_id, kpi_id, year)
+    if not entry:
+        _log("get_or_create_entry returned None")
+        return None
+    _log("Entry id=%s (created or existing)", entry.id)
+    _log("sync_mode=%s (UI choice; API override_existing ignored)", sync_mode)
+
+    # When append: load existing field values so we can merge for multi_line_items
+    existing_value_json_by_field: dict[int, list] = {}
+    if (sync_mode or "override").lower() == "append":
+        fv_res = await db.execute(
+            select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id)
+        )
+        for fv in fv_res.scalars().all():
+            if isinstance(fv.value_json, list):
+                existing_value_json_by_field[fv.field_id] = fv.value_json
+        _log("append mode: existing multi_line_items field_ids with data: %s", list(existing_value_json_by_field.keys()))
+
+    # Case-insensitive key lookup for API response (some APIs return "Grant_Type" vs "grant_type")
+    _values_lower = {k.lower(): (k, v) for k, v in values_map.items() if isinstance(k, str)} if values_map else {}
+    _log("values_map keys (original): %s | lower map keys: %s", list(values_map.keys()) if values_map else [], list(_values_lower.keys()) if _values_lower else [])
+
+    def _get_raw(f):
+        raw = values_map.get(f.key)
+        if raw is not None:
+            return raw
+        raw = values_map.get(f.name)
+        if raw is not None:
+            return raw
+        key_lower = f.key.lower()
+        if key_lower in _values_lower:
+            return _values_lower[key_lower][1]
+        name_lower = (f.name or "").replace(" ", "_").lower()
+        if name_lower in _values_lower:
+            return _values_lower[name_lower][1]
+        alt = f.key.replace("_", " ")
+        raw = values_map.get(alt)
+        if raw is not None:
+            return raw
+        alt = f.name.replace(" ", "_").lower()
+        return values_map.get(alt)
+
+    value_inputs: list[FieldValueInput] = []
+    for f in kpi_with_fields.fields:
+        ft_norm = _normalized_field_type(f)
+        if ft_norm == "formula":
+            _log("  field key=%s name=%s type=formula -> SKIP (computed)", f.key, f.name)
+            continue
+        raw = _get_raw(f)
+        if raw is None:
+            _log("  field key=%s name=%s type=%s -> NOT FOUND in API values (no match)", f.key, f.name, ft_norm)
+            continue
+        _log("  field key=%s name=%s type=%s raw_value=%s (type=%s)", f.key, f.name, ft_norm, raw, type(raw).__name__)
+        if ft_norm == "number":
+            try:
+                num = float(raw) if not isinstance(raw, (int, float)) else raw
+            except (TypeError, ValueError) as e:
+                _log("    -> SKIP number parse failed: %s", e)
+                continue
+            value_inputs.append(FieldValueInput(field_id=f.id, value_number=num))
+            _log("    -> ADD value_number=%s", num)
+        elif ft_norm == "boolean":
+            b = _normalize_api_boolean(raw)
+            if b is not None:
+                value_inputs.append(FieldValueInput(field_id=f.id, value_boolean=b))
+                _log("    -> ADD value_boolean=%s", b)
+            else:
+                _log("    -> SKIP boolean normalize returned None for raw=%s", raw)
+        elif ft_norm == "date":
+            value_inputs.append(
+                FieldValueInput(field_id=f.id, value_date=str(raw) if raw else None)
+            )
+            _log("    -> ADD value_date=%s", raw)
+        elif ft_norm == "multi_line_items" and isinstance(raw, list):
+            if (sync_mode or "override").lower() == "append":
+                existing_list = existing_value_json_by_field.get(f.id) or []
+                merged = existing_list + raw
+                value_inputs.append(FieldValueInput(field_id=f.id, value_json=merged))
+                _log("    -> APPEND value_json existing=%s + new=%s -> total=%s", len(existing_list), len(raw), len(merged))
+            else:
+                value_inputs.append(FieldValueInput(field_id=f.id, value_json=raw))
+                _log("    -> ADD value_json len=%s (override)", len(raw))
+        else:
+            value_inputs.append(FieldValueInput(field_id=f.id, value_text=str(raw) if raw is not None else None))
+            _log("    -> ADD value_text=%s", (str(raw)[:80] if raw is not None else None))
+
+    _log("value_inputs count=%s (will save=%s)", len(value_inputs), bool(value_inputs))
+    if value_inputs:
+        await save_entry_values(db, entry.id, user_id, value_inputs, kpi_id, org_id)
+        _log("save_entry_values done for entry_id=%s", entry.id)
+    else:
+        _log("No value_inputs to save; check field keys vs API response keys above")
+    return {"entry_id": entry.id, "year": year, "fields_updated": len(value_inputs)}

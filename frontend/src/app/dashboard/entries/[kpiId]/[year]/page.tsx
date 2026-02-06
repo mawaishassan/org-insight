@@ -58,21 +58,43 @@ export default function EntryDetailPage() {
   const kpiId = Number(params.kpiId);
   const year = Number(params.year);
   const orgIdParam = searchParams.get("organization_id");
-  const organizationId = orgIdParam ? Number(orgIdParam) : undefined;
+  const organizationIdFromUrl = orgIdParam ? Number(orgIdParam) : undefined;
   const fromDomainId = searchParams.get("from_domain");
   const domainId = fromDomainId ? Number(fromDomainId) : undefined;
 
+  const [meOrgId, setMeOrgId] = useState<number | null>(null);
   const [kpiName, setKpiName] = useState<string>("");
+  const [kpiEntryMode, setKpiEntryMode] = useState<string | null>(null);
+  const [kpiApiEndpointUrl, setKpiApiEndpointUrl] = useState<string | null>(null);
   const [fields, setFields] = useState<FieldDef[]>([]);
   const [existingEntry, setExistingEntry] = useState<EntryRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const token = getAccessToken();
+  const effectiveOrgId = organizationIdFromUrl ?? meOrgId ?? existingEntry?.organization_id ?? undefined;
 
-  const entriesQuery = organizationId != null ? `?${qs({ kpi_id: kpiId, year, organization_id: organizationId })}` : `?kpi_id=${kpiId}&year=${year}`;
-  const fieldsQuery = organizationId != null ? `?${qs({ kpi_id: kpiId, organization_id: organizationId })}` : `?kpi_id=${kpiId}`;
-  const availableKpisQuery = organizationId != null ? `?${qs({ organization_id: organizationId })}` : "";
+  const entriesQuery = effectiveOrgId != null ? `?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}` : `?kpi_id=${kpiId}&year=${year}`;
+  const fieldsQuery = effectiveOrgId != null ? `?${qs({ kpi_id: kpiId, organization_id: effectiveOrgId })}` : `?kpi_id=${kpiId}`;
+  const availableKpisQuery = effectiveOrgId != null ? `?${qs({ organization_id: effectiveOrgId })}` : "";
+  const loadEntry = async (opts?: { cacheBust?: boolean }) => {
+    if (!token) return;
+    try {
+      let q = effectiveOrgId != null ? `?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}` : `?kpi_id=${kpiId}&year=${year}`;
+      if (opts?.cacheBust) q += (q ? "&" : "?") + "_=" + Date.now();
+      const entries = await api<EntryRow[]>(`/entries${q}`, { token });
+      setExistingEntry(entries[0] ?? null);
+    } catch {
+      setExistingEntry(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!token) return;
+    api<{ organization_id: number | null }>("/auth/me", { token })
+      .then((me) => setMeOrgId(me.organization_id ?? null))
+      .catch(() => setMeOrgId(null));
+  }, [token]);
 
   useEffect(() => {
     if (!token || !kpiId || !year) return;
@@ -86,18 +108,29 @@ export default function EntryDetailPage() {
       api<EntryRow[]>(`/entries${entriesQuery}`, { token })
         .then((entries) => setExistingEntry(entries[0] ?? null))
         .catch(() => setExistingEntry(null)),
+      effectiveOrgId != null
+        ? api<{ entry_mode?: string; api_endpoint_url?: string | null }>(`/entries/kpi-api-info?${qs({ kpi_id: kpiId, organization_id: effectiveOrgId })}`, { token })
+            .then((info) => {
+              setKpiEntryMode(info.entry_mode ?? null);
+              setKpiApiEndpointUrl(info.api_endpoint_url ?? null);
+            })
+            .catch(() => {
+              setKpiEntryMode(null);
+              setKpiApiEndpointUrl(null);
+            })
+        : Promise.resolve(),
     ])
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
-  }, [token, kpiId, year, entriesQuery, fieldsQuery, availableKpisQuery]);
+  }, [token, kpiId, year, entriesQuery, fieldsQuery, availableKpisQuery, effectiveOrgId]);
 
   if (!kpiId || !year) return <p>Invalid KPI or year.</p>;
   if (loading) return <p>Loading...</p>;
 
   const backDomainHref =
     domainId != null
-      ? organizationId != null
-        ? `/dashboard/domains/${domainId}?organization_id=${organizationId}`
+      ? effectiveOrgId != null
+        ? `/dashboard/domains/${domainId}?organization_id=${effectiveOrgId}`
         : `/dashboard/domains/${domainId}`
       : null;
 
@@ -130,7 +163,10 @@ export default function EntryDetailPage() {
             existingEntry={existingEntry}
             setExistingEntry={setExistingEntry}
             token={token!}
-            organizationId={organizationId}
+            organizationId={effectiveOrgId}
+            loadEntry={loadEntry}
+            entryMode={kpiEntryMode}
+            apiEndpointUrl={kpiApiEndpointUrl}
           />
         </div>
       )}
@@ -148,6 +184,9 @@ function EntryForm({
   setExistingEntry,
   token,
   organizationId,
+  loadEntry,
+  entryMode,
+  apiEndpointUrl,
 }: {
   kpiId: number;
   year: number;
@@ -157,8 +196,11 @@ function EntryForm({
   setExistingEntry: (e: EntryRow | null) => void;
   token: string;
   organizationId?: number;
+  loadEntry?: () => Promise<void>;
+  entryMode?: string | null;
+  apiEndpointUrl?: string | null;
 }) {
-  const [formValues, setFormValues] = useState<Record<number, { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] }>>(() => {
+  const buildInitialValues = () => {
     const o: Record<number, { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] }> = {};
     fields.forEach((f) => {
       if (f.field_type === "formula") return;
@@ -175,13 +217,38 @@ function EntryForm({
       }
     });
     return o;
-  });
+  };
+
+  const [formValues, setFormValues] = useState(buildInitialValues);
   const [saving, setSaving] = useState(false);
   const [submitLoading, setSubmitLoading] = useState(false);
+  const [fetchingFromApi, setFetchingFromApi] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [uploadingFieldId, setUploadingFieldId] = useState<number | null>(null);
   const [appendExcelUpload, setAppendExcelUpload] = useState(true);
+  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+  const [lastSyncFieldsUpdated, setLastSyncFieldsUpdated] = useState<number>(-1);
+  const [syncMode, setSyncMode] = useState<"override" | "append">("override");
+
+  useEffect(() => {
+    const o: Record<number, { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] }> = {};
+    fields.forEach((f) => {
+      if (f.field_type === "formula") return;
+      const v = existingEntry?.values?.find((x) => x.field_id === f.id);
+      if (v) {
+        o[f.id] = {};
+        if (v.value_text != null) o[f.id].value_text = v.value_text;
+        if (v.value_number != null) o[f.id].value_number = v.value_number;
+        if (v.value_boolean != null) o[f.id].value_boolean = v.value_boolean;
+        if (v.value_date) o[f.id].value_date = v.value_date;
+        if (f.field_type === "multi_line_items" && Array.isArray(v.value_json)) o[f.id].value_json = v.value_json as Record<string, unknown>[];
+      } else {
+        o[f.id] = f.field_type === "multi_line_items" ? { value_json: [] } : {};
+      }
+    });
+    setFormValues(o);
+  }, [existingEntry, fields]);
 
   const updateField = (fieldId: number, key: string, value: string | number | boolean | undefined | Record<string, unknown>[]) => {
     setFormValues((prev) => ({
@@ -243,10 +310,90 @@ function EntryForm({
 
   const isLocked = existingEntry?.is_locked ?? false;
 
+  const isApiKpi = entryMode === "api" && apiEndpointUrl && organizationId != null;
+  const hasMultiLineItems = fields.some((x) => x.field_type === "multi_line_items");
+  const firstMultiLineFieldId = fields.find((x) => x.field_type === "multi_line_items")?.id;
+
+  const syncRow = isApiKpi && loadEntry && (
+    <div style={{ marginBottom: "0.75rem" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
+        <span style={{ fontSize: "0.9rem", fontWeight: 500 }}>When syncing:</span>
+        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+          <input
+            type="radio"
+            name="syncMode"
+            checked={syncMode === "override"}
+            onChange={() => setSyncMode("override")}
+          />
+          Override existing data
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+          <input
+            type="radio"
+            name="syncMode"
+            checked={syncMode === "append"}
+            onChange={() => setSyncMode("append")}
+          />
+          Append to existing (multi-line rows)
+        </label>
+      </div>
+      <button
+        type="button"
+        className="btn btn-primary"
+        disabled={fetchingFromApi || isLocked}
+        onClick={async () => {
+          setFetchingFromApi(true);
+          setSaveError(null);
+          setSyncFeedback(null);
+          try {
+            const result = await api<{ entry_id?: number; fields_updated?: number }>(
+              `/entries/sync-from-api?${qs({ kpi_id: kpiId, year, organization_id: organizationId!, sync_mode: syncMode })}`,
+              { method: "POST", token }
+            );
+            await loadEntry({ cacheBust: true });
+            const n = result?.fields_updated ?? 0;
+            setLastSyncFieldsUpdated(n);
+            setSyncFeedback(
+              n > 0
+                ? `${n} field(s) updated. Data loaded below.`
+                : "Sync completed but no fields were updated. Ensure your API returns { year, values: { \"field_key\": value } } with keys matching the KPI field keys."
+            );
+            setTimeout(() => {
+              setSyncFeedback(null);
+              setLastSyncFieldsUpdated(-1);
+            }, 8000);
+          } catch (err) {
+            setSaveError(err instanceof Error ? err.message : "Sync from API failed");
+          } finally {
+            setFetchingFromApi(false);
+          }
+        }}
+      >
+        {fetchingFromApi ? "Syncing…" : "Sync from API now"}
+      </button>
+      {syncFeedback && (
+        <p
+          style={{
+            fontSize: "0.85rem",
+            color: lastSyncFieldsUpdated > 0 ? "var(--success)" : "var(--muted)",
+            marginTop: "0.35rem",
+          }}
+        >
+          {syncFeedback}
+        </p>
+      )}
+      <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+        Load entry data from the configured API endpoint. Override or append is chosen above. You can still edit values manually below and save.
+      </p>
+    </div>
+  );
+
   return (
     <form onSubmit={handleSaveDraft}>
       {saveError && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{saveError}</p>}
       {saved && <p style={{ color: "var(--success)", marginBottom: "0.75rem", fontSize: "0.9rem" }}>Draft saved.</p>}
+
+      {!hasMultiLineItems && syncRow}
 
       {fields.map((f) => {
         if (f.field_type === "formula") {
@@ -421,6 +568,7 @@ function EntryForm({
                       : "Save draft first to upload Excel."}
                   </span>
                 </div>
+                {f.id === firstMultiLineFieldId && syncRow}
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                     <thead>

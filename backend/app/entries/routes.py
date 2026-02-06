@@ -22,6 +22,7 @@ from app.entries.service import (
     list_entries_overview,
 )
 from app.fields.service import list_fields as list_kpi_fields_service
+from app.kpis.service import sync_kpi_entry_from_api
 
 router = APIRouter(prefix="/entries", tags=["entries"])
 
@@ -261,6 +262,55 @@ async def get_available_kpis(
     org_id = _org_id(current_user, organization_id)
     kpis = await list_available_kpis(db, current_user.id, org_id)
     return [{"id": k.id, "name": k.name, "year": k.year, "domain_id": k.domain_id} for k in kpis]
+
+
+@router.get("/kpi-api-info")
+async def get_kpi_api_info(
+    kpi_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return entry_mode and api_endpoint_url for a KPI the current user can enter data for (for data entry page)."""
+    org_id = _org_id(current_user, organization_id)
+    can = await user_can_edit_kpi(db, current_user.id, kpi_id)
+    if not can:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+    res = await db.execute(select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id))
+    kpi = res.scalar_one_or_none()
+    if not kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    return {
+        "entry_mode": getattr(kpi, "entry_mode", None) or "manual",
+        "api_endpoint_url": getattr(kpi, "api_endpoint_url", None),
+    }
+
+
+@router.post("/sync-from-api")
+async def entry_sync_from_api(
+    kpi_id: int = Query(...),
+    year: int = Query(..., ge=2000, le=2100),
+    organization_id: int | None = Query(None),
+    force_override: bool = Query(True, description="If true, overwrite existing entry data when API returns override_existing=false"),
+    sync_mode: str = Query("override", description="override = replace existing; append = append API rows to multi_line_items (ignores API override_existing)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fetch entry data from the KPI's API endpoint. User must be allowed to edit this KPI."""
+    org_id = _org_id(current_user, organization_id)
+    can = await user_can_edit_kpi(db, current_user.id, kpi_id)
+    if not can:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+    result = await sync_kpi_entry_from_api(
+        db, kpi_id, org_id, year, current_user.id, force_override=force_override, sync_mode=sync_mode
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="KPI not found, not in API mode, API endpoint not set, or API call failed",
+        )
+    await db.commit()
+    return result
 
 
 @router.get("/fields")

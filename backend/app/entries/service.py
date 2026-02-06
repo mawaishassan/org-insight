@@ -173,8 +173,18 @@ async def save_entry_values(
         fv.value_number = v.value_number
         fv.value_json = v.value_json
         fv.value_boolean = v.value_boolean
-        if v.value_date:
-            fv.value_date = v.value_date if isinstance(v.value_date, datetime) else None
+        if v.value_date is not None:
+            if isinstance(v.value_date, datetime):
+                fv.value_date = v.value_date
+            elif isinstance(v.value_date, str):
+                try:
+                    s = v.value_date.strip()
+                    if s:
+                        fv.value_date = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    pass
+            else:
+                fv.value_date = None
         if num_val is not None:
             value_by_key[f.key] = num_val
 
