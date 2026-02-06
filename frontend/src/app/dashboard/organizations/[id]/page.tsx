@@ -46,7 +46,7 @@ const WHERE_OPERATORS = [
   { value: "op_lte", label: "less or equal (≤)" },
 ] as const;
 
-type TabId = "domains" | "kpis" | "fields" | "tags";
+type TabId = "domains" | "kpis" | "fields" | "tags" | "reports";
 
 interface SubFieldDef {
   id?: number;
@@ -183,6 +183,12 @@ const fieldUpdateSchema = z.object({
   sort_order: z.coerce.number().int().min(0),
 });
 
+const reportTemplateCreateSchema = z.object({
+  name: z.string().min(1, "Name required").max(255),
+  description: z.string().optional(),
+  year: z.coerce.number().int().min(2000).max(2100),
+});
+
 type DomainCreateFormData = z.infer<typeof domainCreateSchema>;
 type DomainUpdateFormData = z.infer<typeof domainUpdateSchema>;
 type KpiCreateFormData = z.infer<typeof kpiCreateSchema>;
@@ -191,6 +197,15 @@ type TagCreateFormData = z.infer<typeof tagCreateSchema>;
 type TagUpdateFormData = z.infer<typeof tagUpdateSchema>;
 type FieldCreateFormData = z.infer<typeof fieldCreateSchema>;
 type FieldUpdateFormData = z.infer<typeof fieldUpdateSchema>;
+type ReportTemplateCreateFormData = z.infer<typeof reportTemplateCreateSchema>;
+
+interface ReportTemplateRow {
+  id: number;
+  organization_id: number;
+  name: string;
+  description: string | null;
+  year: number;
+}
 
 function qs(params: Record<string, string | number | boolean>): string {
   return new URLSearchParams(
@@ -348,6 +363,15 @@ export default function OrganizationDetailPage() {
           KPI Fields
           {selectedKpi && ` (${selectedKpi.name})`}
         </button>
+        {userRole === "SUPER_ADMIN" && (
+          <button
+            type="button"
+            className={tab === "reports" ? "btn btn-primary" : "btn"}
+            onClick={() => setTab("reports")}
+          >
+            Reports
+          </button>
+        )}
       </div>
 
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
@@ -410,6 +434,13 @@ export default function OrganizationDetailPage() {
           editingId={fieldEditingId}
           setEditingId={setFieldEditingId}
           userRole={userRole}
+        />
+      )}
+
+      {tab === "reports" && userRole === "SUPER_ADMIN" && (
+        <ReportsSection
+          orgId={orgId}
+          token={token!}
         />
       )}
     </div>
@@ -988,7 +1019,7 @@ function KpisSection({
                       {(k.organization_tags?.length ?? 0) > 0 && (
                         <span style={{ marginLeft: "0.5rem", fontSize: "0.85rem" }}>
                           { (k.organization_tags ?? []).map((t) => (
-                            <span key={t.id} style={{ background: "var(--muted)", color: "var(--bg)", padding: "0.1rem 0.4rem", borderRadius: "4px", marginRight: "0.25rem" }}>{t.name}</span>
+                            <span key={t.id} style={{ background: "var(--muted)", color: "var(--on-muted)", padding: "0.1rem 0.4rem", borderRadius: "4px", marginRight: "0.25rem" }}>{t.name}</span>
                           ))}
                         </span>
                       )}
@@ -1830,5 +1861,137 @@ function FieldEditForm({
         <button type="button" className="btn" onClick={onCancel}>Cancel</button>
       </div>
     </form>
+  );
+}
+
+function ReportsSection({
+  orgId,
+  token,
+}: {
+  orgId: number;
+  token: string;
+}) {
+  const [list, setList] = useState<ReportTemplateRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [createdMsg, setCreatedMsg] = useState<string | null>(null);
+
+  const loadTemplates = () => {
+    if (!token || !orgId) return;
+    setError(null);
+    api<ReportTemplateRow[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token })
+      .then(setList)
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load templates"))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadTemplates();
+  }, [orgId, token]);
+
+  const createForm = useForm<ReportTemplateCreateFormData>({
+    resolver: zodResolver(reportTemplateCreateSchema),
+    defaultValues: {
+      name: "",
+      description: "",
+      year: new Date().getFullYear(),
+    },
+  });
+
+  const onCreate = async (data: ReportTemplateCreateFormData) => {
+    if (!token || !orgId) return;
+    setError(null);
+    setCreatedMsg(null);
+    try {
+      await api(`/reports/templates?${qs({ organization_id: orgId })}`, {
+        method: "POST",
+        token,
+        body: JSON.stringify({
+          name: data.name,
+          description: data.description?.trim() || null,
+          year: data.year,
+        }),
+      });
+      createForm.reset({ name: "", description: "", year: data.year });
+      setCreatedMsg("Template created.");
+      loadTemplates();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create template");
+    }
+  };
+
+  return (
+    <div>
+      <h2 style={{ fontSize: "1.2rem", marginBottom: "0.75rem" }}>Report templates</h2>
+
+      <div className="card" style={{ marginBottom: "1rem" }}>
+        <h3 style={{ margin: "0 0 0.75rem 0", fontSize: "1rem" }}>Create template</h3>
+        <form onSubmit={createForm.handleSubmit(onCreate)}>
+          <div className="form-group">
+            <label>Name *</label>
+            <input {...createForm.register("name")} />
+            {createForm.formState.errors.name && (
+              <p className="form-error">{createForm.formState.errors.name.message}</p>
+            )}
+          </div>
+          <div className="form-group">
+            <label>Description</label>
+            <textarea {...createForm.register("description")} rows={2} />
+          </div>
+          <div className="form-group">
+            <label>Year *</label>
+            <input type="number" min={2000} max={2100} {...createForm.register("year")} />
+            {createForm.formState.errors.year && (
+              <p className="form-error">{createForm.formState.errors.year.message}</p>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+            <button type="submit" className="btn btn-primary" disabled={createForm.formState.isSubmitting}>
+              {createForm.formState.isSubmitting ? "Creating…" : "Create"}
+            </button>
+            {createdMsg && <span style={{ color: "var(--success)" }}>{createdMsg}</span>}
+          </div>
+          {error && <p className="form-error" style={{ marginTop: "0.75rem" }}>{error}</p>}
+        </form>
+      </div>
+
+      <div className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0, fontSize: "1rem" }}>Templates</h3>
+          <button type="button" className="btn" onClick={loadTemplates} disabled={loading}>
+            Refresh
+          </button>
+        </div>
+        {loading ? (
+          <p style={{ color: "var(--muted)" }}>Loading…</p>
+        ) : list.length === 0 ? (
+          <p style={{ color: "var(--muted)" }}>No templates yet.</p>
+        ) : (
+          <ul style={{ listStyle: "none", padding: 0, margin: "0.75rem 0 0" }}>
+            {list.map((t) => (
+              <li key={t.id} style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+                  <div>
+                    <strong>{t.name}</strong>
+                    <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>Year {t.year}</span>
+                    {t.description && (
+                      <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{t.description}</div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                    <Link className="btn" href={`/dashboard/reports/${t.id}/design`}>
+                      Design
+                    </Link>
+                    <Link className="btn btn-primary" href={`/dashboard/reports/${t.id}`}>
+                      View / Print
+                    </Link>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
   );
 }

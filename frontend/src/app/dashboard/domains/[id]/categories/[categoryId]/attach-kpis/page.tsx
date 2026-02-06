@@ -336,7 +336,7 @@ export default function AttachKpisPage() {
                     {(kpi.organization_tags?.length ?? 0) > 0 && (
                       <span style={{ marginLeft: "0.5rem" }}>
                         {(kpi.organization_tags ?? []).map((t) => (
-                          <span key={t.id} style={{ background: "var(--muted)", color: "var(--bg)", padding: "0.1rem 0.4rem", borderRadius: "4px", marginRight: "0.25rem", fontSize: "0.8rem" }}>{t.name}</span>
+                          <span key={t.id} style={{ background: "var(--muted)", color: "var(--on-muted)", padding: "0.1rem 0.4rem", borderRadius: "4px", marginRight: "0.25rem", fontSize: "0.8rem" }}>{t.name}</span>
                         ))}
                       </span>
                     )}

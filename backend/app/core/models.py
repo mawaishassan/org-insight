@@ -60,6 +60,7 @@ class Organization(Base):
     users = relationship("User", back_populates="organization", lazy="selectin")
     domains = relationship("Domain", back_populates="organization", lazy="selectin")
     kpis = relationship("KPI", back_populates="organization", lazy="selectin")
+    kpi_entries = relationship("KPIEntry", back_populates="organization", lazy="selectin")
     tags = relationship("OrganizationTag", back_populates="organization", lazy="selectin", order_by="OrganizationTag.name")
     report_templates = relationship("ReportTemplate", back_populates="organization", lazy="selectin")
 
@@ -122,6 +123,7 @@ class User(Base):
 
     organization = relationship("Organization", back_populates="users")
     kpi_assignments = relationship("KPIAssignment", back_populates="user", lazy="selectin")
+    kpi_entries = relationship("KPIEntry", back_populates="user", lazy="selectin")
     report_access_permissions = relationship(
         "ReportAccessPermission", back_populates="user", lazy="selectin"
     )
@@ -146,6 +148,7 @@ class Domain(Base):
     kpis = relationship("KPI", back_populates="domain", lazy="selectin")
     categories = relationship("Category", back_populates="domain", lazy="selectin", order_by="Category.sort_order")
     kpi_domains = relationship("KPIDomain", back_populates="domain", lazy="selectin")
+    report_templates = relationship("ReportTemplateDomain", back_populates="domain", lazy="selectin")
 
 
 class Category(Base):
@@ -323,16 +326,19 @@ class KPIAssignment(Base):
 
 
 class KPIEntry(Base):
-    """KPI data entry (one per user per KPI per year)."""
+    """KPI data entry (one per organization per KPI per year)."""
 
     __tablename__ = "kpi_entries"
 
     id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     kpi_id = Column(
         Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
     )
     user_id = Column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     year = Column(Integer, nullable=False, index=True)
     is_draft = Column(Boolean, default=True, nullable=False)
@@ -341,7 +347,13 @@ class KPIEntry(Base):
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
+    __table_args__ = (
+        UniqueConstraint("organization_id", "kpi_id", "year", name="uq_kpi_entry_org_kpi_year"),
+    )
+
+    organization = relationship("Organization", back_populates="kpi_entries")
     kpi = relationship("KPI", back_populates="entries")
+    user = relationship("User", back_populates="kpi_entries")
     field_values = relationship("KPIFieldValue", back_populates="entry", lazy="selectin")
 
 
@@ -378,6 +390,10 @@ class ReportTemplate(Base):
     )
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
+    # Optional rich layout template (Jinja2-style) stored as raw text.
+    # When present, this is used to render HTML for the report using the
+    # structured KPI data produced at generation time.
+    body_template = Column(Text, nullable=True)
     year = Column(Integer, nullable=False, index=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
@@ -392,6 +408,55 @@ class ReportTemplate(Base):
     access_permissions = relationship(
         "ReportAccessPermission", back_populates="report_template", lazy="selectin"
     )
+    domains = relationship(
+        "ReportTemplateDomain",
+        back_populates="report_template",
+        lazy="selectin",
+        order_by="ReportTemplateDomain.id",
+    )
+    text_blocks = relationship(
+        "ReportTemplateTextBlock",
+        back_populates="report_template",
+        lazy="selectin",
+        order_by="ReportTemplateTextBlock.sort_order",
+    )
+
+
+class ReportTemplateDomain(Base):
+    """Attach a report template to a domain (domain admins can view/print/export attached templates)."""
+
+    __tablename__ = "report_template_domains"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_template_id = Column(
+        Integer, ForeignKey("report_templates.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    domain_id = Column(
+        Integer, ForeignKey("domains.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("report_template_id", "domain_id", name="uq_report_template_domain"),
+    )
+
+    report_template = relationship("ReportTemplate", back_populates="domains")
+    domain = relationship("Domain", back_populates="report_templates")
+
+
+class ReportTemplateTextBlock(Base):
+    """Custom text block in a report template (for headings/instructions/notes)."""
+
+    __tablename__ = "report_template_text_blocks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_template_id = Column(
+        Integer, ForeignKey("report_templates.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title = Column(String(255), nullable=True)
+    content = Column(Text, nullable=False, default="")
+    sort_order = Column(Integer, default=0)
+
+    report_template = relationship("ReportTemplate", back_populates="text_blocks")
 
 
 class ReportTemplateKPI(Base):

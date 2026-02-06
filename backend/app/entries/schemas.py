@@ -54,7 +54,8 @@ class EntryResponse(BaseModel):
 
     id: int
     kpi_id: int
-    user_id: int
+    organization_id: int
+    user_id: int | None
     year: int
     is_draft: bool
     is_locked: bool

@@ -57,7 +57,7 @@ export default function DashboardLayout({
 
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
-      <aside style={{ width: 220, borderRight: "1px solid var(--border)", padding: "1rem 0" }}>
+      <aside style={{ width: 220, borderRight: "1px solid var(--border)", padding: "1rem 0", background: "var(--surface)" }}>
         <div style={{ padding: "0 1rem", marginBottom: "1rem", fontSize: "0.9rem", color: "var(--muted)" }}>
           {user.full_name || user.username} · {user.role}
         </div>

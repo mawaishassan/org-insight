@@ -8,6 +8,8 @@ class ReportTemplateCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
+    # Optional rich layout template text (Jinja2-style) used when rendering HTML.
+    body_template: str | None = None
     year: int = Field(..., ge=2000, le=2100)
 
 
@@ -16,6 +18,7 @@ class ReportTemplateUpdate(BaseModel):
 
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
+    body_template: str | None = None
     year: int | None = Field(None, ge=2000, le=2100)
 
 
