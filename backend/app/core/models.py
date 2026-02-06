@@ -227,6 +227,9 @@ class KPI(Base):
     year = Column(Integer, nullable=False, index=True)
     sort_order = Column(Integer, default=0)
     card_display_field_ids = Column(JSON, nullable=True)  # field IDs to show on domain KPI card (order preserved)
+    # Entry mode: manual (default) or api. When api, we call api_endpoint_url to fetch entry data.
+    entry_mode = Column(String(20), nullable=False, default="manual", server_default="manual")
+    api_endpoint_url = Column(String(2048), nullable=True)  # URL we call (GET or POST with year) to get entry payload
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 

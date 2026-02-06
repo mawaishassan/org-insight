@@ -53,5 +53,6 @@ backend/app/fields/__pycache__/*.pyc
 backend/app/reports/__pycache__/*.pyc
 backend/app/formula_engine/__pycache__/*.pyc
 backend/app/entries/__pycache__/*.pyc
-backend/app/core/__pycache__/*.pyc
 backend/alembic/__pycache__/*.pyc
+backend/alembic/versions/__pycache__/*.pyc
+

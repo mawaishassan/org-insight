@@ -11,6 +11,8 @@ from app.kpis.schemas import (
     KPIUpdate,
     KPIResponse,
     KPIChildDataSummary,
+    KPIApiContract,
+    KPIApiContractField,
     KPIAssignUserBody,
     DomainTagRef,
     CategoryTagRef,
@@ -34,8 +36,11 @@ from app.kpis.service import (
     list_kpi_assignments,
     assign_user_to_kpi,
     unassign_user_from_kpi,
+    sync_kpi_entry_from_api,
 )
 from app.users.schemas import UserResponse
+from app.fields.service import list_fields as list_kpi_fields
+from app.core.models import FieldType
 
 router = APIRouter(prefix="/kpis", tags=["kpis"])
 
@@ -81,6 +86,8 @@ def _kpi_to_response(k):
         description=k.description,
         year=k.year,
         sort_order=k.sort_order,
+        entry_mode=getattr(k, "entry_mode", None) or "manual",
+        api_endpoint_url=getattr(k, "api_endpoint_url", None),
         card_display_field_ids=getattr(k, "card_display_field_ids", None) or None,
         domain_tags=domain_tags,
         category_tags=category_tags,
@@ -317,3 +324,124 @@ async def unassign_user_from_kpi_route(
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     await db.commit()
+
+
+def _field_type_str(f) -> str:
+    """Normalize field type to lowercase string for consistent comparison."""
+    ft = getattr(f, "field_type", None)
+    if hasattr(ft, "value"):
+        ft = ft.value if ft else "single_line_text"
+    else:
+        ft = str(ft) if ft else "single_line_text"
+    return (ft or "single_line_text").lower()
+
+
+def _example_value_for_field(f) -> str | int | float | bool | list[dict] | None:
+    """Return a concrete example value for API contract by field type. f is KPIField."""
+    ft = _field_type_str(f)
+    if ft == "formula":
+        return None
+    if ft == "number":
+        return 100
+    if ft == "boolean":
+        return 1  # API may send 1 or 0
+    if ft == "date":
+        return "2025-01-15"
+    if ft == "multi_line_items":
+        sub_fields = getattr(f, "sub_fields", None) or []
+        sub_keys = [getattr(s, "key", f"col_{i}") for i, s in enumerate(sub_fields)]
+        if not sub_keys:
+            sub_keys = ["item_name", "quantity"]
+        # Example: list of row objects; each row has all sub_keys with sample values
+        numeric_types = {"number"}
+        sub_types = {}
+        for s in sub_fields:
+            st = getattr(getattr(s, "field_type", None), "value", None) or str(getattr(s, "field_type", "single_line_text"))
+            sub_types[getattr(s, "key", "")] = st in numeric_types
+        rows = []
+        for row_idx in range(2):
+            row = {}
+            for k in sub_keys:
+                if sub_types.get(k, False):
+                    row[k] = 85 + row_idx * 5
+                else:
+                    row[k] = ("Alice", "Bob")[row_idx]
+            rows.append(row)
+        return rows
+    # single_line_text, multi_line_text
+    return "Example text" if ft == "single_line_text" else "First paragraph.\n\nSecond paragraph."
+
+
+@router.get("/{kpi_id}/api-contract", response_model=KPIApiContract)
+async def get_kpi_api_contract(
+    kpi_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Return the operation contract for API entry mode: request we send and response we expect."""
+    org_id = _org_id(current_user, organization_id)
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    fields_orm = await list_kpi_fields(db, kpi_id, org_id)
+    contract_fields: list[KPIApiContractField] = []
+    example_values: dict = {}
+    for f in fields_orm:
+        ft_str = _field_type_str(f)
+        sub_keys = []
+        if ft_str == "multi_line_items":
+            for s in getattr(f, "sub_fields", None) or []:
+                sub_keys.append(getattr(s, "key", ""))
+        ex = _example_value_for_field(f)  # None for formula
+        accepted_hint = "true, false, 1, or 0" if ft_str == "boolean" else None
+        contract_fields.append(
+            KPIApiContractField(
+                key=f.key,
+                name=f.name,
+                field_type=ft_str,
+                sub_field_keys=sub_keys,
+                example_value=ex,
+                accepted_value_hint=accepted_hint,
+            )
+        )
+        # Only non-formula fields go in response values (API must not send formula; we compute it)
+        if ft_str != "formula":
+            example_values[f.key] = ex
+    example_year = 2025
+    return KPIApiContract(
+        example_request_body={
+            "year": example_year,
+            "kpi_id": kpi_id,
+            "organization_id": org_id,
+        },
+        fields=contract_fields,
+        example_response={
+            "year": example_year,
+            "values": example_values,
+        },
+    )
+
+
+@router.post("/{kpi_id}/sync-from-api")
+async def sync_kpi_from_api_route(
+    kpi_id: int,
+    year: int = Query(..., ge=2000, le=2100),
+    organization_id: int | None = Query(None),
+    force_override: bool = Query(True, description="Overwrite existing entry when API returns override_existing=false"),
+    sync_mode: str = Query("override", description="override = replace; append = append to multi_line_items"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Call the KPI's API endpoint to fetch entry data for the given year and apply it."""
+    org_id = _org_id(current_user, organization_id)
+    result = await sync_kpi_entry_from_api(
+        db, kpi_id, org_id, year, current_user.id, force_override=force_override, sync_mode=sync_mode
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="KPI not found, not in API mode, API endpoint not set, or API call failed",
+        )
+    await db.commit()
+    return result
