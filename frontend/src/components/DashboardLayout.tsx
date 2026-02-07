@@ -12,7 +12,6 @@ import {
   canManageOrgs,
   canManageUsers,
   canManageDomains,
-  canManageKpis,
   canEnterData,
   canViewReports,
 } from "@/lib/auth";
@@ -131,7 +130,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && !isDataEntryOnlyUser && canViewReports(role) },
-    { href: "/dashboard/reports/templates", label: "Report templates", show: isSuperAdmin },
     { href: "/dashboard/users", label: "Users", show: !isSuperAdmin && canManageUsers(role) },
   ].filter((x) => x.show);
 
@@ -149,16 +147,24 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         }}
       >
         <Link
-          href="/dashboard/entries"
+          href={isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries"}
           style={{
             fontWeight: 700,
             fontSize: "1rem",
-            color: pathname === "/dashboard/entries" ? "var(--accent)" : "var(--text)",
+            color: (isSuperAdmin ? pathname === "/dashboard/organizations" : pathname === "/dashboard/entries") ? "var(--accent)" : "var(--text)",
             textDecoration: "none",
           }}
         >
           Home
         </Link>
+        {pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users" && (
+          <Link
+            href="/dashboard/users"
+            style={{ fontSize: "0.95rem", color: "var(--muted)", textDecoration: "none" }}
+          >
+            ← Users
+          </Link>
+        )}
 
         {onEntries && canEnter && (
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -297,15 +303,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   onClick={() => setMenuOpen(false)}
                 >
                   Domains
-                </Link>
-              )}
-              {isSuperAdmin && canManageKpis(role) && (
-                <Link
-                  href="/dashboard/kpis"
-                  style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                  onClick={() => setMenuOpen(false)}
-                >
-                  KPIs
                 </Link>
               )}
               <button

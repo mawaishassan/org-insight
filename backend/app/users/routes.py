@@ -6,8 +6,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_org_admin, require_tenant
 from app.core.models import User
-from app.users.schemas import UserCreate, UserUpdate, UserResponse
-from app.users.service import create_user, get_user, list_users, update_user, delete_user
+from app.users.schemas import UserCreate, UserUpdate, UserResponse, UserKpiAssignmentResponse
+from app.users.service import (
+    create_user,
+    get_user,
+    get_user_kpi_assignments,
+    list_users,
+    update_user,
+    delete_user,
+)
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -61,6 +68,19 @@ async def get_org_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return UserResponse.model_validate(user)
+
+
+@router.get("/{user_id}/kpi-assignments", response_model=list[UserKpiAssignmentResponse])
+async def get_org_user_kpi_assignments(
+    user_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Get user's KPI assignments (kpi_id, permission) within organization."""
+    org_id = _org_id(current_user, organization_id)
+    assignments = await get_user_kpi_assignments(db, user_id, org_id)
+    return [UserKpiAssignmentResponse.model_validate(a) for a in assignments]
 
 
 @router.patch("/{user_id}", response_model=UserResponse)

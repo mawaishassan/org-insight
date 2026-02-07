@@ -35,7 +35,8 @@ export default function LoginPage() {
         }
       );
       setTokens(res.access_token, res.refresh_token);
-      router.push("/dashboard/entries");
+      const me = await api<{ role: string }>("/auth/me", { token: res.access_token });
+      router.push(me.role === "SUPER_ADMIN" ? "/dashboard/organizations" : "/dashboard/entries");
       router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Login failed");

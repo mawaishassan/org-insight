@@ -1,6 +1,6 @@
 """Organization API routes (Super Admin)."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -19,6 +19,7 @@ from app.organizations.service import (
     list_organizations,
     get_organization_summary,
     update_organization,
+    get_organization_filter_options,
 )
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
@@ -27,11 +28,25 @@ router = APIRouter(prefix="/organizations", tags=["organizations"])
 @router.get("", response_model=list[OrganizationResponse] | list[OrganizationWithSummary])
 async def list_orgs(
     with_summary: bool = False,
+    name: str | None = Query(None, description="Search by organization name (partial match)"),
+    is_active: bool | None = Query(None, description="Filter by active status"),
+    domain_id: int | None = Query(None, description="Organizations that have this domain"),
+    kpi_id: int | None = Query(None, description="Organizations that have this KPI"),
+    category_id: int | None = Query(None, description="Organizations that have this category"),
+    organization_tag_id: int | None = Query(None, description="Organizations that have this tag"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_super_admin),
 ):
-    """List all organizations (Super Admin only). Optionally include summary counts."""
-    orgs = await list_organizations(db)
+    """List all organizations (Super Admin only). Optionally include summary counts and filters."""
+    orgs = await list_organizations(
+        db,
+        name=name,
+        is_active=is_active,
+        domain_id=domain_id,
+        kpi_id=kpi_id,
+        category_id=category_id,
+        organization_tag_id=organization_tag_id,
+    )
     if not with_summary:
         return [OrganizationResponse.model_validate(o) for o in orgs]
     result = []
@@ -47,6 +62,15 @@ async def list_orgs(
             )
         )
     return result
+
+
+@router.get("/filter-options")
+async def list_org_filter_options(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """List filter dropdown options for organizations (domains, kpis, categories, tags). Super Admin only."""
+    return await get_organization_filter_options(db)
 
 
 def _default_summary() -> OrganizationSummary:

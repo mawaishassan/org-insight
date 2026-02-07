@@ -12,6 +12,13 @@ class UserKpiAssignment(BaseModel):
     permission: str = Field(default="data_entry", description="data_entry or view")
 
 
+class UserKpiAssignmentResponse(BaseModel):
+    """Single KPI assignment in GET response."""
+
+    kpi_id: int
+    permission: str  # "data_entry" | "view"
+
+
 class UserCreate(BaseModel):
     """Create user (Org Admin)."""
 

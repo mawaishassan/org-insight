@@ -1,32 +1,23 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
-
-interface UserRow {
-  id: number;
-  username: string;
-  email: string | null;
-  full_name: string | null;
-  role: string;
-  is_active: boolean;
-}
-
-interface KpiOption {
-  id: number;
-  name: string;
-  year: number;
-}
-
-interface ReportTemplateOption {
-  id: number;
-  name: string;
-  year: number;
-}
+import {
+  type UserRow,
+  type KpiOption,
+  type DomainOption,
+  type ReportTemplateOption,
+  type KpiPermission,
+  qs,
+  groupKpisByName,
+  buildKpiAssignmentsPayload,
+} from "./shared";
+import { KpiRightsTable } from "./KpiRightsTable";
 
 const createSchema = z.object({
   username: z.string().min(1, "Username required"),
@@ -36,25 +27,17 @@ const createSchema = z.object({
   role: z.enum(["USER", "REPORT_VIEWER"]),
 });
 
-const updateSchema = z.object({
-  email: z.string().email("Invalid email").optional().or(z.literal("")),
-  full_name: z.string().optional(),
-  password: z.string().min(8, "Min 8 characters").optional().or(z.literal("")),
-  role: z.enum(["USER", "REPORT_VIEWER"]),
-  is_active: z.boolean(),
-});
-
 type CreateFormData = z.infer<typeof createSchema>;
-type UpdateFormData = z.infer<typeof updateSchema>;
 
 export default function UsersPage() {
   const [list, setList] = useState<UserRow[]>([]);
   const [kpis, setKpis] = useState<KpiOption[]>([]);
+  const [domains, setDomains] = useState<DomainOption[]>([]);
   const [templates, setTemplates] = useState<ReportTemplateOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [kpiFilterDomainId, setKpiFilterDomainId] = useState<number | "">("");
 
   const token = getAccessToken();
 
@@ -73,9 +56,17 @@ export default function UsersPage() {
 
   useEffect(() => {
     if (!token) return;
-    api<KpiOption[]>("/kpis", { token }).then(setKpis).catch(() => setKpis([]));
+    api<DomainOption[]>("/domains", { token }).then(setDomains).catch(() => setDomains([]));
     api<ReportTemplateOption[]>("/reports/templates", { token }).then(setTemplates).catch(() => setTemplates([]));
   }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    const params: Record<string, string | number> = {};
+    if (kpiFilterDomainId !== "") params.domain_id = kpiFilterDomainId;
+    const query = qs(params);
+    api<KpiOption[]>(`/kpis${query ? `?${query}` : ""}`, { token }).then(setKpis).catch(() => setKpis([]));
+  }, [token, kpiFilterDomainId]);
 
   const createForm = useForm<CreateFormData>({
     resolver: zodResolver(createSchema),
@@ -88,13 +79,14 @@ export default function UsersPage() {
     },
   });
 
-  const [createKpiIds, setCreateKpiIds] = useState<number[]>([]);
+  const [createKpiPermissions, setCreateKpiPermissions] = useState<Record<number, KpiPermission>>({});
   const [createReportIds, setCreateReportIds] = useState<number[]>([]);
 
   const onCreateSubmit = async (data: CreateFormData) => {
     if (!token) return;
     setError(null);
     try {
+      const kpi_assignments = buildKpiAssignmentsPayload(createKpiPermissions);
       await api("/users", {
         method: "POST",
         body: JSON.stringify({
@@ -103,13 +95,13 @@ export default function UsersPage() {
           email: data.email || null,
           full_name: data.full_name || null,
           role: data.role,
-          kpi_ids: createKpiIds,
+          ...(kpi_assignments.length > 0 ? { kpi_assignments } : {}),
           report_template_ids: createReportIds,
         }),
         token,
       });
       createForm.reset({ username: "", password: "", email: "", full_name: "", role: "USER" });
-      setCreateKpiIds([]);
+      setCreateKpiPermissions({});
       setCreateReportIds([]);
       setShowCreate(false);
       loadList();
@@ -118,45 +110,9 @@ export default function UsersPage() {
     }
   };
 
-  const onUpdateSubmit = async (userId: number, data: UpdateFormData) => {
-    if (!token) return;
-    setError(null);
-    try {
-      const body: Record<string, unknown> = {
-        email: data.email || null,
-        full_name: data.full_name || null,
-        role: data.role,
-        is_active: data.is_active,
-      };
-      if (data.password && data.password.length >= 8) body.password = data.password;
-      await api(`/users/${userId}`, {
-        method: "PATCH",
-        body: JSON.stringify(body),
-        token,
-      });
-      setEditingId(null);
-      loadList();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Update failed");
-    }
-  };
-
-  const onDelete = async (userId: number) => {
-    if (!token) return;
-    if (!confirm("Delete this user? This cannot be undone.")) return;
-    setError(null);
-    try {
-      await api(`/users/${userId}`, { method: "DELETE", token });
-      setEditingId(null);
-      loadList();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Delete failed");
-    }
-  };
-
   if (loading && list.length === 0) return <p>Loading...</p>;
 
-  const content = (
+  return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
         <h1 style={{ fontSize: "1.5rem" }}>Users</h1>
@@ -203,26 +159,30 @@ export default function UsersPage() {
                 <option value="REPORT_VIEWER">REPORT_VIEWER (view/print reports only)</option>
               </select>
             </div>
-            {kpis.length > 0 && (
-              <div className="form-group">
-                <label>Assign KPIs (optional)</label>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-                  {kpis.map((k) => (
-                    <label key={k.id} style={{ display: "flex", alignItems: "center", gap: "0.35rem", marginRight: "1rem" }}>
-                      <input
-                        type="checkbox"
-                        checked={createKpiIds.includes(k.id)}
-                        onChange={(e) => {
-                          if (e.target.checked) setCreateKpiIds((ids) => [...ids, k.id]);
-                          else setCreateKpiIds((ids) => ids.filter((id) => id !== k.id));
-                        }}
-                      />
-                      {k.name} ({k.year})
-                    </label>
-                  ))}
-                </div>
+            <div className="form-group">
+              <label>KPI rights (optional)</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center", marginBottom: "0.5rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem" }}>
+                  Domain
+                  <select
+                    value={kpiFilterDomainId}
+                    onChange={(e) => setKpiFilterDomainId(e.target.value === "" ? "" : Number(e.target.value))}
+                    style={{ padding: "0.35rem 0.5rem", minWidth: "10rem" }}
+                  >
+                    <option value="">All domains</option>
+                    {domains.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                </label>
               </div>
-            )}
+              <KpiRightsTable
+                groups={groupKpisByName(kpis)}
+                permissions={createKpiPermissions}
+                setPermissions={setCreateKpiPermissions}
+                disabled={createForm.formState.isSubmitting}
+              />
+            </div>
             {templates.length > 0 && (
               <div className="form-group">
                 <label>Assign report templates (optional)</label>
@@ -253,98 +213,54 @@ export default function UsersPage() {
         </div>
       )}
 
-      <div className="card">
-        {list.length === 0 ? (
+      {list.length === 0 ? (
+        <div className="card">
           <p style={{ color: "var(--muted)" }}>No users yet. Add one above to get started.</p>
-        ) : (
-          <ul style={{ listStyle: "none" }}>
-            {list.map((u) => (
-              <li key={u.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
-                {editingId === u.id ? (
-                  <UserEditForm
-                    user={u}
-                    onSave={(data) => onUpdateSubmit(u.id, data)}
-                    onCancel={() => setEditingId(null)}
-                  />
-                ) : (
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
-                    <div>
-                      <strong>{u.username}</strong>
-                      {u.full_name && <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>({u.full_name})</span>}
-                      <span style={{ marginLeft: "0.5rem" }}>{u.role}</span>
-                      <span style={{ marginLeft: "0.5rem", color: u.is_active ? "var(--success)" : "var(--muted)" }}>
-                        {u.is_active ? "Active" : "Inactive"}
-                      </span>
-                    </div>
-                    <div style={{ display: "flex", gap: "0.5rem" }}>
-                      <button type="button" className="btn" onClick={() => setEditingId(u.id)}>Edit</button>
-                      <button type="button" className="btn" onClick={() => onDelete(u.id)} style={{ color: "var(--error)" }}>Delete</button>
-                    </div>
-                  </div>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
+          {list.map((u) => (
+            <Link
+              key={u.id}
+              href={`/dashboard/users/${u.id}`}
+              style={{ textDecoration: "none", color: "inherit" }}
+              className="card"
+            >
+              <div style={{ padding: "1rem" }}>
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "0.5rem" }}>
+                  <strong style={{ fontSize: "1.05rem" }}>{u.username}</strong>
+                  <span
+                    style={{
+                      fontSize: "0.75rem",
+                      padding: "0.2rem 0.45rem",
+                      borderRadius: "6px",
+                      background: u.is_active ? "var(--success)" : "var(--border)",
+                      color: u.is_active ? "var(--on-muted)" : "var(--muted)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {u.is_active ? "Active" : "Inactive"}
+                  </span>
+                </div>
+                {u.full_name && (
+                  <p style={{ margin: "0.35rem 0 0", fontSize: "0.9rem", color: "var(--text-secondary)" }}>{u.full_name}</p>
                 )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+                {u.email && (
+                  <p style={{ margin: "0.25rem 0 0", fontSize: "0.85rem", color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {u.email}
+                  </p>
+                )}
+                <div style={{ marginTop: "0.5rem" }}>
+                  <span style={{ fontSize: "0.8rem", padding: "0.15rem 0.4rem", background: "var(--border)", borderRadius: "4px" }}>
+                    {u.role}
+                  </span>
+                </div>
+                <p style={{ margin: "0.5rem 0 0", fontSize: "0.8rem", color: "var(--muted)" }}>Click to view details & manage KPI rights</p>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
-  );
-  return content;
-}
-
-function UserEditForm({
-  user,
-  onSave,
-  onCancel,
-}: {
-  user: UserRow;
-  onSave: (data: UpdateFormData) => void;
-  onCancel: () => void;
-}) {
-  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<UpdateFormData>({
-    resolver: zodResolver(updateSchema),
-    defaultValues: {
-      email: user.email ?? "",
-      full_name: user.full_name ?? "",
-      password: "",
-      role: (user.role === "USER" || user.role === "REPORT_VIEWER" ? user.role : "USER") as "USER" | "REPORT_VIEWER",
-      is_active: user.is_active,
-    },
-  });
-
-  return (
-    <form onSubmit={handleSubmit(onSave)} style={{ width: "100%" }}>
-      <div className="form-group">
-        <label>Email</label>
-        <input type="email" {...register("email")} />
-        {errors.email && <p className="form-error">{errors.email.message}</p>}
-      </div>
-      <div className="form-group">
-        <label>Full name</label>
-        <input {...register("full_name")} />
-      </div>
-      <div className="form-group">
-        <label>New password (leave blank to keep current)</label>
-        <input type="password" {...register("password")} />
-        {errors.password && <p className="form-error">{errors.password.message}</p>}
-      </div>
-      <div className="form-group">
-        <label>Role</label>
-        <select {...register("role")}>
-          <option value="USER">USER</option>
-          <option value="REPORT_VIEWER">REPORT_VIEWER</option>
-        </select>
-      </div>
-      <div className="form-group">
-        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <input type="checkbox" {...register("is_active")} />
-          Active
-        </label>
-      </div>
-      <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
-        <button type="submit" className="btn btn-primary" disabled={isSubmitting}>{isSubmitting ? "Saving..." : "Save"}</button>
-        <button type="button" className="btn" onClick={onCancel}>Cancel</button>
-      </div>
-    </form>
   );
 }
