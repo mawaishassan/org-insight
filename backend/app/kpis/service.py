@@ -463,6 +463,22 @@ async def unassign_user_from_kpi(db: AsyncSession, kpi_id: int, user_id: int, or
     return True
 
 
+async def replace_kpi_assignments(db: AsyncSession, kpi_id: int, user_ids: list[int], org_id: int) -> bool:
+    """Replace all assignments for this KPI with the given user IDs (org admin)."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return False
+    for uid in user_ids:
+        result = await db.execute(select(User).where(User.id == uid, User.organization_id == org_id))
+        if result.scalar_one_or_none() is None:
+            return False
+    await db.execute(delete(KPIAssignment).where(KPIAssignment.kpi_id == kpi_id))
+    for uid in user_ids:
+        db.add(KPIAssignment(kpi_id=kpi_id, user_id=uid))
+    await db.flush()
+    return True
+
+
 def _normalized_field_type(f) -> str:
     """Return field type as lowercase string for consistent comparison."""
     ft = getattr(f, "field_type", None)

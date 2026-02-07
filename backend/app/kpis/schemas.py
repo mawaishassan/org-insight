@@ -24,6 +24,12 @@ class KPIAssignUserBody(BaseModel):
     user_id: int = Field(..., description="User to assign (must be in same organization)")
 
 
+class KPIReplaceAssignmentsBody(BaseModel):
+    """Replace all users assigned to a KPI for data entry."""
+
+    user_ids: list[int] = Field(default_factory=list, description="User IDs in same organization")
+
+
 class KPIUpdate(BaseModel):
     """Update KPI (optionally replace domain/category/org tags, card display fields)."""
 

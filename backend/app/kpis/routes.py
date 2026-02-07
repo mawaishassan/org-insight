@@ -14,6 +14,7 @@ from app.kpis.schemas import (
     KPIApiContract,
     KPIApiContractField,
     KPIAssignUserBody,
+    KPIReplaceAssignmentsBody,
     DomainTagRef,
     CategoryTagRef,
     OrganizationTagRef,
@@ -36,6 +37,7 @@ from app.kpis.service import (
     list_kpi_assignments,
     assign_user_to_kpi,
     unassign_user_from_kpi,
+    replace_kpi_assignments,
     sync_kpi_entry_from_api,
 )
 from app.users.schemas import UserResponse
@@ -305,6 +307,22 @@ async def assign_user_to_kpi_route(
     """Assign a user to this KPI so they can add data."""
     org_id = _org_id(current_user, organization_id)
     ok = await assign_user_to_kpi(db, kpi_id, body.user_id, org_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI or user not found")
+    await db.commit()
+
+
+@router.put("/{kpi_id}/assignments", status_code=status.HTTP_200_OK)
+async def replace_kpi_assignments_route(
+    kpi_id: int,
+    body: KPIReplaceAssignmentsBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Replace all user assignments for this KPI (org admin)."""
+    org_id = _org_id(current_user, organization_id)
+    ok = await replace_kpi_assignments(db, kpi_id, body.user_ids, org_id)
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI or user not found")
     await db.commit()

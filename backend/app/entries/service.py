@@ -228,6 +228,8 @@ async def save_entry_values(
         if computed is not None:
             value_by_key[f.key] = computed
 
+    entry.user_id = user_id
+    entry.updated_at = datetime.utcnow()
     await db.flush()
     return entry
 
@@ -241,6 +243,8 @@ async def submit_entry(
         return None
     entry.is_draft = False
     entry.submitted_at = datetime.utcnow()
+    entry.user_id = user_id
+    entry.updated_at = datetime.utcnow()
     await db.flush()
     return entry
 
@@ -330,7 +334,10 @@ async def _get_entry_for_overview(
             KPIEntry.kpi_id == kpi_id,
             KPIEntry.year == year,
         )
-        .options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
+        .options(
+            selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field),
+            selectinload(KPIEntry.user),
+        )
     )
     res = await db.execute(q)
     return res.scalar_one_or_none()
@@ -341,9 +348,30 @@ async def list_entries_overview(
 ) -> list[dict]:
     """
     For the given year, return KPIs with entry status and first 2 field preview.
-    One entry per organization per KPI per year.
+    One entry per organization per KPI per year. Includes last data entry user and assigned users.
     """
     kpis = await list_available_kpis(db, user_id, org_id)
+    kpi_ids = [k.id for k in kpis]
+    # Load assigned users per KPI (org admin assigns users to KPIs); also track user ids for "is assigned" check
+    assigned_by_kpi: dict[int, list[str]] = {kid: [] for kid in kpi_ids}
+    assigned_users_detail_by_kpi: dict[int, list[dict]] = {kid: [] for kid in kpi_ids}
+    assigned_user_ids_by_kpi: dict[int, set[int]] = {kid: set() for kid in kpi_ids}
+    if kpi_ids:
+        assign_res = await db.execute(
+            select(KPIAssignment.kpi_id, KPIAssignment.user_id, User.full_name, User.username, User.email)
+            .join(User, User.id == KPIAssignment.user_id)
+            .where(KPIAssignment.kpi_id.in_(kpi_ids))
+        )
+        for row in assign_res.all():
+            kpi_id, uid, full_name, username, email = row[0], row[1], row[2], row[3], row[4]
+            assigned_user_ids_by_kpi.setdefault(kpi_id, set()).add(uid)
+            display = (full_name or "").strip() or username or ""
+            if display and display not in assigned_by_kpi.get(kpi_id, []):
+                assigned_by_kpi.setdefault(kpi_id, []).append(display)
+            assigned_users_detail_by_kpi.setdefault(kpi_id, []).append({
+                "display_name": (full_name or "").strip() or username or "",
+                "email": (email or "").strip() or None,
+            })
     result = []
     for kpi in kpis:
         entry = await _get_entry_for_overview(db, org_id, kpi.id, year)
@@ -351,6 +379,8 @@ async def list_entries_overview(
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,
             "kpi_year": kpi.year,
+            "assigned_user_names": assigned_by_kpi.get(kpi.id, []),
+            "assigned_users": assigned_users_detail_by_kpi.get(kpi.id, []),
             "entry": None,
         }
         if entry:
@@ -377,12 +407,20 @@ async def list_entries_overview(
                             "field_name": fv.field.name,
                             "value": _format_field_value(fv),
                         })
+            entered_by_name = None
+            if entry.user:
+                entered_by_name = (entry.user.full_name or entry.user.username or "").strip() or entry.user.username
+            assigned_ids = assigned_user_ids_by_kpi.get(kpi.id, set())
+            data_entry_user_is_assigned = entry.user_id is not None and entry.user_id in assigned_ids
             item["entry"] = {
                 "id": entry.id,
                 "is_draft": entry.is_draft,
                 "is_locked": entry.is_locked,
                 "submitted_at": entry.submitted_at.isoformat() if entry.submitted_at else None,
                 "preview": preview,
+                "entered_by_user_name": entered_by_name,
+                "last_updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+                "data_entry_user_is_assigned": data_entry_user_is_assigned,
             }
         result.append(item)
     return result

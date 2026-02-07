@@ -9,12 +9,16 @@ interface OverviewItem {
   kpi_id: number;
   kpi_name: string;
   kpi_year: number;
+  assigned_user_names?: string[];
   entry: {
     id: number;
     is_draft: boolean;
     is_locked: boolean;
     submitted_at: string | null;
     preview: Array<{ field_name: string; value: string }>;
+    entered_by_user_name?: string | null;
+    last_updated_at?: string | null;
+    data_entry_user_is_assigned?: boolean;
   } | null;
 }
 
