@@ -308,8 +308,15 @@ class KPIFieldSubField(Base):
     field = relationship("KPIField", back_populates="sub_fields")
 
 
+class KPIAssignmentType(str, enum.Enum):
+    """KPI assignment permission: view (read-only) or data_entry (can edit)."""
+
+    view = "view"
+    data_entry = "data_entry"
+
+
 class KPIAssignment(Base):
-    """Assignment of KPI to user for data entry."""
+    """Assignment of KPI to user: view (read-only) or data_entry (can enter/edit data)."""
 
     __tablename__ = "kpi_assignments"
 
@@ -319,6 +326,9 @@ class KPIAssignment(Base):
     )
     kpi_id = Column(
         Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assignment_type = Column(
+        String(20), nullable=False, default=KPIAssignmentType.data_entry.value, server_default="data_entry"
     )
     created_at = Column(DateTime, default=utc_now)
 

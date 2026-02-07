@@ -14,6 +14,7 @@ from app.entries.schemas import EntryCreate, EntrySubmit, EntryLock, EntryRespon
 from app.entries.service import (
     get_or_create_entry,
     user_can_edit_kpi,
+    user_can_view_kpi,
     save_entry_values,
     submit_entry,
     lock_entry,
@@ -271,11 +272,12 @@ async def get_kpi_api_info(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return entry_mode and api_endpoint_url for a KPI the current user can enter data for (for data entry page)."""
+    """Return entry_mode, api_endpoint_url, and can_edit for a KPI the current user can view (view or data_entry)."""
     org_id = _org_id(current_user, organization_id)
-    can = await user_can_edit_kpi(db, current_user.id, kpi_id)
-    if not can:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not assigned to this KPI")
+    can_edit = await user_can_edit_kpi(db, current_user.id, kpi_id)
     res = await db.execute(select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id))
     kpi = res.scalar_one_or_none()
     if not kpi:
@@ -283,6 +285,7 @@ async def get_kpi_api_info(
     return {
         "entry_mode": getattr(kpi, "entry_mode", None) or "manual",
         "api_endpoint_url": getattr(kpi, "api_endpoint_url", None),
+        "can_edit": can_edit,
     }
 
 
@@ -320,10 +323,10 @@ async def get_entry_fields(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List fields for a KPI the current user can enter data for (so USER can load form for assigned KPIs)."""
+    """List fields for a KPI the current user can view or enter data for (USER: assigned with view or data_entry)."""
     org_id = _org_id(current_user, organization_id)
-    can = await user_can_edit_kpi(db, current_user.id, kpi_id)
-    if not can:
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not assigned to this KPI")
     fields = await list_kpi_fields_service(db, kpi_id, org_id)
     return [
@@ -390,8 +393,15 @@ async def submit_entry_route(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Submit entry (no longer draft)."""
+    """Submit entry (no longer draft). User must have data_entry permission."""
     org_id = _org_id(current_user, organization_id)
+    ent = await db.execute(select(KPIEntry).where(KPIEntry.id == body.entry_id, KPIEntry.organization_id == org_id))
+    entry_row = ent.scalar_one_or_none()
+    if not entry_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, entry_row.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
     entry = await submit_entry(db, body.entry_id, current_user.id, org_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found or locked")

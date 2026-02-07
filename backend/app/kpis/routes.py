@@ -14,6 +14,8 @@ from app.kpis.schemas import (
     KPIApiContract,
     KPIApiContractField,
     KPIAssignUserBody,
+    KPIReplaceAssignmentsBody,
+    KPIAssignmentItem,
     DomainTagRef,
     CategoryTagRef,
     OrganizationTagRef,
@@ -36,6 +38,7 @@ from app.kpis.service import (
     list_kpi_assignments,
     assign_user_to_kpi,
     unassign_user_from_kpi,
+    replace_kpi_assignments,
     sync_kpi_entry_from_api,
 )
 from app.users.schemas import UserResponse
@@ -77,7 +80,13 @@ def _kpi_to_response(k):
     for ka in getattr(k, "assignments", []) or []:
         if getattr(ka, "user", None):
             u = ka.user
-            assigned_users.append(AssignedUserRef(id=u.id, username=u.username, full_name=u.full_name))
+            perm = getattr(ka, "assignment_type", None) or "data_entry"
+            perm = perm.value if hasattr(perm, "value") else str(perm)
+            if perm not in ("data_entry", "view"):
+                perm = "data_entry"
+            assigned_users.append(
+                AssignedUserRef(id=u.id, username=u.username, full_name=u.full_name, permission=perm)
+            )
     return KPIResponse(
         id=k.id,
         organization_id=k.organization_id,
@@ -281,17 +290,20 @@ async def remove_category_tag(
     await db.commit()
 
 
-@router.get("/{kpi_id}/assignments", response_model=list[UserResponse])
+@router.get("/{kpi_id}/assignments")
 async def list_kpi_assignments_route(
     kpi_id: int,
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """List users assigned to this KPI (can add data)."""
+    """List users assigned to this KPI with permission (data_entry or view)."""
     org_id = _org_id(current_user, organization_id)
-    users = await list_kpi_assignments(db, kpi_id, org_id)
-    return [UserResponse.model_validate(u) for u in users]
+    pairs = await list_kpi_assignments(db, kpi_id, org_id)
+    return [
+        {"id": u.id, "username": u.username, "full_name": u.full_name, "permission": perm}
+        for u, perm in pairs
+    ]
 
 
 @router.post("/{kpi_id}/assignments", status_code=status.HTTP_201_CREATED)
@@ -305,6 +317,28 @@ async def assign_user_to_kpi_route(
     """Assign a user to this KPI so they can add data."""
     org_id = _org_id(current_user, organization_id)
     ok = await assign_user_to_kpi(db, kpi_id, body.user_id, org_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI or user not found")
+    await db.commit()
+
+
+@router.put("/{kpi_id}/assignments", status_code=status.HTTP_200_OK)
+async def replace_kpi_assignments_route(
+    kpi_id: int,
+    body: KPIReplaceAssignmentsBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Replace all user assignments for this KPI (each with permission: data_entry or view)."""
+    org_id = _org_id(current_user, organization_id)
+    if body.assignments is not None:
+        assignments = [(a.user_id, a.permission) for a in body.assignments]
+    elif body.user_ids is not None:
+        assignments = [(uid, "data_entry") for uid in body.user_ids]
+    else:
+        assignments = []
+    ok = await replace_kpi_assignments(db, kpi_id, assignments, org_id)
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI or user not found")
     await db.commit()

@@ -3,7 +3,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
-from app.core.models import User, UserRole, KPIAssignment, ReportAccessPermission
+from app.core.models import User, UserRole, KPI, KPIAssignment, ReportAccessPermission
 from app.core.security import get_password_hash
 from app.users.schemas import UserCreate, UserUpdate
 
@@ -34,8 +34,15 @@ async def create_user(
     )
     db.add(user)
     await db.flush()
-    for kpi_id in data.kpi_ids:
-        db.add(KPIAssignment(user_id=user.id, kpi_id=kpi_id))
+    if data.kpi_assignments is not None:
+        for a in data.kpi_assignments:
+            perm = (a.permission or "data_entry").strip().lower()
+            if perm not in ("data_entry", "view"):
+                perm = "data_entry"
+            db.add(KPIAssignment(user_id=user.id, kpi_id=a.kpi_id, assignment_type=perm))
+    else:
+        for kpi_id in data.kpi_ids:
+            db.add(KPIAssignment(user_id=user.id, kpi_id=kpi_id))
     for rt_id in data.report_template_ids:
         db.add(
             ReportAccessPermission(
@@ -57,6 +64,28 @@ async def get_user(db: AsyncSession, user_id: int, org_id: int | None = None) ->
         q = q.where(User.organization_id == org_id)
     result = await db.execute(q)
     return result.scalar_one_or_none()
+
+
+async def get_user_kpi_assignments(
+    db: AsyncSession, user_id: int, org_id: int
+) -> list[dict]:
+    """Get user's KPI assignments (kpi_id, permission) within org. Returns list of { kpi_id, permission }."""
+    user = await get_user(db, user_id, org_id)
+    if not user:
+        return []
+    result = await db.execute(
+        select(KPIAssignment.kpi_id, KPIAssignment.assignment_type)
+        .join(KPI, KPI.id == KPIAssignment.kpi_id)
+        .where(KPIAssignment.user_id == user_id, KPI.organization_id == org_id)
+    )
+    out = []
+    for row in result.all():
+        kpi_id, atype = row[0], row[1]
+        perm = atype.value if hasattr(atype, "value") else str(atype or "data_entry")
+        if perm not in ("data_entry", "view"):
+            perm = "data_entry"
+        out.append({"kpi_id": kpi_id, "permission": perm})
+    return out
 
 
 async def list_users(
@@ -94,7 +123,14 @@ async def update_user(
         user.role = data.role
     if data.is_active is not None:
         user.is_active = data.is_active
-    if data.kpi_ids is not None:
+    if data.kpi_assignments is not None:
+        await db.execute(delete(KPIAssignment).where(KPIAssignment.user_id == user_id))
+        for a in data.kpi_assignments:
+            perm = (a.permission or "data_entry").strip().lower()
+            if perm not in ("data_entry", "view"):
+                perm = "data_entry"
+            db.add(KPIAssignment(user_id=user_id, kpi_id=a.kpi_id, assignment_type=perm))
+    elif data.kpi_ids is not None:
         await db.execute(delete(KPIAssignment).where(KPIAssignment.user_id == user_id))
         for kpi_id in data.kpi_ids:
             db.add(KPIAssignment(user_id=user_id, kpi_id=kpi_id))

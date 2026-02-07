@@ -207,7 +207,7 @@ export default function DomainsPage() {
             ) : (
               <>
                 <Link
-                  href={`/dashboard/domains/${d.id}`}
+                  href={`/dashboard/entries?domain_id=${d.id}&year=${summaryYear}`}
                   style={{ textDecoration: "none", color: "inherit", display: "block", marginBottom: "0.75rem" }}
                 >
                   <strong style={{ fontSize: "1.1rem" }}>{d.name}</strong>
@@ -248,8 +248,8 @@ export default function DomainsPage() {
                       <button type="button" className="btn" onClick={() => onDelete(d.id)} style={{ color: "var(--error)" }}>Delete</button>
                     </>
                   )}
-                  <Link href={`/dashboard/domains/${d.id}`} className="btn btn-primary" style={{ textDecoration: "none", marginLeft: canEdit ? undefined : "auto" }}>
-                    Manage
+                  <Link href={`/dashboard/entries?domain_id=${d.id}&year=${summaryYear}`} className="btn btn-primary" style={{ textDecoration: "none", marginLeft: canEdit ? undefined : "auto" }}>
+                    View KPIs
                   </Link>
                 </div>
               </>

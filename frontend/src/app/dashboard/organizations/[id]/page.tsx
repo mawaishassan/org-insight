@@ -103,6 +103,13 @@ interface OrgTagRow {
   name: string;
 }
 
+interface CategoryRow {
+  id: number;
+  domain_id: number;
+  name: string;
+  domain_name?: string | null;
+}
+
 interface KpiRow {
   id: number;
   organization_id?: number;
@@ -294,6 +301,10 @@ export default function OrganizationDetailPage() {
   const [domains, setDomains] = useState<DomainWithSummary[]>([]);
   const [orgTags, setOrgTags] = useState<OrgTagRow[]>([]);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
+  const [categories, setCategories] = useState<CategoryRow[]>([]);
+  const [kpiFilterName, setKpiFilterName] = useState("");
+  const [kpiFilterDomainId, setKpiFilterDomainId] = useState<number | null>(null);
+  const [kpiFilterCategoryId, setKpiFilterCategoryId] = useState<number | null>(null);
   const [kpiFilterTagId, setKpiFilterTagId] = useState<number | null>(null);
   const [selectedKpiId, setSelectedKpiId] = useState<number | null>(null);
   const [fields, setFields] = useState<KpiField[]>([]);
@@ -330,10 +341,20 @@ export default function OrganizationDetailPage() {
       .catch(() => setOrgTags([]));
   };
 
+  const loadCategories = () => {
+    if (!token || !orgId) return;
+    api<CategoryRow[]>(`/categories?${qs({ organization_id: orgId })}`, { token })
+      .then(setCategories)
+      .catch(() => setCategories([]));
+  };
+
   const loadKpis = () => {
     if (!token || !orgId) return;
     setError(null);
     const params: Record<string, string | number> = { organization_id: orgId };
+    if (kpiFilterName?.trim()) params.name = kpiFilterName.trim();
+    if (kpiFilterDomainId != null) params.domain_id = kpiFilterDomainId;
+    if (kpiFilterCategoryId != null) params.category_id = kpiFilterCategoryId;
     if (kpiFilterTagId != null) params.organization_tag_id = kpiFilterTagId;
     api<KpiRow[]>(`/kpis?${qs(params)}`, { token })
       .then(setKpis)
@@ -355,12 +376,13 @@ export default function OrganizationDetailPage() {
   useEffect(() => {
     loadDomains();
     loadOrgTags();
+    loadCategories();
     setLoading(false);
   }, [orgId]);
 
   useEffect(() => {
     loadKpis();
-  }, [orgId, kpiFilterTagId]);
+  }, [orgId, kpiFilterName, kpiFilterDomainId, kpiFilterCategoryId, kpiFilterTagId]);
 
   useEffect(() => {
     if (selectedKpiId) loadFields();
@@ -463,8 +485,18 @@ export default function OrganizationDetailPage() {
           orgId={orgId}
           token={token!}
           domains={domains}
+          categories={categories}
           orgTags={orgTags}
           loadOrgTags={loadOrgTags}
+          filterName={kpiFilterName}
+          setFilterName={setKpiFilterName}
+          filterDomainId={kpiFilterDomainId}
+          setFilterDomainId={(id) => {
+            setKpiFilterDomainId(id);
+            setKpiFilterCategoryId(null);
+          }}
+          filterCategoryId={kpiFilterCategoryId}
+          setFilterCategoryId={setKpiFilterCategoryId}
           filterTagId={kpiFilterTagId}
           setFilterTagId={setKpiFilterTagId}
           list={kpis}
@@ -869,8 +901,15 @@ function KpisSection({
   orgId,
   token,
   domains,
+  categories,
   orgTags,
   loadOrgTags,
+  filterName,
+  setFilterName,
+  filterDomainId,
+  setFilterDomainId,
+  filterCategoryId,
+  setFilterCategoryId,
   filterTagId,
   setFilterTagId,
   list,
@@ -885,8 +924,15 @@ function KpisSection({
   orgId: number;
   token: string;
   domains: DomainRow[];
+  categories: CategoryRow[];
   orgTags: OrgTagRow[];
   loadOrgTags: () => void;
+  filterName: string;
+  setFilterName: (v: string) => void;
+  filterDomainId: number | null;
+  setFilterDomainId: (v: number | null) => void;
+  filterCategoryId: number | null;
+  setFilterCategoryId: (v: number | null) => void;
   filterTagId: number | null;
   setFilterTagId: (v: number | null) => void;
   list: KpiRow[];
@@ -990,34 +1036,77 @@ function KpisSection({
 
   const domainById = (id: number) => domains.find((d) => d.id === id)?.name ?? `Domain #${id}`;
 
+  const categoriesForDomain = filterDomainId != null
+    ? categories.filter((c) => c.domain_id === filterDomainId)
+    : categories;
+
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
         <h2 style={{ fontSize: "1.1rem" }}>KPIs</h2>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-          {orgTags.length > 0 && (
-            <>
-              <label style={{ fontSize: "0.9rem" }}>Filter by tag:</label>
-              <select
-                value={filterTagId ?? ""}
-                onChange={(e) => setFilterTagId(e.target.value ? Number(e.target.value) : null)}
-                style={{ padding: "0.5rem", minWidth: "140px" }}
-              >
-                <option value="">All tags</option>
-                {orgTags.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
-            </>
-          )}
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => setShowCreate((s) => !s)}
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => setShowCreate((s) => !s)}
+        >
+          {showCreate ? "Cancel" : "Add KPI"}
+        </button>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "0.5rem",
+          flexWrap: "wrap",
+          marginBottom: "1rem",
+          padding: "0.5rem 0",
+        }}
+      >
+        <input
+          type="search"
+          placeholder="Search KPIs…"
+          value={filterName}
+          onChange={(e) => setFilterName(e.target.value)}
+          style={{
+            padding: "0.35rem 0.6rem",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            fontSize: "0.85rem",
+            width: "clamp(120px, 20vw, 200px)",
+          }}
+        />
+        <select
+          value={filterDomainId ?? ""}
+          onChange={(e) => setFilterDomainId(e.target.value ? Number(e.target.value) : null)}
+          style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 100 }}
+        >
+          <option value="">All domains</option>
+          {domains.map((d) => (
+            <option key={d.id} value={d.id}>{d.name}</option>
+          ))}
+        </select>
+        <select
+          value={filterCategoryId ?? ""}
+          onChange={(e) => setFilterCategoryId(e.target.value ? Number(e.target.value) : null)}
+          style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 100 }}
+        >
+          <option value="">All categories</option>
+          {categoriesForDomain.map((c) => (
+            <option key={c.id} value={c.id}>{c.domain_name ? `${c.name} (${c.domain_name})` : c.name}</option>
+          ))}
+        </select>
+        {orgTags.length > 0 && (
+          <select
+            value={filterTagId ?? ""}
+            onChange={(e) => setFilterTagId(e.target.value ? Number(e.target.value) : null)}
+            style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 90 }}
           >
-            {showCreate ? "Cancel" : "Add KPI"}
-          </button>
-        </div>
+            <option value="">All tags</option>
+            {orgTags.map((t) => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        )}
       </div>
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
       {showCreate && (

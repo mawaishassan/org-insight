@@ -8,6 +8,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, canEditDomainsAndCategories, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { KpiCardsGrid } from "@/components/KpiCardsGrid";
 
 interface DomainInfo {
   id: number;
@@ -52,19 +53,6 @@ interface KpiRow {
   sort_order: number;
   category_tags?: CategoryTagRef[];
   organization_tags?: OrganizationTagRef[];
-}
-
-interface OverviewItem {
-  kpi_id: number;
-  kpi_name: string;
-  kpi_year: number;
-  entry: {
-    id: number;
-    is_draft: boolean;
-    is_locked: boolean;
-    submitted_at: string | null;
-    preview: Array<{ field_name: string; value: string }>;
-  } | null;
 }
 
 interface ReportTemplateRow {
@@ -114,7 +102,6 @@ export default function DomainDetailPage() {
   const currentYear = new Date().getFullYear();
   const [selectedYear, setSelectedYear] = useState(currentYear);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
-  const [overview, setOverview] = useState<OverviewItem[]>([]);
   const [domainTemplates, setDomainTemplates] = useState<ReportTemplateRow[]>([]);
   const [allTemplates, setAllTemplates] = useState<ReportTemplateRow[]>([]);
   const [attachTemplateId, setAttachTemplateId] = useState<number | "">("");
@@ -155,14 +142,6 @@ export default function DomainDetailPage() {
       .catch(() => setKpis([]));
   };
 
-  const loadOverview = () => {
-    if (!token || effectiveOrgId == null) return;
-    const query = `?year=${selectedYear}&organization_id=${effectiveOrgId}`;
-    api<OverviewItem[]>(`/entries/overview${query}`, { token })
-      .then(setOverview)
-      .catch(() => setOverview([]));
-  };
-
   const loadOrgTags = () => {
     if (!token || effectiveOrgId == null) return;
     api<OrgTagRow[]>(`/organizations/${effectiveOrgId}/tags`, { token })
@@ -189,12 +168,6 @@ export default function DomainDetailPage() {
     if (!searchLower) return kpis;
     return kpis.filter((k) => k.name.toLowerCase().includes(searchLower));
   }, [kpis, kpiFilterName]);
-
-  const overviewByKpiId = useMemo(() => {
-    const map = new Map<number, OverviewItem>();
-    overview.forEach((o) => map.set(o.kpi_id, o));
-    return map;
-  }, [overview]);
 
   useEffect(() => {
     loadDomain();
@@ -252,10 +225,6 @@ export default function DomainDetailPage() {
   useEffect(() => {
     if (!canEdit && effectiveOrgId != null && domainId) loadKpis();
   }, [canEdit, effectiveOrgId, domainId, kpiFilterTagId, kpiFilterCategoryId]);
-
-  useEffect(() => {
-    if (!canEdit && effectiveOrgId != null) loadOverview();
-  }, [canEdit, effectiveOrgId, selectedYear]);
 
   const onCreateCategory = async (data: CreateFormData) => {
     if (!token || !domainId) return;
@@ -412,67 +381,15 @@ export default function DomainDetailPage() {
               {(kpiFilterName.trim() || kpiFilterTagId !== "" || kpiFilterCategoryId !== "") && " (filtered)"}
             </p>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
-            {filteredKpis.map((kpi) => {
-              const item = overviewByKpiId.get(kpi.id);
-              const hasEntry = item?.entry != null;
-              const status = !hasEntry ? "not_entered" : item.entry!.is_locked ? "locked" : item.entry!.is_draft ? "draft" : "submitted";
-              const preview = hasEntry && item.entry!.preview ? item.entry!.preview : [];
-              const entryHref =
-                effectiveOrgId != null
-                  ? `/dashboard/entries/${kpi.id}/${selectedYear}?organization_id=${effectiveOrgId}&from_domain=${domainId}`
-                  : `/dashboard/entries/${kpi.id}/${selectedYear}?from_domain=${domainId}`;
-              return (
-                <Link
-                  key={kpi.id}
-                  href={entryHref}
-                  style={{ textDecoration: "none", color: "inherit", display: "block" }}
-                  className="card"
-                >
-                  <div style={{ marginBottom: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.5rem", gap: "0.5rem" }}>
-                      <h3 style={{ fontSize: "1.05rem", fontWeight: 600, margin: 0, flex: 1 }}>{kpi.name}</h3>
-                      <span
-                        style={{
-                          fontSize: "0.75rem",
-                          fontWeight: 600,
-                          padding: "0.25rem 0.5rem",
-                          borderRadius: 4,
-                          flexShrink: 0,
-                          ...(status === "not_entered"
-                            ? { background: "var(--warning)", color: "var(--on-muted)" }
-                            : status === "draft"
-                            ? { background: "var(--warning)", color: "var(--on-muted)" }
-                            : status === "submitted"
-                            ? { background: "var(--success)", color: "var(--on-muted)" }
-                            : { background: "var(--muted)", color: "var(--text)" }),
-                        }}
-                      >
-                        {status === "not_entered" ? "Not entered" : status === "draft" ? "Draft" : status === "submitted" ? "Submitted" : "Locked"}
-                      </span>
-                    </div>
-                    <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginBottom: "0.5rem" }}>Year {selectedYear}</p>
-                    {preview.length > 0 ? (
-                      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                        {preview.map((p, i) => (
-                          <li key={i} style={{ fontSize: "0.9rem", marginBottom: "0.35rem", color: "var(--muted)" }}>
-                            <strong style={{ color: "var(--text)" }}>{p.field_name}:</strong> {p.value || "—"}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{hasEntry ? "No field values yet" : "No data for this year"}</p>
-                    )}
-                    <p style={{ marginTop: "0.5rem", fontSize: "0.85rem", color: "var(--primary)" }}>View full data entry →</p>
-                  </div>
-                </Link>
-              );
-            })}
-          </div>
-          {filteredKpis.length === 0 && (
-            <p style={{ color: "var(--muted)", marginTop: "0.5rem" }}>
-              {kpis.length === 0 ? "No KPIs in this domain." : "No KPIs match the filters."}
-            </p>
+          {effectiveOrgId != null && (
+            <KpiCardsGrid
+              organizationId={effectiveOrgId}
+              year={selectedYear}
+              domainId={domainId}
+              kpisOverride={filteredKpis}
+              filterName={kpiFilterName}
+              emptyMessage={kpis.length === 0 ? "No KPIs in this domain." : "No KPIs match the filters."}
+            />
           )}
         </>
       )}
