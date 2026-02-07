@@ -35,7 +35,7 @@ export default function LoginPage() {
         }
       );
       setTokens(res.access_token, res.refresh_token);
-      router.push("/dashboard");
+      router.push("/dashboard/entries");
       router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Login failed");

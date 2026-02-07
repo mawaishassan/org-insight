@@ -8,6 +8,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, canEditDomainsAndCategories, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { KpiCardsGrid } from "@/components/KpiCardsGrid";
 
 interface DomainInfo {
   id: number;
@@ -52,24 +53,6 @@ interface KpiRow {
   sort_order: number;
   category_tags?: CategoryTagRef[];
   organization_tags?: OrganizationTagRef[];
-}
-
-interface OverviewItem {
-  kpi_id: number;
-  kpi_name: string;
-  kpi_year: number;
-  assigned_user_names?: string[];
-  assigned_users?: Array<{ display_name: string; email: string | null }>;
-  entry: {
-    id: number;
-    is_draft: boolean;
-    is_locked: boolean;
-    submitted_at: string | null;
-    preview: Array<{ field_name: string; value: string }>;
-    entered_by_user_name?: string | null;
-    last_updated_at?: string | null;
-    data_entry_user_is_assigned?: boolean;
-  } | null;
 }
 
 interface ReportTemplateRow {
@@ -119,7 +102,6 @@ export default function DomainDetailPage() {
   const currentYear = new Date().getFullYear();
   const [selectedYear, setSelectedYear] = useState(currentYear);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
-  const [overview, setOverview] = useState<OverviewItem[]>([]);
   const [domainTemplates, setDomainTemplates] = useState<ReportTemplateRow[]>([]);
   const [allTemplates, setAllTemplates] = useState<ReportTemplateRow[]>([]);
   const [attachTemplateId, setAttachTemplateId] = useState<number | "">("");
@@ -160,14 +142,6 @@ export default function DomainDetailPage() {
       .catch(() => setKpis([]));
   };
 
-  const loadOverview = () => {
-    if (!token || effectiveOrgId == null) return;
-    const query = `?year=${selectedYear}&organization_id=${effectiveOrgId}`;
-    api<OverviewItem[]>(`/entries/overview${query}`, { token })
-      .then(setOverview)
-      .catch(() => setOverview([]));
-  };
-
   const loadOrgTags = () => {
     if (!token || effectiveOrgId == null) return;
     api<OrgTagRow[]>(`/organizations/${effectiveOrgId}/tags`, { token })
@@ -194,12 +168,6 @@ export default function DomainDetailPage() {
     if (!searchLower) return kpis;
     return kpis.filter((k) => k.name.toLowerCase().includes(searchLower));
   }, [kpis, kpiFilterName]);
-
-  const overviewByKpiId = useMemo(() => {
-    const map = new Map<number, OverviewItem>();
-    overview.forEach((o) => map.set(o.kpi_id, o));
-    return map;
-  }, [overview]);
 
   useEffect(() => {
     loadDomain();
@@ -257,10 +225,6 @@ export default function DomainDetailPage() {
   useEffect(() => {
     if (!canEdit && effectiveOrgId != null && domainId) loadKpis();
   }, [canEdit, effectiveOrgId, domainId, kpiFilterTagId, kpiFilterCategoryId]);
-
-  useEffect(() => {
-    if (!canEdit && effectiveOrgId != null) loadOverview();
-  }, [canEdit, effectiveOrgId, selectedYear]);
 
   const onCreateCategory = async (data: CreateFormData) => {
     if (!token || !domainId) return;
@@ -417,151 +381,15 @@ export default function DomainDetailPage() {
               {(kpiFilterName.trim() || kpiFilterTagId !== "" || kpiFilterCategoryId !== "") && " (filtered)"}
             </p>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
-            {filteredKpis.map((kpi) => {
-              const item = overviewByKpiId.get(kpi.id);
-              const hasEntry = item?.entry != null;
-              const status = !hasEntry ? "not_entered" : item.entry!.is_locked ? "locked" : item.entry!.is_draft ? "draft" : "submitted";
-              const preview = hasEntry && item.entry!.preview ? item.entry!.preview : [];
-              const detailHref =
-                effectiveOrgId != null
-                  ? `/dashboard/domains/${domainId}/kpis/${kpi.id}?year=${selectedYear}&organization_id=${effectiveOrgId}`
-                  : `/dashboard/domains/${domainId}/kpis/${kpi.id}?year=${selectedYear}`;
-              const assignedCount = item?.assigned_user_names?.length ?? 0;
-              const assignedUsers = item?.assigned_users ?? [];
-              const noAssigned = assignedCount === 0;
-              const lastUpdatedFormatted =
-                item?.entry?.last_updated_at &&
-                (() => {
-                  const d = new Date(item.entry!.last_updated_at!);
-                  return `${String(d.getDate()).padStart(2, "0")}-${d.toLocaleString("en", { month: "short" })}-${String(d.getFullYear()).slice(-2)}`;
-                })();
-              const reminderEmails = assignedUsers.map((u) => u.email).filter(Boolean).join(", ");
-
-              return (
-                <Link
-                  key={kpi.id}
-                  href={detailHref}
-                  style={{
-                    textDecoration: "none",
-                    color: "inherit",
-                    display: "block",
-                    ...(noAssigned
-                      ? { boxShadow: "0 0 0 2px var(--warning, #b8860b)", borderRadius: 8 }
-                      : {}),
-                  }}
-                  className="card"
-                >
-                  {/* Section 1: Line 1 = Year (left), Status (right). Line 2 = Name with ellipsis */}
-                  <div
-                    style={{
-                      paddingBottom: "0.75rem",
-                      marginBottom: "0.75rem",
-                      borderBottom: "1px solid var(--border, #e5e7eb)",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
-                      <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Year {selectedYear}</span>
-                      <span
-                        style={{
-                          fontSize: "0.75rem",
-                          fontWeight: 600,
-                          padding: "0.2rem 0.45rem",
-                          borderRadius: 4,
-                          flexShrink: 0,
-                          ...(status === "not_entered"
-                            ? { background: "var(--warning)", color: "var(--on-muted)" }
-                            : status === "draft"
-                            ? { background: "var(--warning)", color: "var(--on-muted)" }
-                            : status === "submitted"
-                            ? { background: "var(--success)", color: "var(--on-muted)" }
-                            : { background: "var(--muted)", color: "var(--text)" }),
-                        }}
-                      >
-                        {status === "not_entered" ? "Not entered" : status === "draft" ? "Draft" : status === "submitted" ? "Submitted" : "Locked"}
-                      </span>
-                    </div>
-                    <h3
-                      style={{
-                        fontSize: "1.05rem",
-                        fontWeight: 600,
-                        margin: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                      title={kpi.name}
-                    >
-                      {kpi.name}
-                    </h3>
-                  </div>
-
-                  {/* Section 2: Data entry preview + message (Case 1 or Case 2) */}
-                  <div
-                    style={{
-                      paddingBottom: "0.75rem",
-                      marginBottom: "0.75rem",
-                      borderBottom: "1px solid var(--border, #e5e7eb)",
-                      minHeight: "2rem",
-                    }}
-                  >
-                    {preview.length > 0 ? (
-                      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                        {preview.map((p, i) => (
-                          <li key={i} style={{ fontSize: "0.9rem", marginBottom: "0.35rem", color: "var(--muted)" }}>
-                            <strong style={{ color: "var(--text)" }}>{p.field_name}:</strong> {p.value || "—"}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: 0 }}>
-                        {hasEntry ? "No field values yet" : "No data for this year"}
-                      </p>
-                    )}
-                    {!hasEntry && (
-                      <p style={{ fontSize: "0.8rem", margin: "0.5rem 0 0 0", color: "var(--muted)" }}>
-                        {assignedCount > 0 ? (
-                          <>
-                            Data has not been uploaded by {item!.assigned_user_names!.join(", ")}.
-                            {reminderEmails ? (
-                              <> Give a reminder: <a href={`mailto:${reminderEmails}`} style={{ color: "var(--primary)" }} onClick={(e) => e.stopPropagation()} target="_blank" rel="noopener noreferrer">{reminderEmails}</a></>
-                            ) : (
-                              " Give a reminder."
-                            )}
-                          </>
-                        ) : (
-                          <span style={{ color: "var(--warning, #b8860b)" }}>Assign user to upload data entry or add data yourself.</span>
-                        )}
-                      </p>
-                    )}
-                  </div>
-
-                  {/* Section 3 (footer): Who/when updated, or no data + assigned, or not assigned + highlight */}
-                  <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
-                    {hasEntry && (item?.entry?.last_updated_at || item?.entry?.entered_by_user_name) ? (
-                      <p style={{ margin: 0 }}>
-                        Last updated: {lastUpdatedFormatted || ""}{item?.entry?.entered_by_user_name ? (lastUpdatedFormatted ? " by " : "") + item.entry.entered_by_user_name : ""}
-                      </p>
-                    ) : (
-                      <>
-                        {assignedCount > 0 ? (
-                          <p style={{ margin: 0 }}>
-                            Assigned for data entry: {item!.assigned_user_names!.join(", ")}
-                          </p>
-                        ) : (
-                          <p style={{ margin: 0, color: "var(--warning, #b8860b)", fontWeight: 500 }}>No data entry user assigned.</p>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </Link>
-              );
-            })}
-          </div>
-          {filteredKpis.length === 0 && (
-            <p style={{ color: "var(--muted)", marginTop: "0.5rem" }}>
-              {kpis.length === 0 ? "No KPIs in this domain." : "No KPIs match the filters."}
-            </p>
+          {effectiveOrgId != null && (
+            <KpiCardsGrid
+              organizationId={effectiveOrgId}
+              year={selectedYear}
+              domainId={domainId}
+              kpisOverride={filteredKpis}
+              filterName={kpiFilterName}
+              emptyMessage={kpis.length === 0 ? "No KPIs in this domain." : "No KPIs match the filters."}
+            />
           )}
         </>
       )}

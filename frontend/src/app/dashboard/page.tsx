@@ -1,29 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 
 export default function DashboardPage() {
-  const [me, setMe] = useState<{ username: string; role: string; full_name: string | null } | null>(null);
-
+  const router = useRouter();
   useEffect(() => {
-    const token = getAccessToken();
-    if (!token) return;
-    api<{ username: string; role: string; full_name: string | null }>("/auth/me", { token }).then(setMe);
-  }, []);
-
+    router.replace("/dashboard/entries");
+  }, [router]);
   return (
-    <div>
-      <h1 style={{ marginBottom: "1rem", fontSize: "1.5rem" }}>Dashboard</h1>
-      <div className="card" style={{ maxWidth: 400 }}>
-        {me && (
-          <>
-            <p><strong>Welcome,</strong> {me.full_name || me.username}</p>
-            <p style={{ color: "var(--muted)", marginTop: "0.5rem" }}>Role: {me.role}</p>
-          </>
-        )}
-      </div>
+    <div style={{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <p style={{ color: "var(--muted)" }}>Redirecting…</p>
     </div>
   );
 }

@@ -24,10 +24,24 @@ class KPIAssignUserBody(BaseModel):
     user_id: int = Field(..., description="User to assign (must be in same organization)")
 
 
-class KPIReplaceAssignmentsBody(BaseModel):
-    """Replace all users assigned to a KPI for data entry."""
+class KPIAssignmentItem(BaseModel):
+    """One assignment: user and permission (view or data_entry)."""
 
-    user_ids: list[int] = Field(default_factory=list, description="User IDs in same organization")
+    user_id: int = Field(..., description="User in same organization")
+    permission: str = Field(default="data_entry", description="data_entry (can edit) or view (read-only)")
+
+
+class KPIReplaceAssignmentsBody(BaseModel):
+    """Replace all user assignments for a KPI (each with permission: data_entry or view)."""
+
+    assignments: list[KPIAssignmentItem] | None = Field(
+        default=None,
+        description="List of {user_id, permission}; permission is 'data_entry' or 'view'",
+    )
+    user_ids: list[int] | None = Field(
+        default=None,
+        description="Legacy: if assignments not provided, treat as data_entry for these user IDs",
+    )
 
 
 class KPIUpdate(BaseModel):
@@ -69,11 +83,12 @@ class OrganizationTagRef(BaseModel):
 
 
 class AssignedUserRef(BaseModel):
-    """User assigned to KPI for data entry."""
+    """User assigned to KPI with permission (data_entry or view)."""
 
     id: int
     username: str
     full_name: str | None = None
+    permission: str = Field(default="data_entry", description="data_entry (can edit) or view (read-only)")
 
 
 class KPIResponse(BaseModel):

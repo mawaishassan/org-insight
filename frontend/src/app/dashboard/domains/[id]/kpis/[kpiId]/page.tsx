@@ -62,6 +62,7 @@ interface UserRef {
   id: number;
   username: string;
   full_name: string | null;
+  permission?: string;
 }
 
 function qs(params: Record<string, string | number | undefined>) {
@@ -90,7 +91,7 @@ function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
 export default function DomainKpiDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const domainId = Number(params.id);
+  const domainId = params.id != null ? Number(params.id) : undefined;
   const kpiId = Number(params.kpiId);
   const yearParam = searchParams.get("year");
   const year = yearParam ? Number(yearParam) : new Date().getFullYear();
@@ -104,14 +105,15 @@ export default function DomainKpiDetailPage() {
   const [overviewItem, setOverviewItem] = useState<OverviewItem | null>(null);
   const [assignedUsers, setAssignedUsers] = useState<UserRef[]>([]);
   const [orgUsers, setOrgUsers] = useState<UserRef[]>([]);
-  const [kpiApiInfo, setKpiApiInfo] = useState<{ entry_mode?: string; api_endpoint_url?: string | null } | null>(null);
+  const [kpiApiInfo, setKpiApiInfo] = useState<{ entry_mode?: string; api_endpoint_url?: string | null; can_edit?: boolean } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"scalar" | number>("scalar");
-  const [selectedAssignmentIds, setSelectedAssignmentIds] = useState<number[]>([]);
+  /** When editing: list of { user_id, permission } for PUT assignments */
+  const [editAssignments, setEditAssignments] = useState<{ user_id: number; permission: string }[]>([]);
   const [uploadingFieldId, setUploadingFieldId] = useState<number | null>(null);
   const [uploadOption, setUploadOption] = useState<"append" | "override" | null>(null);
   const [syncOption, setSyncOption] = useState<"append" | "override" | null>(null);
@@ -187,7 +189,7 @@ export default function DomainKpiDetailPage() {
       api<{ name: string }>(`/kpis/${kpiId}${kpiQuery}`, { token }).catch(() => null),
       api<UserRef[]>(`/kpis/${kpiId}/assignments${kpiQuery}`, { token }).catch(() => []),
       api<UserRef[]>(`/users${usersQuery}`, { token }).catch(() => []),
-      api<{ entry_mode?: string; api_endpoint_url?: string | null }>(`/entries/kpi-api-info${apiInfoQuery}`, { token }).catch(() => null),
+      api<{ entry_mode?: string; api_endpoint_url?: string | null; can_edit?: boolean }>(`/entries/kpi-api-info${apiInfoQuery}`, { token }).catch(() => null),
     ]);
     setFields(fieldsList);
     setEntry(entriesList[0] ?? null);
@@ -196,7 +198,7 @@ export default function DomainKpiDetailPage() {
     if (kpiResp?.name) setKpiName(kpiResp.name);
     else if (ov?.kpi_name) setKpiName(ov.kpi_name);
     else setKpiName(`KPI #${kpiId}`);
-    setAssignedUsers(Array.isArray(assignmentsList) ? assignmentsList : []);
+    setAssignedUsers(Array.isArray(assignmentsList) ? assignmentsList.map((u: UserRef & { permission?: string }) => ({ id: u.id, username: u.username, full_name: u.full_name ?? null, permission: u.permission || "data_entry" })) : []);
     setOrgUsers(Array.isArray(usersList) ? usersList : []);
     setKpiApiInfo(apiInfo ?? null);
   };
@@ -228,7 +230,7 @@ export default function DomainKpiDetailPage() {
 
   const startEditing = () => {
     setFormValues(buildFormValuesFromEntry(entry));
-    setSelectedAssignmentIds(assignedUsers.length ? [assignedUsers[0].id] : []);
+    setEditAssignments(assignedUsers.map((u) => ({ user_id: u.id, permission: u.permission || "data_entry" })));
     setIsEditing(true);
     setSaveError(null);
   };
@@ -265,7 +267,7 @@ export default function DomainKpiDetailPage() {
       setEntry(updated);
       await api(`/kpis/${kpiId}/assignments?${saveQuery}`, {
         method: "PUT",
-        body: JSON.stringify({ user_ids: selectedAssignmentIds }),
+        body: JSON.stringify({ assignments: editAssignments.map((a) => ({ user_id: a.user_id, permission: a.permission || "data_entry" })) }),
         token,
       });
       await loadData();
@@ -278,13 +280,26 @@ export default function DomainKpiDetailPage() {
   };
 
   const backHref =
-    effectiveOrgId != null
-      ? `/dashboard/domains/${domainId}?organization_id=${effectiveOrgId}&year=${year}`
-      : `/dashboard/domains/${domainId}?year=${year}`;
+    domainId != null
+      ? (effectiveOrgId != null
+          ? `/dashboard/domains/${domainId}?organization_id=${effectiveOrgId}&year=${year}`
+          : `/dashboard/domains/${domainId}?year=${year}`)
+      : (effectiveOrgId != null
+          ? `/dashboard/entries?year=${year}&organization_id=${effectiveOrgId}`
+          : "/dashboard/entries");
 
-  const assignedNames = useMemo(
-    () => assignedUsers.map((u) => (u.full_name || u.username || "").trim() || u.username),
+  const canEditKpi = kpiApiInfo?.can_edit !== false;
+  const dataEntryAssignees = useMemo(
+    () => assignedUsers.filter((u) => (u.permission || "data_entry") === "data_entry"),
     [assignedUsers]
+  );
+  const viewOnlyAssignees = useMemo(
+    () => assignedUsers.filter((u) => u.permission === "view"),
+    [assignedUsers]
+  );
+  const assignedNames = useMemo(
+    () => dataEntryAssignees.map((u) => (u.full_name || u.username || "").trim() || u.username),
+    [dataEntryAssignees]
   );
   const totalFields = fields.length;
   const isLocked = entry?.is_locked ?? false;
@@ -296,11 +311,13 @@ export default function DomainKpiDetailPage() {
 
   return (
     <div>
-      <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
-        <Link href={backHref} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-          ← Back to Domain
-        </Link>
-      </div>
+      {domainId != null && (
+        <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+          <Link href={backHref} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+            ← Back to Domain
+          </Link>
+        </div>
+      )}
 
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
       {saveError && <p className="form-error" style={{ marginBottom: "1rem" }}>{saveError}</p>}
@@ -340,31 +357,109 @@ export default function DomainKpiDetailPage() {
       <div className="card" style={{ marginBottom: "1.5rem" }}>
         <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem" }}>
           <div>
-            <h1 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>{kpiName}</h1>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+              <h1 style={{ fontSize: "1.5rem", margin: 0 }}>{kpiName}</h1>
+              {!canEditKpi && (
+                <span
+                  style={{
+                    fontSize: "0.75rem",
+                    fontWeight: 600,
+                    padding: "0.2rem 0.5rem",
+                    borderRadius: 4,
+                    background: "var(--muted)",
+                    color: "var(--text)",
+                  }}
+                >
+                  View only
+                </span>
+              )}
+            </div>
             <p style={{ color: "var(--muted)", marginBottom: "0.25rem" }}>Year {year}</p>
             <p style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>
               <strong>Total fields:</strong> {totalFields}
             </p>
             <p style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>
-              <strong>Assigned user:</strong>{" "}
+              <strong>Assigned:</strong>{" "}
               {isEditing ? (
-                <select
-                  value={selectedAssignmentIds[0] ?? ""}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setSelectedAssignmentIds(v ? [Number(v)] : []);
-                  }}
-                  style={{ marginLeft: "0.25rem", padding: "0.35rem 0.5rem", minWidth: 160 }}
-                >
-                  <option value="">None</option>
-                  {orgUsers.map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.full_name || u.username}
-                    </option>
-                  ))}
-                </select>
+                <span style={{ display: "inline-block", marginLeft: "0.25rem" }}>
+                  {editAssignments.map((a) => {
+                    const u = orgUsers.find((o) => o.id === a.user_id);
+                    const name = u ? (u.full_name || u.username || "").trim() || u.username : `User #${a.user_id}`;
+                    return (
+                      <span
+                        key={a.user_id}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "0.35rem",
+                          marginRight: "0.5rem",
+                          marginBottom: "0.25rem",
+                          padding: "0.2rem 0.4rem",
+                          background: "var(--border)",
+                          borderRadius: 6,
+                          fontSize: "0.85rem",
+                        }}
+                      >
+                        {name}
+                        <select
+                          value={a.permission || "data_entry"}
+                          onChange={(e) => {
+                            const perm = e.target.value;
+                            setEditAssignments((prev) =>
+                              prev.map((x) => (x.user_id === a.user_id ? { ...x, permission: perm } : x))
+                            );
+                          }}
+                          style={{ padding: "0.15rem 0.25rem", fontSize: "0.8rem" }}
+                        >
+                          <option value="data_entry">Data entry</option>
+                          <option value="view">View only</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => setEditAssignments((prev) => prev.filter((x) => x.user_id !== a.user_id))}
+                          style={{ padding: 0, border: "none", background: "none", cursor: "pointer", fontSize: "1rem" }}
+                          aria-label="Remove"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    );
+                  })}
+                  {orgUsers.filter((u) => !editAssignments.some((a) => a.user_id === u.id)).length > 0 && (
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v) {
+                          setEditAssignments((prev) => [...prev, { user_id: Number(v), permission: "data_entry" }]);
+                          e.target.value = "";
+                        }
+                      }}
+                      style={{ marginLeft: "0.25rem", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                    >
+                      <option value="">Add user…</option>
+                      {orgUsers
+                        .filter((u) => !editAssignments.some((a) => a.user_id === u.id))
+                        .map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.full_name || u.username}
+                          </option>
+                        ))}
+                    </select>
+                  )}
+                </span>
               ) : (
-                assignedNames.length > 0 ? assignedNames[0] : "None"
+                <>
+                  {dataEntryAssignees.length > 0 && (
+                    <span style={{ marginRight: "0.75rem" }}>
+                      Data entry: {dataEntryAssignees.map((u) => (u.full_name || u.username || "").trim() || u.username).join(", ")}
+                    </span>
+                  )}
+                  {viewOnlyAssignees.length > 0 && (
+                    <span>View only: {viewOnlyAssignees.map((u) => (u.full_name || u.username || "").trim() || u.username).join(", ")}</span>
+                  )}
+                  {assignedUsers.length === 0 && "None"}
+                </>
               )}
             </p>
             {lastUpdatedFormatted && (
@@ -385,7 +480,7 @@ export default function DomainKpiDetailPage() {
                 </button>
               </>
             ) : (
-              !isLocked && (
+              !isLocked && canEditKpi && (
                 <button type="button" className="btn btn-primary" onClick={startEditing}>
                   Edit
                 </button>
@@ -819,11 +914,6 @@ export default function DomainKpiDetailPage() {
         })}
       </div>
 
-      <p style={{ marginTop: "1rem", fontSize: "0.85rem", color: "var(--muted)" }}>
-        <Link href={`/dashboard/entries/${kpiId}/${year}?organization_id=${effectiveOrgId}&from_domain=${domainId}`} style={{ color: "var(--primary)" }}>
-          Open full data entry page →
-        </Link>
-      </p>
     </div>
   );
 }

@@ -73,11 +73,17 @@ async def get_or_create_entry(
     return entry, True
 
 
-async def user_can_edit_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool:
-    """Check if user is assigned to KPI or is org admin."""
-    result = await db.execute(
-        select(User).where(User.id == user_id)
-    )
+def _assignment_type_value(a) -> str:
+    """Return assignment_type as string (handles enum or string column)."""
+    t = getattr(a, "assignment_type", None)
+    if t is None:
+        return "data_entry"
+    return t.value if hasattr(t, "value") else str(t)
+
+
+async def user_can_view_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool:
+    """Check if user can view KPI (org/super admin or has any assignment: view or data_entry)."""
+    result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         return False
@@ -90,6 +96,26 @@ async def user_can_edit_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool
         )
     )
     return result.scalar_one_or_none() is not None
+
+
+async def user_can_edit_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool:
+    """Check if user can edit KPI (org/super admin or has data_entry assignment)."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        return False
+    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return True
+    result = await db.execute(
+        select(KPIAssignment).where(
+            KPIAssignment.user_id == user_id,
+            KPIAssignment.kpi_id == kpi_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        return False
+    return _assignment_type_value(row) == "data_entry"
 
 
 async def _load_other_kpi_values(
@@ -352,26 +378,45 @@ async def list_entries_overview(
     """
     kpis = await list_available_kpis(db, user_id, org_id)
     kpi_ids = [k.id for k in kpis]
-    # Load assigned users per KPI (org admin assigns users to KPIs); also track user ids for "is assigned" check
+    # Load assigned users per KPI with permission (data_entry vs view); data_entry-only for "assigned" label
     assigned_by_kpi: dict[int, list[str]] = {kid: [] for kid in kpi_ids}
     assigned_users_detail_by_kpi: dict[int, list[dict]] = {kid: [] for kid in kpi_ids}
-    assigned_user_ids_by_kpi: dict[int, set[int]] = {kid: set() for kid in kpi_ids}
+    assigned_data_entry_ids_by_kpi: dict[int, set[int]] = {kid: set() for kid in kpi_ids}
+    current_user_permission_by_kpi: dict[int, str] = {}
     if kpi_ids:
         assign_res = await db.execute(
-            select(KPIAssignment.kpi_id, KPIAssignment.user_id, User.full_name, User.username, User.email)
+            select(
+                KPIAssignment.kpi_id,
+                KPIAssignment.user_id,
+                KPIAssignment.assignment_type,
+                User.full_name,
+                User.username,
+                User.email,
+            )
             .join(User, User.id == KPIAssignment.user_id)
             .where(KPIAssignment.kpi_id.in_(kpi_ids))
         )
         for row in assign_res.all():
-            kpi_id, uid, full_name, username, email = row[0], row[1], row[2], row[3], row[4]
-            assigned_user_ids_by_kpi.setdefault(kpi_id, set()).add(uid)
-            display = (full_name or "").strip() or username or ""
-            if display and display not in assigned_by_kpi.get(kpi_id, []):
-                assigned_by_kpi.setdefault(kpi_id, []).append(display)
+            kpi_id, uid, atype, full_name, username, email = row[0], row[1], row[2], row[3], row[4], row[5]
+            perm = row[2].value if hasattr(row[2], "value") else str(row[2] or "data_entry")
+            if uid == user_id:
+                current_user_permission_by_kpi[kpi_id] = perm
+            if perm == "data_entry":
+                assigned_data_entry_ids_by_kpi.setdefault(kpi_id, set()).add(uid)
+                display = (full_name or "").strip() or username or ""
+                if display and display not in assigned_by_kpi.get(kpi_id, []):
+                    assigned_by_kpi.setdefault(kpi_id, []).append(display)
             assigned_users_detail_by_kpi.setdefault(kpi_id, []).append({
                 "display_name": (full_name or "").strip() or username or "",
                 "email": (email or "").strip() or None,
+                "permission": perm,
             })
+    # Org admin / super admin see all KPIs with data_entry permission (no assignment row)
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    current_user_obj = user_res.scalar_one_or_none()
+    if current_user_obj and current_user_obj.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        for kid in kpi_ids:
+            current_user_permission_by_kpi[kid] = "data_entry"
     result = []
     for kpi in kpis:
         entry = await _get_entry_for_overview(db, org_id, kpi.id, year)
@@ -381,6 +426,7 @@ async def list_entries_overview(
             "kpi_year": kpi.year,
             "assigned_user_names": assigned_by_kpi.get(kpi.id, []),
             "assigned_users": assigned_users_detail_by_kpi.get(kpi.id, []),
+            "current_user_permission": current_user_permission_by_kpi.get(kpi.id) or "data_entry",
             "entry": None,
         }
         if entry:
@@ -410,7 +456,7 @@ async def list_entries_overview(
             entered_by_name = None
             if entry.user:
                 entered_by_name = (entry.user.full_name or entry.user.username or "").strip() or entry.user.username
-            assigned_ids = assigned_user_ids_by_kpi.get(kpi.id, set())
+            assigned_ids = assigned_data_entry_ids_by_kpi.get(kpi.id, set())
             data_entry_user_is_assigned = entry.user_id is not None and entry.user_id in assigned_ids
             item["entry"] = {
                 "id": entry.id,

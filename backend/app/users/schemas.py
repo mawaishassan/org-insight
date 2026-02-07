@@ -5,6 +5,13 @@ from pydantic import BaseModel, Field
 from app.core.models import UserRole
 
 
+class UserKpiAssignment(BaseModel):
+    """KPI assignment for a user: kpi_id and permission (view or data_entry)."""
+
+    kpi_id: int = Field(..., description="KPI in same organization")
+    permission: str = Field(default="data_entry", description="data_entry or view")
+
+
 class UserCreate(BaseModel):
     """Create user (Org Admin)."""
 
@@ -13,7 +20,11 @@ class UserCreate(BaseModel):
     email: str | None = None
     full_name: str | None = None
     role: UserRole = UserRole.USER
-    kpi_ids: list[int] = Field(default_factory=list)
+    kpi_ids: list[int] = Field(default_factory=list, description="Legacy: assign as data_entry")
+    kpi_assignments: list[UserKpiAssignment] | None = Field(
+        default=None,
+        description="KPI assignments with permission (overrides kpi_ids if provided)",
+    )
     report_template_ids: list[int] = Field(default_factory=list)
 
 
@@ -26,7 +37,11 @@ class UserUpdate(BaseModel):
     password: str | None = None
     role: UserRole | None = None
     is_active: bool | None = None
-    kpi_ids: list[int] | None = None
+    kpi_ids: list[int] | None = Field(None, description="Legacy: replace with data_entry")
+    kpi_assignments: list[UserKpiAssignment] | None = Field(
+        None,
+        description="Replace KPI assignments with permission (overrides kpi_ids if provided)",
+    )
     report_template_ids: list[int] | None = None
 
 

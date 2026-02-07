@@ -34,8 +34,15 @@ async def create_user(
     )
     db.add(user)
     await db.flush()
-    for kpi_id in data.kpi_ids:
-        db.add(KPIAssignment(user_id=user.id, kpi_id=kpi_id))
+    if data.kpi_assignments is not None:
+        for a in data.kpi_assignments:
+            perm = (a.permission or "data_entry").strip().lower()
+            if perm not in ("data_entry", "view"):
+                perm = "data_entry"
+            db.add(KPIAssignment(user_id=user.id, kpi_id=a.kpi_id, assignment_type=perm))
+    else:
+        for kpi_id in data.kpi_ids:
+            db.add(KPIAssignment(user_id=user.id, kpi_id=kpi_id))
     for rt_id in data.report_template_ids:
         db.add(
             ReportAccessPermission(
@@ -94,7 +101,14 @@ async def update_user(
         user.role = data.role
     if data.is_active is not None:
         user.is_active = data.is_active
-    if data.kpi_ids is not None:
+    if data.kpi_assignments is not None:
+        await db.execute(delete(KPIAssignment).where(KPIAssignment.user_id == user_id))
+        for a in data.kpi_assignments:
+            perm = (a.permission or "data_entry").strip().lower()
+            if perm not in ("data_entry", "view"):
+                perm = "data_entry"
+            db.add(KPIAssignment(user_id=user_id, kpi_id=a.kpi_id, assignment_type=perm))
+    elif data.kpi_ids is not None:
         await db.execute(delete(KPIAssignment).where(KPIAssignment.user_id == user_id))
         for kpi_id in data.kpi_ids:
             db.add(KPIAssignment(user_id=user_id, kpi_id=kpi_id))

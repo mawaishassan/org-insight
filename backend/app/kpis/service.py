@@ -417,22 +417,31 @@ async def remove_kpi_category(db: AsyncSession, kpi_id: int, category_id: int, o
     return True
 
 
-async def list_kpi_assignments(db: AsyncSession, kpi_id: int, org_id: int) -> list[User]:
-    """List users assigned to this KPI (for data entry)."""
+def _assignment_type_str(a: KPIAssignment) -> str:
+    t = getattr(a, "assignment_type", None)
+    if t is None:
+        return "data_entry"
+    return t.value if hasattr(t, "value") else str(t)
+
+
+async def list_kpi_assignments(db: AsyncSession, kpi_id: int, org_id: int) -> list[tuple[User, str]]:
+    """List (user, permission) assigned to this KPI. Permission is 'data_entry' or 'view'."""
     kpi = await get_kpi(db, kpi_id, org_id)
     if not kpi:
         return []
     result = await db.execute(
-        select(User)
+        select(User, KPIAssignment)
         .join(KPIAssignment, KPIAssignment.user_id == User.id)
         .where(KPIAssignment.kpi_id == kpi_id, User.organization_id == org_id)
         .order_by(User.username)
     )
-    return list(result.scalars().unique().all())
+    return [(row[0], _assignment_type_str(row[1])) for row in result.all()]
 
 
-async def assign_user_to_kpi(db: AsyncSession, kpi_id: int, user_id: int, org_id: int) -> bool:
-    """Assign a user to KPI so they can add data. Only one user per KPI; assigning replaces any existing."""
+async def assign_user_to_kpi(
+    db: AsyncSession, kpi_id: int, user_id: int, org_id: int, permission: str = "data_entry"
+) -> bool:
+    """Assign a user to KPI with permission (data_entry or view)."""
     kpi = await get_kpi(db, kpi_id, org_id)
     if not kpi:
         return False
@@ -440,9 +449,14 @@ async def assign_user_to_kpi(db: AsyncSession, kpi_id: int, user_id: int, org_id
     user = result.scalar_one_or_none()
     if not user:
         return False
-    # Remove any existing assignments for this KPI (only one user allowed)
-    await db.execute(delete(KPIAssignment).where(KPIAssignment.kpi_id == kpi_id))
-    db.add(KPIAssignment(kpi_id=kpi_id, user_id=user_id))
+    perm = (permission or "data_entry").strip().lower()
+    if perm not in ("data_entry", "view"):
+        perm = "data_entry"
+    # Upsert: remove existing for this user+kpi then add
+    await db.execute(
+        delete(KPIAssignment).where(KPIAssignment.kpi_id == kpi_id, KPIAssignment.user_id == user_id)
+    )
+    db.add(KPIAssignment(kpi_id=kpi_id, user_id=user_id, assignment_type=perm))
     await db.flush()
     return True
 
@@ -463,18 +477,26 @@ async def unassign_user_from_kpi(db: AsyncSession, kpi_id: int, user_id: int, or
     return True
 
 
-async def replace_kpi_assignments(db: AsyncSession, kpi_id: int, user_ids: list[int], org_id: int) -> bool:
-    """Replace all assignments for this KPI with the given user IDs (org admin)."""
+async def replace_kpi_assignments(
+    db: AsyncSession,
+    kpi_id: int,
+    assignments: list[tuple[int, str]],
+    org_id: int,
+) -> bool:
+    """Replace all assignments for this KPI. assignments: list of (user_id, permission) with permission in ('data_entry', 'view')."""
     kpi = await get_kpi(db, kpi_id, org_id)
     if not kpi:
         return False
-    for uid in user_ids:
+    for uid, _ in assignments:
         result = await db.execute(select(User).where(User.id == uid, User.organization_id == org_id))
         if result.scalar_one_or_none() is None:
             return False
     await db.execute(delete(KPIAssignment).where(KPIAssignment.kpi_id == kpi_id))
-    for uid in user_ids:
-        db.add(KPIAssignment(kpi_id=kpi_id, user_id=uid))
+    for uid, perm in assignments:
+        p = (perm or "data_entry").strip().lower() if isinstance(perm, str) else "data_entry"
+        if p not in ("data_entry", "view"):
+            p = "data_entry"
+        db.add(KPIAssignment(kpi_id=kpi_id, user_id=uid, assignment_type=p))
     await db.flush()
     return True
 
