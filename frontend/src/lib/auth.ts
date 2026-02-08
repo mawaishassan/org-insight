@@ -66,3 +66,8 @@ export function canEnterData(role: UserRole): boolean {
 export function canViewReports(role: UserRole): boolean {
   return role === "REPORT_VIEWER" || role === "ORG_ADMIN" || role === "SUPER_ADMIN" || role === "USER";
 }
+
+/** Chat with KPI data (NLP) is for organization admins only. */
+export function canUseChat(role: UserRole): boolean {
+  return role === "ORG_ADMIN" || role === "SUPER_ADMIN";
+}

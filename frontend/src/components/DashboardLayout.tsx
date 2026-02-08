@@ -14,6 +14,7 @@ import {
   canManageDomains,
   canEnterData,
   canViewReports,
+  canUseChat,
 } from "@/lib/auth";
 
 const currentYear = new Date().getFullYear();
@@ -129,6 +130,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   };
 
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
+    { href: "/dashboard/chat", label: "Chat with data", show: canUseChat(role) },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && !isDataEntryOnlyUser && canViewReports(role) },
     { href: "/dashboard/users", label: "Users", show: !isSuperAdmin && canManageUsers(role) },
   ].filter((x) => x.show);
