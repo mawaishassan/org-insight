@@ -99,6 +99,7 @@ export default function DomainKpiDetailPage() {
   const organizationIdFromUrl = orgIdParam ? Number(orgIdParam) : undefined;
 
   const [meOrgId, setMeOrgId] = useState<number | null>(null);
+  const [meRole, setMeRole] = useState<string | null>(null);
   const [kpiName, setKpiName] = useState<string>("");
   const [fields, setFields] = useState<FieldDef[]>([]);
   const [entry, setEntry] = useState<EntryRow | null>(null);
@@ -162,9 +163,15 @@ export default function DomainKpiDetailPage() {
 
   useEffect(() => {
     if (!token) return;
-    api<{ organization_id: number | null }>("/auth/me", { token })
-      .then((me) => setMeOrgId(me.organization_id ?? null))
-      .catch(() => setMeOrgId(null));
+    api<{ organization_id: number | null; role: string }>("/auth/me", { token })
+      .then((me) => {
+        setMeOrgId(me.organization_id ?? null);
+        setMeRole(me.role ?? null);
+      })
+      .catch(() => {
+        setMeOrgId(null);
+        setMeRole(null);
+      });
   }, [token]);
 
   const loadData = async () => {
@@ -267,11 +274,14 @@ export default function DomainKpiDetailPage() {
         token,
       });
       setEntry(updated);
-      await api(`/kpis/${kpiId}/assignments?${saveQuery}`, {
-        method: "PUT",
-        body: JSON.stringify({ assignments: editAssignments.map((a) => ({ user_id: a.user_id, permission: a.permission || "data_entry" })) }),
-        token,
-      });
+      const isOrgAdmin = meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN";
+      if (isOrgAdmin) {
+        await api(`/kpis/${kpiId}/assignments?${saveQuery}`, {
+          method: "PUT",
+          body: JSON.stringify({ assignments: editAssignments.map((a) => ({ user_id: a.user_id, permission: a.permission || "data_entry" })) }),
+          token,
+        });
+      }
       await loadData();
       setIsEditing(false);
     } catch (err) {
