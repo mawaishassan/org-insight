@@ -1,7 +1,13 @@
 """Application configuration loaded from environment."""
 
-from pydantic_settings import BaseSettings
+from pathlib import Path
 from functools import lru_cache
+
+from pydantic_settings import BaseSettings
+
+# Load .env from backend directory so it works when running from project root or backend/
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+_ENV_FILE = _BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
@@ -23,8 +29,12 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
+    # Chat / NLP (OpenAI)
+    OPENAI_API_KEY: str = ""
+    CHAT_MODEL: str = "gpt-4o-mini"
+
     class Config:
-        env_file = ".env"
+        env_file = _ENV_FILE
         case_sensitive = True
 
 

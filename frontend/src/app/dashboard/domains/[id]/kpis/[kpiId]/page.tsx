@@ -120,6 +120,8 @@ export default function DomainKpiDetailPage() {
   const [fetchingFromApi, setFetchingFromApi] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [bulkMethod, setBulkMethod] = useState<"upload" | "api">("upload");
+  /** Bulk upload section is hidden until user clicks the "Bulk upload" link (per multi_line field) */
+  const [bulkExpandedByFieldId, setBulkExpandedByFieldId] = useState<Record<number, boolean>>({});
 
   type FormCell = { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
@@ -643,6 +645,28 @@ export default function DomainKpiDetailPage() {
                 <p style={{ color: "var(--muted)" }}>No sub-fields defined.</p>
               ) : (
                 <>
+                  <div style={{ marginBottom: "0.75rem", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      onClick={() => setBulkExpandedByFieldId((prev) => ({ ...prev, [f.id]: !prev[f.id] }))}
+                      style={{
+                        padding: "0.35rem 0.5rem",
+                        border: "1px solid var(--border)",
+                        borderRadius: 6,
+                        background: "var(--surface)",
+                        fontSize: "0.85rem",
+                        cursor: "pointer",
+                        minWidth: 32,
+                      }}
+                      title={bulkExpandedByFieldId[f.id] ? "Collapse" : "Expand"}
+                    >
+                      {bulkExpandedByFieldId[f.id] ? "▲" : "▼"}
+                    </button>
+                    <span style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+                      Bulk upload
+                    </span>
+                  </div>
+                  {bulkExpandedByFieldId[f.id] && (
                   <div
                     className="card"
                     style={{
@@ -652,10 +676,26 @@ export default function DomainKpiDetailPage() {
                       border: "1px solid var(--border)",
                     }}
                   >
-                    <div style={{ marginBottom: "0.75rem" }}>
-                      <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.35rem", color: "var(--text-secondary)" }}>
-                        Bulk load data
-                      </label>
+                    <div style={{ marginBottom: "0.75rem", display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+                      {bulkMethod === "api" && kpiApiInfo?.api_endpoint_url && (
+                        <a
+                          href={kpiApiInfo.api_endpoint_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{
+                            fontSize: "0.9rem",
+                            color: "var(--accent)",
+                            textDecoration: "none",
+                            maxWidth: "100%",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={kpiApiInfo.api_endpoint_url}
+                        >
+                          {kpiApiInfo.api_endpoint_url}
+                        </a>
+                      )}
                       <select
                         value={isApiKpi ? bulkMethod : "upload"}
                         onChange={(e) => setBulkMethod(e.target.value as "upload" | "api")}
@@ -805,6 +845,7 @@ export default function DomainKpiDetailPage() {
                       </div>
                     )}
                   </div>
+                  )}
 
                   {isEditing && (
                     <div style={{ marginBottom: "0.75rem" }}>

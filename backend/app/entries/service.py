@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from app.core.models import (
@@ -334,6 +334,118 @@ async def list_entries(
     return list(result.unique().scalars().all())
 
 
+async def get_latest_year_with_entries(
+    db: AsyncSession,
+    org_id: int,
+    kpi_ids: list[int],
+) -> int | None:
+    """Return the latest (max) year that has at least one entry for the given org and KPIs, or None."""
+    if not kpi_ids:
+        return None
+    q = select(func.max(KPIEntry.year)).where(
+        KPIEntry.organization_id == org_id,
+        KPIEntry.kpi_id.in_(kpi_ids),
+    )
+    r = await db.execute(q)
+    val = r.scalar()
+    return int(val) if val is not None else None
+
+
+async def get_available_years(
+    db: AsyncSession,
+    org_id: int,
+    kpi_ids: list[int],
+    limit: int = 10,
+) -> list[int]:
+    """Return distinct years (descending) that have at least one entry for the given org and KPIs."""
+    if not kpi_ids:
+        return []
+    q = (
+        select(KPIEntry.year)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id.in_(kpi_ids),
+        )
+        .distinct()
+        .order_by(KPIEntry.year.desc())
+        .limit(limit)
+    )
+    r = await db.execute(q)
+    return [int(row[0]) for row in r.all()]
+
+
+async def get_entries_for_kpis(
+    db: AsyncSession,
+    org_id: int,
+    kpi_ids: list[int],
+    year: int,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Load entries for given org, kpi_ids, and year. Returns (rows, missing_kpis).
+    - rows: list of { "kpi_id", "kpi_name", "entry_id", "row": { field_key: display_value } }
+    - missing_kpis: list of { "kpi_id", "kpi_name", "assigned_user_names": [...] } for KPIs with no entry.
+    """
+    if not kpi_ids:
+        return [], []
+    # Load KPIs with fields (for names and keys)
+    from sqlalchemy.orm import selectinload as sl
+    kpi_q = select(KPI).where(KPI.id.in_(kpi_ids)).options(sl(KPI.fields).selectinload(KPIField.sub_fields))
+    kpi_res = await db.execute(kpi_q)
+    kpis = {k.id: k for k in kpi_res.scalars().all()}
+    # Load entries with field_values and field
+    entry_q = (
+        select(KPIEntry)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id.in_(kpi_ids),
+            KPIEntry.year == year,
+        )
+        .options(
+            selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field).selectinload(KPIField.sub_fields),
+        )
+    )
+    entry_res = await db.execute(entry_q)
+    entries = list(entry_res.scalars().all())
+    entry_by_kpi = {e.kpi_id: e for e in entries}
+    rows = []
+    for e in entries:
+        kpi = kpis.get(e.kpi_id)
+        kpi_name = kpi.name if kpi else ""
+        row = {}
+        for fv in e.field_values or []:
+            if fv.field:
+                row[fv.field.key] = _format_field_value(fv)
+        rows.append({"kpi_id": e.kpi_id, "kpi_name": kpi_name, "entry_id": e.id, "row": row})
+    missing_ids = [kid for kid in kpi_ids if kid not in entry_by_kpi]
+    if not missing_ids:
+        return rows, []
+    # Data-entry assignees for missing KPIs
+    assign_q = (
+        select(KPIAssignment.kpi_id, User.full_name, User.username)
+        .join(User, User.id == KPIAssignment.user_id)
+        .where(
+            KPIAssignment.kpi_id.in_(missing_ids),
+            KPIAssignment.assignment_type == "data_entry",
+        )
+    )
+    assign_res = await db.execute(assign_q)
+    assignees_by_kpi: dict[int, list[str]] = {}
+    for row in assign_res.all():
+        kpi_id, full_name, username = row[0], row[1], row[2]
+        display = (full_name or "").strip() or username or ""
+        if display and kpi_id in missing_ids:
+            assignees_by_kpi.setdefault(kpi_id, []).append(display)
+    missing_kpis = [
+        {
+            "kpi_id": kid,
+            "kpi_name": kpis.get(kid).name if kpis.get(kid) else "",
+            "assigned_user_names": assignees_by_kpi.get(kid, []),
+        }
+        for kid in missing_ids
+    ]
+    return rows, missing_kpis
+
+
 def _format_field_value(fv) -> str:
     """Format a field value for display."""
     if fv.value_text is not None:
@@ -345,8 +457,30 @@ def _format_field_value(fv) -> str:
     if fv.value_date is not None:
         return str(fv.value_date)[:10] if hasattr(fv.value_date, "isoformat") else str(fv.value_date)
     if fv.value_json is not None:
+        # multi_line_items: use sub_fields for readable summary when available
+        if getattr(fv.field, "field_type", None) == FieldType.multi_line_items and isinstance(fv.value_json, list):
+            return _format_multi_line_for_display(fv)
         return str(fv.value_json)[:80]
     return ""
+
+
+def _format_multi_line_for_display(fv) -> str:
+    """Format multi_line_items value_json as a short summary using sub_field keys (for NLP/chat)."""
+    if not isinstance(fv.value_json, list) or not fv.field:
+        return str(fv.value_json)[:80] if fv.value_json else ""
+    sub_fields = getattr(fv.field, "sub_fields", None) or []
+    keys = [sf.key for sf in sorted(sub_fields, key=lambda x: getattr(x, "sort_order", 0))]
+    parts = []
+    for item in fv.value_json[:5]:  # first 5 items
+        if not isinstance(item, dict):
+            parts.append(str(item)[:40])
+            continue
+        if not keys:
+            keys = list(item.keys())[:5]
+        pair_str = ", ".join(f"{k}={str(item.get(k, ''))[:25]}" for k in keys)
+        parts.append(pair_str[:60])
+    out = f"{len(fv.value_json)} item(s): " + "; ".join(parts) if parts else f"{len(fv.value_json)} item(s)"
+    return out[:250]
 
 
 async def _get_entry_for_overview(

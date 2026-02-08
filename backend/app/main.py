@@ -14,6 +14,7 @@ from app.org_tags.routes import router as org_tags_router
 from app.fields.routes import router as fields_router
 from app.entries.routes import router as entries_router
 from app.reports.routes import router as reports_router
+from app.chat.routes import router as chat_router
 
 settings = get_settings()
 
@@ -41,6 +42,7 @@ app.include_router(org_tags_router, prefix="/api/organizations")
 app.include_router(fields_router, prefix="/api")
 app.include_router(entries_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
+app.include_router(chat_router, prefix="/api")
 
 
 @app.get("/health")
