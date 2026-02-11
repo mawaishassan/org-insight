@@ -628,7 +628,7 @@ function DomainsSection({
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
         <h2 style={{ fontSize: "1.1rem" }}>Domains</h2>
-        <button type="button" className="btn btn-primary" onClick={() => setShowCreate((s) => !s)}>
+        <button type="button" className="btn btn-primary" onClick={() => setShowCreate(!showCreate)}>
           {showCreate ? "Cancel" : "Add domain"}
         </button>
       </div>
@@ -774,7 +774,7 @@ function TagsSection({
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
         <h2 style={{ fontSize: "1.1rem" }}>Organization tags</h2>
-        <button type="button" className="btn btn-primary" onClick={() => setShowCreate((s) => !s)}>
+        <button type="button" className="btn btn-primary" onClick={() => setShowCreate(!showCreate)}>
           {showCreate ? "Cancel" : "Add tag"}
         </button>
       </div>
@@ -1047,7 +1047,7 @@ function KpisSection({
         <button
           type="button"
           className="btn btn-primary"
-          onClick={() => setShowCreate((s) => !s)}
+          onClick={() => setShowCreate(!showCreate)}
         >
           {showCreate ? "Cancel" : "Add KPI"}
         </button>
@@ -1272,7 +1272,7 @@ function KpiEditForm({
       description: kpi.description ?? "",
       year: kpi.year,
       sort_order: kpi.sort_order,
-      entry_mode: kpi.entry_mode ?? "manual",
+      entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
       api_endpoint_url: kpi.api_endpoint_url ?? "",
       organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
     },
@@ -1625,7 +1625,7 @@ function FieldsSection({
             ))}
           </select>
         </div>
-        <button type="button" className="btn btn-primary" onClick={() => setShowCreate((s) => !s)}>
+        <button type="button" className="btn btn-primary" onClick={() => setShowCreate(!showCreate)}>
           {showCreate ? "Cancel" : "Add field"}
         </button>
       </div>

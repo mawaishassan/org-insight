@@ -79,8 +79,10 @@ type CreateFormData = z.infer<typeof createSchema>;
 type UpdateFormData = z.infer<typeof updateSchema>;
 
 function qs(params: Record<string, string | number | undefined>) {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
-  return new URLSearchParams(entries as Record<string, string>).toString();
+  const entries = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== "")
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  return new URLSearchParams(entries).toString();
 }
 
 export default function DomainDetailPage() {

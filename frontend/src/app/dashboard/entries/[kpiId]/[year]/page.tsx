@@ -48,8 +48,10 @@ interface EntryRow {
 }
 
 function qs(params: Record<string, string | number | undefined>) {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
-  return new URLSearchParams(entries as Record<string, string>).toString();
+  const entries = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== "")
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  return new URLSearchParams(entries).toString();
 }
 
 export default function EntryDetailPage() {
@@ -196,7 +198,7 @@ function EntryForm({
   setExistingEntry: (e: EntryRow | null) => void;
   token: string;
   organizationId?: number;
-  loadEntry?: () => Promise<void>;
+  loadEntry?: (opts?: { cacheBust?: boolean }) => Promise<void>;
   entryMode?: string | null;
   apiEndpointUrl?: string | null;
 }) {

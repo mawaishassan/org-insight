@@ -31,8 +31,10 @@ interface KpiRow {
 }
 
 function qs(params: Record<string, string | number | undefined>) {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
-  return new URLSearchParams(entries as Record<string, string>).toString();
+  const entries = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== "")
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  return new URLSearchParams(entries).toString();
 }
 
 export interface KpiCardsGridProps {
@@ -169,9 +171,10 @@ export function KpiCardsGrid({
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
       {filteredKpis.map((kpi) => {
         const item = overviewByKpiId.get(kpi.id);
-        const hasEntry = item?.entry != null;
-        const status = !hasEntry ? "not_entered" : item!.entry.is_locked ? "locked" : item!.entry.is_draft ? "draft" : "submitted";
-        const preview = hasEntry && item!.entry.preview ? item!.entry.preview : [];
+        const entry = item?.entry ?? null;
+        const hasEntry = entry != null;
+        const status = !hasEntry ? "not_entered" : entry.is_locked ? "locked" : entry.is_draft ? "draft" : "submitted";
+        const preview = hasEntry && entry.preview ? entry.preview : [];
         const assignedCount = item?.assigned_user_names?.length ?? 0;
         const assignedUsers = item?.assigned_users ?? [];
         const noAssigned = assignedCount === 0;

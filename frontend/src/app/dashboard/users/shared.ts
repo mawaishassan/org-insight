@@ -8,6 +8,7 @@ export interface UserRow {
   email: string | null;
   full_name: string | null;
   role: string;
+  organization_id: number | null;
   is_active: boolean;
 }
 

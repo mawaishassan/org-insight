@@ -99,8 +99,10 @@ type CreateFormData = z.infer<typeof createSchema>;
 type UpdateFormData = z.infer<typeof updateSchema>;
 
 function qs(params: Record<string, string | number | undefined>) {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "" && v !== 0);
-  return new URLSearchParams(entries as Record<string, string>).toString();
+  const entries = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== "" && v !== 0)
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  return new URLSearchParams(entries).toString();
 }
 
 interface ApiContractField {
@@ -679,7 +681,7 @@ function KpiEditForm({
       description: kpi.description ?? "",
       year: kpi.year,
       sort_order: kpi.sort_order,
-      entry_mode: kpi.entry_mode ?? "manual",
+      entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
       api_endpoint_url: kpi.api_endpoint_url ?? "",
     },
   });

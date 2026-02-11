@@ -45,8 +45,10 @@ interface OrgTagRow {
 }
 
 function qs(params: Record<string, string | number | undefined>) {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
-  return new URLSearchParams(entries as Record<string, string>).toString();
+  const entries = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== "")
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  return new URLSearchParams(entries).toString();
 }
 
 function isKpiInCategory(kpi: KpiRow, categoryId: number): boolean {
@@ -347,7 +349,7 @@ export default function AttachKpisPage() {
                     )}
                     {(kpi.category_tags?.length ?? 0) > 0 && (
                       <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.2rem" }}>
-                        Attached: {formatAttachedDomainsAndCategories(kpi.category_tags)}
+                        Attached: {formatAttachedDomainsAndCategories(kpi.category_tags ?? [])}
                       </span>
                     )}
                     {(kpi.category_tags?.length ?? 0) === 0 && !attachedElsewhereInDomain && (

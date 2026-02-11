@@ -66,8 +66,10 @@ interface UserRef {
 }
 
 function qs(params: Record<string, string | number | undefined>) {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
-  return new URLSearchParams(entries as Record<string, string>).toString();
+  const entries = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== "")
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  return new URLSearchParams(entries).toString();
 }
 
 const FORMULA_BOX_COLORS = [
@@ -979,28 +981,38 @@ export default function DomainKpiDetailPage() {
                               <td key={s.id} style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
                                 {isEditing ? (
                                   s.field_type === "number" ? (
-                                    <input
-                                      type="number"
-                                      step="any"
-                                      value={typeof row[s.key] === "number" ? row[s.key] : ""}
-                                      onChange={(e) => {
+                                    (() => {
+                                      const cellVal = row[s.key];
+                                      return (
+                                        <input
+                                          type="number"
+                                          step="any"
+                                          value={typeof cellVal === "number" ? cellVal : ""}
+                                          onChange={(e) => {
                                         const next = [...rows];
                                         next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value === "" ? undefined : Number(e.target.value) };
                                         setRows(next);
                                       }}
-                                      style={{ width: "100%", maxWidth: 140, padding: "0.35rem" }}
-                                    />
+                                          style={{ width: "100%", maxWidth: 140, padding: "0.35rem" }}
+                                        />
+                                      );
+                                    })()
                                   ) : s.field_type === "date" ? (
-                                    <input
-                                      type="date"
-                                      value={typeof row[s.key] === "string" ? row[s.key] : ""}
-                                      onChange={(e) => {
-                                        const next = [...rows];
-                                        next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value || undefined };
-                                        setRows(next);
-                                      }}
-                                      style={{ width: "100%", maxWidth: 140, padding: "0.35rem" }}
-                                    />
+                                    (() => {
+                                      const cellVal = row[s.key];
+                                      return (
+                                        <input
+                                          type="date"
+                                          value={typeof cellVal === "string" ? cellVal : ""}
+                                          onChange={(e) => {
+                                            const next = [...rows];
+                                            next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value || undefined };
+                                            setRows(next);
+                                          }}
+                                          style={{ width: "100%", maxWidth: 140, padding: "0.35rem" }}
+                                        />
+                                      );
+                                    })()
                                   ) : s.field_type === "boolean" ? (
                                     <input
                                       type="checkbox"
@@ -1012,16 +1024,21 @@ export default function DomainKpiDetailPage() {
                                       }}
                                     />
                                   ) : (
-                                    <input
-                                      type="text"
-                                      value={typeof row[s.key] === "string" ? row[s.key] : String(row[s.key] ?? "")}
-                                      onChange={(e) => {
-                                        const next = [...rows];
-                                        next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value };
-                                        setRows(next);
-                                      }}
-                                      style={{ width: "100%", minWidth: 80, padding: "0.35rem" }}
-                                    />
+                                    (() => {
+                                      const cellVal = row[s.key];
+                                      return (
+                                        <input
+                                          type="text"
+                                          value={typeof cellVal === "string" ? cellVal : String(cellVal ?? "")}
+                                          onChange={(e) => {
+                                            const next = [...rows];
+                                            next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value };
+                                            setRows(next);
+                                          }}
+                                          style={{ width: "100%", minWidth: 80, padding: "0.35rem" }}
+                                        />
+                                      );
+                                    })()
                                   )
                                 ) : (
                                   row[s.key] != null ? String(row[s.key]) : "—"
