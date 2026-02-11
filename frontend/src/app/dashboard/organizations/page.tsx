@@ -490,7 +490,14 @@ export default function OrganizationsPage() {
                   >
                     {o.is_active ? "Deactivate" : "Activate"}
                   </button>
-                  <Link href={`/dashboard/organizations/${o.id}`} className="btn btn-primary" style={{ textDecoration: "none", marginLeft: "auto" }}>
+                  <Link href={`/dashboard/organizations/${o.id}/data-export`} className="btn">
+                    API export
+                  </Link>
+                  <Link
+                    href={`/dashboard/organizations/${o.id}`}
+                    className="btn btn-primary"
+                    style={{ textDecoration: "none", marginLeft: "auto" }}
+                  >
                     Manage
                   </Link>
                 </div>

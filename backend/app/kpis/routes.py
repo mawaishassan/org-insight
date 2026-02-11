@@ -28,6 +28,7 @@ from app.kpis.service import (
     get_kpi_with_tags_by_id,
     list_kpis,
     list_kpis_for_formula_refs,
+    list_kpi_data_for_export,
     update_kpi,
     delete_kpi,
     get_kpi_child_data_summary,
@@ -135,6 +136,43 @@ async def list_org_kpis(
         db, org_id, domain_id=domain_id, category_id=category_id, organization_tag_id=organization_tag_id, year=year, name=name
     )
     return [_kpi_to_response(k) for k in kpis]
+
+
+@router.get("/data-export")
+async def export_kpis_json(
+    organization_id: int | None = Query(None),
+    year: int | None = Query(None, ge=2000, le=2100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """
+    Export KPI data (definition + fields + values) in JSON format.
+
+    Response shape:
+    [
+        {
+            "kpi_id": ...,
+            "kpi_name": ...,
+            "kpi_description": ...,
+            "kpi_year": ...,
+            "kpi_fields_ids": [...],
+            "kpi_fields": [
+                {
+                    "kpi_field_id": ...,
+                    "kpi_field_key": ...,
+                    "kpi_field_data_type": ...,
+                    "kpi_field_values": ...,
+                    "kpi_field_year": ...,
+                },
+                ...
+            ],
+        },
+        ...
+    ]
+    """
+    org_id = _org_id(current_user, organization_id)
+    items = await list_kpi_data_for_export(db, org_id, year=year)
+    return items
 
 
 @router.post("", response_model=KPIResponse, status_code=status.HTTP_201_CREATED)

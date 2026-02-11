@@ -77,7 +77,7 @@ uni_kpi_mis/
 3. From `backend/`:
    - `pip install -r requirements.txt`
    - `alembic upgrade head` (create tables)
-   - `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
+   - `uvicorn app.main:app --reload --host 0.0.0.0 --port 8080`
 
 ### Frontend
 

@@ -509,6 +509,114 @@ def _normalized_field_type(f) -> str:
     return (str(ft) if ft else "single_line_text").lower()
 
 
+async def list_kpi_data_for_export(
+    db: AsyncSession,
+    org_id: int,
+    year: int | None = None,
+) -> list[dict]:
+    """
+    Return KPI data with fields and values for JSON export.
+
+    Shape:
+    [
+        {
+            "kpi_id": int,
+            "kpi_name": str,
+            "kpi_description": str | None,
+            "kpi_year": int,
+            "kpi_fields_ids": [int, ...],
+            "kpi_fields": [
+                {
+                    "kpi_field_id": int,
+                    "kpi_field_key": str,
+                    "kpi_field_data_type": str,
+                    "kpi_field_values": Any | None,
+                    "kpi_field_year": int | None,
+                },
+                ...
+            ],
+        },
+        ...
+    ]
+    """
+    # Load KPIs in organization (optionally for a specific year) with their fields.
+    kpi_query = select(KPI).where(KPI.organization_id == org_id)
+    if year is not None:
+        kpi_query = kpi_query.where(KPI.year == year)
+    kpi_query = kpi_query.order_by(KPI.sort_order, KPI.name).options(selectinload(KPI.fields))
+    result = await db.execute(kpi_query)
+    kpis: list[KPI] = list(result.unique().scalars().all())
+    if not kpis:
+        return []
+
+    kpi_ids = [k.id for k in kpis]
+
+    # Load submitted entries (one per KPI per year) with field values.
+    entry_query = (
+        select(KPIEntry)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id.in_(kpi_ids),
+            KPIEntry.is_draft == False,  # noqa: E712
+        )
+        .options(selectinload(KPIEntry.field_values))
+    )
+    if year is not None:
+        entry_query = entry_query.where(KPIEntry.year == year)
+    entry_result = await db.execute(entry_query)
+    entries: list[KPIEntry] = list(entry_result.unique().scalars().all())
+    entry_by_kpi: dict[int, KPIEntry] = {e.kpi_id: e for e in entries}
+
+    out: list[dict] = []
+    for k in kpis:
+        entry = entry_by_kpi.get(k.id)
+        fv_by_field_id: dict[int, KPIFieldValue] = {}
+        if entry and getattr(entry, "field_values", None):
+            fv_by_field_id = {fv.field_id: fv for fv in entry.field_values}
+
+        fields_payload: list[dict] = []
+        field_ids: list[int] = []
+        for f in getattr(k, "fields", []) or []:
+            field_ids.append(f.id)
+            fv = fv_by_field_id.get(f.id)
+            value = None
+            if fv is not None:
+                # Prefer explicit value_* attributes in a stable order.
+                if fv.value_date is not None:
+                    value = fv.value_date.isoformat() if hasattr(fv.value_date, "isoformat") else str(fv.value_date)
+                elif fv.value_json is not None:
+                    value = fv.value_json
+                elif fv.value_number is not None:
+                    value = fv.value_number
+                elif fv.value_boolean is not None:
+                    value = fv.value_boolean
+                else:
+                    value = fv.value_text
+
+            fields_payload.append(
+                {
+                    "kpi_field_id": f.id,
+                    "kpi_field_key": f.key,
+                    "kpi_field_data_type": _normalized_field_type(f),
+                    "kpi_field_values": value,
+                    "kpi_field_year": getattr(entry, "year", None) if entry else (year or k.year),
+                }
+            )
+
+        out.append(
+            {
+                "kpi_id": k.id,
+                "kpi_name": k.name,
+                "kpi_description": k.description,
+                "kpi_year": k.year,
+                "kpi_fields_ids": field_ids,
+                "kpi_fields": fields_payload,
+            }
+        )
+
+    return out
+
+
 def _normalize_api_boolean(raw) -> bool | None:
     """Convert API value to bool. Accepts bool, 1, 0, '1', '0', 'true', 'false' (case-insensitive). Returns None if not recognized."""
     if raw is None:
