@@ -121,6 +121,7 @@ export default function DomainKpiDetailPage() {
   const [fetchingFromApi, setFetchingFromApi] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [bulkMethod, setBulkMethod] = useState<"upload" | "api">("upload");
+  const [submitLoading, setSubmitLoading] = useState(false);
   /** Bulk upload section is hidden until user clicks the "Bulk upload" link (per multi_line field) */
   const [bulkExpandedByFieldId, setBulkExpandedByFieldId] = useState<Record<number, boolean>>({});
 
@@ -291,6 +292,26 @@ export default function DomainKpiDetailPage() {
     }
   };
 
+  const handleSubmitEntry = async () => {
+    if (!token || !entry?.id || effectiveOrgId == null) return;
+    setSaveError(null);
+    setSubmitLoading(true);
+    try {
+      const submitQuery = `?${qs({ organization_id: effectiveOrgId })}`;
+      const updated = await api<EntryRow>(`/entries/submit${submitQuery}`, {
+        method: "POST",
+        body: JSON.stringify({ entry_id: entry.id }),
+        token,
+      });
+      setEntry(updated);
+      await loadData();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Submit failed");
+    } finally {
+      setSubmitLoading(false);
+    }
+  };
+
   const backHref =
     domainId != null
       ? (effectiveOrgId != null
@@ -387,6 +408,45 @@ export default function DomainKpiDetailPage() {
               )}
             </div>
             <p style={{ color: "var(--muted)", marginBottom: "0.25rem" }}>Year {year}</p>
+            <p style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>
+              <strong>Entry status:</strong>{" "}
+              {entry ? (
+                entry.is_draft ? (
+                  <span
+                    style={{
+                      display: "inline-block",
+                      padding: "0.2rem 0.5rem",
+                      borderRadius: 4,
+                      background: "var(--warning)",
+                      color: "var(--on-muted)",
+                      fontWeight: 600,
+                      fontSize: "0.85rem",
+                    }}
+                  >
+                    Draft
+                  </span>
+                ) : (
+                  <span
+                    style={{
+                      display: "inline-block",
+                      padding: "0.2rem 0.5rem",
+                      borderRadius: 4,
+                      background: "var(--success)",
+                      color: "var(--on-muted)",
+                      fontWeight: 600,
+                      fontSize: "0.85rem",
+                    }}
+                  >
+                    Submitted
+                    {entry.submitted_at
+                      ? ` on ${new Date(entry.submitted_at).toLocaleDateString()}`
+                      : ""}
+                  </span>
+                )
+              ) : (
+                <span style={{ color: "var(--muted)" }}>No entry yet</span>
+              )}
+            </p>
             <p style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>
               <strong>Total fields:</strong> {totalFields}
             </p>
@@ -492,11 +552,37 @@ export default function DomainKpiDetailPage() {
                 </button>
               </>
             ) : (
-              !isLocked && canEditKpi && (
-                <button type="button" className="btn btn-primary" onClick={startEditing}>
-                  Edit
-                </button>
-              )
+              <>
+                {!isLocked && canEditKpi && (
+                  <button type="button" className="btn btn-primary" onClick={startEditing}>
+                    Edit
+                  </button>
+                )}
+                {entry?.id && entry.is_draft && !isLocked && canEditKpi && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={handleSubmitEntry}
+                    disabled={submitLoading}
+                  >
+                    {submitLoading ? "Submitting…" : "Submit entry"}
+                  </button>
+                )}
+                {entry?.id && !entry.is_draft && (
+                  <span
+                    style={{
+                      padding: "0.35rem 0.6rem",
+                      borderRadius: 6,
+                      background: "var(--success)",
+                      color: "var(--on-muted)",
+                      fontSize: "0.9rem",
+                      fontWeight: 500,
+                    }}
+                  >
+                    Submitted
+                  </span>
+                )}
+              </>
             )}
           </div>
         </div>

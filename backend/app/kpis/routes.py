@@ -4,8 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.auth.dependencies import require_org_admin
+from app.auth.dependencies import require_org_admin, get_current_user
 from app.core.models import User
+from app.entries.service import user_can_view_kpi
 from app.kpis.schemas import (
     KPICreate,
     KPIUpdate,
@@ -333,10 +334,13 @@ async def list_kpi_assignments_route(
     kpi_id: int,
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_org_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    """List users assigned to this KPI with permission (data_entry or view)."""
+    """List users assigned to this KPI with permission (data_entry or view). Any user who can view this KPI (assigned or org admin) may list assignments."""
     org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
     pairs = await list_kpi_assignments(db, kpi_id, org_id)
     return [
         {"id": u.id, "username": u.username, "full_name": u.full_name, "permission": perm}
