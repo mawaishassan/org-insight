@@ -39,7 +39,7 @@ export default function DynamicKpiForm({ fields, disabled }: Props) {
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
       {fields.map((f) => {
         const name = `values.${f.id}`;
-        const err = errors.values?.[f.id as keyof typeof errors.values];
+        const err = (errors.values as Record<number, { message?: string }> | undefined)?.[f.id];
 
         if (f.field_type === "formula") {
           return (
