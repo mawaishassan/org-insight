@@ -138,6 +138,30 @@ interface KpiField {
   sub_fields?: SubFieldDef[];
 }
 
+/** Build example JSON response that the bound API should return for this KPI (for API binding UI). */
+function buildExampleApiResponse(fields: KpiField[], year: number): { year: number; values: Record<string, unknown> } {
+  const values: Record<string, unknown> = {};
+  for (const f of fields) {
+    if (f.field_type === "formula") continue;
+    if (f.field_type === "single_line_text") values[f.key] = "Example text";
+    else if (f.field_type === "multi_line_text") values[f.key] = "First paragraph.\n\nSecond paragraph.";
+    else if (f.field_type === "number") values[f.key] = 100;
+    else if (f.field_type === "date") values[f.key] = "2025-01-15";
+    else if (f.field_type === "boolean") values[f.key] = 1;
+    else if (f.field_type === "multi_line_items") {
+      const subs = f.sub_fields ?? [];
+      const subKeys = subs.map((s) => s.key);
+      const keys = subKeys.length ? subKeys : ["item_name", "quantity"];
+      const numeric = new Set(subs.filter((s) => s.field_type === "number").map((s) => s.key));
+      values[f.key] = [
+        Object.fromEntries(keys.map((k) => [k, numeric.has(k) ? 85 : "Alice"])),
+        Object.fromEntries(keys.map((k) => [k, numeric.has(k) ? 90 : "Bob"])),
+      ];
+    }
+  }
+  return { year, values };
+}
+
 const domainCreateSchema = z.object({
   name: z.string().min(1, "Name required"),
   description: z.string().optional(),
@@ -536,6 +560,7 @@ export default function OrganizationDetailPage() {
           editingId={fieldEditingId}
           setEditingId={setFieldEditingId}
           userRole={userRole}
+          onKpiUpdated={loadKpis}
         />
       )}
 
@@ -1417,6 +1442,7 @@ function FieldsSection({
   editingId,
   setEditingId,
   userRole,
+  onKpiUpdated,
 }: {
   orgId: number;
   token: string;
@@ -1430,6 +1456,7 @@ function FieldsSection({
   editingId: number | null;
   setEditingId: (v: number | null) => void;
   userRole: UserRole | null;
+  onKpiUpdated?: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [createSubFields, setCreateSubFields] = useState<Array<{ name: string; key: string; field_type: string; is_required: boolean; sort_order: number }>>([]);
@@ -1438,6 +1465,12 @@ function FieldsSection({
   const [cardDisplaySaved, setCardDisplaySaved] = useState(false);
   const [cardDisplaySaveError, setCardDisplaySaveError] = useState<string | null>(null);
   const autosaveTimerRef = useRef<number | null>(null);
+  /** API binding for multi-line items (Super Admin only) – bind KPI to API endpoint */
+  const selectedKpi = selectedKpiId ? kpis.find((k) => k.id === selectedKpiId) : null;
+  const [apiConfigEntryMode, setApiConfigEntryMode] = useState<"manual" | "api">("manual");
+  const [apiConfigUrl, setApiConfigUrl] = useState("");
+  const [apiConfigSaving, setApiConfigSaving] = useState(false);
+  const [apiConfigError, setApiConfigError] = useState<string | null>(null);
 
   const createForm = useForm<FieldCreateFormData>({
     resolver: zodResolver(fieldCreateSchema),
@@ -1450,6 +1483,35 @@ function FieldsSection({
       sort_order: 0,
     },
   });
+
+  useEffect(() => {
+    const mode = selectedKpi?.entry_mode === "api" ? "api" : "manual";
+    const url = selectedKpi?.api_endpoint_url ?? "";
+    setApiConfigEntryMode(mode);
+    setApiConfigUrl(url);
+  }, [selectedKpi?.entry_mode, selectedKpi?.api_endpoint_url]);
+
+  const saveApiConfig = async () => {
+    if (!selectedKpiId || !token) return;
+    setApiConfigError(null);
+    setApiConfigSaving(true);
+    try {
+      await api(`/kpis/${selectedKpiId}?${qs({ organization_id: orgId })}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          entry_mode: apiConfigEntryMode,
+          api_endpoint_url: apiConfigEntryMode === "api" && apiConfigUrl.trim() ? apiConfigUrl.trim() : null,
+        }),
+        token,
+      });
+      onKpiUpdated?.();
+      loadList();
+    } catch (e) {
+      setApiConfigError(e instanceof Error ? e.message : "Failed to save API config");
+    } finally {
+      setApiConfigSaving(false);
+    }
+  };
 
   const onCreateSubmit = async (data: FieldCreateFormData) => {
     if (!selectedKpiId) return;
@@ -1585,6 +1647,11 @@ function FieldsSection({
       .catch(() => setCardDisplayFieldIds([]));
   }, [selectedKpiId, orgId, token]);
 
+  const exampleApiResponse = React.useMemo(
+    () => buildExampleApiResponse(list, selectedKpi?.year ?? new Date().getFullYear()),
+    [list, selectedKpi?.year]
+  );
+
   if (!selectedKpiId) {
     return (
       <div className="card">
@@ -1630,6 +1697,86 @@ function FieldsSection({
         </button>
       </div>
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
+
+      {/* Super Admin: bind API for this KPI so multi-line fields can use "Sync from API" */}
+      {userRole === "SUPER_ADMIN" && selectedKpiId && (
+        <div className="card" style={{ marginBottom: "1rem" }}>
+          <h3 style={{ marginBottom: "0.5rem", fontSize: "1rem" }}>API for multi-line items</h3>
+          <p style={{ fontSize: "0.9rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
+            Bind an API endpoint to this KPI so data-entry users can use &quot;Sync from API&quot; on multi-line fields.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxWidth: 640 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+              <label style={{ fontWeight: 500, minWidth: 100 }}>Data source</label>
+              <select
+                value={apiConfigEntryMode}
+                onChange={(e) => setApiConfigEntryMode(e.target.value as "manual" | "api")}
+                style={{
+                  padding: "0.5rem 0.75rem",
+                  borderRadius: 8,
+                  border: "1px solid var(--border)",
+                  fontSize: "0.9rem",
+                  background: "var(--surface)",
+                }}
+              >
+                <option value="manual">Manual entry only</option>
+                <option value="api">API (sync from endpoint)</option>
+              </select>
+            </div>
+            {apiConfigEntryMode === "api" && (
+              <>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                  <label style={{ fontWeight: 500 }}>API endpoint URL</label>
+                  <input
+                    type="url"
+                    value={apiConfigUrl}
+                    onChange={(e) => setApiConfigUrl(e.target.value)}
+                    placeholder="https://..."
+                    style={{
+                      padding: "0.5rem 0.75rem",
+                      borderRadius: 8,
+                      border: "1px solid var(--border)",
+                      fontSize: "0.9rem",
+                      width: "100%",
+                    }}
+                  />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                  <label style={{ fontWeight: 500 }}>Example response (your API should return JSON in this shape)</label>
+                  <pre
+                    style={{
+                      margin: 0,
+                      padding: "0.75rem 1rem",
+                      borderRadius: 8,
+                      border: "1px solid var(--border)",
+                      background: "var(--bg-subtle)",
+                      fontSize: "0.8rem",
+                      overflow: "auto",
+                      maxHeight: 320,
+                    }}
+                  >
+                    {JSON.stringify(exampleApiResponse, null, 2)}
+                  </pre>
+                  <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0 }}>
+                    The system will call your URL with <code style={{ fontSize: "0.8rem" }}>?year=YYYY</code> (or POST body). Return this structure; <code style={{ fontSize: "0.8rem" }}>values</code> keys must match field keys. Formula fields are computed server-side and should be omitted.
+                  </p>
+                </div>
+              </>
+            )}
+            {apiConfigError && <p className="form-error" style={{ margin: 0 }}>{apiConfigError}</p>}
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={saveApiConfig}
+              disabled={apiConfigSaving}
+              style={{ alignSelf: "flex-start" }}
+            >
+              {apiConfigSaving ? "Saving…" : "Save API config"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {showCreate && (
         <div className="card" style={{ marginBottom: "1rem" }}>
           <h3 style={{ marginBottom: "0.75rem", fontSize: "1rem" }}>Create field</h3>
