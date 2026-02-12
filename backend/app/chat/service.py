@@ -7,13 +7,13 @@ import re
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, case
 from sqlalchemy.orm import selectinload
 
 from datetime import datetime
 
 from app.core.config import get_settings
-from app.core.models import KPI, KPIField
+from app.core.models import KPI, KPIField, KPIEntry
 from app.entries.service import (
     get_entries_for_kpis,
     get_latest_year_with_entries,
@@ -52,11 +52,27 @@ def _get_openai_client() -> tuple["OpenAI | None", str]:
 
 
 async def build_org_schema(db: AsyncSession, org_id: int) -> list[dict]:
-    """Build a compact schema of KPIs, fields, and sub-fields for the org (for LLM context)."""
+    """Build a compact schema of KPIs, fields, and sub-fields for the org (for LLM context).
+    KPIs that have at least one entry (submitted data) for this org are included first, so
+    chat can match questions to them and not report 'not currently collected'."""
+    # KPI ids that have any entry for this org (so they are always in schema when we have room)
+    entry_kpi_q = (
+        select(KPIEntry.kpi_id)
+        .where(KPIEntry.organization_id == org_id)
+        .distinct()
+    )
+    entry_res = await db.execute(entry_kpi_q)
+    ids_with_entries = [row[0] for row in entry_res.all()]
+
+    order = [KPI.year.desc(), KPI.sort_order, KPI.name]
+    if ids_with_entries:
+        # Put KPIs that have data first so they are never dropped by the limit
+        order.insert(0, case((KPI.id.in_(ids_with_entries), 0), else_=1))
+
     q = (
         select(KPI)
         .where(KPI.organization_id == org_id)
-        .order_by(KPI.year.desc(), KPI.sort_order, KPI.name)
+        .order_by(*order)
         .limit(MAX_KPIS_IN_SCHEMA)
         .options(
             selectinload(KPI.fields).selectinload(KPIField.sub_fields),
@@ -409,6 +425,7 @@ async def run_chat_turn(
     field_keys = intent.get("field_keys") or []
     intent_year = intent.get("year")  # None if user did not specify year
     intent_type = intent.get("intent") or "list_data"
+    schema_by_id = {k["id"]: k for k in schema}
 
     # Resolve year: if user specified one use it; else use latest year that has data
     current_year = datetime.now().year
@@ -422,6 +439,13 @@ async def run_chat_turn(
             year_note = f"Data for {current_year} has not been entered yet. The following is for {year}."
         else:
             year_note = ""
+
+    # Only consider KPIs defined for the resolved year (same-name KPIs for other years
+    # would have no entry for this year and would wrongly show as "not entered")
+    kpi_ids_for_year = [i for i in kpi_ids if schema_by_id.get(i, {}).get("year") == year]
+    if not kpi_ids_for_year:
+        kpi_ids_for_year = kpi_ids  # fallback if no schema year match (e.g. legacy data)
+    kpi_ids = kpi_ids_for_year
 
     # User asked about something not in schema
     if not kpi_ids and intent.get("not_collected"):
