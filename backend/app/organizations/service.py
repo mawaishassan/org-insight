@@ -1,8 +1,13 @@
 """Organization CRUD and tenant isolation."""
 
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, exists
-from app.core.models import Organization, User, Domain, KPI, Category, OrganizationTag
+
+from app.core.models import Organization, User, Domain, KPI, Category, OrganizationTag, ExportAPIToken
 from app.core.models import UserRole
 
 
@@ -137,3 +142,21 @@ async def update_organization(
         org.is_active = data.is_active
     await db.flush()
     return org
+
+
+async def create_export_api_token(
+    db: AsyncSession, organization_id: int, valid_hours: int, created_by_user_id: int | None
+) -> tuple[str, datetime]:
+    """Create a long-lived export API token. Returns (plain_token, expires_at). Token is shown once."""
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    expires_at = datetime.utcnow() + timedelta(hours=valid_hours)
+    record = ExportAPIToken(
+        organization_id=organization_id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+        created_by_user_id=created_by_user_id,
+    )
+    db.add(record)
+    await db.flush()
+    return token, expires_at

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
+    # Local storage (when storage_type=local)
+    UPLOAD_BASE_PATH: str = "uploads"
+
     # Chat / NLP (OpenAI)
     OPENAI_API_KEY: str = ""
     CHAT_MODEL: str = "gpt-4o-mini"

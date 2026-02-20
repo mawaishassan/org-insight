@@ -1,12 +1,16 @@
 """KPI API routes (Org Admin)."""
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+import re
+import uuid
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.core.database import get_db
-from app.auth.dependencies import require_org_admin, get_current_user
-from app.core.models import User
-from app.entries.service import user_can_view_kpi
+from app.auth.dependencies import require_org_admin, get_current_user, get_data_export_auth, DataExportAuth
+from app.core.models import User, KPI, KpiFile
+from app.entries.service import user_can_view_kpi, user_can_edit_kpi
 from app.kpis.schemas import (
     KPICreate,
     KPIUpdate,
@@ -21,6 +25,7 @@ from app.kpis.schemas import (
     CategoryTagRef,
     OrganizationTagRef,
     AssignedUserRef,
+    KpiFileResponse,
 )
 from app.kpis.service import (
     create_kpi,
@@ -46,6 +51,7 @@ from app.kpis.service import (
 from app.users.schemas import UserResponse
 from app.fields.service import list_fields as list_kpi_fields
 from app.core.models import FieldType
+from app.storage.service import upload_file as storage_upload_file, delete_file as storage_delete_file, get_file_stream as storage_get_file_stream
 
 router = APIRouter(prefix="/kpis", tags=["kpis"])
 
@@ -89,6 +95,7 @@ def _kpi_to_response(k):
             assigned_users.append(
                 AssignedUserRef(id=u.id, username=u.username, full_name=u.full_name, permission=perm)
             )
+    fields_count = len(getattr(k, "fields", []) or [])
     return KPIResponse(
         id=k.id,
         organization_id=k.organization_id,
@@ -100,6 +107,7 @@ def _kpi_to_response(k):
         entry_mode=getattr(k, "entry_mode", None) or "manual",
         api_endpoint_url=getattr(k, "api_endpoint_url", None),
         card_display_field_ids=getattr(k, "card_display_field_ids", None) or None,
+        fields_count=fields_count,
         domain_tags=domain_tags,
         category_tags=category_tags,
         organization_tags=organization_tags,
@@ -144,34 +152,26 @@ async def export_kpis_json(
     organization_id: int | None = Query(None),
     year: int | None = Query(None, ge=2000, le=2100),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_org_admin),
+    auth: DataExportAuth = Depends(get_data_export_auth),
 ):
     """
     Export KPI data (definition + fields + values) in JSON format.
-
-    Response shape:
-    [
-        {
-            "kpi_id": ...,
-            "kpi_name": ...,
-            "kpi_description": ...,
-            "kpi_year": ...,
-            "kpi_fields_ids": [...],
-            "kpi_fields": [
-                {
-                    "kpi_field_id": ...,
-                    "kpi_field_key": ...,
-                    "kpi_field_data_type": ...,
-                    "kpi_field_values": ...,
-                    "kpi_field_year": ...,
-                },
-                ...
-            ],
-        },
-        ...
-    ]
+    Accepts either (1) JWT Bearer (org admin) or (2) long-lived export API token (organization_id query required).
     """
-    org_id = _org_id(current_user, organization_id)
+    if auth.user is not None:
+        org_id = _org_id(auth.user, organization_id)
+    else:
+        if organization_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="organization_id query parameter is required when using an export API token",
+            )
+        if organization_id != auth.export_org_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Export token is not valid for this organization",
+            )
+        org_id = organization_id
     items = await list_kpi_data_for_export(db, org_id, year=year)
     return items
 
@@ -521,3 +521,163 @@ async def sync_kpi_from_api_route(
         )
     await db.commit()
     return result
+
+
+def _safe_filename(name: str) -> str:
+    """Keep only safe chars and avoid path traversal."""
+    name = re.sub(r"[^\w.\- ]", "_", name).strip() or "file"
+    return name[:200]
+
+
+@router.get("/{kpi_id}/files", response_model=list[KpiFileResponse])
+async def list_kpi_files(
+    kpi_id: int,
+    year: int | None = Query(None, description="Filter by year"),
+    entry_id: int | None = Query(None, description="Filter by entry"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List file attachments for a KPI. Auth: Org Admin or user with view/data_entry for this KPI."""
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+    res = await db.execute(select(KPI).where(KPI.id == kpi_id))
+    kpi = res.scalar_one_or_none()
+    if not kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    org_id = kpi.organization_id
+    q = select(KpiFile).where(KpiFile.kpi_id == kpi_id, KpiFile.organization_id == org_id)
+    if year is not None:
+        q = q.where(KpiFile.year == year)
+    if entry_id is not None:
+        q = q.where(KpiFile.entry_id == entry_id)
+    q = q.order_by(KpiFile.created_at.desc())
+    result = await db.execute(q)
+    files = result.scalars().all()
+    return [
+        KpiFileResponse(
+            id=f.id,
+            original_filename=f.original_filename,
+            size=f.size,
+            content_type=f.content_type,
+            created_at=f.created_at.isoformat() + "Z" if f.created_at else "",
+            download_url=f"/api/kpis/{kpi_id}/files/{f.id}/download",
+        )
+        for f in files
+    ]
+
+
+@router.post("/{kpi_id}/files", response_model=list[KpiFileResponse], status_code=status.HTTP_201_CREATED)
+async def upload_kpi_files(
+    kpi_id: int,
+    files: list[UploadFile] = File(...),
+    year: int | None = Form(None, ge=2000, le=2100),
+    entry_id: int | None = Form(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload one or more files for a KPI. Auth: Org Admin or data_entry for this KPI."""
+    can_edit = await user_can_edit_kpi(db, current_user.id, kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No edit access to this KPI")
+    res = await db.execute(select(KPI).where(KPI.id == kpi_id))
+    kpi = res.scalar_one_or_none()
+    if not kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    org_id = kpi.organization_id
+    year_val = year if year is not None else kpi.year
+    stored: list[KpiFile] = []
+    for uf in files:
+        if not uf.filename:
+            continue
+        content = await uf.read()
+        content_type = uf.content_type or "application/octet-stream"
+        base_name = _safe_filename(uf.filename)
+        unique = f"{base_name}_{uuid.uuid4().hex[:8]}"
+        relative_path = f"org_{org_id}/kpi_{kpi_id}/year_{year_val}/{unique}"
+        try:
+            stored_path = await storage_upload_file(db, org_id, relative_path, content, content_type)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Storage error: {e!s}",
+            )
+        kf = KpiFile(
+            kpi_id=kpi_id,
+            organization_id=org_id,
+            year=year_val,
+            entry_id=entry_id,
+            original_filename=uf.filename[:512],
+            stored_path=stored_path,
+            content_type=content_type[:255] if content_type else None,
+            size=len(content),
+            uploaded_by_user_id=current_user.id,
+        )
+        db.add(kf)
+        await db.flush()
+        stored.append(kf)
+    await db.commit()
+    return [
+        KpiFileResponse(
+            id=f.id,
+            original_filename=f.original_filename,
+            size=f.size,
+            content_type=f.content_type,
+            created_at=f.created_at.isoformat() + "Z" if f.created_at else "",
+            download_url=f"/api/kpis/{kpi_id}/files/{f.id}/download",
+        )
+        for f in stored
+    ]
+
+
+@router.get("/{kpi_id}/files/{file_id}/download")
+async def download_kpi_file(
+    kpi_id: int,
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Stream file content. Auth: Org Admin or user with view/data_entry for this KPI."""
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+    res = await db.execute(
+        select(KpiFile).where(KpiFile.id == file_id, KpiFile.kpi_id == kpi_id)
+    )
+    kf = res.scalar_one_or_none()
+    if not kf:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    try:
+        data = await storage_get_file_stream(db, kf.organization_id, kf.stored_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found in storage")
+    return StreamingResponse(
+        iter([data]),
+        media_type=kf.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{kf.original_filename}"'},
+    )
+
+
+@router.delete("/{kpi_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_kpi_file(
+    kpi_id: int,
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a KPI file. Auth: Org Admin or uploader (or data_entry for this KPI)."""
+    can_edit = await user_can_edit_kpi(db, current_user.id, kpi_id)
+    res = await db.execute(
+        select(KpiFile).where(KpiFile.id == file_id, KpiFile.kpi_id == kpi_id)
+    )
+    kf = res.scalar_one_or_none()
+    if not kf:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    if not can_edit and current_user.id != kf.uploaded_by_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission to delete this file")
+    try:
+        await storage_delete_file(db, kf.organization_id, kf.stored_path)
+    except Exception:
+        pass
+    await db.delete(kf)
+    await db.commit()

@@ -65,6 +65,15 @@ interface UserRef {
   permission?: string;
 }
 
+interface KpiFileItem {
+  id: number;
+  original_filename: string;
+  size: number;
+  content_type: string | null;
+  created_at: string;
+  download_url: string | null;
+}
+
 function qs(params: Record<string, string | number | undefined>) {
   const entries = Object.entries(params)
     .filter(([, v]) => v !== undefined && v !== "")
@@ -115,6 +124,7 @@ export default function DomainKpiDetailPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"scalar" | number>("scalar");
+  const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   /** When editing: list of { user_id, permission } for PUT assignments */
   const [editAssignments, setEditAssignments] = useState<{ user_id: number; permission: string }[]>([]);
   const [uploadingFieldId, setUploadingFieldId] = useState<number | null>(null);
@@ -124,8 +134,14 @@ export default function DomainKpiDetailPage() {
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [bulkMethod, setBulkMethod] = useState<"upload" | "api">("upload");
   const [submitLoading, setSubmitLoading] = useState(false);
+  const [exportExcelLoading, setExportExcelLoading] = useState(false);
+  const [importExcelLoading, setImportExcelLoading] = useState(false);
   /** Bulk upload section is hidden until user clicks the "Bulk upload" link (per multi_line field) */
   const [bulkExpandedByFieldId, setBulkExpandedByFieldId] = useState<Record<number, boolean>>({});
+  /** KPI file attachments */
+  const [kpiFiles, setKpiFiles] = useState<KpiFileItem[]>([]);
+  const [kpiFilesUploading, setKpiFilesUploading] = useState(false);
+  const [kpiFilesError, setKpiFilesError] = useState<string | null>(null);
 
   type FormCell = { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
@@ -213,6 +229,9 @@ export default function DomainKpiDetailPage() {
     setAssignedUsers(Array.isArray(assignmentsList) ? assignmentsList.map((u: UserRef & { permission?: string }) => ({ id: u.id, username: u.username, full_name: u.full_name ?? null, permission: u.permission || "data_entry" })) : []);
     setOrgUsers(Array.isArray(usersList) ? usersList : []);
     setKpiApiInfo(apiInfo ?? null);
+    api<KpiFileItem[]>(`/kpis/${kpiId}/files?${qs({ year })}`, { token })
+      .then(setKpiFiles)
+      .catch(() => setKpiFiles([]));
   };
 
   useEffect(() => {
@@ -389,205 +408,500 @@ export default function DomainKpiDetailPage() {
       )}
 
       {/* Section 2: KPI details + Edit */}
-      <div className="card" style={{ marginBottom: "1.5rem" }}>
-        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem" }}>
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
-              <h1 style={{ fontSize: "1.5rem", margin: 0 }}>{kpiName}</h1>
+      <div className="card" style={{ marginBottom: "1.5rem", padding: "1.25rem" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-start", gap: "1.5rem" }}>
+          <div style={{ flex: "1 1 300px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+              <h1 style={{ fontSize: "1.4rem", margin: 0, fontWeight: 600 }}>{kpiName}</h1>
+              <span
+                style={{
+                  fontSize: "0.8rem",
+                  fontWeight: 500,
+                  padding: "0.25rem 0.6rem",
+                  borderRadius: 12,
+                  background: "var(--accent)",
+                  color: "var(--on-muted)",
+                }}
+              >
+                {year}
+              </span>
               {!canEditKpi && (
                 <span
                   style={{
                     fontSize: "0.75rem",
-                    fontWeight: 600,
+                    fontWeight: 500,
                     padding: "0.2rem 0.5rem",
                     borderRadius: 4,
-                    background: "var(--muted)",
-                    color: "var(--text)",
+                    background: "var(--border)",
+                    color: "var(--muted)",
                   }}
                 >
                   View only
                 </span>
               )}
+              {isLocked && (
+                <span
+                  style={{
+                    fontSize: "0.75rem",
+                    fontWeight: 500,
+                    padding: "0.2rem 0.5rem",
+                    borderRadius: 4,
+                    background: "var(--error, #c00)",
+                    color: "#fff",
+                  }}
+                >
+                  Locked
+                </span>
+              )}
             </div>
-            <p style={{ color: "var(--muted)", marginBottom: "0.25rem" }}>Year {year}</p>
-            <p style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>
-              <strong>Entry status:</strong>{" "}
-              {entry ? (
-                entry.is_draft ? (
-                  <span
-                    style={{
-                      display: "inline-block",
-                      padding: "0.2rem 0.5rem",
-                      borderRadius: 4,
-                      background: "var(--warning)",
-                      color: "var(--on-muted)",
-                      fontWeight: 600,
-                      fontSize: "0.85rem",
-                    }}
-                  >
-                    Draft
+            
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "0.75rem", marginBottom: "0.75rem" }}>
+              <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-subtle, #f8f9fa)", borderRadius: 8 }}>
+                <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Status</div>
+                <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>
+                  {entry ? (
+                    entry.is_draft ? (
+                      <span style={{ color: "var(--warning)" }}>● Draft</span>
+                    ) : (
+                      <span style={{ color: "var(--success)" }}>● Submitted</span>
+                    )
+                  ) : (
+                    <span style={{ color: "var(--muted)" }}>○ No entry</span>
+                  )}
+                </div>
+              </div>
+              <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-subtle, #f8f9fa)", borderRadius: 8 }}>
+                <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Fields</div>
+                <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>{totalFields}</div>
+              </div>
+              {lastUpdatedFormatted && (
+                <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-subtle, #f8f9fa)", borderRadius: 8 }}>
+                  <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Updated</div>
+                  <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>{lastUpdatedFormatted}</div>
+                </div>
+              )}
+            </div>
+            {(assignedUsers.length > 0 || isEditing) && (
+              <div style={{ fontSize: "0.85rem" }}>
+                <span style={{ color: "var(--muted)", marginRight: "0.5rem" }}>Assigned:</span>
+                {isEditing ? (
+                  <span style={{ display: "inline-flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+                    {editAssignments.map((a) => {
+                      const u = orgUsers.find((o) => o.id === a.user_id);
+                      const name = u ? (u.full_name || u.username || "").trim() || u.username : `User #${a.user_id}`;
+                      return (
+                        <span
+                          key={a.user_id}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "0.25rem",
+                            padding: "0.15rem 0.4rem",
+                            background: "var(--border)",
+                            borderRadius: 4,
+                            fontSize: "0.8rem",
+                          }}
+                        >
+                          {name}
+                          <select
+                            value={a.permission || "data_entry"}
+                            onChange={(e) => {
+                              const perm = e.target.value;
+                              setEditAssignments((prev) =>
+                                prev.map((x) => (x.user_id === a.user_id ? { ...x, permission: perm } : x))
+                              );
+                            }}
+                            style={{ padding: "0.1rem 0.2rem", fontSize: "0.75rem", border: "none", background: "transparent" }}
+                          >
+                            <option value="data_entry">Edit</option>
+                            <option value="view">View</option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => setEditAssignments((prev) => prev.filter((x) => x.user_id !== a.user_id))}
+                            style={{ padding: 0, border: "none", background: "none", cursor: "pointer", fontSize: "0.9rem", lineHeight: 1 }}
+                            aria-label="Remove"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      );
+                    })}
+                    {orgUsers.filter((u) => !editAssignments.some((a) => a.user_id === u.id)).length > 0 && (
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v) {
+                            setEditAssignments((prev) => [...prev, { user_id: Number(v), permission: "data_entry" }]);
+                            e.target.value = "";
+                          }
+                        }}
+                        style={{ padding: "0.25rem 0.4rem", fontSize: "0.8rem", border: "1px solid var(--border)", borderRadius: 4 }}
+                      >
+                        <option value="">+ Add</option>
+                        {orgUsers
+                          .filter((u) => !editAssignments.some((a) => a.user_id === u.id))
+                          .map((u) => (
+                            <option key={u.id} value={u.id}>
+                              {u.full_name || u.username}
+                            </option>
+                          ))}
+                      </select>
+                    )}
                   </span>
                 ) : (
-                  <span
-                    style={{
-                      display: "inline-block",
-                      padding: "0.2rem 0.5rem",
-                      borderRadius: 4,
-                      background: "var(--success)",
-                      color: "var(--on-muted)",
-                      fontWeight: 600,
-                      fontSize: "0.85rem",
-                    }}
-                  >
-                    Submitted
-                    {entry.submitted_at
-                      ? ` on ${new Date(entry.submitted_at).toLocaleDateString()}`
-                      : ""}
-                  </span>
-                )
-              ) : (
-                <span style={{ color: "var(--muted)" }}>No entry yet</span>
-              )}
-            </p>
-            <p style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>
-              <strong>Total fields:</strong> {totalFields}
-            </p>
-            <p style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>
-              <strong>Assigned:</strong>{" "}
-              {isEditing ? (
-                <span style={{ display: "inline-block", marginLeft: "0.25rem" }}>
-                  {editAssignments.map((a) => {
-                    const u = orgUsers.find((o) => o.id === a.user_id);
-                    const name = u ? (u.full_name || u.username || "").trim() || u.username : `User #${a.user_id}`;
-                    return (
-                      <span
-                        key={a.user_id}
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: "0.35rem",
-                          marginRight: "0.5rem",
-                          marginBottom: "0.25rem",
-                          padding: "0.2rem 0.4rem",
-                          background: "var(--border)",
-                          borderRadius: 6,
-                          fontSize: "0.85rem",
-                        }}
-                      >
-                        {name}
-                        <select
-                          value={a.permission || "data_entry"}
-                          onChange={(e) => {
-                            const perm = e.target.value;
-                            setEditAssignments((prev) =>
-                              prev.map((x) => (x.user_id === a.user_id ? { ...x, permission: perm } : x))
-                            );
-                          }}
-                          style={{ padding: "0.15rem 0.25rem", fontSize: "0.8rem" }}
-                        >
-                          <option value="data_entry">Data entry</option>
-                          <option value="view">View only</option>
-                        </select>
-                        <button
-                          type="button"
-                          onClick={() => setEditAssignments((prev) => prev.filter((x) => x.user_id !== a.user_id))}
-                          style={{ padding: 0, border: "none", background: "none", cursor: "pointer", fontSize: "1rem" }}
-                          aria-label="Remove"
-                        >
-                          ×
-                        </button>
+                  <span>
+                    {dataEntryAssignees.map((u) => (u.full_name || u.username || "").trim() || u.username).join(", ")}
+                    {dataEntryAssignees.length > 0 && viewOnlyAssignees.length > 0 && " • "}
+                    {viewOnlyAssignees.length > 0 && (
+                      <span style={{ color: "var(--muted)" }}>
+                        (view: {viewOnlyAssignees.map((u) => (u.full_name || u.username || "").trim() || u.username).join(", ")})
                       </span>
-                    );
-                  })}
-                  {orgUsers.filter((u) => !editAssignments.some((a) => a.user_id === u.id)).length > 0 && (
-                    <select
-                      value=""
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v) {
-                          setEditAssignments((prev) => [...prev, { user_id: Number(v), permission: "data_entry" }]);
-                          e.target.value = "";
-                        }
-                      }}
-                      style={{ marginLeft: "0.25rem", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
-                    >
-                      <option value="">Add user…</option>
-                      {orgUsers
-                        .filter((u) => !editAssignments.some((a) => a.user_id === u.id))
-                        .map((u) => (
-                          <option key={u.id} value={u.id}>
-                            {u.full_name || u.username}
-                          </option>
-                        ))}
-                    </select>
-                  )}
-                </span>
-              ) : (
-                <>
-                  {dataEntryAssignees.length > 0 && (
-                    <span style={{ marginRight: "0.75rem" }}>
-                      Data entry: {dataEntryAssignees.map((u) => (u.full_name || u.username || "").trim() || u.username).join(", ")}
-                    </span>
-                  )}
-                  {viewOnlyAssignees.length > 0 && (
-                    <span>View only: {viewOnlyAssignees.map((u) => (u.full_name || u.username || "").trim() || u.username).join(", ")}</span>
-                  )}
-                  {assignedUsers.length === 0 && "None"}
-                </>
-              )}
-            </p>
-            {lastUpdatedFormatted && (
-              <p style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>
-                <strong>Last updated:</strong> {lastUpdatedFormatted}
-                {overviewItem?.entry?.entered_by_user_name && ` by ${overviewItem.entry.entered_by_user_name}`}
-              </p>
+                    )}
+                  </span>
+                )}
+              </div>
             )}
           </div>
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            {isEditing ? (
-              <>
-                <button type="button" className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                  {saving ? "Saving…" : "Save"}
-                </button>
-                <button type="button" className="btn" onClick={() => { setIsEditing(false); setSaveError(null); }}>
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <>
-                {!isLocked && canEditKpi && (
-                  <button type="button" className="btn btn-primary" onClick={startEditing}>
-                    Edit
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", alignItems: "flex-end" }}>
+            {/* Primary actions */}
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              {isEditing ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    style={{ padding: "0.4rem 0.75rem", fontSize: "0.9rem" }}
+                    onClick={handleSave}
+                    disabled={saving}
+                  >
+                    {saving ? "Saving…" : "Save"}
                   </button>
-                )}
-                {entry?.id && entry.is_draft && !isLocked && canEditKpi && (
                   <button
                     type="button"
                     className="btn"
-                    onClick={handleSubmitEntry}
-                    disabled={submitLoading}
+                    style={{ padding: "0.4rem 0.75rem", fontSize: "0.9rem" }}
+                    onClick={() => { setIsEditing(false); setSaveError(null); }}
                   >
-                    {submitLoading ? "Submitting…" : "Submit entry"}
+                    Cancel
                   </button>
-                )}
-                {entry?.id && !entry.is_draft && (
-                  <span
+                </>
+              ) : (
+                <>
+                  {!isLocked && canEditKpi && (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ padding: "0.4rem 0.75rem", fontSize: "0.9rem" }}
+                      onClick={startEditing}
+                    >
+                      Edit
+                    </button>
+                  )}
+                  {entry?.id && entry.is_draft && !isLocked && canEditKpi && (
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: "0.4rem 0.75rem", fontSize: "0.9rem", background: "var(--success)", color: "var(--on-muted)" }}
+                      onClick={handleSubmitEntry}
+                      disabled={submitLoading}
+                    >
+                      {submitLoading ? "Submitting…" : "Submit entry"}
+                    </button>
+                  )}
+                  {entry?.id && !entry.is_draft && (
+                    <span
+                      style={{
+                        padding: "0.4rem 0.75rem",
+                        borderRadius: 6,
+                        background: "var(--success)",
+                        color: "var(--on-muted)",
+                        fontSize: "0.9rem",
+                        fontWeight: 500,
+                        display: "inline-flex",
+                        alignItems: "center",
+                      }}
+                    >
+                      ✓ Submitted
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+            {/* Data import/export actions */}
+            {effectiveOrgId != null && (
+              <div
+                style={{
+                  display: "flex",
+                  gap: "0.5rem",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  paddingTop: "0.5rem",
+                  borderTop: "1px solid var(--border)",
+                }}
+              >
+                <span style={{ fontSize: "0.8rem", color: "var(--muted)", marginRight: "0.25rem" }}>Excel:</span>
+                <button
+                  type="button"
+                  style={{
+                    padding: "0.35rem 0.65rem",
+                    fontSize: "0.85rem",
+                    border: "1px solid var(--border)",
+                    borderRadius: 6,
+                    background: "var(--surface)",
+                    cursor: exportExcelLoading ? "not-allowed" : "pointer",
+                    opacity: exportExcelLoading ? 0.7 : 1,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.35rem",
+                  }}
+                  disabled={exportExcelLoading}
+                  onClick={async () => {
+                    if (!token) return;
+                    setExportExcelLoading(true);
+                    try {
+                      const url = getApiUrl(`/entries/export-excel?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}`);
+                      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                      if (!res.ok) throw new Error("Export failed");
+                      const blob = await res.blob();
+                      const disp = res.headers.get("Content-Disposition");
+                      const match = disp?.match(/filename="?([^";]+)"?/);
+                      const name = match ? match[1] : `KPI_${kpiId}_${year}.xlsx`;
+                      const a = document.createElement("a");
+                      a.href = URL.createObjectURL(blob);
+                      a.download = name;
+                      a.click();
+                      URL.revokeObjectURL(a.href);
+                    } catch {
+                      setError("Download failed");
+                    } finally {
+                      setExportExcelLoading(false);
+                    }
+                  }}
+                >
+                  <span style={{ fontSize: "1rem" }}>↓</span>
+                  {exportExcelLoading ? "Preparing…" : "Download"}
+                </button>
+                {canEditKpi && !isLocked && (
+                  <label
                     style={{
-                      padding: "0.35rem 0.6rem",
+                      padding: "0.35rem 0.65rem",
+                      fontSize: "0.85rem",
+                      border: "1px solid var(--border)",
                       borderRadius: 6,
-                      background: "var(--success)",
-                      color: "var(--on-muted)",
-                      fontSize: "0.9rem",
-                      fontWeight: 500,
+                      background: "var(--surface)",
+                      cursor: importExcelLoading ? "not-allowed" : "pointer",
+                      opacity: importExcelLoading ? 0.7 : 1,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "0.35rem",
                     }}
                   >
-                    Submitted
-                  </span>
+                    <span style={{ fontSize: "1rem" }}>↑</span>
+                    {importExcelLoading ? "Uploading…" : "Upload"}
+                    <input
+                      type="file"
+                      accept=".xlsx"
+                      style={{ display: "none" }}
+                      disabled={importExcelLoading}
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = "";
+                        if (!file || !token) return;
+                        const confirmed = window.confirm(
+                          "This will replace all existing data for this KPI entry with the data from the uploaded file.\n\nAre you sure you want to continue?"
+                        );
+                        if (!confirmed) return;
+                        setImportExcelLoading(true);
+                        setError(null);
+                        try {
+                          const form = new FormData();
+                          form.append("file", file);
+                          const url = getApiUrl(`/entries/import-excel?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}`);
+                          const res = await fetch(url, {
+                            method: "POST",
+                            headers: { Authorization: `Bearer ${token}` },
+                            body: form,
+                          });
+                          if (!res.ok) {
+                            const err = await res.json().catch(() => ({}));
+                            throw new Error(err.detail ?? res.statusText);
+                          }
+                          await loadData();
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : "Upload failed");
+                        } finally {
+                          setImportExcelLoading(false);
+                        }
+                      }}
+                    />
+                  </label>
                 )}
-              </>
+              </div>
             )}
           </div>
         </div>
+      </div>
+
+      {/* Section: Attachments (collapsible, at KPI level) */}
+      <div className="card" style={{ marginBottom: "1rem", padding: "0", border: "1px solid var(--border)" }}>
+        <button
+          type="button"
+          onClick={() => setAttachmentsOpen((prev) => !prev)}
+          style={{
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "0.85rem 1rem",
+            background: attachmentsOpen ? "var(--surface)" : "rgba(var(--accent-rgb, 100, 100, 100), 0.08)",
+            border: "none",
+            borderRadius: attachmentsOpen ? "0.5rem 0.5rem 0 0" : "0.5rem",
+            cursor: "pointer",
+            fontSize: "1rem",
+            fontWeight: 600,
+            textAlign: "left",
+            transition: "background 0.15s ease",
+          }}
+        >
+          <span style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span style={{ fontSize: "1.1rem" }}>📎</span>
+            Attachments
+            {kpiFiles.length > 0 && (
+              <span
+                style={{
+                  marginLeft: "0.25rem",
+                  padding: "0.15rem 0.5rem",
+                  borderRadius: "999px",
+                  background: "var(--accent)",
+                  color: "var(--on-muted)",
+                  fontSize: "0.8rem",
+                  fontWeight: 500,
+                }}
+              >
+                {kpiFiles.length}
+              </span>
+            )}
+          </span>
+          <span style={{ fontSize: "0.9rem", color: "var(--muted)" }}>{attachmentsOpen ? "▲" : "▼"}</span>
+        </button>
+        {attachmentsOpen && (
+          <div style={{ padding: "0 1rem 1rem 1rem", borderTop: "1px solid var(--border)" }}>
+            {kpiFilesError && <p className="form-error" style={{ marginTop: "0.75rem", marginBottom: "0.5rem" }}>{kpiFilesError}</p>}
+            {(meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN" || kpiApiInfo?.can_edit) && (
+              <div style={{ marginTop: "0.75rem", marginBottom: "0.75rem" }}>
+                <label
+                  className="btn btn-primary"
+                  style={{ cursor: kpiFilesUploading ? "not-allowed" : "pointer", opacity: kpiFilesUploading ? 0.7 : 1, padding: "0.4rem 0.75rem", fontSize: "0.9rem" }}
+                >
+                  {kpiFilesUploading ? "Uploading…" : "Upload files"}
+                  <input
+                    type="file"
+                    multiple
+                    style={{ display: "none" }}
+                    disabled={kpiFilesUploading}
+                    onChange={async (e) => {
+                      const fileList = e.target.files;
+                      e.target.value = "";
+                      if (!fileList?.length || !token || !kpiId || effectiveOrgId == null) return;
+                      setKpiFilesUploading(true);
+                      setKpiFilesError(null);
+                      const form = new FormData();
+                      for (let i = 0; i < fileList.length; i++) form.append("files", fileList[i]);
+                      form.append("year", String(year));
+                      if (entry?.id) form.append("entry_id", String(entry.id));
+                      try {
+                        const url = getApiUrl(`/kpis/${kpiId}/files`);
+                        const res = await fetch(url, {
+                          method: "POST",
+                          headers: { Authorization: `Bearer ${token}` },
+                          body: form,
+                        });
+                        if (!res.ok) {
+                          const err = await res.json().catch(() => ({}));
+                          throw new Error(err.detail ?? res.statusText);
+                        }
+                        const created = await res.json() as KpiFileItem[];
+                        setKpiFiles((prev) => [...(created ?? []), ...prev]);
+                      } catch (err) {
+                        setKpiFilesError(err instanceof Error ? err.message : "Upload failed");
+                      } finally {
+                        setKpiFilesUploading(false);
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+            )}
+            {kpiFiles.length === 0 ? (
+              <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: "0.5rem" }}>No attachments yet.</p>
+            ) : (
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {kpiFiles.map((f) => (
+                  <li
+                    key={f.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.75rem",
+                      padding: "0.5rem 0",
+                      borderBottom: "1px solid var(--border)",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", fontSize: "0.9rem" }} title={f.original_filename}>
+                      {f.original_filename}
+                    </span>
+                    <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>
+                      {typeof f.size === "number" && f.size >= 1024 ? `${(f.size / 1024).toFixed(1)} KB` : `${f.size ?? 0} B`}
+                    </span>
+                    <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>
+                      {f.created_at ? new Date(f.created_at).toLocaleDateString() : ""}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: "0.2rem 0.45rem", fontSize: "0.8rem" }}
+                      onClick={async () => {
+                        if (!f.download_url || !token) return;
+                        const url = getApiUrl(f.download_url.replace(/^\/api/, ""));
+                        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                        if (!res.ok) return;
+                        const blob = await res.blob();
+                        const a = document.createElement("a");
+                        a.href = URL.createObjectURL(blob);
+                        a.download = f.original_filename || "download";
+                        a.click();
+                        URL.revokeObjectURL(a.href);
+                      }}
+                    >
+                      Download
+                    </button>
+                    {(meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN" || kpiApiInfo?.can_edit) && (
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ padding: "0.2rem 0.45rem", fontSize: "0.8rem", color: "var(--error, #c00)" }}
+                        onClick={async () => {
+                          if (!token || !window.confirm("Delete this file?")) return;
+                          try {
+                            await api(`/kpis/${kpiId}/files/${f.id}`, { method: "DELETE", token });
+                            setKpiFiles((prev) => prev.filter((x) => x.id !== f.id));
+                          } catch {
+                            setKpiFilesError("Delete failed");
+                          }
+                        }}
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Section 3: Tabs – Field details (scalar + formula), then one tab per multi_line_items */}

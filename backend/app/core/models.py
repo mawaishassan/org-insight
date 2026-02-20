@@ -63,6 +63,55 @@ class Organization(Base):
     kpi_entries = relationship("KPIEntry", back_populates="organization", lazy="selectin")
     tags = relationship("OrganizationTag", back_populates="organization", lazy="selectin", order_by="OrganizationTag.name")
     report_templates = relationship("ReportTemplate", back_populates="organization", lazy="selectin")
+    export_api_tokens = relationship("ExportAPIToken", back_populates="organization", lazy="selectin")
+    kpi_files = relationship("KpiFile", back_populates="organization", lazy="selectin")
+    storage_config = relationship(
+        "OrganizationStorageConfig",
+        back_populates="organization",
+        uselist=False,
+        lazy="selectin",
+    )
+
+
+class OrganizationStorageConfig(Base):
+    """One storage backend per organization (Super Admin config)."""
+
+    __tablename__ = "organization_storage_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        unique=True,
+    )
+    storage_type = Column(String(32), nullable=False, index=True)
+    params = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    organization = relationship("Organization", back_populates="storage_config")
+
+
+class ExportAPIToken(Base):
+    """Long-lived token for data-export API; org admin sets validity in hours."""
+
+    __tablename__ = "export_api_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=utc_now)
+    created_by_user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    organization = relationship("Organization", back_populates="export_api_tokens")
+    created_by = relationship("User", back_populates="export_api_tokens")
 
 
 class OrganizationTag(Base):
@@ -124,9 +173,11 @@ class User(Base):
     organization = relationship("Organization", back_populates="users")
     kpi_assignments = relationship("KPIAssignment", back_populates="user", lazy="selectin")
     kpi_entries = relationship("KPIEntry", back_populates="user", lazy="selectin")
+    kpi_files = relationship("KpiFile", back_populates="uploaded_by", lazy="selectin")
     report_access_permissions = relationship(
         "ReportAccessPermission", back_populates="user", lazy="selectin"
     )
+    export_api_tokens = relationship("ExportAPIToken", back_populates="created_by", lazy="selectin")
 
 
 class Domain(Base):
@@ -241,6 +292,7 @@ class KPI(Base):
     fields = relationship("KPIField", back_populates="kpi", lazy="selectin", order_by="KPIField.sort_order")
     assignments = relationship("KPIAssignment", back_populates="kpi", lazy="selectin")
     entries = relationship("KPIEntry", back_populates="kpi", lazy="selectin")
+    kpi_files = relationship("KpiFile", back_populates="kpi", lazy="selectin")
     report_template_kpis = relationship("ReportTemplateKPI", back_populates="kpi", lazy="selectin")
 
 
@@ -368,6 +420,38 @@ class KPIEntry(Base):
     kpi = relationship("KPI", back_populates="entries")
     user = relationship("User", back_populates="kpi_entries")
     field_values = relationship("KPIFieldValue", back_populates="entry", lazy="selectin")
+    kpi_files = relationship("KpiFile", back_populates="entry", lazy="selectin")
+
+
+class KpiFile(Base):
+    """File attachment for a KPI (tenant-scoped by organization_id)."""
+
+    __tablename__ = "kpi_files"
+
+    id = Column(Integer, primary_key=True, index=True)
+    kpi_id = Column(
+        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    year = Column(Integer, nullable=True, index=True)
+    entry_id = Column(
+        Integer, ForeignKey("kpi_entries.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    original_filename = Column(String(512), nullable=False)
+    stored_path = Column(String(2048), nullable=False)
+    content_type = Column(String(255), nullable=True)
+    size = Column(Integer, nullable=False)
+    uploaded_by_user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at = Column(DateTime, default=utc_now)
+
+    kpi = relationship("KPI", back_populates="kpi_files")
+    organization = relationship("Organization", back_populates="kpi_files")
+    entry = relationship("KPIEntry", back_populates="kpi_files")
+    uploaded_by = relationship("User", back_populates="kpi_files")
 
 
 class KPIFieldValue(Base):

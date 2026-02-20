@@ -104,6 +104,7 @@ class KPIResponse(BaseModel):
     entry_mode: str = "manual"
     api_endpoint_url: str | None = None
     card_display_field_ids: list[int] | None = None
+    fields_count: int = 0
     domain_tags: list[DomainTagRef] = []
     category_tags: list[CategoryTagRef] = []
     organization_tags: list[OrganizationTagRef] = []
@@ -172,3 +173,14 @@ class KPIChildDataSummary(BaseModel):
     field_values_count: int = 0
     report_template_kpis_count: int = 0
     has_child_data: bool = False
+
+
+class KpiFileResponse(BaseModel):
+    """KPI file attachment in list/download response."""
+
+    id: int
+    original_filename: str
+    size: int
+    content_type: str | None
+    created_at: str
+    download_url: str | None = None  # relative path for download endpoint

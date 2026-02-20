@@ -46,7 +46,7 @@ const WHERE_OPERATORS = [
   { value: "op_lte", label: "less or equal (≤)" },
 ] as const;
 
-type TabId = "domains" | "kpis" | "fields" | "tags" | "reports";
+type TabId = "domains" | "kpis" | "fields" | "tags" | "reports" | "storage";
 
 interface SubFieldDef {
   id?: number;
@@ -120,6 +120,7 @@ interface KpiRow {
   sort_order: number;
   entry_mode?: string;
   api_endpoint_url?: string | null;
+  fields_count?: number;
   domain_tags?: DomainTagRef[];
   category_tags?: CategoryTagRef[];
   organization_tags?: OrganizationTagRef[];
@@ -487,6 +488,15 @@ export default function OrganizationDetailPage() {
             Reports
           </button>
         )}
+        {userRole === "SUPER_ADMIN" && (
+          <button
+            type="button"
+            className={tab === "storage" ? "btn btn-primary" : "btn"}
+            onClick={() => setTab("storage")}
+          >
+            Storage
+          </button>
+        )}
       </div>
 
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
@@ -570,6 +580,239 @@ export default function OrganizationDetailPage() {
           token={token!}
         />
       )}
+
+      {tab === "storage" && userRole === "SUPER_ADMIN" && (
+        <StorageConfigSection orgId={orgId} token={token!} />
+      )}
+    </div>
+  );
+}
+
+const STORAGE_TYPES = [
+  { value: "local", label: "Local (server path)" },
+  { value: "gcs", label: "Google Cloud Storage" },
+  { value: "ftp", label: "FTP" },
+  { value: "s3", label: "Amazon S3" },
+  { value: "onedrive", label: "OneDrive" },
+] as const;
+
+interface StorageConfigResponse {
+  organization_id: number;
+  storage_type: string;
+  params: Record<string, string | number | undefined>;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+function StorageConfigSection({ orgId, token }: { orgId: number; token: string }) {
+  const [config, setConfig] = useState<StorageConfigResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [form, setForm] = useState<{ storage_type: string; params: Record<string, string> }>({
+    storage_type: "local",
+    params: {},
+  });
+
+  const loadConfig = () => {
+    setLoading(true);
+    api<StorageConfigResponse>(`/organizations/${orgId}/storage-config`, { token })
+      .then((c) => {
+        setConfig(c);
+        setForm((prev) => ({
+          storage_type: c.storage_type,
+          params: { ...prev.params, ...Object.fromEntries(Object.entries(c.params).filter(([, v]) => v !== "***" && v !== undefined) as [string, string][]) },
+        }));
+      })
+      .catch(() => setConfig(null))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadConfig();
+  }, [orgId, token]);
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setMessage(null);
+    api<StorageConfigResponse>(`/organizations/${orgId}/storage-config`, {
+      method: "PATCH",
+      token,
+      body: JSON.stringify({ storage_type: form.storage_type, params: form.params }),
+    })
+      .then((c) => {
+        setConfig(c);
+        setMessage("Saved. Secrets are stored securely and are not displayed after save.");
+      })
+      .catch((err) => setMessage(err instanceof Error ? err.message : "Failed to save"))
+      .finally(() => setSaving(false));
+  };
+
+  const updateParam = (key: string, value: string) => {
+    setForm((prev) => ({ ...prev, params: { ...prev.params, [key]: value } }));
+  };
+
+  if (loading) return <p style={{ color: "var(--muted)" }}>Loading storage config…</p>;
+
+  return (
+    <div style={{ maxWidth: "32rem" }}>
+      <h2 style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>Storage configuration</h2>
+      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
+        Choose where this organization&apos;s files (e.g. KPI attachments) are stored. One backend per organization.
+      </p>
+      <form onSubmit={handleSave}>
+        <div style={{ marginBottom: "0.75rem" }}>
+          <label style={{ display: "block", marginBottom: "0.25rem", fontWeight: 600 }}>Storage type</label>
+          <select
+            value={form.storage_type}
+            onChange={(e) => setForm((p) => ({ ...p, storage_type: e.target.value, params: {} }))}
+            style={{ width: "100%", padding: "0.5rem" }}
+          >
+            {STORAGE_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>{t.label}</option>
+            ))}
+          </select>
+        </div>
+        {form.storage_type === "local" && (
+          <div style={{ marginBottom: "0.75rem" }}>
+            <label style={{ display: "block", marginBottom: "0.25rem" }}>Base path (optional)</label>
+            <input
+              type="text"
+              value={form.params.base_path ?? ""}
+              onChange={(e) => updateParam("base_path", e.target.value)}
+              placeholder="e.g. uploads (default from server)"
+              style={{ width: "100%", padding: "0.5rem" }}
+            />
+          </div>
+        )}
+        {form.storage_type === "gcs" && (
+          <>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Bucket name</label>
+              <input
+                type="text"
+                value={form.params.bucket_name ?? form.params.bucket ?? ""}
+                onChange={(e) => updateParam("bucket_name", e.target.value)}
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Credentials path (optional)</label>
+              <input
+                type="text"
+                value={form.params.credentials_path ?? ""}
+                onChange={(e) => updateParam("credentials_path", e.target.value)}
+                placeholder="Path to service account JSON"
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+          </>
+        )}
+        {form.storage_type === "ftp" && (
+          <>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Host</label>
+              <input
+                type="text"
+                value={form.params.host ?? ""}
+                onChange={(e) => updateParam("host", e.target.value)}
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Port</label>
+              <input
+                type="text"
+                value={form.params.port ?? "21"}
+                onChange={(e) => updateParam("port", e.target.value)}
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Username</label>
+              <input
+                type="text"
+                value={form.params.username ?? ""}
+                onChange={(e) => updateParam("username", e.target.value)}
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Password</label>
+              <input
+                type="password"
+                value={form.params.password ?? ""}
+                onChange={(e) => updateParam("password", e.target.value)}
+                placeholder="Stored securely; leave blank to keep existing"
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Base path (optional)</label>
+              <input
+                type="text"
+                value={form.params.base_path ?? ""}
+                onChange={(e) => updateParam("base_path", e.target.value)}
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+          </>
+        )}
+        {form.storage_type === "s3" && (
+          <>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Bucket</label>
+              <input
+                type="text"
+                value={form.params.bucket ?? ""}
+                onChange={(e) => updateParam("bucket", e.target.value)}
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Region</label>
+              <input
+                type="text"
+                value={form.params.region ?? "us-east-1"}
+                onChange={(e) => updateParam("region", e.target.value)}
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Access key ID</label>
+              <input
+                type="text"
+                value={form.params.access_key_id ?? ""}
+                onChange={(e) => updateParam("access_key_id", e.target.value)}
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", marginBottom: "0.25rem" }}>Secret access key</label>
+              <input
+                type="password"
+                value={form.params.secret_access_key ?? ""}
+                onChange={(e) => updateParam("secret_access_key", e.target.value)}
+                placeholder="Stored securely; leave blank to keep existing"
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+          </>
+        )}
+        {form.storage_type === "onedrive" && (
+          <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+            OneDrive requires OAuth or app-based auth; not yet implemented. Choose another storage type.
+          </p>
+        )}
+        {message && <p style={{ marginBottom: "0.75rem", color: "var(--success, green)" }}>{message}</p>}
+        <button type="submit" className="btn btn-primary" disabled={saving}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </form>
+      <p style={{ marginTop: "1rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+        Secrets are stored securely and are not displayed after save.
+      </p>
     </div>
   );
 }
@@ -1210,59 +1453,258 @@ function KpisSection({
           </form>
         </div>
       )}
-      <div className="card">
-        {list.length === 0 ? (
+      {list.length === 0 ? (
+        <div className="card">
           <p style={{ color: "var(--muted)" }}>No KPIs yet. Add one above.</p>
-        ) : (
-          <ul style={{ listStyle: "none" }}>
-            {list.map((k) => (
-              <li key={k.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
-                {editingId === k.id ? (
-                  <KpiEditForm
-                    kpi={k}
-                    orgId={orgId}
-                    orgTags={orgTags}
-                    token={token}
-                    userRole={userRole}
-                    onSave={(data) => onUpdateSubmit(k.id, data)}
-                    onCancel={() => setEditingId(null)}
-                    onSyncSuccess={() => loadList()}
-                  />
-                ) : (
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
-                    <div>
-                      <strong>{k.name}</strong>
-                      <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>Year {k.year}</span>
-                      {(k.domain_tags?.length ?? 0) > 0 && (
-                        <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>
-                          — {(k.domain_tags ?? []).map((t) => t.name).join(", ")}
+        </div>
+      ) : (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+            gap: "1rem",
+          }}
+        >
+          {list.map((k) => {
+            const cardColorPalette = [
+              { bg: "rgba(239, 68, 68, 0.08)", border: "rgba(239, 68, 68, 0.3)", accent: "#dc2626", accentBg: "rgba(239, 68, 68, 0.15)" },
+              { bg: "rgba(245, 158, 11, 0.08)", border: "rgba(245, 158, 11, 0.3)", accent: "#d97706", accentBg: "rgba(245, 158, 11, 0.15)" },
+              { bg: "rgba(16, 185, 129, 0.08)", border: "rgba(16, 185, 129, 0.3)", accent: "#059669", accentBg: "rgba(16, 185, 129, 0.15)" },
+              { bg: "rgba(99, 102, 241, 0.08)", border: "rgba(99, 102, 241, 0.3)", accent: "#6366f1", accentBg: "rgba(99, 102, 241, 0.15)" },
+              { bg: "rgba(168, 85, 247, 0.08)", border: "rgba(168, 85, 247, 0.3)", accent: "#9333ea", accentBg: "rgba(168, 85, 247, 0.15)" },
+              { bg: "rgba(236, 72, 153, 0.08)", border: "rgba(236, 72, 153, 0.3)", accent: "#db2777", accentBg: "rgba(236, 72, 153, 0.15)" },
+              { bg: "rgba(20, 184, 166, 0.08)", border: "rgba(20, 184, 166, 0.3)", accent: "#0d9488", accentBg: "rgba(20, 184, 166, 0.15)" },
+              { bg: "rgba(59, 130, 246, 0.08)", border: "rgba(59, 130, 246, 0.3)", accent: "#3b82f6", accentBg: "rgba(59, 130, 246, 0.15)" },
+            ];
+            let colorKey: number;
+            if ((k.organization_tags?.length ?? 0) > 0) {
+              colorKey = k.organization_tags![0].id;
+            } else if ((k.domain_tags?.length ?? 0) > 0) {
+              colorKey = k.domain_tags![0].id + 100;
+            } else if (k.domain_id != null) {
+              colorKey = k.domain_id + 200;
+            } else {
+              colorKey = k.id;
+            }
+            const cardColor = cardColorPalette[colorKey % cardColorPalette.length];
+            return (
+            <div
+              key={k.id}
+              className="card"
+              style={{
+                padding: "1rem",
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "space-between",
+                minHeight: "180px",
+                transition: "box-shadow 0.15s ease, transform 0.15s ease",
+                background: cardColor.bg,
+                borderLeft: `3px solid ${cardColor.accent}`,
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.boxShadow = `0 4px 12px ${cardColor.border}`;
+                e.currentTarget.style.transform = "translateY(-2px)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.boxShadow = "";
+                e.currentTarget.style.transform = "";
+              }}
+            >
+              {editingId === k.id ? (
+                <KpiEditForm
+                  kpi={k}
+                  orgId={orgId}
+                  orgTags={orgTags}
+                  token={token}
+                  userRole={userRole}
+                  onSave={(data) => onUpdateSubmit(k.id, data)}
+                  onCancel={() => setEditingId(null)}
+                  onSyncSuccess={() => loadList()}
+                />
+              ) : (
+                <>
+                  {/* Card header */}
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem", gap: "0.5rem" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                        <span
+                          style={{
+                            background: cardColor.accentBg,
+                            color: cardColor.accent,
+                            padding: "0.2rem 0.5rem",
+                            borderRadius: "4px",
+                            fontSize: "0.75rem",
+                            fontWeight: 500,
+                          }}
+                        >
+                          {k.year}
                         </span>
-                      )}
-                      {(k.organization_tags?.length ?? 0) > 0 && (
-                        <span style={{ marginLeft: "0.5rem", fontSize: "0.85rem" }}>
-                          { (k.organization_tags ?? []).map((t) => (
-                            <span key={t.id} style={{ background: "var(--muted)", color: "var(--on-muted)", padding: "0.1rem 0.4rem", borderRadius: "4px", marginRight: "0.25rem" }}>{t.name}</span>
-                          ))}
+                        <span
+                          style={{
+                            background: "rgba(107, 114, 128, 0.12)",
+                            color: "#6b7280",
+                            padding: "0.2rem 0.5rem",
+                            borderRadius: "4px",
+                            fontSize: "0.75rem",
+                            fontWeight: 500,
+                          }}
+                          title="Number of fields"
+                        >
+                          {k.fields_count ?? 0} fields
+                        </span>
+                      </div>
+                      {k.entry_mode === "api" && k.api_endpoint_url && (
+                        <span
+                          style={{
+                            background: "rgba(107, 114, 128, 0.15)",
+                            color: "#6b7280",
+                            padding: "0.15rem 0.4rem",
+                            borderRadius: "4px",
+                            fontSize: "0.7rem",
+                          }}
+                          title="API entry mode"
+                        >
+                          API
                         </span>
                       )}
                     </div>
-                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
-                      {(k.entry_mode === "api" && k.api_endpoint_url) && (
-                        <span style={{ fontSize: "0.8rem", color: "var(--muted)", marginRight: "0.25rem" }} title="API entry">API</span>
-                      )}
-                      <button type="button" className="btn btn-primary" onClick={() => onManageFields(k.id)}>
-                        Manage fields
-                      </button>
-                      <button type="button" className="btn" onClick={() => setEditingId(k.id)}>Edit</button>
-                      <button type="button" className="btn" onClick={() => onDelete(k.id)} style={{ color: "var(--error)" }}>Delete</button>
-                    </div>
+                    <h3
+                      style={{
+                        fontSize: "1rem",
+                        fontWeight: 600,
+                        margin: "0 0 0.5rem 0",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        cursor: "default",
+                      }}
+                      title={k.name}
+                    >
+                      {k.name}
+                    </h3>
+                    {k.description && (
+                      <p
+                        style={{
+                          fontSize: "0.85rem",
+                          color: "var(--muted)",
+                          margin: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                          lineHeight: "1.4",
+                          cursor: "default",
+                        }}
+                        title={k.description}
+                      >
+                        {k.description}
+                      </p>
+                    )}
+                    {/* Tags with distinct colors */}
+                    {((k.domain_tags?.length ?? 0) > 0 || (k.organization_tags?.length ?? 0) > 0) && (
+                      <div style={{ marginTop: "0.5rem", display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
+                        {(k.domain_tags ?? []).slice(0, 3).map((t, idx) => {
+                          const domainColors = [
+                            { bg: "rgba(239, 68, 68, 0.15)", color: "#dc2626" },
+                            { bg: "rgba(245, 158, 11, 0.15)", color: "#d97706" },
+                            { bg: "rgba(16, 185, 129, 0.15)", color: "#059669" },
+                          ];
+                          const c = domainColors[idx % domainColors.length];
+                          return (
+                            <span
+                              key={`d-${t.id}`}
+                              style={{
+                                background: c.bg,
+                                color: c.color,
+                                padding: "0.12rem 0.4rem",
+                                borderRadius: "3px",
+                                fontSize: "0.7rem",
+                                fontWeight: 500,
+                              }}
+                              title={t.name}
+                            >
+                              {t.name.length > 12 ? `${t.name.slice(0, 12)}…` : t.name}
+                            </span>
+                          );
+                        })}
+                        {(k.organization_tags ?? []).slice(0, 3).map((t, idx) => {
+                          const orgColors = [
+                            { bg: "rgba(99, 102, 241, 0.15)", color: "#6366f1" },
+                            { bg: "rgba(168, 85, 247, 0.15)", color: "#9333ea" },
+                            { bg: "rgba(236, 72, 153, 0.15)", color: "#db2777" },
+                          ];
+                          const c = orgColors[idx % orgColors.length];
+                          return (
+                            <span
+                              key={`o-${t.id}`}
+                              style={{
+                                background: c.bg,
+                                color: c.color,
+                                padding: "0.12rem 0.4rem",
+                                borderRadius: "3px",
+                                fontSize: "0.7rem",
+                                fontWeight: 500,
+                              }}
+                              title={t.name}
+                            >
+                              {t.name.length > 12 ? `${t.name.slice(0, 12)}…` : t.name}
+                            </span>
+                          );
+                        })}
+                        {((k.domain_tags?.length ?? 0) + (k.organization_tags?.length ?? 0) > 6) && (
+                          <span style={{ fontSize: "0.7rem", color: "var(--muted)" }}>+more</span>
+                        )}
+                      </div>
+                    )}
                   </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+                  {/* Card actions */}
+                  <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.75rem", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{
+                        padding: "0.3rem 0.6rem",
+                        fontSize: "0.8rem",
+                        flex: "1 1 auto",
+                        background: cardColor.accent,
+                        color: "#fff",
+                        border: "none",
+                      }}
+                      onClick={() => onManageFields(k.id)}
+                    >
+                      Fields
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{
+                        padding: "0.3rem 0.6rem",
+                        fontSize: "0.8rem",
+                        background: cardColor.accentBg,
+                        color: cardColor.accent,
+                        border: `1px solid ${cardColor.border}`,
+                      }}
+                      onClick={() => setEditingId(k.id)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem", color: "var(--error)" }}
+                      onClick={() => onDelete(k.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+          })}
+        </div>
+      )}
     </div>
   );
 }

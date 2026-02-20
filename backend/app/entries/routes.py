@@ -349,6 +349,329 @@ async def get_entry_fields(
     ]
 
 
+def _excel_sheet_name(name: str, max_len: int = 31) -> str:
+    """Sanitize sheet name for Excel (max 31 chars; no : \\ / ? * [ ])."""
+    invalid = ":\\/?*[]"
+    out = "".join(c if c not in invalid else "_" for c in (name or "Sheet"))
+    return out[:max_len].strip() or "Sheet"
+
+
+def _build_kpi_entry_xlsx(
+    kpi_name: str,
+    year: int,
+    org_id: int,
+    fields: list,
+    entry,
+) -> bytes:
+    """Build Excel workbook: one sheet for scalar fields, one sheet per multi_line_items field."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    value_by_field_id = {}
+    if entry and getattr(entry, "field_values", None):
+        for fv in entry.field_values:
+            value_by_field_id[fv.field_id] = fv
+
+    # --- Sheet 1: Scalar (and formula) fields ---
+    scalar_types = (
+        FieldType.single_line_text,
+        FieldType.multi_line_text,
+        FieldType.number,
+        FieldType.date,
+        FieldType.boolean,
+        FieldType.formula,
+    )
+    scalar_fields = [f for f in fields if getattr(f, "field_type", None) in scalar_types]
+    ws_scalar = wb.active
+    ws_scalar.title = _excel_sheet_name("KPI Data")
+    ws_scalar.append(["Field", "Value"])
+    for f in scalar_fields:
+        fv = value_by_field_id.get(f.id)
+        if fv is None:
+            ws_scalar.append([f.name, ""])
+            continue
+        if fv.value_text is not None:
+            val = fv.value_text
+        elif fv.value_number is not None:
+            val = fv.value_number
+        elif fv.value_boolean is not None:
+            val = "Yes" if fv.value_boolean else "No"
+        elif fv.value_date is not None:
+            val = str(fv.value_date)[:10] if fv.value_date else ""
+        elif fv.value_json is not None:
+            val = str(fv.value_json)[:500]
+        else:
+            val = ""
+        ws_scalar.append([f.name, val])
+
+    # --- One sheet per multi_line_items field ---
+    multi_fields = [f for f in fields if getattr(f, "field_type", None) == FieldType.multi_line_items]
+    for idx, f in enumerate(multi_fields):
+        sub_fields = list(getattr(f, "sub_fields", None) or [])
+        keys = [s.key for s in sub_fields]
+        if not keys:
+            keys = ["value"]
+        sheet_name = _excel_sheet_name(f.name) or f"Table_{idx + 1}"
+        if sheet_name in [s.title for s in wb.worksheets]:
+            sheet_name = _excel_sheet_name(f"{f.name}_{idx}") or f"Table_{idx + 1}"
+        ws = wb.create_sheet(title=sheet_name)
+        ws.append(keys)
+        fv = value_by_field_id.get(f.id)
+        rows = list(fv.value_json) if (fv and isinstance(getattr(fv, "value_json", None), list)) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                ws.append([""] * len(keys))
+                continue
+            ws.append([row.get(k, "") for k in keys])
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@router.get("/export-excel")
+async def export_entry_excel(
+    kpi_id: int = Query(...),
+    year: int = Query(..., ge=2000, le=2100),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download KPI entry data as Excel: scalar fields in one sheet, each multi_line_items in its own sheet."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+    kpi_res = await db.execute(
+        select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id)
+    )
+    kpi = kpi_res.scalar_one_or_none()
+    if not kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    fields = await list_kpi_fields_service(db, kpi_id, org_id)
+    entry_res = await db.execute(
+        select(KPIEntry)
+        .where(
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.organization_id == org_id,
+            KPIEntry.year == year,
+        )
+        .options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
+    )
+    entry = entry_res.scalar_one_or_none()
+    xlsx_bytes = _build_kpi_entry_xlsx(
+        kpi_name=getattr(kpi, "name", "") or f"KPI_{kpi_id}",
+        year=year,
+        org_id=org_id,
+        fields=fields,
+        entry=entry,
+    )
+    filename = f"KPI_{kpi_id}_{year}_org{org_id}.xlsx"
+    return StreamingResponse(
+        iter([xlsx_bytes]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _parse_kpi_entry_xlsx(
+    content: bytes,
+    fields: list,
+) -> dict[int, dict]:
+    """Parse uploaded Excel into field values. Returns {field_id: {value_text, value_number, value_boolean, value_date, value_json}}."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(filename=BytesIO(content), data_only=True)
+    result: dict[int, dict] = {}
+
+    # Build lookup from field name -> field
+    name_to_field = {f.name.strip().lower(): f for f in fields}
+    sheet_name_to_field = {}
+    for f in fields:
+        if getattr(f, "field_type", None) == FieldType.multi_line_items:
+            sanitized = _excel_sheet_name(f.name).lower()
+            sheet_name_to_field[sanitized] = f
+
+    # Parse scalar sheet ("KPI Data")
+    scalar_sheet = None
+    for ws in wb.worksheets:
+        if ws.title.lower() == "kpi data":
+            scalar_sheet = ws
+            break
+    if not scalar_sheet and wb.worksheets:
+        scalar_sheet = wb.worksheets[0]
+
+    if scalar_sheet:
+        rows = list(scalar_sheet.iter_rows(values_only=True))
+        for row in rows[1:]:  # skip header
+            if not row or len(row) < 2:
+                continue
+            field_name = str(row[0]).strip().lower() if row[0] else ""
+            raw_value = row[1]
+            field = name_to_field.get(field_name)
+            if not field:
+                continue
+            ft = getattr(field, "field_type", None)
+            if ft == FieldType.formula:
+                continue  # skip formula fields on upload
+            if ft == FieldType.multi_line_items:
+                continue  # handled separately
+            val: dict = {}
+            if raw_value is None or raw_value == "":
+                pass
+            elif ft == FieldType.number:
+                try:
+                    val["value_number"] = float(raw_value)
+                except (TypeError, ValueError):
+                    val["value_text"] = str(raw_value)
+            elif ft == FieldType.boolean:
+                if isinstance(raw_value, bool):
+                    val["value_boolean"] = raw_value
+                else:
+                    s = str(raw_value).strip().lower()
+                    val["value_boolean"] = s in ("1", "true", "yes", "y")
+            elif ft == FieldType.date:
+                if hasattr(raw_value, "date"):
+                    try:
+                        val["value_date"] = raw_value.date().isoformat()
+                    except Exception:
+                        val["value_text"] = str(raw_value)
+                else:
+                    val["value_text"] = str(raw_value)
+            else:
+                val["value_text"] = str(raw_value) if raw_value is not None else None
+            result[field.id] = val
+
+    # Parse multi_line_items sheets
+    for ws in wb.worksheets:
+        title_lower = ws.title.lower()
+        if title_lower == "kpi data":
+            continue
+        field = sheet_name_to_field.get(title_lower)
+        if not field:
+            # Try matching by prefix
+            for sn, f in sheet_name_to_field.items():
+                if title_lower.startswith(sn[:20]):
+                    field = f
+                    break
+        if not field:
+            continue
+        sub_fields = list(getattr(field, "sub_fields", None) or [])
+        key_to_sf = {s.key: s for s in sub_fields}
+        name_to_sf = {s.name.strip().lower(): s for s in sub_fields}
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            continue
+        header = [str(c).strip() if c else "" for c in rows[0]]
+        col_to_key: list[str | None] = []
+        for col in header:
+            col_lower = col.lower()
+            if col in key_to_sf:
+                col_to_key.append(col)
+            elif col_lower in name_to_sf:
+                col_to_key.append(name_to_sf[col_lower].key)
+            else:
+                col_to_key.append(None)
+        items: list[dict] = []
+        for row in rows[1:]:
+            if not row:
+                continue
+            item: dict = {}
+            empty = True
+            for i, raw in enumerate(row):
+                if i >= len(col_to_key):
+                    continue
+                key = col_to_key[i]
+                if not key:
+                    continue
+                if raw is None or raw == "":
+                    continue
+                empty = False
+                sf = key_to_sf.get(key)
+                sf_type = sf.field_type if sf else "single_line_text"
+                if sf_type == FieldType.number or sf_type == "number":
+                    try:
+                        item[key] = float(raw)
+                    except (TypeError, ValueError):
+                        item[key] = str(raw)
+                elif sf_type == FieldType.boolean or sf_type == "boolean":
+                    if isinstance(raw, bool):
+                        item[key] = raw
+                    else:
+                        s = str(raw).strip().lower()
+                        item[key] = s in ("1", "true", "yes", "y")
+                elif sf_type == FieldType.date or sf_type == "date":
+                    if hasattr(raw, "date"):
+                        try:
+                            item[key] = raw.date().isoformat()
+                        except Exception:
+                            item[key] = str(raw)
+                    else:
+                        item[key] = str(raw)
+                else:
+                    item[key] = str(raw)
+            if not empty:
+                items.append(item)
+        result[field.id] = {"value_json": items}
+
+    return result
+
+
+@router.post("/import-excel")
+async def import_entry_excel(
+    kpi_id: int = Query(...),
+    year: int = Query(..., ge=2000, le=2100),
+    organization_id: int | None = Query(None),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload KPI entry data from Excel (same format as download). Auth: Org Admin or data_entry for this KPI."""
+    org_id = _org_id(current_user, organization_id)
+    can_edit = await user_can_edit_kpi(db, current_user.id, kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No edit access to this KPI")
+    kpi_res = await db.execute(
+        select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id)
+    )
+    kpi = kpi_res.scalar_one_or_none()
+    if not kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    fields = await list_kpi_fields_service(db, kpi_id, org_id)
+    content = await file.read()
+    try:
+        parsed = _parse_kpi_entry_xlsx(content, fields)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to parse Excel: {e}")
+    # Get or create entry
+    entry, _ = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
+    if entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry is locked")
+    # Build FieldValueInput list
+    from app.entries.schemas import FieldValueInput
+    values = []
+    for field in fields:
+        if field.id not in parsed:
+            continue
+        data = parsed[field.id]
+        values.append(
+            FieldValueInput(
+                field_id=field.id,
+                value_text=data.get("value_text"),
+                value_number=data.get("value_number"),
+                value_boolean=data.get("value_boolean"),
+                value_date=data.get("value_date"),
+                value_json=data.get("value_json"),
+            )
+        )
+    await save_entry_values(db, entry.id, current_user.id, values, kpi_id, org_id)
+    await db.commit()
+    await db.refresh(entry)
+    return {"message": "Import successful", "entry_id": entry.id, "fields_updated": len(values)}
+
+
 @router.get("", response_model=list[EntryResponse])
 async def list_my_entries(
     kpi_id: int | None = Query(None),

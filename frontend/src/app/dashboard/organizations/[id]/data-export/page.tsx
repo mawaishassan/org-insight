@@ -114,8 +114,14 @@ export default function OrganizationDataExportPage() {
   const [responseText, setResponseText] = useState<string>("\n// Click \"Test API call\" to see JSON here\n");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [validHours, setValidHours] = useState<number>(24);
+  const [generatedToken, setGeneratedToken] = useState<string | null>(null);
+  const [generatedExpiresAt, setGeneratedExpiresAt] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
 
   const token = getAccessToken();
+  const displayToken = generatedToken ?? token ?? null;
 
   useEffect(() => {
     if (!token) {
@@ -133,8 +139,27 @@ export default function OrganizationDataExportPage() {
     return `${url}?${search.toString()}`;
   }, [orgId, year]);
 
+  const handleGenerateToken = async () => {
+    if (!orgId || !token) return;
+    setGenerating(true);
+    setGenerateError(null);
+    try {
+      const res = await api<{ token: string; expires_at: string }>(
+        `/organizations/${orgId}/export-token`,
+        { method: "POST", body: JSON.stringify({ valid_hours: validHours }), token }
+      );
+      setGeneratedToken(res.token);
+      setGeneratedExpiresAt(res.expires_at);
+    } catch (e) {
+      setGenerateError(e instanceof Error ? e.message : "Failed to generate token");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   const handleTestCall = async () => {
-    if (!token || !orgId) {
+    const authToken = displayToken ?? token;
+    if (!authToken || !orgId) {
       setError("Missing token or organization id");
       return;
     }
@@ -146,7 +171,7 @@ export default function OrganizationDataExportPage() {
       if (year.trim()) {
         search.set("year", year.trim());
       }
-      const data = await api<ExportItem[]>(`/kpis/data-export?${search.toString()}`, { token });
+      const data = await api<ExportItem[]>(`/kpis/data-export?${search.toString()}`, { token: authToken });
       setResponseText(JSON.stringify(data, null, 2));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to call API";
@@ -214,14 +239,73 @@ export default function OrganizationDataExportPage() {
       </div>
 
       <div className="card" style={{ marginBottom: "1rem" }}>
-        <h2 style={{ fontSize: "1.1rem", marginBottom: "0.75rem" }}>2. Security token (Bearer)</h2>
+        <h2 style={{ fontSize: "1.1rem", marginBottom: "0.75rem" }}>2. Long-lived export token (recommended)</h2>
+        <p style={{ fontSize: "0.9rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
+          Generate a token that stays valid for the number of hours you choose. No resync until it expires.
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+          <label style={{ fontWeight: 500 }}>Valid for (hours)</label>
+          <input
+            type="number"
+            min={1}
+            max={8760}
+            value={validHours}
+            onChange={(e) => setValidHours(Number(e.target.value) || 24)}
+            style={{
+              width: 80,
+              padding: "0.4rem 0.5rem",
+              borderRadius: 6,
+              border: "1px solid var(--border)",
+            }}
+          />
+          <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>e.g. 24 = 1 day, 168 = 1 week, 8760 = 1 year</span>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleGenerateToken}
+            disabled={generating || !token}
+          >
+            {generating ? "Generating…" : "Generate token"}
+          </button>
+        </div>
+        {generateError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{generateError}</p>}
+        {generatedToken && (
+          <div style={{ marginTop: "0.5rem" }}>
+            <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.25rem" }}>
+              Token (copy now; it won’t be shown again):
+            </p>
+            <textarea
+              readOnly
+              value={generatedToken}
+              rows={2}
+              style={{
+                width: "100%",
+                fontFamily: "monospace",
+                fontSize: "0.85rem",
+                padding: "0.5rem",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                resize: "vertical",
+              }}
+            />
+            {generatedExpiresAt && (
+              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>
+                Expires: {new Date(generatedExpiresAt).toLocaleString()}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: "1rem" }}>
+        <h2 style={{ fontSize: "1.1rem", marginBottom: "0.75rem" }}>3. Security token (Bearer)</h2>
         <p style={{ fontSize: "0.9rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
-          Provide this token to the external system. It must be sent in the{" "}
-          <code>Authorization: Bearer &lt;token&gt;</code> header. Tokens expire as configured on the backend.
+          Use the generated token above, or your session token below. Send in{" "}
+          <code>Authorization: Bearer &lt;token&gt;</code> header.
         </p>
         <textarea
           readOnly
-          value={token || "// No access token found in browser cookies"}
+          value={displayToken ?? "// Generate a token above or sign in to use session token"}
           rows={3}
           style={{
             width: "100%",
@@ -236,16 +320,17 @@ export default function OrganizationDataExportPage() {
       </div>
 
       <div className="card">
-        <h2 style={{ fontSize: "1.1rem", marginBottom: "0.75rem" }}>3. Test API call</h2>
+        <h2 style={{ fontSize: "1.1rem", marginBottom: "0.75rem" }}>4. Test API call</h2>
         {error && (
           <p className="form-error" style={{ marginBottom: "0.5rem" }}>
             {error}
           </p>
         )}
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
-          <button type="button" className="btn btn-primary" onClick={handleTestCall} disabled={loading || !token}>
+          <button type="button" className="btn btn-primary" onClick={handleTestCall} disabled={loading || !displayToken}>
             {loading ? "Calling…" : "Test API call"}
           </button>
+          <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Uses token from section 3</span>
           <button type="button" className="btn" onClick={handleShowSchemaAndExample}>
             Schema & example
           </button>
