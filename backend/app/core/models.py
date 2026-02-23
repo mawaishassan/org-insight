@@ -491,6 +491,8 @@ class ReportTemplate(Base):
     # When present, this is used to render HTML for the report using the
     # structured KPI data produced at generation time.
     body_template = Column(Text, nullable=True)
+    # Visual builder: list of block configs (JSON). When set, body_template is generated from this at render time.
+    body_blocks = Column(JSON, nullable=True)
     year = Column(Integer, nullable=False, index=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)

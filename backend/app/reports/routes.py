@@ -17,6 +17,7 @@ from app.reports.schemas import (
     ReportAccessAssign,
     ReportTemplateResponse,
     ReportTemplateDetailResponse,
+    EvaluateSnippetRequest,
 )
 from app.reports.service import (
     create_report_template,
@@ -35,6 +36,7 @@ from app.reports.service import (
     delete_text_block,
     generate_report_data,
     render_report_html,
+    evaluate_report_snippet,
 )
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -355,3 +357,35 @@ async def generate_report(
             headers={"Content-Disposition": f"attachment; filename=report_{template_id}.csv"},
         )
     return data
+
+
+@router.post("/templates/{template_id}/evaluate-snippet")
+async def evaluate_snippet(
+    template_id: int,
+    body: EvaluateSnippetRequest,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Evaluate a KPI value or formula snippet in report context; returns the value for preview."""
+    org_id = await _org_id_for_template(db, current_user, template_id, body.organization_id or organization_id)
+    can = await user_can_access_report(db, current_user.id, template_id, "view")
+    if not can:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+    rt = await get_report_template(db, template_id, org_id)
+    if not rt:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+    value = await evaluate_report_snippet(
+        db,
+        template_id,
+        org_id,
+        snippet_type=body.type,
+        year=body.year,
+        kpi_id=body.kpi_id,
+        field_key=body.field_key,
+        sub_field_key=body.sub_field_key,
+        sub_field_group_fn=body.sub_field_group_fn,
+        entry_index=body.entry_index,
+        expression=body.expression,
+    )
+    return {"value": value}

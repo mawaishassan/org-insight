@@ -19,6 +19,7 @@ class ReportTemplateUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
     body_template: str | None = None
+    body_blocks: list[dict] | None = None
     year: int | None = Field(None, ge=2000, le=2100)
 
 
@@ -70,3 +71,19 @@ class ReportGenerateOptions(BaseModel):
 
     format: str = Field(default="json", pattern="^(json|csv|pdf)$")
     year: int | None = None  # override template year if needed
+
+
+class EvaluateSnippetRequest(BaseModel):
+    """Request to evaluate a KPI value or formula snippet in report context."""
+
+    type: str = Field(..., pattern="^(kpi_value|formula)$")
+    organization_id: int = Field(...)
+    year: int | None = None  # use template year if not provided
+    # For kpi_value: which value to resolve
+    kpi_id: int | None = None
+    field_key: str | None = None
+    sub_field_key: str | None = None
+    sub_field_group_fn: str | None = None  # SUM_ITEMS, AVG_ITEMS, etc. when sub_field_key is set
+    entry_index: int = 0
+    # For formula
+    expression: str | None = None
