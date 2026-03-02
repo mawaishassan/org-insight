@@ -2,12 +2,20 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+
+function qs(params: Record<string, string | number | boolean | undefined>): string {
+  return new URLSearchParams(
+    Object.fromEntries(
+      Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])
+    )
+  ).toString();
+}
 
 const FIELD_TYPES = [
   "single_line_text",
@@ -69,12 +77,22 @@ interface KpiField {
   sub_fields?: SubFieldDef[];
 }
 
+interface OrgTagRef {
+  id: number;
+  name: string;
+}
+
 interface KpiInfo {
   id: number;
   name: string;
+  description?: string | null;
   year: number;
+  sort_order?: number;
   organization_id: number;
   card_display_field_ids?: number[] | null;
+  entry_mode?: string;
+  api_endpoint_url?: string | null;
+  organization_tags?: OrgTagRef[];
 }
 
 const createSchema = z.object({
@@ -95,13 +113,28 @@ const updateSchema = z.object({
   sort_order: z.coerce.number().int().min(0),
 });
 
+const kpiUpdateSchema = z.object({
+  name: z.string().min(1, "Name required"),
+  description: z.string().optional(),
+  year: z.coerce.number().int().min(2000).max(2100),
+  sort_order: z.coerce.number().int().min(0),
+  entry_mode: z.enum(["manual", "api"]),
+  api_endpoint_url: z.string().max(2048).optional(),
+  organization_tag_ids: z.array(z.number().int()).optional(),
+});
+
 type CreateFormData = z.infer<typeof createSchema>;
 type UpdateFormData = z.infer<typeof updateSchema>;
+type KpiUpdateFormData = z.infer<typeof kpiUpdateSchema>;
 
 export default function KpiFieldsPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
+  const organizationIdFromUrl = searchParams.get("organization_id");
+  const orgIdFromUrl = organizationIdFromUrl ? Number(organizationIdFromUrl) : null;
   const kpiId = Number(params.id);
   const [kpi, setKpi] = useState<KpiInfo | null>(null);
+  const [orgTags, setOrgTags] = useState<OrgTagRef[]>([]);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [list, setList] = useState<KpiField[]>([]);
   const [loading, setLoading] = useState(true);
@@ -113,8 +146,62 @@ export default function KpiFieldsPage() {
   const [cardDisplaySaved, setCardDisplaySaved] = useState(false);
   const [cardDisplaySaveError, setCardDisplaySaveError] = useState<string | null>(null);
   const autosaveTimerRef = useRef<number | null>(null);
+  const [kpiSaveError, setKpiSaveError] = useState<string | null>(null);
+  const [kpiSaving, setKpiSaving] = useState(false);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncMode, setSyncMode] = useState<"override" | "append">("override");
+  const [contractOpen, setContractOpen] = useState(false);
+  const [contract, setContract] = useState<Record<string, unknown> | null>(null);
+  type EditTabId = "details" | "fields";
+  const tabFromUrl = searchParams.get("tab") as EditTabId | null;
+  const [activeEditTab, setActiveEditTab] = useState<EditTabId>(
+    tabFromUrl === "details" || tabFromUrl === "fields" ? tabFromUrl : "details"
+  );
 
   const token = getAccessToken();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (tabFromUrl === "details" || tabFromUrl === "fields") {
+      setActiveEditTab(tabFromUrl);
+    }
+  }, [tabFromUrl]);
+
+  const setEditTab = (tab: EditTabId) => {
+    setActiveEditTab(tab);
+    if (orgIdFromUrl != null) {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("tab", tab);
+      router.replace(`/dashboard/kpis/${kpiId}/fields?${params.toString()}`, { scroll: false });
+    }
+  };
+
+  const kpiEditForm = useForm<KpiUpdateFormData>({
+    resolver: zodResolver(kpiUpdateSchema),
+    defaultValues: {
+      name: "",
+      description: "",
+      year: new Date().getFullYear(),
+      sort_order: 0,
+      entry_mode: "manual",
+      api_endpoint_url: "",
+      organization_tag_ids: [],
+    },
+  });
+
+  useEffect(() => {
+    if (kpi && orgIdFromUrl != null) {
+      kpiEditForm.reset({
+        name: kpi.name,
+        description: kpi.description ?? "",
+        year: kpi.year,
+        sort_order: kpi.sort_order ?? 0,
+        entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
+        api_endpoint_url: kpi.api_endpoint_url ?? "",
+        organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
+      });
+    }
+  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.year, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.organization_tags, orgIdFromUrl]);
 
   useEffect(() => {
     if (!token) return;
@@ -140,7 +227,8 @@ export default function KpiFieldsPage() {
 
   const loadKpi = () => {
     if (!token || !kpiId) return;
-    api<KpiInfo>(`/kpis/${kpiId}`, { token })
+    const query = orgIdFromUrl != null ? `?${qs({ organization_id: orgIdFromUrl })}` : "";
+    api<KpiInfo>(`/kpis/${kpiId}${query}`, { token })
       .then((data) => {
         setKpi(data);
         setCardDisplayFieldIds(Array.isArray(data.card_display_field_ids) ? [...data.card_display_field_ids] : []);
@@ -154,7 +242,14 @@ export default function KpiFieldsPage() {
 
   useEffect(() => {
     loadKpi();
-  }, [kpiId]);
+  }, [kpiId, orgIdFromUrl]);
+
+  useEffect(() => {
+    if (!token || orgIdFromUrl == null) return;
+    api<OrgTagRef[]>(`/organizations/${orgIdFromUrl}/tags`, { token })
+      .then(setOrgTags)
+      .catch(() => setOrgTags([]));
+  }, [token, orgIdFromUrl]);
 
   const [createSubFields, setCreateSubFields] = useState<Array<{ name: string; key: string; field_type: string; is_required: boolean; sort_order: number }>>([]);
 
@@ -303,35 +398,355 @@ export default function KpiFieldsPage() {
     }
   };
 
+  const onKpiUpdateSubmit = async (data: KpiUpdateFormData) => {
+    if (!token || !kpiId || orgIdFromUrl == null) return;
+    setKpiSaveError(null);
+    setKpiSaving(true);
+    try {
+      const updated = await api<KpiInfo>(`/kpis/${kpiId}?${qs({ organization_id: orgIdFromUrl })}`, {
+        method: "PATCH",
+        token,
+        body: JSON.stringify({
+          name: data.name,
+          description: data.description || null,
+          year: data.year,
+          sort_order: data.sort_order,
+          entry_mode: data.entry_mode ?? "manual",
+          api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
+          organization_tag_ids: data.organization_tag_ids ?? [],
+        }),
+      });
+      setKpi(updated);
+    } catch (e) {
+      setKpiSaveError(e instanceof Error ? e.message : "Update failed");
+    } finally {
+      setKpiSaving(false);
+    }
+  };
+
+  const fetchContract = async () => {
+    if (!token || !kpiId || orgIdFromUrl == null) return;
+    if (contract !== null) {
+      setContractOpen((o) => !o);
+      return;
+    }
+    try {
+      const c = await api<Record<string, unknown>>(
+        `/kpis/${kpiId}/api-contract?${qs({ organization_id: orgIdFromUrl })}`,
+        { token }
+      );
+      setContract(c);
+      setContractOpen(true);
+    } catch {
+      setContract({});
+      setContractOpen(true);
+    }
+  };
+
+  const onDeleteKpi = async () => {
+    if (!token || !kpiId || orgIdFromUrl == null) return;
+    try {
+      const summary = await api<{
+        has_child_data: boolean;
+        assignments_count: number;
+        entries_count: number;
+        fields_count: number;
+        field_values_count: number;
+        report_template_kpis_count: number;
+      }>(`/kpis/${kpiId}/child_data_summary?${qs({ organization_id: orgIdFromUrl })}`, { token });
+      const message = summary.has_child_data
+        ? `This KPI has ${summary.assignments_count} assignment(s), ${summary.entries_count} entry/entries, ${summary.fields_count} field(s), ${summary.field_values_count} stored value(s), and ${summary.report_template_kpis_count} report template reference(s). Deleting will remove all of them. Continue?`
+        : "Delete this KPI?";
+      if (!confirm(message)) return;
+      await api(`/kpis/${kpiId}?${qs({ organization_id: orgIdFromUrl })}`, { method: "DELETE", token });
+      window.location.href = `/dashboard/organizations/${orgIdFromUrl}?tab=kpis`;
+    } catch (e) {
+      setKpiSaveError(e instanceof Error ? e.message : "Delete failed");
+    }
+  };
+
   if (!kpiId) return <p>Invalid KPI.</p>;
   if (loading && list.length === 0 && !kpi) return <p>Loading...</p>;
+
+  const isOrgContext = orgIdFromUrl != null && kpi != null;
+
+  const tabBarStyle = {
+    display: "flex",
+    gap: "0.25rem",
+    borderBottom: "1px solid var(--border)",
+    marginBottom: "1.25rem",
+    paddingBottom: 0,
+  } as const;
+
+  const tabButtonStyle = (active: boolean) =>
+    ({
+      padding: "0.6rem 1rem",
+      fontSize: "0.95rem",
+      fontWeight: 500,
+      border: "none",
+      borderBottom: active ? "2px solid var(--primary)" : "2px solid transparent",
+      background: "none",
+      color: active ? "var(--primary)" : "var(--muted)",
+      cursor: "pointer",
+      marginBottom: "-1px",
+      borderRadius: "6px 6px 0 0",
+    }) as const;
 
   const content = (
     <div>
       <div style={{ marginBottom: "1rem" }}>
-        <Link href="/dashboard/kpis" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{"\u2190"} KPIs</Link>
-      </div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
-        <div>
-          <h1 style={{ fontSize: "1.5rem", margin: 0 }}>
-            Fields for {kpi ? `${kpi.name} (${kpi.year})` : `KPI #${kpiId}`}
-          </h1>
-          {userRole === "SUPER_ADMIN" && (
-            <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
-              Use &quot;Show on card&quot; next to each field to choose which fields appear on this KPI&apos;s card on the domain page.
-            </p>
-          )}
-        </div>
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={() => setShowCreate((s) => !s)}
-        >
-          {showCreate ? "Cancel" : "Add field"}
-        </button>
+        {isOrgContext ? (
+          <Link
+            href={`/dashboard/organizations/${orgIdFromUrl}?tab=kpis`}
+            style={{ color: "var(--muted)", fontSize: "0.9rem" }}
+          >
+            {"\u2190"} Organization KPIs
+          </Link>
+        ) : (
+          <Link href="/dashboard/kpis" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+            {"\u2190"} KPIs
+          </Link>
+        )}
       </div>
 
-      {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
+      {isOrgContext && (
+        <>
+          <h1 style={{ fontSize: "1.35rem", margin: "0 0 0.5rem 0", fontWeight: 600 }}>
+            {kpi.name} ({kpi.year})
+          </h1>
+          <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 1rem 0" }}>
+            Edit KPI settings and manage fields below.
+          </p>
+          <div style={tabBarStyle} role="tablist" aria-label="KPI edit sections">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeEditTab === "details"}
+              style={tabButtonStyle(activeEditTab === "details")}
+              onClick={() => setEditTab("details")}
+            >
+              Details
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeEditTab === "fields"}
+              style={tabButtonStyle(activeEditTab === "fields")}
+              onClick={() => setEditTab("fields")}
+            >
+              Fields {list.length > 0 && <span style={{ marginLeft: "0.35rem", opacity: 0.8 }}>({list.length})</span>}
+            </button>
+          </div>
+        </>
+      )}
+
+      {isOrgContext && activeEditTab === "details" && (
+        <div className="card" style={{ marginBottom: "1.5rem" }}>
+          <h2 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>KPI details</h2>
+          <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
+            <div className="form-group">
+              <label>Name *</label>
+              <input {...kpiEditForm.register("name")} />
+              {kpiEditForm.formState.errors.name && (
+                <p className="form-error">{kpiEditForm.formState.errors.name.message}</p>
+              )}
+            </div>
+            <div className="form-group">
+              <label>Description</label>
+              <textarea {...kpiEditForm.register("description")} rows={2} />
+            </div>
+            <div className="form-group">
+              <label>Year *</label>
+              <input type="number" min={2000} max={2100} {...kpiEditForm.register("year")} />
+            </div>
+            <div className="form-group">
+              <label>Sort order</label>
+              <input type="number" min={0} {...kpiEditForm.register("sort_order")} />
+            </div>
+            <div className="form-group">
+              <label>Entry mode</label>
+              <select
+                {...kpiEditForm.register("entry_mode")}
+                disabled={userRole !== "SUPER_ADMIN"}
+              >
+                <option value="manual">Manual (default)</option>
+                <option value="api">API</option>
+              </select>
+            </div>
+            {userRole === "SUPER_ADMIN" && kpiEditForm.watch("entry_mode") === "api" && (
+              <>
+                <div className="form-group">
+                  <label>API endpoint URL</label>
+                  <input
+                    type="url"
+                    placeholder="https://your-server.com/kpi-data"
+                    {...kpiEditForm.register("api_endpoint_url")}
+                    style={{ width: "100%", maxWidth: "480px" }}
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                  <button type="button" className="btn" onClick={fetchContract}>
+                    {contractOpen ? "Hide" : "Show"} operation contract
+                  </button>
+                  {contractOpen && contract && (
+                    <pre
+                      style={{
+                        marginTop: "0.5rem",
+                        padding: "0.75rem",
+                        background: "var(--bg-subtle)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        fontSize: "0.85rem",
+                        overflow: "auto",
+                        maxHeight: 320,
+                      }}
+                    >
+                      {JSON.stringify(contract, null, 2)}
+                    </pre>
+                  )}
+                </div>
+                {kpi?.entry_mode === "api" && kpi?.api_endpoint_url && (
+                  <div className="form-group">
+                    <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.35rem" }}>When syncing:</p>
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                        <input
+                          type="radio"
+                          name="syncMode"
+                          checked={syncMode === "override"}
+                          onChange={() => setSyncMode("override")}
+                        />
+                        Override existing data
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                        <input
+                          type="radio"
+                          name="syncMode"
+                          checked={syncMode === "append"}
+                          onChange={() => setSyncMode("append")}
+                        />
+                        Append to existing (multi-line rows)
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={syncLoading}
+                      onClick={async () => {
+                        setSyncLoading(true);
+                        try {
+                          await api(
+                            `/kpis/${kpiId}/sync-from-api?${qs({
+                              year: kpi.year,
+                              organization_id: orgIdFromUrl!,
+                              sync_mode: syncMode,
+                            })}`,
+                            { method: "POST", token: token! }
+                          );
+                          loadKpi();
+                        } finally {
+                          setSyncLoading(false);
+                        }
+                      }}
+                    >
+                      {syncLoading ? "Syncing…" : "Sync from API now"}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+            {orgTags.length > 0 && (
+              <div className="form-group">
+                <label>Organization tags</label>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.35rem 0" }}>
+                  Use tags to group and filter KPIs inside this organization.
+                </p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+                  {orgTags.map((t) => {
+                    const ids = kpiEditForm.watch("organization_tag_ids") ?? [];
+                    const checked = ids.includes(t.id);
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => {
+                          const prev = kpiEditForm.getValues("organization_tag_ids") ?? [];
+                          const next = prev.includes(t.id)
+                            ? prev.filter((id) => id !== t.id)
+                            : [...prev, t.id];
+                          kpiEditForm.setValue("organization_tag_ids", next);
+                        }}
+                        style={{
+                          borderRadius: 999,
+                          padding: "0.25rem 0.75rem",
+                          fontSize: "0.85rem",
+                          border: checked ? "1px solid var(--primary)" : "1px solid var(--border)",
+                          backgroundColor: checked ? "rgba(59, 130, 246, 0.08)" : "transparent",
+                          color: checked ? "var(--primary)" : "var(--muted)",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "0.35rem",
+                          cursor: "pointer",
+                          transition: "background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease",
+                        }}
+                      >
+                        {checked && (
+                          <span aria-hidden="true" style={{ fontSize: "0.8rem" }}>
+                            ✓
+                          </span>
+                        )}
+                        <span>{t.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
+            <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={kpiEditForm.formState.isSubmitting || kpiSaving}
+              >
+                {kpiSaving ? "Saving…" : "Save KPI"}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ color: "var(--error)" }}
+                onClick={onDeleteKpi}
+              >
+                Delete KPI
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {(!isOrgContext || activeEditTab === "fields") && (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
+            <div>
+              <h2 style={{ fontSize: isOrgContext ? "1.15rem" : "1.5rem", margin: 0 }}>
+                {isOrgContext ? "Fields" : `Fields for ${kpi ? `${kpi.name} (${kpi.year})` : `KPI #${kpiId}`}`}
+              </h2>
+              {userRole === "SUPER_ADMIN" && (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
+                  Use &quot;Show on card&quot; next to each field to choose which fields appear on this KPI&apos;s card on the domain page.
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => setShowCreate((s) => !s)}
+            >
+              {showCreate ? "Cancel" : "Add field"}
+            </button>
+          </div>
+
+          {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
 
       {showCreate && (
         <div className="card" style={{ marginBottom: "1rem" }}>
@@ -512,6 +927,8 @@ export default function KpiFieldsPage() {
           </ul>
         )}
       </div>
+        </>
+      )}
     </div>
   );
   return content;

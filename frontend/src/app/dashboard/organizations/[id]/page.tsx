@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -318,12 +318,24 @@ function ApiContractBlock({ contract }: { contract: ApiContract }) {
 
 export default function OrganizationDetailPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const orgId = Number(params.id);
   const token = getAccessToken();
+  const tabFromUrl = searchParams.get("tab") as TabId | null;
+  const initialTab: TabId =
+    tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage"].includes(tabFromUrl)
+      ? tabFromUrl
+      : "domains";
 
   const [org, setOrg] = useState<OrgInfo | null>(null);
-  const [tab, setTab] = useState<TabId>("domains");
+  const [tab, setTab] = useState<TabId>(initialTab);
   const [domains, setDomains] = useState<DomainWithSummary[]>([]);
+
+  useEffect(() => {
+    if (tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage"].includes(tabFromUrl)) {
+      setTab(tabFromUrl as TabId);
+    }
+  }, [tabFromUrl]);
   const [orgTags, setOrgTags] = useState<OrgTagRow[]>([]);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -1510,20 +1522,8 @@ function KpisSection({
                 e.currentTarget.style.transform = "";
               }}
             >
-              {editingId === k.id ? (
-                <KpiEditForm
-                  kpi={k}
-                  orgId={orgId}
-                  orgTags={orgTags}
-                  token={token}
-                  userRole={userRole}
-                  onSave={(data) => onUpdateSubmit(k.id, data)}
-                  onCancel={() => setEditingId(null)}
-                  onSyncSuccess={() => loadList()}
-                />
-              ) : (
-                <>
-                  {/* Card header */}
+              <>
+                {/* Card header */}
                   <div>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem", gap: "0.5rem" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
@@ -1675,8 +1675,8 @@ function KpisSection({
                     >
                       Fields
                     </button>
-                    <button
-                      type="button"
+                    <Link
+                      href={`/dashboard/organizations/${orgId}/kpis/${k.id}`}
                       className="btn"
                       style={{
                         padding: "0.3rem 0.6rem",
@@ -1684,11 +1684,12 @@ function KpisSection({
                         background: cardColor.accentBg,
                         color: cardColor.accent,
                         border: `1px solid ${cardColor.border}`,
+                        textDecoration: "none",
+                        display: "inline-block",
                       }}
-                      onClick={() => setEditingId(k.id)}
                     >
                       Edit
-                    </button>
+                    </Link>
                     <button
                       type="button"
                       className="btn"
@@ -1699,7 +1700,6 @@ function KpisSection({
                     </button>
                   </div>
                 </>
-              )}
             </div>
           );
           })}
