@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+
+const AUTO_SAVE_DELAY_MS = 45_000; // 45 seconds after last change
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
@@ -487,6 +489,12 @@ export default function ReportDesignPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [bodyTemplate, setBodyTemplate] = useState("");
 
+  const [isDirty, setIsDirty] = useState(false);
+  const [lastAutoSavedAt, setLastAutoSavedAt] = useState<number | null>(null);
+  const autoSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const blocksRef = useRef<ReportBlock[]>([]);
+  const bodyTemplateRef = useRef("");
+
   const [fieldsByKpiId, setFieldsByKpiId] = useState<Record<number, FieldOption[]>>({});
 
   const loadDetail = useCallback(() => {
@@ -507,6 +515,60 @@ export default function ReportDesignPage() {
     loadDetail();
   }, [loadDetail]);
 
+  blocksRef.current = blocks;
+  bodyTemplateRef.current = bodyTemplate;
+
+  const performAutoSave = useCallback(async () => {
+    if (!token || !detail) return;
+    const currentBlocks = blocksRef.current;
+    const currentBodyTemplate = bodyTemplateRef.current;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      if (currentBlocks.length > 0) {
+        await api(`/reports/templates/${id}?${qs({ organization_id: detail.organization_id })}`, {
+          method: "PATCH",
+          token,
+          body: JSON.stringify({
+            body_blocks: currentBlocks.map(({ id: _id, ...rest }) => rest),
+          }),
+        });
+      } else {
+        await api(`/reports/templates/${id}?${qs({ organization_id: detail.organization_id })}`, {
+          method: "PATCH",
+          token,
+          body: JSON.stringify({
+            body_template: currentBodyTemplate,
+            body_blocks: null,
+          }),
+        });
+      }
+      setLastAutoSavedAt(Date.now());
+      setIsDirty(false);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Draft save failed");
+    } finally {
+      setSaving(false);
+    }
+  }, [id, token, detail]);
+
+  const scheduleAutoSave = useCallback(() => {
+    if (autoSaveTimeoutRef.current) {
+      clearTimeout(autoSaveTimeoutRef.current);
+      autoSaveTimeoutRef.current = null;
+    }
+    autoSaveTimeoutRef.current = setTimeout(() => {
+      autoSaveTimeoutRef.current = null;
+      performAutoSave();
+    }, AUTO_SAVE_DELAY_MS);
+  }, [performAutoSave]);
+
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
+    };
+  }, []);
+
   const loadFieldsForKpis = useCallback(
     (kpiIds: number[]) => {
       if (!token || !detail?.organization_id || kpiIds.length === 0) return;
@@ -523,8 +585,14 @@ export default function ReportDesignPage() {
     [token, detail?.organization_id, fieldsByKpiId]
   );
 
+  const markDirtyAndScheduleAutoSave = useCallback(() => {
+    setIsDirty(true);
+    scheduleAutoSave();
+  }, [scheduleAutoSave]);
+
   const addBlock = (block: ReportBlock) => {
     setBlocks((prev) => [...prev, addBlockId(block)]);
+    markDirtyAndScheduleAutoSave();
   };
 
   const updateBlock = (index: number, updates: Partial<ReportBlock>) => {
@@ -534,10 +602,12 @@ export default function ReportDesignPage() {
       next[index] = { ...b, ...updates } as ReportBlock;
       return next;
     });
+    markDirtyAndScheduleAutoSave();
   };
 
   const removeBlock = (index: number) => {
     setBlocks((prev) => prev.filter((_, i) => i !== index));
+    markDirtyAndScheduleAutoSave();
   };
 
   const moveBlock = (index: number, dir: "up" | "down") => {
@@ -548,10 +618,15 @@ export default function ReportDesignPage() {
       [next[index], next[newIndex]] = [next[newIndex], next[index]];
       return next;
     });
+    markDirtyAndScheduleAutoSave();
   };
 
   const saveVisual = async () => {
     if (!token || !detail) return;
+    if (autoSaveTimeoutRef.current) {
+      clearTimeout(autoSaveTimeoutRef.current);
+      autoSaveTimeoutRef.current = null;
+    }
     setSaving(true);
     setSaveError(null);
     try {
@@ -562,6 +637,7 @@ export default function ReportDesignPage() {
           body_blocks: blocks.map(({ id: _id, ...rest }) => rest),
         }),
       });
+      setIsDirty(false);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Failed to save");
     } finally {
@@ -576,6 +652,10 @@ export default function ReportDesignPage() {
   const saveAdvanced = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!token || !detail) return;
+    if (autoSaveTimeoutRef.current) {
+      clearTimeout(autoSaveTimeoutRef.current);
+      autoSaveTimeoutRef.current = null;
+    }
     setSaving(true);
     setSaveError(null);
     try {
@@ -588,6 +668,7 @@ export default function ReportDesignPage() {
           body_blocks: null,
         }),
       });
+      setIsDirty(false);
       loadDetail();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Failed to save");
@@ -610,10 +691,38 @@ export default function ReportDesignPage() {
           {"\u2190"} Back to report
         </Link>
       </div>
-      <h1 style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>Design report: {detail.name}</h1>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.25rem" }}>
+        <h1 style={{ fontSize: "1.5rem", margin: 0 }}>Design report: {detail.name}</h1>
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            padding: "0.25rem 0.6rem",
+            borderRadius: 6,
+            fontSize: "0.8rem",
+            fontWeight: 600,
+            textTransform: "uppercase",
+            letterSpacing: "0.03em",
+            ...(isDirty
+              ? { background: "rgba(217, 119, 6, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)" }
+              : { background: "rgba(5, 150, 105, 0.12)", color: "var(--success)", border: "1px solid var(--success)" }),
+          }}
+          title={isDirty ? "You have unsaved changes; draft is auto-saved every 45s" : "All changes saved"}
+        >
+          {saving ? "Saving…" : isDirty ? "Draft" : "Saved"}
+        </span>
+      </div>
       <p style={{ color: "var(--muted)", marginBottom: "0.5rem" }}>Year {detail.year}. Add blocks below—drag to reorder, then Save.</p>
-      <p style={{ fontSize: "0.9rem", color: "var(--muted)", marginBottom: "1rem" }}>
+      <p style={{ fontSize: "0.9rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
         Use <strong>Text with KPI data</strong> to write paragraphs and insert numbers or text from KPIs anywhere in the text.
+      </p>
+      <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "1rem" }}>
+        Your design is saved automatically as a draft every 45 seconds so you don&apos;t lose work. Use <strong>Save</strong> when you&apos;re done.
+        {lastAutoSavedAt != null && isDirty && (
+          <span style={{ marginLeft: "0.5rem" }}>
+            Last draft saved at {new Date(lastAutoSavedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}.
+          </span>
+        )}
       </p>
 
       {detail.attached_domains.length === 0 && (
@@ -757,7 +866,12 @@ export default function ReportDesignPage() {
             <form onSubmit={saveAdvanced}>
               <textarea
                 value={templateSourceDisplay}
-                onChange={(e) => !isTemplateFromBlocks && setBodyTemplate(e.target.value)}
+                onChange={(e) => {
+                if (!isTemplateFromBlocks) {
+                  setBodyTemplate(e.target.value);
+                  markDirtyAndScheduleAutoSave();
+                }
+              }}
                 readOnly={isTemplateFromBlocks}
                 rows={12}
                 placeholder="HTML + Jinja2..."

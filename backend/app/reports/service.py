@@ -901,65 +901,85 @@ async def generate_report_data(
         entries = list(entries_result.scalars().all())
         # Build value by entry and field
         rows = []
-        for entry in entries:
-            fv_by_field = {fv.field_id: fv for fv in entry.field_values}
-            value_by_key = {}
+        if not entries:
+            # No submitted data for this KPI: provide one placeholder entry so the report shows "No data entered"
+            _NO_DATA_PLACEHOLDER = "No data entered"
             field_values_out = []
-            multi_line_items_data = {}
             for f in fields_to_include:
-                # Skip formula fields here; they are added once with computed value in the loop below
-                if f.field_type == FieldType.formula:
-                    continue
-                fv = fv_by_field.get(f.id)
-                val = None
-                if fv:
-                    val = fv.value_text or fv.value_number or fv.value_json or fv.value_boolean
-                    if fv.value_date:
-                        val = fv.value_date.isoformat() if hasattr(fv.value_date, "isoformat") else str(fv.value_date)
-                    if f.field_type == FieldType.number and fv.value_number is not None:
-                        value_by_key[f.key] = fv.value_number
-                    if f.field_type == FieldType.multi_line_items and isinstance(fv.value_json, list):
-                        multi_line_items_data[f.key] = fv.value_json
                 card_ids = kpi.card_display_field_ids or []
                 show_on_card = f.id in card_ids if isinstance(card_ids, list) else False
                 field_payload = {
                     "field_key": f.key,
                     "field_name": f.name,
-                    "value": val,
+                    "value": _NO_DATA_PLACEHOLDER,
                     "field_type": f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type),
                     "show_on_card": show_on_card,
                 }
-                if f.field_type == FieldType.multi_line_items and isinstance(val, list):
-                    field_payload["value_items"] = val
+                if f.field_type == FieldType.multi_line_items:
+                    field_payload["value_items"] = []
                     field_payload["sub_field_keys"] = [sf.key for sf in (getattr(f, "sub_fields") or [])]
                 field_values_out.append(field_payload)
-                if val is not None and f.field_type == FieldType.number:
-                    value_by_key[f.key] = val
-            # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
-            other_kpi_values = await _load_other_kpi_values(
-                db, entry.year, org_id, kpi.id
-            )
-            # Formula fields (with multi_line_items support for SUM_ITEMS etc.)
-            for f in fields_to_include:
-                if f.field_type == FieldType.formula and f.formula_expression:
-                    computed = evaluate_formula(
-                        f.formula_expression,
-                        value_by_key,
-                        multi_line_items_data,
-                        other_kpi_values,
-                    )
-                    card_ids_f = kpi.card_display_field_ids or []
-                    show_on_card_f = f.id in card_ids_f if isinstance(card_ids_f, list) else False
-                    field_values_out.append({
+            rows.append({"entry_id": None, "fields": field_values_out})
+        else:
+            for entry in entries:
+                fv_by_field = {fv.field_id: fv for fv in entry.field_values}
+                value_by_key = {}
+                field_values_out = []
+                multi_line_items_data = {}
+                for f in fields_to_include:
+                    # Skip formula fields here; they are added once with computed value in the loop below
+                    if f.field_type == FieldType.formula:
+                        continue
+                    fv = fv_by_field.get(f.id)
+                    val = None
+                    if fv:
+                        val = fv.value_text or fv.value_number or fv.value_json or fv.value_boolean
+                        if fv.value_date:
+                            val = fv.value_date.isoformat() if hasattr(fv.value_date, "isoformat") else str(fv.value_date)
+                        if f.field_type == FieldType.number and fv.value_number is not None:
+                            value_by_key[f.key] = fv.value_number
+                        if f.field_type == FieldType.multi_line_items and isinstance(fv.value_json, list):
+                            multi_line_items_data[f.key] = fv.value_json
+                    card_ids = kpi.card_display_field_ids or []
+                    show_on_card = f.id in card_ids if isinstance(card_ids, list) else False
+                    field_payload = {
                         "field_key": f.key,
                         "field_name": f.name,
-                        "value": computed,
+                        "value": val,
                         "field_type": f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type),
-                        "show_on_card": show_on_card_f,
-                    })
-                    if computed is not None:
-                        value_by_key[f.key] = computed
-            rows.append({"entry_id": entry.id, "fields": field_values_out})
+                        "show_on_card": show_on_card,
+                    }
+                    if f.field_type == FieldType.multi_line_items and isinstance(val, list):
+                        field_payload["value_items"] = val
+                        field_payload["sub_field_keys"] = [sf.key for sf in (getattr(f, "sub_fields") or [])]
+                    field_values_out.append(field_payload)
+                    if val is not None and f.field_type == FieldType.number:
+                        value_by_key[f.key] = val
+                # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
+                other_kpi_values = await _load_other_kpi_values(
+                    db, entry.year, org_id, kpi.id
+                )
+                # Formula fields (with multi_line_items support for SUM_ITEMS etc.)
+                for f in fields_to_include:
+                    if f.field_type == FieldType.formula and f.formula_expression:
+                        computed = evaluate_formula(
+                            f.formula_expression,
+                            value_by_key,
+                            multi_line_items_data,
+                            other_kpi_values,
+                        )
+                        card_ids_f = kpi.card_display_field_ids or []
+                        show_on_card_f = f.id in card_ids_f if isinstance(card_ids_f, list) else False
+                        field_values_out.append({
+                            "field_key": f.key,
+                            "field_name": f.name,
+                            "value": computed,
+                            "field_type": f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type),
+                            "show_on_card": show_on_card_f,
+                        })
+                        if computed is not None:
+                            value_by_key[f.key] = computed
+                rows.append({"entry_id": entry.id, "fields": field_values_out})
         out["kpis"].append({
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,
