@@ -2,9 +2,10 @@
 const nextConfig = {
   reactStrictMode: true,
   async rewrites() {
+    // Must match backend port (start.bat and README use 8080)
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8080';
     return [
-      { source: '/api/:path*', destination: 'http://localhost:8080/api/:path*' }, 
-      
+      { source: '/api/:path*', destination: `${backendUrl}/api/:path*` },
     ];
   },
   webpack: (config) => {

@@ -73,6 +73,12 @@ class ReportGenerateOptions(BaseModel):
     year: int | None = None  # override template year if needed
 
 
+class ReportPreviewRequest(BaseModel):
+    """Request body for live report preview (designer)."""
+
+    body_template: str = Field(..., description="Jinja2/HTML template string to render with current report data")
+
+
 class EvaluateSnippetRequest(BaseModel):
     """Request to evaluate a KPI value or formula snippet in report context."""
 

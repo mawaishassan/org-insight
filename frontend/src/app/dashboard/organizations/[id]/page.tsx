@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -318,12 +318,24 @@ function ApiContractBlock({ contract }: { contract: ApiContract }) {
 
 export default function OrganizationDetailPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const orgId = Number(params.id);
   const token = getAccessToken();
+  const tabFromUrl = searchParams.get("tab") as TabId | null;
+  const initialTab: TabId =
+    tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage"].includes(tabFromUrl)
+      ? tabFromUrl
+      : "domains";
 
   const [org, setOrg] = useState<OrgInfo | null>(null);
-  const [tab, setTab] = useState<TabId>("domains");
+  const [tab, setTab] = useState<TabId>(initialTab);
   const [domains, setDomains] = useState<DomainWithSummary[]>([]);
+
+  useEffect(() => {
+    if (tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage"].includes(tabFromUrl)) {
+      setTab(tabFromUrl as TabId);
+    }
+  }, [tabFromUrl]);
   const [orgTags, setOrgTags] = useState<OrgTagRow[]>([]);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -929,9 +941,18 @@ function DomainsSection({
       {list.length === 0 ? (
         <p style={{ color: "var(--muted)" }}>No domains yet. Add one above.</p>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem", alignItems: "stretch" }}>
           {list.map((d) => (
-            <div key={d.id} className="card" style={{ marginBottom: 0 }}>
+            <div
+              key={d.id}
+              className="card"
+              style={{
+                marginBottom: 0,
+                minHeight: 200,
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
               {editingId === d.id ? (
                 <DomainEditForm
                   domain={d}
@@ -942,30 +963,110 @@ function DomainsSection({
                 <>
                   <Link
                     href={`/dashboard/domains/${d.id}?organization_id=${orgId}`}
-                    style={{ textDecoration: "none", color: "inherit", display: "block", marginBottom: "0.75rem" }}
+                    style={{ textDecoration: "none", color: "inherit", display: "flex", flexDirection: "column", flex: 1, minHeight: 0, marginBottom: "0.75rem" }}
                   >
-                    <strong style={{ fontSize: "1.1rem" }}>{d.name}</strong>
-                    {d.description && (
-                      <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0", lineHeight: 1.3 }}>
-                        {d.description}
-                      </p>
-                    )}
+                    <strong style={{ fontSize: "1.1rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>{d.name}</strong>
+                    <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: 0, lineHeight: 1.3, minHeight: "2.6em" }}>
+                      {d.description && d.description.trim() ? d.description : "No description"}
+                    </p>
                     <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Order: {d.sort_order}</span>
-                    <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
+                    <div style={{ display: "flex", gap: "0.75rem", marginTop: "0.5rem" }}>
                       <span style={{ color: "var(--muted)", fontSize: "0.85rem" }} title="Categories">
-                        {d.summary?.category_count ?? 0} categories
+                        <strong style={{ color: "var(--text)" }}>{d.summary?.category_count ?? 0}</strong> categories
                       </span>
                       <span style={{ color: "var(--muted)", fontSize: "0.85rem" }} title="KPIs">
-                        {d.summary?.kpi_count ?? 0} KPIs
+                        <strong style={{ color: "var(--text)" }}>{d.summary?.kpi_count ?? 0}</strong> KPIs
                       </span>
                     </div>
                   </Link>
-                  <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
-                    <Link href={`/dashboard/domains/${d.id}?organization_id=${orgId}`} className="btn btn-primary" style={{ textDecoration: "none" }}>
-                      Manage categories
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                      paddingTop: "0.75rem",
+                      borderTop: "1px solid var(--border)",
+                      marginTop: "auto",
+                      flexWrap: "nowrap",
+                    }}
+                  >
+                    <Link
+                      href={`/dashboard/domains/${d.id}?organization_id=${orgId}`}
+                      className="btn btn-primary"
+                      style={{ textDecoration: "none", flex: "1 1 auto", minWidth: 0, justifyContent: "center", padding: "0.5rem 0.75rem", fontSize: "0.875rem" }}
+                    >
+                      Manage
                     </Link>
-                    <button type="button" className="btn" onClick={() => setEditingId(d.id)}>Edit</button>
-                    <button type="button" className="btn" onClick={() => onDelete(d.id)} style={{ color: "var(--error)" }}>Delete</button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingId(d.id)}
+                      title="Edit domain"
+                      aria-label="Edit domain"
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 36,
+                        height: 36,
+                        flexShrink: 0,
+                        padding: 0,
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        background: "var(--surface)",
+                        color: "var(--text)",
+                        cursor: "pointer",
+                        transition: "background 0.2s, border-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = "var(--bg-subtle)";
+                        e.currentTarget.style.borderColor = "var(--border-focus)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "var(--surface)";
+                        e.currentTarget.style.borderColor = "var(--border)";
+                      }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDelete(d.id)}
+                      title="Delete domain"
+                      aria-label="Delete domain"
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 36,
+                        height: 36,
+                        flexShrink: 0,
+                        padding: 0,
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        background: "var(--surface)",
+                        color: "var(--error)",
+                        cursor: "pointer",
+                        transition: "background 0.2s, border-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = "rgba(220, 38, 38, 0.08)";
+                        e.currentTarget.style.borderColor = "var(--error)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "var(--surface)";
+                        e.currentTarget.style.borderColor = "var(--border)";
+                      }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        <line x1="10" y1="11" x2="10" y2="17" />
+                        <line x1="14" y1="11" x2="14" y2="17" />
+                      </svg>
+                    </button>
                   </div>
                 </>
               )}
@@ -1510,20 +1611,8 @@ function KpisSection({
                 e.currentTarget.style.transform = "";
               }}
             >
-              {editingId === k.id ? (
-                <KpiEditForm
-                  kpi={k}
-                  orgId={orgId}
-                  orgTags={orgTags}
-                  token={token}
-                  userRole={userRole}
-                  onSave={(data) => onUpdateSubmit(k.id, data)}
-                  onCancel={() => setEditingId(null)}
-                  onSyncSuccess={() => loadList()}
-                />
-              ) : (
-                <>
-                  {/* Card header */}
+              <>
+                {/* Card header */}
                   <div>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem", gap: "0.5rem" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
@@ -1675,8 +1764,8 @@ function KpisSection({
                     >
                       Fields
                     </button>
-                    <button
-                      type="button"
+                    <Link
+                      href={`/dashboard/organizations/${orgId}/kpis/${k.id}`}
                       className="btn"
                       style={{
                         padding: "0.3rem 0.6rem",
@@ -1684,11 +1773,12 @@ function KpisSection({
                         background: cardColor.accentBg,
                         color: cardColor.accent,
                         border: `1px solid ${cardColor.border}`,
+                        textDecoration: "none",
+                        display: "inline-block",
                       }}
-                      onClick={() => setEditingId(k.id)}
                     >
                       Edit
-                    </button>
+                    </Link>
                     <button
                       type="button"
                       className="btn"
@@ -1699,7 +1789,6 @@ function KpisSection({
                     </button>
                   </div>
                 </>
-              )}
             </div>
           );
           })}

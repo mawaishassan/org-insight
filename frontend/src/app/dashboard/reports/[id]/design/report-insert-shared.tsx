@@ -46,10 +46,25 @@ export function buildKpiValuePlaceholder(
 export function buildMultiLineTablePlaceholder(
   kpiId: number,
   fieldKey: string,
-  entryIndex: number
+  entryIndex: number,
+  selectedSubFieldKeys?: string[]
 ): string {
   const safeKey = (fieldKey || "").replace(/'/g, "\\'");
-  return `{% set ml = get_multi_line_field(kpis, ${kpiId}, '${safeKey}', ${entryIndex}) %}{% if ml and ml.value_items %}<table border="1" cellpadding="4" style="border-collapse: collapse;"><tr>{% for sub_key in ml.sub_field_keys %}<th>{{ sub_key }}</th>{% endfor %}</tr>{% for item in ml.value_items %}<tr>{% for sub_key in ml.sub_field_keys %}<td>{{ item[sub_key] }}</td>{% endfor %}</tr>{% endfor %}</table>{% endif %}`;
+  const showKeysJinja =
+    selectedSubFieldKeys?.length ?
+      `{% set show_sub_keys = [${selectedSubFieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ")}] %}` :
+      "";
+  const filterCondition = selectedSubFieldKeys?.length
+    ? "{% if sf.key in show_sub_keys %}"
+    : "";
+  const filterConditionEnd = selectedSubFieldKeys?.length ? "{% endif %}" : "";
+  return (
+    `${showKeysJinja}{% set ml = get_multi_line_field(kpis, ${kpiId}, '${safeKey}', ${entryIndex}) %}{% if ml and ml.value_items %}`
+    + `<table border="1" cellpadding="4" style="border-collapse: collapse;">`
+    + `<tr>{% for sf in (ml.sub_fields | default([])) %}${filterCondition}<th>{{ sf.name }}</th>${filterConditionEnd}{% endfor %}</tr>`
+    + `{% for item in ml.value_items %}<tr>{% for sf in (ml.sub_fields | default([])) %}${filterCondition}<td>{{ item[sf.key] }}</td>${filterConditionEnd}{% endfor %}</tr>{% endfor %}`
+    + `</table>{% endif %}`
+  );
 }
 
 export function buildSubFieldGroupPlaceholder(
@@ -110,6 +125,7 @@ export function ReportKpiInsertControls(props: PropsInsert | PropsBound) {
   const [localSubFieldGroupFn, setLocalSubFieldGroupFn] = useState("SUM_ITEMS");
   const [localAsGroup, setLocalAsGroup] = useState(false);
   const [localEntryIndex, setLocalEntryIndex] = useState(isInsert ? (props.defaultEntryIndex ?? 0) : 0);
+  const [selectedTableSubFieldKeys, setSelectedTableSubFieldKeys] = useState<string[]>([]);
 
   const value = isInsert ? undefined : props.value;
   const effectiveKpiId = isInsert ? localKpiId : (value?.kpiId ?? 0);
@@ -135,7 +151,19 @@ export function ReportKpiInsertControls(props: PropsInsert | PropsBound) {
     if (!isInsert) return;
     setLocalFieldKey("");
     setLocalSubFieldKey("");
+    setSelectedTableSubFieldKeys([]);
   }, [effectiveKpiId, isInsert]);
+  useEffect(() => {
+    if (!isInsert) return;
+    setSelectedTableSubFieldKeys([]);
+  }, [effectiveFieldKey, isInsert]);
+  const toggleTableSubField = (key: string) => {
+    setSelectedTableSubFieldKeys((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  };
+  const selectAllTableSubFields = () => setSelectedTableSubFieldKeys(subFields.map((s) => s.key));
+  const clearTableSubFields = () => setSelectedTableSubFieldKeys([]);
 
   const handleKpiChange = (kpiId: number) => {
     if (isInsert) setLocalKpiId(kpiId);
@@ -172,7 +200,8 @@ export function ReportKpiInsertControls(props: PropsInsert | PropsBound) {
   };
   const doInsertTable = () => {
     if (!isInsert || !effectiveFieldKey || selectedField?.field_type !== "multi_line_items") return;
-    props.onInsertTable(buildMultiLineTablePlaceholder(resolvedKpiId, effectiveFieldKey, effectiveEntryIndex));
+    const keysToUse = selectedTableSubFieldKeys.length > 0 ? selectedTableSubFieldKeys : undefined;
+    props.onInsertTable(buildMultiLineTablePlaceholder(resolvedKpiId, effectiveFieldKey, effectiveEntryIndex, keysToUse));
   };
   const doInsertSubFieldGroup = () => {
     if (!isInsert || !effectiveFieldKey || !effectiveSubFieldKey) return;
@@ -284,16 +313,35 @@ export function ReportKpiInsertControls(props: PropsInsert | PropsBound) {
           >
             Insert value
           </button>
-          {selectedField?.field_type === "multi_line_items" && (
-            <button
-              type="button"
-              className="btn"
-              style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem" }}
-              onClick={doInsertTable}
-              title="Insert table of all items"
-            >
-              Insert as table
-            </button>
+          {selectedField?.field_type === "multi_line_items" && subFields.length > 0 && (
+            <>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", width: "100%", minWidth: 200 }}>
+                <label style={{ fontSize: "0.75rem", color: "var(--muted)" }}>Sub-fields in table (leave empty = all)</label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                  <button type="button" className="btn" style={{ padding: "0.2rem 0.4rem", fontSize: "0.75rem" }} onClick={selectAllTableSubFields}>All</button>
+                  <button type="button" className="btn" style={{ padding: "0.2rem 0.4rem", fontSize: "0.75rem" }} onClick={clearTableSubFields}>None</button>
+                  {subFields.map((s) => (
+                    <label key={s.key} style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.85rem" }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedTableSubFieldKeys.includes(s.key)}
+                        onChange={() => toggleTableSubField(s.key)}
+                      />
+                      {s.name}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn"
+                style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem" }}
+                onClick={doInsertTable}
+                title="Insert table (all or selected sub-fields)"
+              >
+                Insert as table
+              </button>
+            </>
           )}
           {selectedField?.field_type === "multi_line_items" && effectiveSubFieldKey && (
             <button

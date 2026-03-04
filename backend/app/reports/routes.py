@@ -17,6 +17,7 @@ from app.reports.schemas import (
     ReportAccessAssign,
     ReportTemplateResponse,
     ReportTemplateDetailResponse,
+    ReportPreviewRequest,
     EvaluateSnippetRequest,
 )
 from app.reports.service import (
@@ -36,6 +37,7 @@ from app.reports.service import (
     delete_text_block,
     generate_report_data,
     render_report_html,
+    render_report_html_with_template,
     evaluate_report_snippet,
 )
 
@@ -389,3 +391,31 @@ async def evaluate_snippet(
         expression=body.expression,
     )
     return {"value": value}
+
+
+@router.post("/templates/{template_id}/preview")
+async def preview_report(
+    template_id: int,
+    body: ReportPreviewRequest,
+    year: int | None = Query(None),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Render report HTML with the given template string (for live preview in designer)."""
+    org_id = await _org_id_for_template(db, current_user, template_id, organization_id)
+    can = await user_can_access_report(db, current_user.id, template_id, "view")
+    if not can:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+    try:
+        html = await render_report_html_with_template(
+            db, template_id, org_id, year=year, body_template_override=body.body_template
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Preview render failed: {str(e)}",
+        ) from e
+    if html is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Preview failed")
+    return {"html": html}
