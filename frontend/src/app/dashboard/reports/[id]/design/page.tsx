@@ -598,8 +598,6 @@ export default function ReportDesignPage() {
   const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const [previewFrameHeight, setPreviewFrameHeight] = useState<number>(480);
-  const previewPdfSourceRef = useRef<HTMLDivElement | null>(null);
-  const [exportingPdf, setExportingPdf] = useState(false);
 
   const [reportContentMinimized, setReportContentMinimized] = useState(false);
   const [livePreviewMinimized, setLivePreviewMinimized] = useState(false);
@@ -836,29 +834,6 @@ export default function ReportDesignPage() {
       setSaving(false);
     }
   };
-
-  const handleDownloadPdf = useCallback(async () => {
-    const el = previewPdfSourceRef.current;
-    if (!el || !previewHtml) return;
-    setExportingPdf(true);
-    try {
-      const html2pdf = (await import("html2pdf.js")).default;
-      const name = detail?.name ?? "report";
-      const filename = `report_${name.replace(/[^a-z0-9-_]/gi, "_")}_preview.pdf`;
-      await html2pdf()
-        .set({
-          filename,
-          margin: [10, 10, 10, 10],
-          image: { type: "jpeg", quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true },
-          jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-        })
-        .from(el)
-        .save();
-    } finally {
-      setExportingPdf(false);
-    }
-  }, [previewHtml, detail?.name]);
 
   if (loading) return <p>Loading…</p>;
   if (error) return <p className="form-error">{error}</p>;
@@ -1191,36 +1166,19 @@ export default function ReportDesignPage() {
             <div style={{ padding: "1rem", borderTop: "1px solid var(--border)" }}>
               {!previewLoading && !previewError && previewHtml != null && (
                 <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem" }}>
-                  <button
-                    type="button"
+                  <Link
+                    href={`/dashboard/reports/${id}`}
                     className="btn btn-primary"
-                    onClick={handleDownloadPdf}
-                    disabled={exportingPdf}
-                    style={{ fontSize: "0.9rem" }}
+                    style={{ fontSize: "0.9rem", textDecoration: "none" }}
                   >
-                    {exportingPdf ? "Generating PDF…" : "Download PDF"}
-                  </button>
+                    View report (print / export PDF)
+                  </Link>
                 </div>
               )}
               {previewLoading && <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.5rem 0" }}>Updating…</p>}
               {previewError && <p className="form-error" style={{ margin: "0.5rem 0", fontSize: "0.9rem" }}>{previewError}</p>}
               {!previewLoading && !previewError && previewHtml != null && (
                 <>
-                <div
-                  ref={previewPdfSourceRef}
-                  style={{
-                    position: "absolute",
-                    left: -9999,
-                    width: "210mm",
-                    background: "white",
-                    padding: "1rem",
-                    fontFamily: "inherit",
-                    color: "#111",
-                  }}
-                  aria-hidden
-                >
-                  <div dangerouslySetInnerHTML={{ __html: previewHtml }} />
-                </div>
                 <iframe
                   ref={previewFrameRef}
                   title="Report preview"
