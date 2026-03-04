@@ -683,6 +683,17 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
             ]
             _sub_keys_prefix = "{% set field_sub_field_keys = {" + ", ".join(_sub_keys_parts) + "} %}"
             _show_ml_label_prefix = "{% set show_multi_line_field_label = " + ("true" if show_multi_line_field_label else "false") + " %}"
+            _column_align_raw = b.get("columnAlign") or b.get("column_align") or {}
+            _align_map = {k: "left" for k in (field_keys or [])}
+            for _k, _v in _column_align_raw.items():
+                if _v in ("left", "center", "right", "justify"):
+                    _align_map[_k] = _v
+            _column_align_parts = [f"'{str(k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': '{v}'" for k, v in _align_map.items()]
+            _column_align_prefix = "{% set column_align = {" + ", ".join(_column_align_parts) + "} %}" if _column_align_parts else "{% set column_align = {} %}"
+            _th_style_key = ' style="text-align: {{ column_align.get(key, \'left\') }}"'
+            _td_style_key = ' style="text-align: {{ column_align.get(key, \'left\') }}"'
+            _td_style_f = ' style="text-align: {{ column_align.get(f.field_key, \'left\') }}"'
+            _td_style_ef = ' style="text-align: {{ column_align.get(ef.field_key, \'left\') }}"'
             _label_f_cond = "{% if show_multi_line_field_label or f.field_type != 'multi_line_items' %}" + _label_f + "{% endif %}"
             _label_key_cond = "{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (_fl[0].field_type != 'multi_line_items') %}" + _label_key + "{% endif %}"
             if show_multi_as_table:
@@ -741,6 +752,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         + _sub_display_prefix
                         + _sub_keys_prefix
                         + _show_ml_label_prefix
+                        + _column_align_prefix
                         + '<div class="report-kpi-table">'
                         "{% if kpis %}"
                         "{% for kpi in kpis %}"
@@ -748,9 +760,9 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
                         '<tbody>'
                         "{% for f in kpi.entries[0].fields if kpi.entries %}"
-                        "<tr><td>" + _label_f_cond + "</td>"
+                        "<tr><td" + _td_style_f + ">" + _label_f_cond + "</td>"
                         "{% for entry in kpi.entries %}"
-                        "{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td>" + _cell_multi_ef + "</td>{% endif %}{% endfor %}"
+                        "{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td" + _td_style_ef + ">" + _cell_multi_ef + "</td>{% endif %}{% endfor %}"
                         "{% endfor %}"
                         "</tr>"
                         "{% endfor %}"
@@ -761,13 +773,14 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     fid_list = ", ".join(str(i) for i in kpi_ids)
                     fkeys_list = ", ".join(repr(k) for k in field_keys)
                     _cell_by_key = (
-                        "{% for f in entry.fields %}{% if f.field_key == key %}<td>" + _cell_multi + "</td>{% endif %}{% endfor %}"
+                        "{% for f in entry.fields %}{% if f.field_key == key %}<td" + _td_style_key + ">" + _cell_multi + "</td>{% endif %}{% endfor %}"
                     )
                     out.append(
                         _display_prefix
                         + _sub_display_prefix
                         + _sub_keys_prefix
                         + _show_ml_label_prefix
+                        + _column_align_prefix
                         + f"{{% set kpi_ids_set = [{fid_list}] %}}"
                         f"{{% set field_keys_list = [{fkeys_list}] %}}"
                         '<div class="report-kpi-table">'
@@ -791,15 +804,16 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         + _sub_display_prefix
                         + _sub_keys_prefix
                         + _show_ml_label_prefix
+                        + _column_align_prefix
                         + '<div class="report-kpi-table">'
                         "{% if kpis %}"
                         "{% for kpi in kpis %}"
                         + heading_html
                         + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
-                        '<thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th>' + _label_f_cond + '</th>{% endfor %}</tr></thead>'
+                        '<thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th' + _td_style_f + '>' + _label_f_cond + '</th>{% endfor %}</tr></thead>'
                         '<tbody>'
                         "{% for entry in kpi.entries %}"
-                        '<tr>{% for f in entry.fields %}<td>' + _cell_multi + '</td>{% endfor %}</tr>'
+                        '<tr>{% for f in entry.fields %}<td' + _td_style_f + '>' + _cell_multi + '</td>{% endfor %}</tr>'
                         "{% endfor %}"
                         "</tbody></table>"
                         "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
@@ -808,13 +822,14 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     fid_list = ", ".join(str(i) for i in kpi_ids)
                     fkeys_list = ", ".join(repr(k) for k in field_keys)
                     _cell_by_key = (
-                        "{% for f in entry.fields %}{% if f.field_key == key %}<td>" + _cell_multi + "</td>{% endif %}{% endfor %}"
+                        "{% for f in entry.fields %}{% if f.field_key == key %}<td" + _td_style_key + ">" + _cell_multi + "</td>{% endif %}{% endfor %}"
                     )
                     out.append(
                         _display_prefix
                         + _sub_display_prefix
                         + _sub_keys_prefix
                         + _show_ml_label_prefix
+                        + _column_align_prefix
                         + f"{{% set kpi_ids_set = [{fid_list}] %}}"
                         f"{{% set field_keys_list = [{fkeys_list}] %}}"
                         '<div class="report-kpi-table">'
@@ -823,7 +838,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         "{% if kpi.kpi_id in kpi_ids_set %}"
                         + heading_html
                         + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
-                        '<thead><tr>{% for key in field_keys_list %}<th>' + _label_key_cond + '</th>{% endfor %}</tr></thead>'
+                        '<thead><tr>{% for key in field_keys_list %}<th' + _th_style_key + '>' + _label_key_cond + '</th>{% endfor %}</tr></thead>'
                         '<tbody>'
                         "{% for entry in kpi.entries %}"
                         '<tr>{% for key in field_keys_list %}' + _cell_by_key + "{% endfor %}</tr>"
@@ -863,9 +878,13 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         cell_parts.append("<td></td>")
                         continue
                     ctype = cell.get("type") or "text"
+                    align = cell.get("align") or "left"
+                    if align not in ("left", "center", "right", "justify"):
+                        align = "left"
+                    td_style = f' style="text-align: {align}"'
                     if ctype == "text":
                         content = (cell.get("content") or "").strip()
-                        cell_parts.append(f"<td>{html_escape(content)}</td>")
+                        cell_parts.append(f"<td{td_style}>{html_escape(content)}</td>")
                     elif ctype == "kpi":
                         kpi_id = int(cell.get("kpiId") or 0)
                         field_key = (cell.get("fieldKey") or "").strip().replace("\\", "\\\\").replace("'", "\\'")
@@ -874,7 +893,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         entry_idx = int(cell.get("entryIndex") or 0)
                         if cell.get("asGroup"):
                             cell_parts.append(
-                                "<td>{% set _ml = get_multi_line_field(kpis, " + str(kpi_id) + ", '" + field_key + "', " + str(entry_idx) + ") %}"
+                                "<td" + td_style + ">{% set _ml = get_multi_line_field(kpis, " + str(kpi_id) + ", '" + field_key + "', " + str(entry_idx) + ") %}"
                                 "{% if _ml %}<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse;\">"
                                 "<tr>{% for sf in (_ml.sub_fields | default([])) %}<th>{{ sf.name }}</th>{% endfor %}</tr>"
                                 "{% for item in _ml.value_items %}<tr>{% for sf in (_ml.sub_fields | default([])) %}<td>{{ item[sf.key] }}</td>{% endfor %}</tr>{% endfor %}"
@@ -885,22 +904,22 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                             formula_expr = f"{sub_field_group_fn}({raw_field_key}, {sub_key})"
                             formula_escaped = formula_expr.replace("\\", "\\\\").replace("'", "\\'")
                             cell_parts.append(
-                                f"<td>{{{{ evaluate_report_formula(kpis, '{formula_escaped}', {kpi_id}, {entry_idx}) }}}}</td>"
+                                f"<td{td_style}>{{{{ evaluate_report_formula(kpis, '{formula_escaped}', {kpi_id}, {entry_idx}) }}}}</td>"
                             )
                         else:
                             sub_arg = ", none"
                             cell_parts.append(
-                                f"<td>{{{{ get_kpi_field_value(kpis, {kpi_id}, '{field_key}'{sub_arg}, {entry_idx}) }}}}</td>"
+                                f"<td{td_style}>{{{{ get_kpi_field_value(kpis, {kpi_id}, '{field_key}'{sub_arg}, {entry_idx}) }}}}</td>"
                             )
                     elif ctype == "formula":
                         kpi_id = int(cell.get("kpiId") or 0)
                         entry_idx = int(cell.get("entryIndex") or 0)
                         formula = (cell.get("formula") or "").strip().replace("\\", "\\\\").replace("'", "\\'")
                         cell_parts.append(
-                            f"<td>{{{{ evaluate_report_formula(kpis, '{formula}', {kpi_id}, {entry_idx}) }}}}</td>"
+                            f"<td{td_style}>{{{{ evaluate_report_formula(kpis, '{formula}', {kpi_id}, {entry_idx}) }}}}</td>"
                         )
                     else:
-                        cell_parts.append("<td></td>")
+                        cell_parts.append("<td" + td_style + "></td>")
                 row_parts.append("<tr>" + "".join(cell_parts) + "</tr>")
             out.append(
                 '<div class="report-simple-table"><table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'

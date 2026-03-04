@@ -61,17 +61,18 @@ export type ReportBlock =
   | { type: "domain_list"; id?: string; domainIds?: number[] }
   | { type: "domain_categories"; id?: string; domainIds?: number[] }
   | { type: "domain_kpis"; id?: string; domainIds?: number[] }
-  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean; fieldsLayout?: "columns" | "rows"; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; showTableHeading?: boolean; showMultiLineAsTable?: boolean; showMultiLineFieldLabel?: boolean }
+  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean; fieldsLayout?: "columns" | "rows"; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; showTableHeading?: boolean; showMultiLineAsTable?: boolean; showMultiLineFieldLabel?: boolean; columnAlign?: Record<string, CellAlign> }
   | { type: "kpi_multi_table"; id?: string; kpiId?: number; fieldKey?: string }
   | { type: "simple_table"; id?: string; rows?: SimpleTableRow[] }
   | { type: "kpi_grid"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>> }
   | { type: "kpi_list"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>> }
   | { type: "single_value"; id?: string; kpiId?: number; fieldKey?: string; subFieldKey?: string; entryIndex?: number };
 
+export type CellAlign = "left" | "center" | "right" | "justify";
 export type SimpleTableCell =
-  | { type: "text"; content?: string }
-  | { type: "kpi"; kpiId?: number; fieldKey?: string; subFieldKey?: string; subFieldGroupFn?: string; entryIndex?: number; asGroup?: boolean }
-  | { type: "formula"; kpiId?: number; fieldKey?: string; entryIndex?: number; formula?: string };
+  | { type: "text"; content?: string; align?: CellAlign }
+  | { type: "kpi"; kpiId?: number; fieldKey?: string; subFieldKey?: string; subFieldGroupFn?: string; entryIndex?: number; asGroup?: boolean; align?: CellAlign }
+  | { type: "formula"; kpiId?: number; fieldKey?: string; entryIndex?: number; formula?: string; align?: CellAlign };
 export type SimpleTableRow = { cells: SimpleTableCell[] };
 const DEFAULT_SIMPLE_TABLE_ROW: SimpleTableRow = { cells: [{ type: "text", content: "" }] };
 
@@ -417,6 +418,16 @@ function blocksToJinja(blocks: ReportBlock[]): string {
     } else if (type === "kpi_table") {
       const kpiIds = (b as { kpiIds?: number[] }).kpiIds || [];
       const fieldKeys = (b as { fieldKeys?: string[] }).fieldKeys || [];
+      const columnAlign = (b as { columnAlign?: Record<string, CellAlign> }).columnAlign || {};
+      const alignMap: Record<string, string> = {};
+      (fieldKeys || []).forEach((k) => { alignMap[k] = (columnAlign[k] && ["left", "center", "right", "justify"].includes(columnAlign[k]) ? columnAlign[k] : "left") as string; });
+      Object.entries(columnAlign).forEach(([k, v]) => { if (["left", "center", "right", "justify"].includes(v)) alignMap[k] = v; });
+      const columnAlignEntries = Object.entries(alignMap).map(([k, v]) => `'${k.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}': '${v}'`).join(", ");
+      const columnAlignPrefix = `{% set column_align = { ${columnAlignEntries} } %}`;
+      const thStyle = ' style="text-align: {{ column_align.get(key, \'left\') }}"';
+      const tdStyleKey = ' style="text-align: {{ column_align.get(key, \'left\') }}"';
+      const tdStyleF = ' style="text-align: {{ column_align.get(f.field_key, \'left\') }}"';
+      const tdStyleEf = ' style="text-align: {{ column_align.get(ef.field_key, \'left\') }}"';
       const fieldsLayout = (b as { fieldsLayout?: "columns" | "rows" }).fieldsLayout ?? "columns";
       const showTableHeading = (b as { showTableHeading?: boolean }).showTableHeading;
       const headingPart = showTableHeading === false ? "" : "<h4>{{ kpi.kpi_name }}</h4>";
@@ -432,30 +443,30 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       const subKeysPrefix = buildFieldSubFieldKeysJinja(multiLineSubFieldKeys);
       const cellMulti = multiLineCellSnippet("f");
       const cellMultiEf = multiLineCellSnippet("ef");
-      const cellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td>${cellMulti}</td>{% endif %}{% endfor %}`;
+      const cellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td${tdStyleKey}>${cellMulti}</td>{% endif %}{% endfor %}`;
       if (fieldsLayout === "rows") {
         if (!kpiIds.length && !fieldKeys.length) {
           out.push(
-            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for f in kpi.entries[0].fields if kpi.entries %}<tr><td>${fieldLabelFCond}</td>{% for entry in kpi.entries %}{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td>${cellMultiEf}</td>{% endif %}{% endfor %}{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
+            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for f in kpi.entries[0].fields if kpi.entries %}<tr><td${tdStyleF}>${fieldLabelFCond}</td>{% for entry in kpi.entries %}{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td${tdStyleEf}>${cellMultiEf}</td>{% endif %}{% endfor %}{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
           );
         } else {
           const fidList = kpiIds.join(", ");
           const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
-          const rowCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td>${cellMulti}</td>{% endif %}{% endfor %}`;
+          const rowCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td${tdStyleKey}>${cellMulti}</td>{% endif %}{% endfor %}`;
           out.push(
-            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for key in field_keys_list %}<tr><td>${fieldLabelKeyCond}</td>{% for entry in kpi.entries %}${rowCellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
+            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for key in field_keys_list %}<tr><td>${fieldLabelKeyCond}</td>{% for entry in kpi.entries %}${rowCellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
           );
         }
       } else {
         if (!kpiIds.length && !fieldKeys.length) {
           out.push(
-            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th>${fieldLabelFCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for f in entry.fields %}<td>${cellMulti}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
+            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th${tdStyleF}>${fieldLabelFCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for f in entry.fields %}<td${tdStyleF}>${cellMulti}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
           );
         } else {
           const fidList = kpiIds.join(", ");
           const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
           out.push(
-            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for key in field_keys_list %}<th>${fieldLabelKeyCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for key in field_keys_list %}${cellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
+            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for key in field_keys_list %}<th${thStyle}>${fieldLabelKeyCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for key in field_keys_list %}${cellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
           );
         }
       }
@@ -474,9 +485,11 @@ function blocksToJinja(blocks: ReportBlock[]): string {
         const cells = row.cells || [];
         const cellParts: string[] = [];
         for (const cell of cells) {
+          const align = (cell as { align?: CellAlign }).align || "left";
+          const tdStyle = ` style="text-align: ${align}"`;
           if (cell.type === "text") {
             const content = (cell.content || "").trim();
-            cellParts.push("<td>" + escapeHtml(content) + "</td>");
+            cellParts.push("<td" + tdStyle + ">" + escapeHtml(content) + "</td>");
           } else if (cell.type === "kpi") {
             const kpiId = cell.kpiId ?? 0;
             const fieldKey = (cell.fieldKey || "").replace(/'/g, "\\'");
@@ -485,17 +498,17 @@ function blocksToJinja(blocks: ReportBlock[]): string {
             const entryIdx = cell.entryIndex ?? 0;
             if (cell.asGroup) {
               cellParts.push(
-                `<td>{% set _ml = get_multi_line_field(kpis, ${kpiId}, '${fieldKey}', ${entryIdx}) %}{% if _ml %}<table border="1" cellpadding="4" style="border-collapse: collapse;"><tr>{% for sf in (_ml.sub_fields | default([])) %}<th>{{ sf.name }}</th>{% endfor %}</tr>{% for item in _ml.value_items %}<tr>{% for sf in (_ml.sub_fields | default([])) %}<td>{{ item[sf.key] }}</td>{% endfor %}</tr>{% endfor %}</table>{% endif %}</td>`
+                `<td${tdStyle}>{% set _ml = get_multi_line_field(kpis, ${kpiId}, '${fieldKey}', ${entryIdx}) %}{% if _ml %}<table border="1" cellpadding="4" style="border-collapse: collapse;"><tr>{% for sf in (_ml.sub_fields | default([])) %}<th>{{ sf.name }}</th>{% endfor %}</tr>{% for item in _ml.value_items %}<tr>{% for sf in (_ml.sub_fields | default([])) %}<td>{{ item[sf.key] }}</td>{% endfor %}</tr>{% endfor %}</table>{% endif %}</td>`
               );
             } else if (subKey) {
               const formula = `${subFieldGroupFn}(${cell.fieldKey || ""}, ${subKey})`.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
               cellParts.push(
-                `<td>{{ evaluate_report_formula(kpis, '${formula}', ${kpiId}, ${entryIdx}) }}</td>`
+                `<td${tdStyle}>{{ evaluate_report_formula(kpis, '${formula}', ${kpiId}, ${entryIdx}) }}</td>`
               );
             } else {
               const subArg = ", none";
               cellParts.push(
-                `<td>{{ get_kpi_field_value(kpis, ${kpiId}, '${fieldKey}'${subArg}, ${entryIdx}) }}</td>`
+                `<td${tdStyle}>{{ get_kpi_field_value(kpis, ${kpiId}, '${fieldKey}'${subArg}, ${entryIdx}) }}</td>`
               );
             }
           } else if (cell.type === "formula") {
@@ -503,10 +516,10 @@ function blocksToJinja(blocks: ReportBlock[]): string {
             const entryIdx = cell.entryIndex ?? 0;
             const formula = (cell.formula || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
             cellParts.push(
-              `<td>{{ evaluate_report_formula(kpis, '${formula}', ${kpiId}, ${entryIdx}) }}</td>`
+              `<td${tdStyle}>{{ evaluate_report_formula(kpis, '${formula}', ${kpiId}, ${entryIdx}) }}</td>`
             );
           } else {
-            cellParts.push("<td></td>");
+            cellParts.push("<td" + tdStyle + "></td>");
           }
         }
         rowParts.push("<tr>" + cellParts.join("") + "</tr>");
@@ -583,6 +596,10 @@ export default function ReportDesignPage() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const [previewFrameHeight, setPreviewFrameHeight] = useState<number>(480);
+  const previewPdfSourceRef = useRef<HTMLDivElement | null>(null);
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   const [reportContentMinimized, setReportContentMinimized] = useState(false);
   const [livePreviewMinimized, setLivePreviewMinimized] = useState(false);
@@ -820,6 +837,29 @@ export default function ReportDesignPage() {
     }
   };
 
+  const handleDownloadPdf = useCallback(async () => {
+    const el = previewPdfSourceRef.current;
+    if (!el || !previewHtml) return;
+    setExportingPdf(true);
+    try {
+      const html2pdf = (await import("html2pdf.js")).default;
+      const name = detail?.name ?? "report";
+      const filename = `report_${name.replace(/[^a-z0-9-_]/gi, "_")}_preview.pdf`;
+      await html2pdf()
+        .set({
+          filename,
+          margin: [10, 10, 10, 10],
+          image: { type: "jpeg", quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true },
+          jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+        })
+        .from(el)
+        .save();
+    } finally {
+      setExportingPdf(false);
+    }
+  }, [previewHtml, detail?.name]);
+
   if (loading) return <p>Loading…</p>;
   if (error) return <p className="form-error">{error}</p>;
   if (!detail) return null;
@@ -901,6 +941,26 @@ export default function ReportDesignPage() {
         >
           Preview only
         </button>
+        {viewMode === "both" && livePreviewMinimized && (
+          <button
+            type="button"
+            className="btn"
+            style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem", marginLeft: "0.5rem" }}
+            onClick={() => setLivePreviewMinimized(false)}
+          >
+            Show Preview
+          </button>
+        )}
+        {reportContentMinimized && (
+          <button
+            type="button"
+            className="btn"
+            style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem", marginLeft: "0.5rem" }}
+            onClick={() => setReportContentMinimized(false)}
+          >
+            Show Design
+          </button>
+        )}
       </div>
 
       {detail.attached_domains.length === 0 && (
@@ -916,20 +976,17 @@ export default function ReportDesignPage() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: viewMode === "both" ? "repeat(2, minmax(0, 1fr))" : "1fr",
+          gridTemplateColumns: viewMode === "both" && !livePreviewMinimized && !reportContentMinimized ? "repeat(2, minmax(0, 1fr))" : "1fr",
           gap: "1.5rem",
           alignItems: "start",
         }}
         className="report-design-grid"
       >
-        {/* Left column: Report content (collapsible) — hidden when viewMode === "preview" */}
-        {(viewMode === "both" || viewMode === "design") && (
+        {/* Left column: Report content — hidden when viewMode === "preview" or when Hide Design is active */}
+        {((viewMode === "both" || viewMode === "design") && !reportContentMinimized) && (
         <div className="card" style={{ padding: 0, marginBottom: 0, overflow: "hidden" }}>
-          <button
-            type="button"
-            onClick={toggleReportContent}
+          <div
             style={{
-              width: "100%",
               padding: "0.75rem 1rem",
               display: "flex",
               alignItems: "center",
@@ -937,21 +994,59 @@ export default function ReportDesignPage() {
               gap: "0.5rem",
               border: "none",
               background: "var(--surface)",
-              cursor: "pointer",
               fontSize: "1rem",
               fontWeight: 600,
-              textAlign: "left",
             }}
           >
             <span>Report content</span>
-            <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{reportContentMinimized ? "▶ Expand" : "▼ Minimize"}</span>
-          </button>
-          {!reportContentMinimized && (
-            <div style={{ padding: "1.25rem", borderTop: "1px solid var(--border)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "1rem", marginBottom: "1rem" }}>
-          <div>
-            <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: 0 }}>Add blocks in order. Use ↑↓ to reorder.</p>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <button
+                type="button"
+                onClick={() => {
+                  const allIds = new Set(blocks.map((block, index) => (block as { id?: string }).id ?? `idx-${index}`));
+                  const allCollapsed = allIds.size > 0 && Array.from(allIds).every((bid) => minimizedBlockIds.has(bid));
+                  setMinimizedBlockIds(allCollapsed ? new Set() : allIds);
+                }}
+                style={{
+                  padding: "0.35rem 0.65rem",
+                  fontSize: "0.85rem",
+                  color: "var(--muted)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  background: "var(--surface)",
+                  cursor: "pointer",
+                }}
+              >
+                {blocks.length > 0 && [...blocks].every((_, i) => minimizedBlockIds.has((blocks[i] as { id?: string }).id ?? `idx-${i}`))
+                  ? "Expand blocks"
+                  : "Collapse blocks"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setReportContentMinimized(true);
+                  if (viewMode === "design") {
+                    setViewMode("both");
+                    setLivePreviewMinimized(false);
+                  }
+                }}
+                style={{
+                  padding: "0.35rem 0.65rem",
+                  border: "none",
+                  background: "none",
+                  cursor: "pointer",
+                  fontSize: "0.9rem",
+                  fontWeight: 600,
+                  color: "var(--muted)",
+                }}
+              >
+                Hide Design
+              </button>
+            </div>
           </div>
+          {(
+            <div style={{ padding: "1.25rem", borderTop: "1px solid var(--border)" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", marginBottom: "1rem" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
             <span style={{ fontSize: "0.85rem", color: "var(--muted)", marginRight: "0.25rem" }}>Add:</span>
             {[
@@ -1055,12 +1150,25 @@ export default function ReportDesignPage() {
         </div>
         )}
 
-        {/* Right column: Live preview (collapsible) — hidden when viewMode === "design" */}
-        {(viewMode === "both" || viewMode === "preview") && (
-        <div className="card" style={{ padding: 0, marginBottom: 0, overflow: "hidden" }}>
+        {/* Right column: Live preview — hidden when viewMode === "design" or when Hide Preview is active */}
+        {(viewMode === "both" && !livePreviewMinimized) || viewMode === "preview" ? (
+        <div
+          className="card"
+          style={{
+            padding: 0,
+            marginBottom: 0,
+            overflow: "hidden",
+            position: "sticky",
+            top: 0,
+            alignSelf: "flex-start",
+          }}
+        >
           <button
             type="button"
-            onClick={toggleLivePreview}
+            onClick={() => {
+              setLivePreviewMinimized(true);
+              if (viewMode === "preview") setViewMode("both");
+            }}
             style={{
               width: "100%",
               padding: "0.75rem 1rem",
@@ -1077,25 +1185,73 @@ export default function ReportDesignPage() {
             }}
           >
             <span>Live preview</span>
-            <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{livePreviewMinimized ? "▶ Expand" : "▼ Minimize"}</span>
+            <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Hide Preview</span>
           </button>
           {!livePreviewMinimized && (
             <div style={{ padding: "1rem", borderTop: "1px solid var(--border)" }}>
+              {!previewLoading && !previewError && previewHtml != null && (
+                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem" }}>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={handleDownloadPdf}
+                    disabled={exportingPdf}
+                    style={{ fontSize: "0.9rem" }}
+                  >
+                    {exportingPdf ? "Generating PDF…" : "Download PDF"}
+                  </button>
+                </div>
+              )}
               {previewLoading && <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.5rem 0" }}>Updating…</p>}
               {previewError && <p className="form-error" style={{ margin: "0.5rem 0", fontSize: "0.9rem" }}>{previewError}</p>}
               {!previewLoading && !previewError && previewHtml != null && (
+                <>
+                <div
+                  ref={previewPdfSourceRef}
+                  style={{
+                    position: "absolute",
+                    left: -9999,
+                    width: "210mm",
+                    background: "white",
+                    padding: "1rem",
+                    fontFamily: "inherit",
+                    color: "#111",
+                  }}
+                  aria-hidden
+                >
+                  <div dangerouslySetInnerHTML={{ __html: previewHtml }} />
+                </div>
                 <iframe
+                  ref={previewFrameRef}
                   title="Report preview"
                   srcDoc={previewDoc}
+                  onLoad={() => {
+                    const frame = previewFrameRef.current;
+                    if (!frame) return;
+                    try {
+                      const doc = frame.contentDocument || frame.contentWindow?.document;
+                      const body = doc?.body;
+                      const html = doc?.documentElement;
+                      const h = Math.max(
+                        body?.scrollHeight || 0,
+                        html?.scrollHeight || 0,
+                        480
+                      );
+                      setPreviewFrameHeight(h);
+                    } catch {
+                      // ignore cross-origin or measurement errors
+                    }
+                  }}
                   style={{
                     width: "100%",
                     minHeight: 480,
-                    height: "60vh",
+                    height: previewFrameHeight,
                     border: "1px solid var(--border)",
                     borderRadius: 8,
                     background: "var(--surface)",
                   }}
                 />
+                </>
               )}
               {!previewLoading && !previewError && previewHtml == null && templateForPreview.trim() && (
                 <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Preview will appear as you add content.</p>
@@ -1103,7 +1259,7 @@ export default function ReportDesignPage() {
             </div>
           )}
         </div>
-        )}
+        ) : null}
       </div>
 
       {/* Advanced: raw template (full width below grid) */}
@@ -1469,7 +1625,43 @@ function BlockCard({
   const [customNamesModalOpen, setCustomNamesModalOpen] = useState(false);
   const [localFieldDisplayNames, setLocalFieldDisplayNames] = useState<Record<string, string>>({});
   const [localSubFieldDisplayNames, setLocalSubFieldDisplayNames] = useState<Record<string, Record<string, string>>>({});
+  const [localColumnAlign, setLocalColumnAlign] = useState<Record<string, CellAlign>>({});
   const [customNamesActiveTab, setCustomNamesActiveTab] = useState<string>("fields");
+
+  const [simpleTableFormulaModal, setSimpleTableFormulaModal] = useState<{ rowIdx: number; cellIdx: number } | null>(null);
+  const [simpleTableFormulaDraft, setSimpleTableFormulaDraft] = useState<{ kpiId: number; entryIndex: number; formula: string } | null>(null);
+  const [simpleTableEvalValue, setSimpleTableEvalValue] = useState<string | number | null>(null);
+  const [simpleTableEvalLoading, setSimpleTableEvalLoading] = useState(false);
+  const [simpleTableEvalError, setSimpleTableEvalError] = useState<string | null>(null);
+  const token = getAccessToken();
+  const handleSimpleTableEvaluate = useCallback(async () => {
+    if (!simpleTableFormulaDraft || !token || detail.organization_id == null) return;
+    setSimpleTableEvalError(null);
+    setSimpleTableEvalValue(null);
+    setSimpleTableEvalLoading(true);
+    try {
+      const res = await api<{ value: string | number | null }>(
+        `/reports/templates/${templateId}/evaluate-snippet`,
+        {
+          method: "POST",
+          token,
+          body: JSON.stringify({
+            type: "formula",
+            organization_id: detail.organization_id,
+            year: detail.year ?? undefined,
+            entry_index: simpleTableFormulaDraft.entryIndex,
+            kpi_id: simpleTableFormulaDraft.kpiId,
+            expression: simpleTableFormulaDraft.formula.trim() || null,
+          }),
+        }
+      );
+      setSimpleTableEvalValue(res.value ?? "(empty)");
+    } catch (e) {
+      setSimpleTableEvalError(e instanceof Error ? e.message : "Evaluate failed");
+    } finally {
+      setSimpleTableEvalLoading(false);
+    }
+  }, [simpleTableFormulaDraft, templateId, detail.organization_id, detail.year, token]);
 
   useEffect(() => {
     if (type === "text") {
@@ -1677,6 +1869,7 @@ function BlockCard({
                 onClick={() => {
                   setLocalFieldDisplayNames((block as { fieldDisplayNames?: Record<string, string> }).fieldDisplayNames ?? {});
                   setLocalSubFieldDisplayNames((block as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames ?? {});
+                  setLocalColumnAlign((block as { columnAlign?: Record<string, CellAlign> }).columnAlign ?? {});
                   setCustomNamesActiveTab("fields");
                   setCustomNamesModalOpen(true);
                 }}
@@ -1878,7 +2071,10 @@ function BlockCard({
                       <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Custom names in report</h3>
                       <button type="button" className="btn" style={{ padding: "0.25rem 0.5rem" }} onClick={() => setCustomNamesModalOpen(false)} aria-label="Close">×</button>
                     </div>
-                    <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0 0 1rem 0" }}>Override the labels shown for fields and sub-fields. Leave empty to use the default name.</p>
+                    <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0 0 1rem 0" }}>
+                      Override the labels shown for fields and sub-fields. Leave display name empty to use the default.
+                      {type === "kpi_table" && " For KPI table, set alignment per column in the Fields tab."}
+                    </p>
                     <div>
                       <div style={{ display: "flex", borderBottom: "1px solid var(--border)", marginBottom: "0.75rem", overflowX: "auto" }}>
                         <button
@@ -1934,7 +2130,10 @@ function BlockCard({
                                   <thead>
                                     <tr style={{ background: "var(--bg-subtle)" }}>
                                       <th style={{ textAlign: "left", padding: "0.5rem 0.6rem", borderBottom: "1px solid var(--border)" }}>Field</th>
-                                      <th style={{ textAlign: "left", padding: "0.5rem 0.6rem", borderBottom: "1px solid var(--border)", width: "55%" }}>Display name</th>
+                                      <th style={{ textAlign: "left", padding: "0.5rem 0.6rem", borderBottom: "1px solid var(--border)", width: "50%" }}>Display name</th>
+                                      {type === "kpi_table" && (
+                                        <th style={{ textAlign: "left", padding: "0.5rem 0.6rem", borderBottom: "1px solid var(--border)" }}>Alignment</th>
+                                      )}
                                     </tr>
                                   </thead>
                                   <tbody>
@@ -1950,6 +2149,20 @@ function BlockCard({
                                             style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
                                           />
                                         </td>
+                                        {type === "kpi_table" && (
+                                          <td style={{ padding: "0.35rem 0.6rem", verticalAlign: "middle" }}>
+                                            <select
+                                              value={localColumnAlign[f.key] ?? "left"}
+                                              onChange={(e) => setLocalColumnAlign((prev) => ({ ...prev, [f.key]: e.target.value as CellAlign }))}
+                                              style={{ padding: "0.3rem 0.4rem", fontSize: "0.85rem", minWidth: 90 }}
+                                            >
+                                              <option value="left">Left</option>
+                                              <option value="center">Center</option>
+                                              <option value="right">Right</option>
+                                              <option value="justify">Justify</option>
+                                            </select>
+                                          </td>
+                                        )}
                                       </tr>
                                     ))}
                                   </tbody>
@@ -2015,11 +2228,14 @@ function BlockCard({
                         onClick={() => {
                           const trimRecord = (r: Record<string, string>) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, (v ?? "").trim()]));
                           const trimNested = (n: Record<string, Record<string, string>>) => Object.fromEntries(Object.entries(n).map(([k, v]) => [k, trimRecord(v ?? {})]));
-                          onUpdate({
-                            ...block,
+                          const payload: Partial<ReportBlock> = {
                             fieldDisplayNames: trimRecord(localFieldDisplayNames),
                             subFieldDisplayNames: trimNested(localSubFieldDisplayNames),
-                          });
+                          };
+                          if (type === "kpi_table") {
+                            (payload as { columnAlign?: Record<string, CellAlign> }).columnAlign = localColumnAlign;
+                          }
+                          onUpdate(payload);
                           setCustomNamesModalOpen(false);
                         }}
                       >
@@ -2039,6 +2255,14 @@ function BlockCard({
           const setRows = (next: SimpleTableRow[]) => onUpdate({ rows: next });
           const addRow = () => setRows([...rows, { cells: [{ type: "text", content: "" }] }]);
           const removeRow = (rowIdx: number) => setRows(rows.filter((_, i) => i !== rowIdx));
+          const moveRow = (rowIdx: number, dir: "up" | "down") => {
+            const newIdx = dir === "up" ? rowIdx - 1 : rowIdx + 1;
+            if (newIdx < 0 || newIdx >= rows.length) return;
+            const next = [...rows];
+            const [moved] = next.splice(rowIdx, 1);
+            next.splice(newIdx, 0, moved);
+            setRows(next);
+          };
           const addCell = (rowIdx: number) => {
             const next = rows.map((r, i) =>
               i === rowIdx ? { cells: [...r.cells, { type: "text" as const, content: "" }] } : r
@@ -2051,6 +2275,18 @@ function BlockCard({
             );
             setRows(next.filter((r) => r.cells.length > 0));
           };
+          const moveCell = (rowIdx: number, fromIdx: number, toIdx: number) => {
+            if (toIdx < 0) return;
+            const next = rows.map((r, i) => {
+              if (i !== rowIdx) return r;
+              const cells = [...r.cells];
+              if (toIdx >= cells.length) return r;
+              const [moved] = cells.splice(fromIdx, 1);
+              cells.splice(toIdx, 0, moved);
+              return { cells };
+            });
+            setRows(next);
+          };
           const updateCell = (rowIdx: number, cellIdx: number, patch: Partial<SimpleTableCell>) => {
             const next = rows.map((r, i) =>
               i === rowIdx
@@ -2060,6 +2296,7 @@ function BlockCard({
             setRows(next);
           };
           return (
+            <>
             <div style={{ marginTop: "0.5rem" }}>
               <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0 0 0.5rem 0" }}>
                 Add rows and columns. Each cell: <strong>Text</strong>, <strong>KPI value</strong> (for multi-line fields pick a sub-field and group function: SUM, AVG, COUNT, MIN, MAX), <strong>Group (table)</strong> to show all sub-fields as a table, or <strong>Formula</strong>.
@@ -2069,6 +2306,26 @@ function BlockCard({
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem", flexWrap: "wrap", gap: "0.25rem" }}>
                     <span style={{ fontSize: "0.85rem", fontWeight: 500 }}>Row {rowIdx + 1}</span>
                     <div style={{ display: "flex", gap: "0.25rem" }}>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ padding: "0.2rem 0.4rem", fontSize: "0.8rem" }}
+                        onClick={() => moveRow(rowIdx, "up")}
+                        disabled={rowIdx === 0}
+                        title="Move row up"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ padding: "0.2rem 0.4rem", fontSize: "0.8rem" }}
+                        onClick={() => moveRow(rowIdx, "down")}
+                        disabled={rowIdx >= rows.length - 1}
+                        title="Move row down"
+                      >
+                        ↓
+                      </button>
                       <button type="button" className="btn" style={{ padding: "0.2rem 0.4rem", fontSize: "0.8rem" }} onClick={() => addCell(rowIdx)}>+ Column</button>
                       <button type="button" className="btn" style={{ padding: "0.2rem 0.4rem", fontSize: "0.8rem", color: "var(--error)" }} onClick={() => removeRow(rowIdx)} disabled={rows.length <= 1}>− Row</button>
                     </div>
@@ -2082,13 +2339,31 @@ function BlockCard({
                             const t = e.target.value as "text" | "kpi" | "formula";
                             if (t === "text") updateCell(rowIdx, cellIdx, { type: "text", content: (cell as { content?: string }).content ?? "" });
                             else if (t === "kpi") updateCell(rowIdx, cellIdx, { type: "kpi", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "", subFieldKey: "", subFieldGroupFn: "SUM_ITEMS", entryIndex: 0, asGroup: false });
-                            else if (t === "formula") updateCell(rowIdx, cellIdx, { type: "formula", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "", entryIndex: 0, formula: "" });
+                            else if (t === "formula") {
+                              const kpiId = kpis[0]?.kpi_id ?? 0;
+                              updateCell(rowIdx, cellIdx, { type: "formula", kpiId, fieldKey: "", entryIndex: 0, formula: "" });
+                              setSimpleTableFormulaModal({ rowIdx, cellIdx });
+                              setSimpleTableFormulaDraft({ kpiId, entryIndex: 0, formula: "" });
+                              setSimpleTableEvalValue(null);
+                              setSimpleTableEvalError(null);
+                            }
                           }}
                           style={{ minWidth: 100, fontSize: "0.85rem" }}
                         >
                           <option value="text">Text</option>
                           <option value="kpi">KPI value</option>
                           <option value="formula">Formula</option>
+                        </select>
+                        <select
+                          value={(cell as { align?: CellAlign }).align ?? "left"}
+                          onChange={(e) => updateCell(rowIdx, cellIdx, { align: e.target.value as CellAlign })}
+                          title="Text alignment"
+                          style={{ width: 90, padding: "0.25rem 0.4rem", fontSize: "0.8rem" }}
+                        >
+                          <option value="left">Left</option>
+                          <option value="center">Center</option>
+                          <option value="right">Right</option>
+                          <option value="justify">Justify</option>
                         </select>
                         {cell.type === "text" && (
                           <input
@@ -2119,42 +2394,176 @@ function BlockCard({
                             )}
                             {cell.type === "formula" && (
                               <>
-                                <input
-                                  type="text"
-                                  value={(cell as { formula?: string }).formula ?? ""}
-                                  onChange={(e) => updateCell(rowIdx, cellIdx, { formula: e.target.value })}
-                                  placeholder="e.g. total_count + SUM_ITEMS(students, score)"
-                                  style={{ minWidth: 200, padding: "0.25rem 0.4rem", fontSize: "0.85rem" }}
-                                />
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={(cell as { entryIndex?: number }).entryIndex ?? 0}
-                                  onChange={(e) => updateCell(rowIdx, cellIdx, { entryIndex: parseInt(e.target.value, 10) || 0 })}
-                                  title="Entry index"
-                                  style={{ width: 52, padding: "0.25rem", fontSize: "0.85rem" }}
-                                />
+                                <span style={{ fontSize: "0.85rem", color: "var(--muted)", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {(cell as { formula?: string }).formula?.trim() ? (cell as { formula?: string }).formula : "Empty formula"}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  style={{ padding: "0.25rem 0.5rem", fontSize: "0.8rem" }}
+                                  onClick={() => {
+                                    const c = cell as { kpiId?: number; entryIndex?: number; formula?: string };
+                                    setSimpleTableFormulaModal({ rowIdx, cellIdx });
+                                    setSimpleTableFormulaDraft({ kpiId: c.kpiId ?? kpis[0]?.kpi_id ?? 0, entryIndex: c.entryIndex ?? 0, formula: c.formula ?? "" });
+                                    setSimpleTableEvalValue(null);
+                                    setSimpleTableEvalError(null);
+                                  }}
+                                >
+                                  Edit formula…
+                                </button>
                               </>
                             )}
                           </>
                         )}
-                        <button type="button" className="btn" style={{ padding: "0.2rem 0.4rem", fontSize: "0.8rem", color: "var(--error)" }} onClick={() => removeCell(rowIdx, cellIdx)}>−</button>
+                        <div style={{ display: "flex", gap: "0.2rem", marginLeft: "auto" }}>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ padding: "0.2rem 0.35rem", fontSize: "0.8rem" }}
+                            onClick={() => moveCell(rowIdx, cellIdx, cellIdx - 1)}
+                            disabled={cellIdx === 0}
+                            title="Move column left"
+                          >
+                            ←
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ padding: "0.2rem 0.35rem", fontSize: "0.8rem" }}
+                            onClick={() => moveCell(rowIdx, cellIdx, cellIdx + 1)}
+                            disabled={cellIdx >= (row.cells?.length || 0) - 1}
+                            title="Move column right"
+                          >
+                            →
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ padding: "0.2rem 0.4rem", fontSize: "0.8rem", color: "var(--error)" }}
+                            onClick={() => removeCell(rowIdx, cellIdx)}
+                            title="Remove column"
+                          >
+                            −
+                          </button>
+                        </div>
                       </div>
-                      {cell.type === "formula" && detail?.organization_id != null && (
-                        <ReportFormulaBuilder
-                          formulaValue={(cell as { formula?: string }).formula ?? ""}
-                          onInsert={(text) => updateCell(rowIdx, cellIdx, { formula: ((cell as { formula?: string }).formula ?? "") + text })}
-                          fields={(fieldsByKpiId[(cell as { kpiId?: number }).kpiId ?? 0] || []).filter((f) => f.field_type === "number" || f.field_type === "multi_line_items")}
-                          organizationId={detail.organization_id}
-                          currentKpiId={(cell as { kpiId?: number }).kpiId ?? 0}
-                        />
-                      )}
                     </div>
                   ))}
                 </div>
               ))}
               <button type="button" className="btn" style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem" }} onClick={addRow}>+ Add row</button>
             </div>
+            {simpleTableFormulaModal !== null && simpleTableFormulaDraft !== null && (
+              <div
+                style={{
+                  position: "fixed",
+                  inset: 0,
+                  zIndex: 1000,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  background: "rgba(0,0,0,0.4)",
+                }}
+                onClick={() => { setSimpleTableFormulaModal(null); setSimpleTableFormulaDraft(null); setSimpleTableEvalValue(null); setSimpleTableEvalError(null); }}
+              >
+                <div
+                  style={{
+                    background: "var(--surface, #fff)",
+                    borderRadius: 8,
+                    boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+                    maxWidth: 560,
+                    width: "90%",
+                    maxHeight: "90vh",
+                    overflow: "auto",
+                    padding: "1.25rem",
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <h3 style={{ margin: "0 0 1rem 0", fontSize: "1.1rem" }}>Edit formula</h3>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "flex-end" }}>
+                      <div style={{ minWidth: 160 }}>
+                        <label style={{ fontSize: "0.75rem", display: "block", marginBottom: "0.2rem" }}>Context KPI</label>
+                        <select
+                          value={simpleTableFormulaDraft.kpiId || ""}
+                          onChange={(e) => setSimpleTableFormulaDraft((prev) => prev ? { ...prev, kpiId: Number(e.target.value) } : null)}
+                          style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                        >
+                          {kpis.map((k) => (
+                            <option key={k.kpi_id} value={k.kpi_id}>{k.kpi_name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div style={{ minWidth: 80 }}>
+                        <label style={{ fontSize: "0.75rem", display: "block", marginBottom: "0.2rem" }}>Entry index</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={simpleTableFormulaDraft.entryIndex}
+                          onChange={(e) => setSimpleTableFormulaDraft((prev) => prev ? { ...prev, entryIndex: parseInt(e.target.value, 10) || 0 } : null)}
+                          style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label style={{ fontSize: "0.75rem", display: "block", marginBottom: "0.2rem" }}>Formula expression</label>
+                      <input
+                        type="text"
+                        value={simpleTableFormulaDraft.formula}
+                        onChange={(e) => setSimpleTableFormulaDraft((prev) => prev ? { ...prev, formula: e.target.value } : null)}
+                        placeholder="e.g. total_count + SUM_ITEMS(students, score)"
+                        style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                      />
+                    </div>
+                    {detail?.organization_id != null && (
+                      <ReportFormulaBuilder
+                        formulaValue={simpleTableFormulaDraft.formula}
+                        onInsert={(text) => setSimpleTableFormulaDraft((prev) => prev ? { ...prev, formula: prev.formula + text } : null)}
+                        fields={(fieldsByKpiId[simpleTableFormulaDraft.kpiId] || []).filter((f) => f.field_type === "number" || f.field_type === "multi_line_items")}
+                        organizationId={detail.organization_id}
+                        currentKpiId={simpleTableFormulaDraft.kpiId || undefined}
+                      />
+                    )}
+                  </div>
+                  <div style={{ marginTop: "1rem", padding: "0.75rem", background: "var(--bg-muted, #f5f5f5)", borderRadius: 6, fontSize: "0.9rem" }}>
+                    <div style={{ fontWeight: 600, marginBottom: "0.35rem" }}>Evaluated value</div>
+                    {simpleTableEvalError && <div style={{ color: "var(--error, #c00)" }}>{simpleTableEvalError}</div>}
+                    {simpleTableEvalLoading && <div style={{ color: "var(--muted)" }}>Evaluating…</div>}
+                    {!simpleTableEvalLoading && simpleTableEvalValue !== null && <div style={{ fontFamily: "monospace" }}>{String(simpleTableEvalValue)}</div>}
+                    {!simpleTableEvalLoading && simpleTableEvalValue === null && !simpleTableEvalError && <div style={{ color: "var(--muted)" }}>Click Evaluate to see the value that will appear in the report.</div>}
+                  </div>
+                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem", justifyContent: "flex-end" }}>
+                    <button type="button" className="btn" onClick={handleSimpleTableEvaluate} disabled={simpleTableEvalLoading}>
+                      Evaluate
+                    </button>
+                    <button type="button" className="btn" onClick={() => { setSimpleTableFormulaModal(null); setSimpleTableFormulaDraft(null); setSimpleTableEvalValue(null); setSimpleTableEvalError(null); }}>
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => {
+                        if (simpleTableFormulaModal && simpleTableFormulaDraft) {
+                          updateCell(simpleTableFormulaModal.rowIdx, simpleTableFormulaModal.cellIdx, {
+                            type: "formula",
+                            kpiId: simpleTableFormulaDraft.kpiId,
+                            entryIndex: simpleTableFormulaDraft.entryIndex,
+                            formula: simpleTableFormulaDraft.formula,
+                          });
+                          setSimpleTableFormulaModal(null);
+                          setSimpleTableFormulaDraft(null);
+                          setSimpleTableEvalValue(null);
+                          setSimpleTableEvalError(null);
+                        }
+                      }}
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
           );
         })()}
         {type === "single_value" && (

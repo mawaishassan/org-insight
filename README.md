@@ -85,7 +85,7 @@ uni_kpi_mis/
    - `npm install`
    - `npm run dev` (default port 3000)
 
-Next.js rewrites `/api/*` to `http://localhost:8000/api/*` when using default config.
+Next.js rewrites `/api/*` to `http://localhost:8080/api/*` when using default config (set `NEXT_PUBLIC_BACKEND_URL` if your backend runs on another port).
 
 ### First Super Admin
 
