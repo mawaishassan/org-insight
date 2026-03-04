@@ -146,3 +146,10 @@ textarea {
     box-shadow: none !important;
   }
 }
+
+/* Report design page: two-column grid stacks on narrow screens */
+@media (max-width: 768px) {
+  .report-design-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

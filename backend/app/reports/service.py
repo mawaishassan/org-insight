@@ -433,7 +433,10 @@ def _get_multi_line_field(kpis: list, kpi_id: int, field_key: str, entry_index: 
     if not isinstance(value_items, list):
         return None
     sub_field_keys = field.get("sub_field_keys") or []
-    return {"value_items": value_items, "sub_field_keys": sub_field_keys, "field_name": field.get("field_name", field_key)}
+    sub_fields = field.get("sub_fields")
+    if not sub_fields and sub_field_keys:
+        sub_fields = [{"key": k, "name": k} for k in sub_field_keys]
+    return {"value_items": value_items, "sub_field_keys": sub_field_keys, "sub_fields": sub_fields or [], "field_name": field.get("field_name", field_key)}
 
 
 _jinja_env.globals["get_multi_line_field"] = _get_multi_line_field
@@ -641,49 +644,214 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
             kpi_ids = b.get("kpiIds") or []
             field_keys = b.get("fieldKeys") or []
             one_per_kpi = b.get("oneTablePerKpi", True)
-            _cell_multi = (
-                "{% if f.field_type == 'multi_line_items' and f.value_items %}"
-                "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse; width: 100%;\">"
-                "{% for item in f.value_items %}<tr>{% for sub_key in f.sub_field_keys %}<td>{{ item[sub_key] }}</td>{% endfor %}</tr>{% endfor %}"
-                "</table>{% else %}{{ f.value }}{% endif %}"
-            )
-            if not kpi_ids and not field_keys:
-                out.append(
-                    '<div class="report-kpi-table">'
-                    "{% if kpis %}"
-                    "{% for kpi in kpis %}"
-                    '<h4>{{ kpi.kpi_name }}</h4><table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
-                    '<thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th>{{ f.field_name }}</th>{% endfor %}</tr></thead>'
-                    '<tbody>'
-                    "{% for entry in kpi.entries %}"
-                    '<tr>{% for f in entry.fields %}<td>' + _cell_multi + '</td>{% endfor %}</tr>'
-                    "{% endfor %}"
-                    "</tbody></table>"
-                    "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+            fields_layout = b.get("fieldsLayout") or b.get("fields_layout") or "columns"
+            # Explicit False → hide KPI heading; missing or True → show (support both camelCase and snake_case)
+            _sth = b.get("showTableHeading") if "showTableHeading" in b else b.get("show_table_heading")
+            show_table_heading = _sth is not False
+            show_multi_as_table = b.get("showMultiLineAsTable", True)
+            # When False, hide the parent multi-line field name; inner table stays
+            _sml = b.get("showMultiLineFieldLabel") if "showMultiLineFieldLabel" in b else b.get("show_multi_line_field_label")
+            show_multi_line_field_label = _sml is not False
+            _field_display = b.get("fieldDisplayNames") or b.get("field_display_names") or {}
+            _display_parts = [
+                f"'{str(k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': '{str(v).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}'"
+                for k, v in _field_display.items()
+                if v is not None and str(v).strip()
+            ]
+            _display_prefix = "{% set field_display_names = {" + ", ".join(_display_parts) + "} %}"
+            _label_f = "{{ (field_display_names.get(f.field_key) or f.field_name) | default(f.field_name) }}"
+            _label_key = "{{ (field_display_names.get(key) or kpi.field_names.get(key, key)) | default(key) }}"
+            _sub_field_display = b.get("subFieldDisplayNames") or b.get("sub_field_display_names") or {}
+            _sub_display_outer = []
+            for _fk, _inner in (_sub_field_display or {}).items():
+                if not _inner or not isinstance(_inner, dict):
+                    continue
+                _inner_parts = [
+                    f"'{str(_k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': '{str(_v).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}'"
+                    for _k, _v in _inner.items()
+                    if _v is not None and str(_v).strip()
+                ]
+                if _inner_parts:
+                    _sub_display_outer.append(f"'{str(_fk).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': {{{', '.join(_inner_parts)}}}")
+            _sub_display_prefix = "{% set sub_field_display_names = {" + ", ".join(_sub_display_outer) + "} %}" if _sub_display_outer else "{% set sub_field_display_names = {} %}"
+            _sub_label_sf_f = "{{ ((sub_field_display_names.get(f.field_key) or {}) | default({})).get(sf.key) or sf.name | default(sf.name) }}"
+            _sub_label_sf_ef = "{{ ((sub_field_display_names.get(ef.field_key) or {}) | default({})).get(sf.key) or sf.name | default(sf.name) }}"
+            _ml_sub = b.get("multiLineSubFieldKeys") or b.get("multi_line_sub_field_keys") or {}
+            _sub_keys_parts = [
+                f"'{str(k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': [{', '.join(repr(str(s)) for s in (v or []))}]"
+                for k, v in _ml_sub.items()
+            ]
+            _sub_keys_prefix = "{% set field_sub_field_keys = {" + ", ".join(_sub_keys_parts) + "} %}"
+            _show_ml_label_prefix = "{% set show_multi_line_field_label = " + ("true" if show_multi_line_field_label else "false") + " %}"
+            _label_f_cond = "{% if show_multi_line_field_label or f.field_type != 'multi_line_items' %}" + _label_f + "{% endif %}"
+            _label_key_cond = "{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (_fl[0].field_type != 'multi_line_items') %}" + _label_key + "{% endif %}"
+            if show_multi_as_table:
+                _cell_multi = (
+                    "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
+                    "{% if f.field_type == 'multi_line_items' and f.value_items %}"
+                    "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse; width: 100%;\">"
+                    "<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<th>" + _sub_label_sf_f + "</th>{% endif %}{% endfor %}</tr>"
+                    "{% for item in f.value_items %}<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}</tr>{% endfor %}"
+                    "</table>{% else %}{{ f.value }}{% endif %}"
+                )
+                _cell_multi_ef = (
+                    "{% set show_sub_keys = field_sub_field_keys.get(ef.field_key, []) | default([]) %}"
+                    "{% if ef.field_type == 'multi_line_items' and ef.value_items %}"
+                    "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse; width: 100%;\">"
+                    "<tr>{% for sf in (ef.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<th>" + _sub_label_sf_ef + "</th>{% endif %}{% endfor %}</tr>"
+                    "{% for item in ef.value_items %}<tr>{% for sf in (ef.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}</tr>{% endfor %}"
+                    "</table>{% else %}{{ ef.value }}{% endif %}"
                 )
             else:
-                fid_list = ", ".join(str(i) for i in kpi_ids)
-                fkeys_list = ", ".join(repr(k) for k in field_keys)
-                _cell_by_key = (
-                    "{% for f in entry.fields %}{% if f.field_key == key %}<td>" + _cell_multi + "</td>{% endif %}{% endfor %}"
-                )
-                out.append(
-                    f"{{% set kpi_ids_set = [{fid_list}] %}}"
-                    f"{{% set field_keys_list = [{fkeys_list}] %}}"
-                    '<div class="report-kpi-table">'
-                    "{% if kpis %}"
-                    "{% for kpi in kpis %}"
-                    "{% if kpi.kpi_id in kpi_ids_set %}"
-                    '<h4>{{ kpi.kpi_name }}</h4><table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
-                    '<thead><tr>{% for key in field_keys_list %}<th>{{ key }}</th>{% endfor %}</tr></thead>'
-                    '<tbody>'
-                    "{% for entry in kpi.entries %}"
-                    '<tr>{% for key in field_keys_list %}' + _cell_by_key + "{% endfor %}</tr>"
-                    "{% endfor %}"
-                    "</tbody></table>"
+                _cell_multi = (
+                    "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
+                    "{% if f.field_type == 'multi_line_items' and f.value_items %}"
+                    "<div class=\"report-kpi-multi\">"
+                    "{% for item in f.value_items %}"
+                    "<div class=\"report-kpi-multi-row\">"
+                    "{% for sf in (f.sub_fields | default([])) %}"
+                    "{% if not show_sub_keys or sf.key in show_sub_keys %}"
+                    "<div class=\"report-kpi-multi-cell\"><strong>" + _sub_label_sf_f + ":</strong> {{ item[sf.key] }}</div>"
                     "{% endif %}"
-                    "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+                    "{% endfor %}"
+                    "</div>"
+                    "{% endfor %}"
+                    "</div>{% else %}{{ f.value }}{% endif %}"
                 )
+                _cell_multi_ef = (
+                    "{% set show_sub_keys = field_sub_field_keys.get(ef.field_key, []) | default([]) %}"
+                    "{% if ef.field_type == 'multi_line_items' and ef.value_items %}"
+                    "<div class=\"report-kpi-multi\">"
+                    "{% for item in ef.value_items %}"
+                    "<div class=\"report-kpi-multi-row\">"
+                    "{% for sf in (ef.sub_fields | default([])) %}"
+                    "{% if not show_sub_keys or sf.key in show_sub_keys %}"
+                    "<div class=\"report-kpi-multi-cell\"><strong>" + _sub_label_sf_ef + ":</strong> {{ item[sf.key] }}</div>"
+                    "{% endif %}"
+                    "{% endfor %}"
+                    "</div>"
+                    "{% endfor %}"
+                    "</div>{% else %}{{ ef.value }}{% endif %}"
+                )
+            heading_html = '<h4>{{ kpi.kpi_name }}</h4>' if show_table_heading else ""
+            if fields_layout == "rows":
+                if not kpi_ids and not field_keys:
+                    out.append(
+                        _display_prefix
+                        + _sub_display_prefix
+                        + _sub_keys_prefix
+                        + _show_ml_label_prefix
+                        + '<div class="report-kpi-table">'
+                        "{% if kpis %}"
+                        "{% for kpi in kpis %}"
+                        + heading_html
+                        + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
+                        '<tbody>'
+                        "{% for f in kpi.entries[0].fields if kpi.entries %}"
+                        "<tr><td>" + _label_f_cond + "</td>"
+                        "{% for entry in kpi.entries %}"
+                        "{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td>" + _cell_multi_ef + "</td>{% endif %}{% endfor %}"
+                        "{% endfor %}"
+                        "</tr>"
+                        "{% endfor %}"
+                        "</tbody></table>"
+                        "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+                    )
+                else:
+                    fid_list = ", ".join(str(i) for i in kpi_ids)
+                    fkeys_list = ", ".join(repr(k) for k in field_keys)
+                    _cell_by_key = (
+                        "{% for f in entry.fields %}{% if f.field_key == key %}<td>" + _cell_multi + "</td>{% endif %}{% endfor %}"
+                    )
+                    out.append(
+                        _display_prefix
+                        + _sub_display_prefix
+                        + _sub_keys_prefix
+                        + _show_ml_label_prefix
+                        + f"{{% set kpi_ids_set = [{fid_list}] %}}"
+                        f"{{% set field_keys_list = [{fkeys_list}] %}}"
+                        '<div class="report-kpi-table">'
+                        "{% if kpis %}"
+                        "{% for kpi in kpis %}"
+                        "{% if kpi.kpi_id in kpi_ids_set %}"
+                        + heading_html
+                        + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
+                        '<tbody>'
+                        "{% for key in field_keys_list %}"
+                        "<tr><td>" + _label_key_cond + "</td>{% for entry in kpi.entries %}" + _cell_by_key + "{% endfor %}</tr>"
+                        "{% endfor %}"
+                        "</tbody></table>"
+                        "{% endif %}"
+                        "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+                    )
+            else:
+                if not kpi_ids and not field_keys:
+                    out.append(
+                        _display_prefix
+                        + _sub_display_prefix
+                        + _sub_keys_prefix
+                        + _show_ml_label_prefix
+                        + '<div class="report-kpi-table">'
+                        "{% if kpis %}"
+                        "{% for kpi in kpis %}"
+                        + heading_html
+                        + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
+                        '<thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th>' + _label_f_cond + '</th>{% endfor %}</tr></thead>'
+                        '<tbody>'
+                        "{% for entry in kpi.entries %}"
+                        '<tr>{% for f in entry.fields %}<td>' + _cell_multi + '</td>{% endfor %}</tr>'
+                        "{% endfor %}"
+                        "</tbody></table>"
+                        "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+                    )
+                else:
+                    fid_list = ", ".join(str(i) for i in kpi_ids)
+                    fkeys_list = ", ".join(repr(k) for k in field_keys)
+                    _cell_by_key = (
+                        "{% for f in entry.fields %}{% if f.field_key == key %}<td>" + _cell_multi + "</td>{% endif %}{% endfor %}"
+                    )
+                    out.append(
+                        _display_prefix
+                        + _sub_display_prefix
+                        + _sub_keys_prefix
+                        + _show_ml_label_prefix
+                        + f"{{% set kpi_ids_set = [{fid_list}] %}}"
+                        f"{{% set field_keys_list = [{fkeys_list}] %}}"
+                        '<div class="report-kpi-table">'
+                        "{% if kpis %}"
+                        "{% for kpi in kpis %}"
+                        "{% if kpi.kpi_id in kpi_ids_set %}"
+                        + heading_html
+                        + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
+                        '<thead><tr>{% for key in field_keys_list %}<th>' + _label_key_cond + '</th>{% endfor %}</tr></thead>'
+                        '<tbody>'
+                        "{% for entry in kpi.entries %}"
+                        '<tr>{% for key in field_keys_list %}' + _cell_by_key + "{% endfor %}</tr>"
+                        "{% endfor %}"
+                        "</tbody></table>"
+                        "{% endif %}"
+                        "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+                    )
+        elif block_type == "kpi_multi_table":
+            kpi_id = int(b.get("kpiId") or 0)
+            field_key = (b.get("fieldKey") or "").strip()
+            if not kpi_id or not field_key:
+                continue
+            field_key_escaped = field_key.replace("\\", "\\\\").replace("'", "\\'")
+            out.append(
+                "<div class=\"report-kpi-multi-table\">"
+                "{% set _ml = get_multi_line_field(kpis, "
+                + str(kpi_id)
+                + ", '"
+                + field_key_escaped
+                + "', 0) %}"
+                "{% if _ml %}"
+                "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse; width: 100%;\">"
+                "<tr>{% for sf in (_ml.sub_fields | default([])) %}<th>{{ sf.name }}</th>{% endfor %}</tr>"
+                "{% for item in _ml.value_items %}<tr>{% for sf in (_ml.sub_fields | default([])) %}<td>{{ item[sf.key] }}</td>{% endfor %}</tr>{% endfor %}"
+                "</table>"
+                "{% endif %}</div>"
+            )
         elif block_type == "simple_table":
             rows = b.get("rows") or []
             row_parts = []
@@ -708,8 +876,8 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                             cell_parts.append(
                                 "<td>{% set _ml = get_multi_line_field(kpis, " + str(kpi_id) + ", '" + field_key + "', " + str(entry_idx) + ") %}"
                                 "{% if _ml %}<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse;\">"
-                                "<tr>{% for sk in _ml.sub_field_keys %}<th>{{ sk }}</th>{% endfor %}</tr>"
-                                "{% for item in _ml.value_items %}<tr>{% for sk in _ml.sub_field_keys %}<td>{{ item[sk] }}</td>{% endfor %}</tr>{% endfor %}"
+                                "<tr>{% for sf in (_ml.sub_fields | default([])) %}<th>{{ sf.name }}</th>{% endfor %}</tr>"
+                                "{% for item in _ml.value_items %}<tr>{% for sf in (_ml.sub_fields | default([])) %}<td>{{ item[sf.key] }}</td>{% endfor %}</tr>{% endfor %}"
                                 "</table>{% endif %}</td>"
                             )
                         elif sub_key:
@@ -741,21 +909,55 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
         elif block_type == "kpi_grid":
             kpi_ids = b.get("kpiIds") or []
             field_keys = b.get("fieldKeys") or []
+            _field_display = b.get("fieldDisplayNames") or b.get("field_display_names") or {}
+            _display_parts = [
+                f"'{str(k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': '{str(v).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}'"
+                for k, v in _field_display.items()
+                if v is not None and str(v).strip()
+            ]
+            _display_prefix = "{% set field_display_names = {" + ", ".join(_display_parts) + "} %}"
+            _label_f = "{{ (field_display_names.get(f.field_key) or f.field_name) | default(f.field_name) }}"
+            _label_key = "{{ (field_display_names.get(key) or kpi.field_names.get(key, key)) | default(key) }}"
+            _sub_field_display = b.get("subFieldDisplayNames") or b.get("sub_field_display_names") or {}
+            _sub_display_outer = []
+            for _fk, _inner in (_sub_field_display or {}).items():
+                if not _inner or not isinstance(_inner, dict):
+                    continue
+                _inner_parts = [
+                    f"'{str(_k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': '{str(_v).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}'"
+                    for _k, _v in _inner.items()
+                    if _v is not None and str(_v).strip()
+                ]
+                if _inner_parts:
+                    _sub_display_outer.append(f"'{str(_fk).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': {{{', '.join(_inner_parts)}}}")
+            _sub_display_prefix = "{% set sub_field_display_names = {" + ", ".join(_sub_display_outer) + "} %}" if _sub_display_outer else "{% set sub_field_display_names = {} %}"
+            _sub_label_sf_f = "{{ ((sub_field_display_names.get(f.field_key) or {}) | default({})).get(sf.key) or sf.name | default(sf.name) }}"
+            _ml_sub = b.get("multiLineSubFieldKeys") or b.get("multi_line_sub_field_keys") or {}
+            _sub_keys_parts = [
+                f"'{str(k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': [{', '.join(repr(str(s)) for s in (v or []))}]"
+                for k, v in _ml_sub.items()
+            ]
+            _sub_keys_prefix = "{% set field_sub_field_keys = {" + ", ".join(_sub_keys_parts) + "} %}"
             _grid_cell_multi = (
+                "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
                 "{% if f.field_type == 'multi_line_items' and f.value_items %}"
                 "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse;\">"
-                "{% for item in f.value_items %}<tr>{% for sub_key in f.sub_field_keys %}<td>{{ item[sub_key] }}</td>{% endfor %}</tr>{% endfor %}"
+                "<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<th>" + _sub_label_sf_f + "</th>{% endif %}{% endfor %}</tr>"
+                "{% for item in f.value_items %}<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}</tr>{% endfor %}"
                 "</table>{% else %}{{ f.value }}{% endif %}"
             )
             if not kpi_ids and not field_keys:
                 out.append(
-                    '<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">'
+                    _display_prefix
+                    + _sub_display_prefix
+                    + _sub_keys_prefix
+                    + '<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">'
                     "{% if kpis %}{% for kpi in kpis %}"
                     "{% for entry in kpi.entries %}"
                     '<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;">'
                     '<h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>'
                     "{% for f in entry.fields %}"
-                    '<p style="margin: 0.25rem 0;"><strong>{{ f.field_name }}:</strong> ' + _grid_cell_multi + '</p>'
+                    '<p style="margin: 0.25rem 0;"><strong>' + _label_f + ':</strong> ' + _grid_cell_multi + '</p>'
                     "{% endfor %}</div>"
                     "{% endfor %}{% endfor %}{% endif %}</div>"
                 )
@@ -766,7 +968,10 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     "{% for f in entry.fields %}{% if f.field_key == key %}" + _grid_cell_multi + "{% endif %}{% endfor %}"
                 )
                 out.append(
-                    f"{{% set kpi_ids_set = [{fid_list}] %}}"
+                    _display_prefix
+                    + _sub_display_prefix
+                    + _sub_keys_prefix
+                    + f"{{% set kpi_ids_set = [{fid_list}] %}}"
                     f"{{% set field_keys_list = [{fkeys_list}] %}}"
                     '<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">'
                     "{% if kpis %}{% for kpi in kpis %}"
@@ -775,26 +980,59 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     '<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;">'
                     '<h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>'
                     "{% for key in field_keys_list %}"
-                    '<p style="margin: 0.25rem 0;"><strong>{{ key }}:</strong> ' + _grid_cell_by_key + '</p>'
+                    '<p style="margin: 0.25rem 0;"><strong>' + _label_key + ':</strong> ' + _grid_cell_by_key + '</p>'
                     "{% endfor %}</div>"
                     "{% endfor %}{% endif %}{% endfor %}{% endif %}</div>"
                 )
         elif block_type == "kpi_list":
             kpi_ids = b.get("kpiIds") or []
             field_keys = b.get("fieldKeys") or []
+            _field_display = b.get("fieldDisplayNames") or b.get("field_display_names") or {}
+            _display_parts = [
+                f"'{str(k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': '{str(v).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}'"
+                for k, v in _field_display.items()
+                if v is not None and str(v).strip()
+            ]
+            _display_prefix = "{% set field_display_names = {" + ", ".join(_display_parts) + "} %}"
+            _label_f = "{{ (field_display_names.get(f.field_key) or f.field_name) | default(f.field_name) }}"
+            _label_key = "{{ (field_display_names.get(key) or kpi.field_names.get(key, key)) | default(key) }}"
+            _sub_field_display = b.get("subFieldDisplayNames") or b.get("sub_field_display_names") or {}
+            _sub_display_outer = []
+            for _fk, _inner in (_sub_field_display or {}).items():
+                if not _inner or not isinstance(_inner, dict):
+                    continue
+                _inner_parts = [
+                    f"'{str(_k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': '{str(_v).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}'"
+                    for _k, _v in _inner.items()
+                    if _v is not None and str(_v).strip()
+                ]
+                if _inner_parts:
+                    _sub_display_outer.append(f"'{str(_fk).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': {{{', '.join(_inner_parts)}}}")
+            _sub_display_prefix = "{% set sub_field_display_names = {" + ", ".join(_sub_display_outer) + "} %}" if _sub_display_outer else "{% set sub_field_display_names = {} %}"
+            _sub_label_sf_f = "{{ ((sub_field_display_names.get(f.field_key) or {}) | default({})).get(sf.key) or sf.name | default(sf.name) }}"
+            _ml_sub = b.get("multiLineSubFieldKeys") or b.get("multi_line_sub_field_keys") or {}
+            _sub_keys_parts = [
+                f"'{str(k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': [{', '.join(repr(str(s)) for s in (v or []))}]"
+                for k, v in _ml_sub.items()
+            ]
+            _sub_keys_prefix = "{% set field_sub_field_keys = {" + ", ".join(_sub_keys_parts) + "} %}"
             _list_cell_multi = (
+                "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
                 "{% if f.field_type == 'multi_line_items' and f.value_items %}"
-                "<ul style=\"margin: 0.25rem 0;\">{% for item in f.value_items %}<li>{% for sub_key in f.sub_field_keys %}{{ item[sub_key] }}{% if not loop.last %} – {% endif %}{% endfor %}</li>{% endfor %}</ul>"
+                "<ul style=\"margin: 0.25rem 0;\">{% for item in f.value_items %}<li>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}{{ item[sf.key] }}{% if not loop.last %} – {% endif %}{% endif %}{% endfor %}</li>{% endfor %}</ul>"
                 "{% else %}{{ f.value }}{% endif %}"
             )
             if not kpi_ids and not field_keys:
                 out.append(
-                    '<div class="report-kpi-list">'
+                    _display_prefix
+                    + _sub_display_prefix
+                    + _sub_keys_prefix
+                    + '<div class="report-kpi-list">'
                     "{% if kpis %}{% for kpi in kpis %}"
                     '<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">'
                     "{% for entry in kpi.entries %}"
                     "{% for f in entry.fields %}"
-                    '<dt style="font-weight: 600;">{{ f.field_name }}</dt><dd style="margin-left: 1rem;">' + _list_cell_multi + '</dd>'
+                    '<dt style="font-weight: 600;">' + _label_f + '</dt><dd style="margin-left: 1rem;">' + _list_cell_multi + '</dd>'
                     "{% endfor %}{% endfor %}</dl>"
                     "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                 )
@@ -805,7 +1043,10 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     "{% for f in entry.fields %}{% if f.field_key == key %}" + _list_cell_multi + "{% endif %}{% endfor %}"
                 )
                 out.append(
-                    f"{{% set kpi_ids_set = [{fid_list}] %}}"
+                    _display_prefix
+                    + _sub_display_prefix
+                    + _sub_keys_prefix
+                    + f"{{% set kpi_ids_set = [{fid_list}] %}}"
                     f"{{% set field_keys_list = [{fkeys_list}] %}}"
                     '<div class="report-kpi-list">'
                     "{% if kpis %}{% for kpi in kpis %}"
@@ -813,7 +1054,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     '<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">'
                     "{% for entry in kpi.entries %}"
                     "{% for key in field_keys_list %}"
-                    '<dt style="font-weight: 600;">{{ key }}</dt><dd style="margin-left: 1rem;">' + _list_cell_by_key + '</dd>'
+                    '<dt style="font-weight: 600;">' + _label_key + '</dt><dd style="margin-left: 1rem;">' + _list_cell_by_key + '</dd>'
                     "{% endfor %}{% endfor %}</dl>"
                     "{% endif %}{% endfor %}{% endif %}</div>"
                 )
@@ -916,8 +1157,10 @@ async def generate_report_data(
                     "show_on_card": show_on_card,
                 }
                 if f.field_type == FieldType.multi_line_items:
+                    sub_fields_orm = getattr(f, "sub_fields") or []
                     field_payload["value_items"] = []
-                    field_payload["sub_field_keys"] = [sf.key for sf in (getattr(f, "sub_fields") or [])]
+                    field_payload["sub_field_keys"] = [sf.key for sf in sub_fields_orm]
+                    field_payload["sub_fields"] = [{"key": sf.key, "name": getattr(sf, "name", sf.key)} for sf in sub_fields_orm]
                 field_values_out.append(field_payload)
             rows.append({"entry_id": None, "fields": field_values_out})
         else:
@@ -949,9 +1192,14 @@ async def generate_report_data(
                         "field_type": f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type),
                         "show_on_card": show_on_card,
                     }
-                    if f.field_type == FieldType.multi_line_items and isinstance(val, list):
-                        field_payload["value_items"] = val
-                        field_payload["sub_field_keys"] = [sf.key for sf in (getattr(f, "sub_fields") or [])]
+                    if f.field_type == FieldType.multi_line_items:
+                        sub_fields_orm = getattr(f, "sub_fields") or []
+                        field_payload["sub_field_keys"] = [sf.key for sf in sub_fields_orm]
+                        field_payload["sub_fields"] = [{"key": sf.key, "name": getattr(sf, "name", sf.key)} for sf in sub_fields_orm]
+                        if isinstance(val, list):
+                            field_payload["value_items"] = val
+                        else:
+                            field_payload["value_items"] = []
                     field_values_out.append(field_payload)
                     if val is not None and f.field_type == FieldType.number:
                         value_by_key[f.key] = val
@@ -980,10 +1228,18 @@ async def generate_report_data(
                         if computed is not None:
                             value_by_key[f.key] = computed
                 rows.append({"entry_id": entry.id, "fields": field_values_out})
+        # Map field_key -> field_name for template headers when only key is in scope
+        field_names_map = {}
+        if rows and rows[0].get("fields"):
+            for f in rows[0]["fields"]:
+                fkey = f.get("field_key")
+                if fkey is not None:
+                    field_names_map[fkey] = f.get("field_name", fkey)
         out["kpis"].append({
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,
             "entries": rows,
+            "field_names": field_names_map,
         })
 
     # Build domains → categories → KPIs for template access
@@ -1044,8 +1300,35 @@ async def render_report_html(
         body_template = _blocks_to_jinja(rt.body_blocks)
     if not body_template:
         return None
+    return await render_report_html_with_template(
+        db, template_id, org_id, year=year, body_template_override=body_template
+    )
+
+
+async def render_report_html_with_template(
+    db: AsyncSession,
+    template_id: int,
+    org_id: int,
+    year: int | None = None,
+    body_template_override: str | None = None,
+) -> str | None:
+    """
+    Render report with given template string (for live preview) or from DB.
+    Uses generate_report_data and Jinja2 render.
+    """
     data = await generate_report_data(db, template_id, org_id, year=year)
     if not data:
+        return None
+    if body_template_override:
+        body_template = body_template_override
+    else:
+        rt = await get_report_template(db, template_id, org_id)
+        if not rt:
+            return None
+        body_template = rt.body_template or ""
+        if getattr(rt, "body_blocks", None):
+            body_template = _blocks_to_jinja(rt.body_blocks)
+    if not body_template:
         return None
     template = _jinja_env.from_string(body_template)
     return template.render(**data)

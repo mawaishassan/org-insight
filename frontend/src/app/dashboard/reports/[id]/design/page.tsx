@@ -61,10 +61,11 @@ export type ReportBlock =
   | { type: "domain_list"; id?: string; domainIds?: number[] }
   | { type: "domain_categories"; id?: string; domainIds?: number[] }
   | { type: "domain_kpis"; id?: string; domainIds?: number[] }
-  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean }
+  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean; fieldsLayout?: "columns" | "rows"; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; showTableHeading?: boolean; showMultiLineAsTable?: boolean; showMultiLineFieldLabel?: boolean }
+  | { type: "kpi_multi_table"; id?: string; kpiId?: number; fieldKey?: string }
   | { type: "simple_table"; id?: string; rows?: SimpleTableRow[] }
-  | { type: "kpi_grid"; id?: string; kpiIds?: number[]; fieldKeys?: string[] }
-  | { type: "kpi_list"; id?: string; kpiIds?: number[]; fieldKeys?: string[] }
+  | { type: "kpi_grid"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>> }
+  | { type: "kpi_list"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>> }
   | { type: "single_value"; id?: string; kpiId?: number; fieldKey?: string; subFieldKey?: string; entryIndex?: number };
 
 export type SimpleTableCell =
@@ -83,6 +84,7 @@ const BLOCK_LABELS: Record<string, string> = {
   domain_categories: "Domain categories",
   domain_kpis: "Domain KPIs",
   kpi_table: "KPI table",
+  kpi_multi_table: "Multi-line items table",
   simple_table: "Simple table",
   kpi_grid: "KPI grid",
   kpi_list: "KPI list",
@@ -315,6 +317,48 @@ function addBlockId(b: ReportBlock): ReportBlock {
   return { ...b, id: (b as { id?: string }).id || generateId() } as ReportBlock;
 }
 
+function buildFieldSubFieldKeysJinja(multiLineSubFieldKeys: Record<string, string[]> | undefined): string {
+  const m = multiLineSubFieldKeys || {};
+  const pairs = Object.entries(m).map(([fk, keys]) => `'${fk.replace(/'/g, "\\'")}': [${(keys || []).map((k) => `'${String(k).replace(/'/g, "\\'")}'`).join(", ")}]`);
+  return "{% set field_sub_field_keys = {" + pairs.join(", ") + "} %}";
+}
+
+function buildFieldDisplayNamesJinja(fieldDisplayNames: Record<string, string> | undefined): string {
+  const m = fieldDisplayNames || {};
+  const pairs = Object.entries(m)
+    .filter(([, v]) => v != null && String(v).trim() !== "")
+    .map(([k, v]) => `'${String(k).replace(/'/g, "\\'")}': '${String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`);
+  return pairs.length ? "{% set field_display_names = {" + pairs.join(", ") + "} %}" : "{% set field_display_names = {} %}";
+}
+
+/** Label for a field in report: custom display name or default (f.field_name / kpi.field_names.get(key, key)) */
+const fieldLabelF = "{{ (field_display_names.get(f.field_key) or f.field_name) | default(f.field_name) }}";
+const fieldLabelKey = "{{ (field_display_names.get(key) or kpi.field_names.get(key, key)) | default(key) }}";
+
+/** Sub-field column header: custom display or sf.name (uses sub_field_display_names[field_key][sub_key]) */
+function subFieldLabelExpr(v: "f" | "ef"): string {
+  return `{{ ((sub_field_display_names.get(${v}.field_key) or {}) | default({})).get(sf.key) or sf.name | default(sf.name) }}`;
+}
+
+function buildSubFieldDisplayNamesJinja(subFieldDisplayNames: Record<string, Record<string, string>> | undefined): string {
+  const m = subFieldDisplayNames || {};
+  const outer: string[] = [];
+  for (const [fk, inner] of Object.entries(m)) {
+    if (!inner || typeof inner !== "object") continue;
+    const innerPairs = Object.entries(inner)
+      .filter(([, v]) => v != null && String(v).trim() !== "")
+      .map(([k, v]) => `'${String(k).replace(/'/g, "\\'")}': '${String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`);
+    if (innerPairs.length) outer.push(`'${String(fk).replace(/'/g, "\\'")}': {${innerPairs.join(", ")}}`);
+  }
+  return outer.length ? "{% set sub_field_display_names = {" + outer.join(", ") + "} %}" : "{% set sub_field_display_names = {} %}";
+}
+
+function multiLineCellSnippet(v: "f" | "ef"): string {
+  const subFields = `(${v}.sub_fields | default([]))`;
+  const thLabel = subFieldLabelExpr(v);
+  return `{% set show_sub_keys = field_sub_field_keys.get(${v}.field_key, []) | default([]) %}{% if ${v}.field_type == 'multi_line_items' and ${v}.value_items %}<table border="1" cellpadding="4" style="border-collapse: collapse; width: 100%;"><tr>{% for sf in ${subFields} %}{% if not show_sub_keys or sf.key in show_sub_keys %}<th>${thLabel}</th>{% endif %}{% endfor %}</tr>{% for item in ${v}.value_items %}<tr>{% for sf in ${subFields} %}{% if not show_sub_keys or sf.key in show_sub_keys %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}</tr>{% endfor %}</table>{% else %}{{ ${v}.value }}{% endif %}`;
+}
+
 /** Generate Jinja2 template source from blocks (mirrors backend _blocks_to_jinja). */
 function blocksToJinja(blocks: ReportBlock[]): string {
   const out: string[] = [];
@@ -373,20 +417,56 @@ function blocksToJinja(blocks: ReportBlock[]): string {
     } else if (type === "kpi_table") {
       const kpiIds = (b as { kpiIds?: number[] }).kpiIds || [];
       const fieldKeys = (b as { fieldKeys?: string[] }).fieldKeys || [];
-      const cellMulti =
-        '{% if f.field_type == \'multi_line_items\' and f.value_items %}<table border="1" cellpadding="4" style="border-collapse: collapse; width: 100%;">{% for item in f.value_items %}<tr>{% for sub_key in f.sub_field_keys %}<td>{{ item[sub_key] }}</td>{% endfor %}</tr>{% endfor %}</table>{% else %}{{ f.value }}{% endif %}';
-      if (!kpiIds.length && !fieldKeys.length) {
-        out.push(
-          `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}<h4>{{ kpi.kpi_name }}</h4><table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th>{{ f.field_name }}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for f in entry.fields %}<td>${cellMulti}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
-        );
+      const fieldsLayout = (b as { fieldsLayout?: "columns" | "rows" }).fieldsLayout ?? "columns";
+      const showTableHeading = (b as { showTableHeading?: boolean }).showTableHeading;
+      const headingPart = showTableHeading === false ? "" : "<h4>{{ kpi.kpi_name }}</h4>";
+      const showMultiLineFieldLabel = (b as { showMultiLineFieldLabel?: boolean }).showMultiLineFieldLabel !== false;
+      const showMlLabelPrefix = `{% set show_multi_line_field_label = ${showMultiLineFieldLabel ? "true" : "false"} %}`;
+      const fieldLabelFCond = `{% if show_multi_line_field_label or f.field_type != 'multi_line_items' %}${fieldLabelF}{% endif %}`;
+      const fieldLabelKeyCond = `{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (_fl[0].field_type != 'multi_line_items') %}${fieldLabelKey}{% endif %}`;
+      const multiLineSubFieldKeys = (b as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys;
+      const fieldDisplayNames = (b as { fieldDisplayNames?: Record<string, string> }).fieldDisplayNames;
+      const subFieldDisplayNames = (b as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames;
+      const displayPrefix = buildFieldDisplayNamesJinja(fieldDisplayNames);
+      const subFieldDisplayPrefix = buildSubFieldDisplayNamesJinja(subFieldDisplayNames);
+      const subKeysPrefix = buildFieldSubFieldKeysJinja(multiLineSubFieldKeys);
+      const cellMulti = multiLineCellSnippet("f");
+      const cellMultiEf = multiLineCellSnippet("ef");
+      const cellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td>${cellMulti}</td>{% endif %}{% endfor %}`;
+      if (fieldsLayout === "rows") {
+        if (!kpiIds.length && !fieldKeys.length) {
+          out.push(
+            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for f in kpi.entries[0].fields if kpi.entries %}<tr><td>${fieldLabelFCond}</td>{% for entry in kpi.entries %}{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td>${cellMultiEf}</td>{% endif %}{% endfor %}{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
+          );
+        } else {
+          const fidList = kpiIds.join(", ");
+          const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
+          const rowCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td>${cellMulti}</td>{% endif %}{% endfor %}`;
+          out.push(
+            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for key in field_keys_list %}<tr><td>${fieldLabelKeyCond}</td>{% for entry in kpi.entries %}${rowCellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
+          );
+        }
       } else {
-        const fidList = kpiIds.join(", ");
-        const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
-        const cellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td>${cellMulti}</td>{% endif %}{% endfor %}`;
-        out.push(
-          `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}<h4>{{ kpi.kpi_name }}</h4><table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for key in field_keys_list %}<th>{{ key }}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for key in field_keys_list %}${cellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
-        );
+        if (!kpiIds.length && !fieldKeys.length) {
+          out.push(
+            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th>${fieldLabelFCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for f in entry.fields %}<td>${cellMulti}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
+          );
+        } else {
+          const fidList = kpiIds.join(", ");
+          const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
+          out.push(
+            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for key in field_keys_list %}<th>${fieldLabelKeyCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for key in field_keys_list %}${cellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
+          );
+        }
       }
+    } else if (type === "kpi_multi_table") {
+      const kpiId = (b as { kpiId?: number }).kpiId ?? 0;
+      const fieldKey = ((b as { fieldKey?: string }).fieldKey || "").trim();
+      if (!kpiId || !fieldKey) continue;
+      const fieldKeyEsc = fieldKey.replace(/'/g, "\\'");
+      out.push(
+        `<div class="report-kpi-multi-table">{% set _ml = get_multi_line_field(kpis, ${kpiId}, '${fieldKeyEsc}', 0) %}{% if _ml %}<table border="1" cellpadding="4" style="border-collapse: collapse; width: 100%;"><tr>{% for sf in (_ml.sub_fields | default([])) %}<th>{{ sf.name }}</th>{% endfor %}</tr>{% for item in _ml.value_items %}<tr>{% for sf in (_ml.sub_fields | default([])) %}<td>{{ item[sf.key] }}</td>{% endfor %}</tr>{% endfor %}</table>{% endif %}</div>`
+      );
     } else if (type === "simple_table") {
       const rows = (b as { rows?: SimpleTableRow[] }).rows || [];
       const rowParts: string[] = [];
@@ -405,7 +485,7 @@ function blocksToJinja(blocks: ReportBlock[]): string {
             const entryIdx = cell.entryIndex ?? 0;
             if (cell.asGroup) {
               cellParts.push(
-                `<td>{% set _ml = get_multi_line_field(kpis, ${kpiId}, '${fieldKey}', ${entryIdx}) %}{% if _ml %}<table border="1" cellpadding="4" style="border-collapse: collapse;"><tr>{% for sk in _ml.sub_field_keys %}<th>{{ sk }}</th>{% endfor %}</tr>{% for item in _ml.value_items %}<tr>{% for sk in _ml.sub_field_keys %}<td>{{ item[sk] }}</td>{% endfor %}</tr>{% endfor %}</table>{% endif %}</td>`
+                `<td>{% set _ml = get_multi_line_field(kpis, ${kpiId}, '${fieldKey}', ${entryIdx}) %}{% if _ml %}<table border="1" cellpadding="4" style="border-collapse: collapse;"><tr>{% for sf in (_ml.sub_fields | default([])) %}<th>{{ sf.name }}</th>{% endfor %}</tr>{% for item in _ml.value_items %}<tr>{% for sf in (_ml.sub_fields | default([])) %}<td>{{ item[sf.key] }}</td>{% endfor %}</tr>{% endfor %}</table>{% endif %}</td>`
               );
             } else if (subKey) {
               const formula = `${subFieldGroupFn}(${cell.fieldKey || ""}, ${subKey})`.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
@@ -439,35 +519,39 @@ function blocksToJinja(blocks: ReportBlock[]): string {
     } else if (type === "kpi_grid") {
       const kpiIds = (b as { kpiIds?: number[] }).kpiIds || [];
       const fieldKeys = (b as { fieldKeys?: string[] }).fieldKeys || [];
-      const gridCellMulti =
-        '{% if f.field_type == \'multi_line_items\' and f.value_items %}<table border="1" cellpadding="4" style="border-collapse: collapse;">{% for item in f.value_items %}<tr>{% for sub_key in f.sub_field_keys %}<td>{{ item[sub_key] }}</td>{% endfor %}</tr>{% endfor %}</table>{% else %}{{ f.value }}{% endif %}';
+      const displayPrefix = buildFieldDisplayNamesJinja((b as { fieldDisplayNames?: Record<string, string> }).fieldDisplayNames);
+      const subFieldDisplayPrefix = buildSubFieldDisplayNamesJinja((b as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames);
+      const subKeysPrefix = buildFieldSubFieldKeysJinja((b as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys);
+      const gridCellMulti = multiLineCellSnippet("f");
       if (!kpiIds.length && !fieldKeys.length) {
         out.push(
-          `<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">{% if kpis %}{% for kpi in kpis %}{% for entry in kpi.entries %}<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;"><h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>{% for f in entry.fields %}<p style="margin: 0.25rem 0;"><strong>{{ f.field_name }}:</strong> ${gridCellMulti}</p>{% endfor %}</div>{% endfor %}{% endfor %}{% endif %}</div>`
+          displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">{% if kpis %}{% for kpi in kpis %}{% for entry in kpi.entries %}<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;"><h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>{% for f in entry.fields %}<p style="margin: 0.25rem 0;"><strong>${fieldLabelF}:</strong> ${gridCellMulti}</p>{% endfor %}</div>{% endfor %}{% endfor %}{% endif %}</div>`
         );
       } else {
         const fidList = kpiIds.join(", ");
         const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
         const gridCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}${gridCellMulti}{% endif %}{% endfor %}`;
         out.push(
-          `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}{% for entry in kpi.entries %}<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;"><h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>{% for key in field_keys_list %}<p style="margin: 0.25rem 0;"><strong>{{ key }}:</strong> ${gridCellByKey}</p>{% endfor %}</div>{% endfor %}{% endif %}{% endfor %}{% endif %}</div>`
+          displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}{% for entry in kpi.entries %}<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;"><h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>{% for key in field_keys_list %}<p style="margin: 0.25rem 0;"><strong>${fieldLabelKey}:</strong> ${gridCellByKey}</p>{% endfor %}</div>{% endfor %}{% endif %}{% endfor %}{% endif %}</div>`
         );
       }
     } else if (type === "kpi_list") {
       const kpiIds = (b as { kpiIds?: number[] }).kpiIds || [];
       const fieldKeys = (b as { fieldKeys?: string[] }).fieldKeys || [];
-      const listCellMulti =
-        '{% if f.field_type == \'multi_line_items\' and f.value_items %}<ul style="margin: 0.25rem 0;">{% for item in f.value_items %}<li>{% for sub_key in f.sub_field_keys %}{{ item[sub_key] }}{% if not loop.last %} – {% endif %}{% endfor %}</li>{% endfor %}</ul>{% else %}{{ f.value }}{% endif %}';
+      const displayPrefix = buildFieldDisplayNamesJinja((b as { fieldDisplayNames?: Record<string, string> }).fieldDisplayNames);
+      const subFieldDisplayPrefix = buildSubFieldDisplayNamesJinja((b as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames);
+      const subKeysPrefix = buildFieldSubFieldKeysJinja((b as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys);
+      const listCellMulti = multiLineCellSnippet("f");
       if (!kpiIds.length && !fieldKeys.length) {
         out.push(
-          `<div class="report-kpi-list">{% if kpis %}{% for kpi in kpis %}<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">{% for entry in kpi.entries %}{% for f in entry.fields %}<dt style="font-weight: 600;">{{ f.field_name }}</dt><dd style="margin-left: 1rem;">${listCellMulti}</dd>{% endfor %}{% endfor %}</dl>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
+          displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `<div class="report-kpi-list">{% if kpis %}{% for kpi in kpis %}<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">{% for entry in kpi.entries %}{% for f in entry.fields %}<dt style="font-weight: 600;">${fieldLabelF}</dt><dd style="margin-left: 1rem;">${listCellMulti}</dd>{% endfor %}{% endfor %}</dl>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
         );
       } else {
         const fidList = kpiIds.join(", ");
         const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
         const listCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}${listCellMulti}{% endif %}{% endfor %}`;
         out.push(
-          `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-list">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">{% for entry in kpi.entries %}{% for key in field_keys_list %}<dt style="font-weight: 600;">{{ key }}</dt><dd style="margin-left: 1rem;">${listCellByKey}</dd>{% endfor %}{% endfor %}</dl>{% endif %}{% endfor %}{% endif %}</div>`
+          displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-list">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">{% for entry in kpi.entries %}{% for key in field_keys_list %}<dt style="font-weight: 600;">${fieldLabelKey}</dt><dd style="margin-left: 1rem;">${listCellByKey}</dd>{% endfor %}{% endfor %}</dl>{% endif %}{% endfor %}{% endif %}</div>`
         );
       }
     }
@@ -494,6 +578,25 @@ export default function ReportDesignPage() {
   const autoSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blocksRef = useRef<ReportBlock[]>([]);
   const bodyTemplateRef = useRef("");
+
+  const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [reportContentMinimized, setReportContentMinimized] = useState(false);
+  const [livePreviewMinimized, setLivePreviewMinimized] = useState(false);
+  const [minimizedBlockIds, setMinimizedBlockIds] = useState<Set<string>>(new Set());
+  const [viewMode, setViewMode] = useState<"both" | "design" | "preview">("both");
+
+  const toggleBlockMinimized = useCallback((blockId: string) => {
+    setMinimizedBlockIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(blockId)) next.delete(blockId);
+      else next.add(blockId);
+      return next;
+    });
+  }, []);
 
   const [fieldsByKpiId, setFieldsByKpiId] = useState<Record<number, FieldOption[]>>({});
 
@@ -648,6 +751,46 @@ export default function ReportDesignPage() {
   const generatedTemplate = useMemo(() => blocksToJinja(blocks), [blocks]);
   const templateSourceDisplay = blocks.length > 0 ? generatedTemplate : bodyTemplate;
   const isTemplateFromBlocks = blocks.length > 0;
+  const templateForPreview = templateSourceDisplay;
+
+  // Live preview: debounced fetch when template changes
+  useEffect(() => {
+    if (!detail || !token || !templateForPreview.trim()) {
+      setPreviewHtml(null);
+      return;
+    }
+    if (previewDebounceRef.current) {
+      clearTimeout(previewDebounceRef.current);
+      previewDebounceRef.current = null;
+    }
+    previewDebounceRef.current = setTimeout(() => {
+      previewDebounceRef.current = null;
+      setPreviewLoading(true);
+      setPreviewError(null);
+      const query = qs({
+        organization_id: detail.organization_id,
+        year: detail.year,
+      });
+      api<{ html: string }>(`/reports/templates/${id}/preview?${query}`, {
+        method: "POST",
+        token,
+        body: JSON.stringify({ body_template: templateForPreview }),
+      })
+        .then((res) => setPreviewHtml(res.html))
+        .catch((e) => {
+          const msg = e instanceof Error ? e.message : "Preview failed";
+          setPreviewError(
+            msg === "Failed to fetch"
+              ? "Preview request failed. Check that the backend is running and the request reaches the server (network/CORS)."
+              : msg
+          );
+        })
+        .finally(() => setPreviewLoading(false));
+    }, 500);
+    return () => {
+      if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
+    };
+  }, [id, token, detail?.organization_id, detail?.year, templateForPreview]);
 
   const saveAdvanced = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -684,8 +827,16 @@ export default function ReportDesignPage() {
   const kpis = detail.kpis_from_domains;
   const domains = detail.attached_domains;
 
+  const previewDoc = previewHtml != null
+    ? `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:inherit;margin:1rem;color:var(--text,#111);}</style></head><body>${previewHtml}</body></html>`
+    : "";
+
+  const toggleReportContent = () => setReportContentMinimized((m) => !m);
+  const toggleLivePreview = () => setLivePreviewMinimized((m) => !m);
+
   return (
-    <div style={{ maxWidth: 900, margin: "0 auto" }}>
+    <div style={{ padding: "0 1rem 1rem" }}>
+      {/* Full-width header */}
       <div style={{ marginBottom: "1rem" }}>
         <Link href={`/dashboard/reports/${id}`} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
           {"\u2190"} Back to report
@@ -716,7 +867,7 @@ export default function ReportDesignPage() {
       <p style={{ fontSize: "0.9rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
         Use <strong>Text with KPI data</strong> to write paragraphs and insert numbers or text from KPIs anywhere in the text.
       </p>
-      <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "1rem" }}>
+      <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
         Your design is saved automatically as a draft every 45 seconds so you don&apos;t lose work. Use <strong>Save</strong> when you&apos;re done.
         {lastAutoSavedAt != null && isDirty && (
           <span style={{ marginLeft: "0.5rem" }}>
@@ -724,6 +875,33 @@ export default function ReportDesignPage() {
           </span>
         )}
       </p>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "1rem", flexWrap: "wrap" }}>
+        <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>View:</span>
+        <button
+          type="button"
+          className={viewMode === "both" ? "btn btn-primary" : "btn"}
+          style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem" }}
+          onClick={() => setViewMode("both")}
+        >
+          Both
+        </button>
+        <button
+          type="button"
+          className={viewMode === "design" ? "btn btn-primary" : "btn"}
+          style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem" }}
+          onClick={() => setViewMode("design")}
+        >
+          Design only
+        </button>
+        <button
+          type="button"
+          className={viewMode === "preview" ? "btn btn-primary" : "btn"}
+          style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem" }}
+          onClick={() => setViewMode("preview")}
+        >
+          Preview only
+        </button>
+      </div>
 
       {detail.attached_domains.length === 0 && (
         <div className="card" style={{ marginBottom: "1rem", borderLeft: "4px solid var(--warn, #c90)", background: "var(--surface)" }}>
@@ -734,11 +912,44 @@ export default function ReportDesignPage() {
         </div>
       )}
 
-      {/* Visual builder */}
-      <section className="card" style={{ marginBottom: "1rem", padding: "1.25rem" }}>
+      {/* Grid: Report content | Live preview — hide one to give the other full space */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: viewMode === "both" ? "repeat(2, minmax(0, 1fr))" : "1fr",
+          gap: "1.5rem",
+          alignItems: "start",
+        }}
+        className="report-design-grid"
+      >
+        {/* Left column: Report content (collapsible) — hidden when viewMode === "preview" */}
+        {(viewMode === "both" || viewMode === "design") && (
+        <div className="card" style={{ padding: 0, marginBottom: 0, overflow: "hidden" }}>
+          <button
+            type="button"
+            onClick={toggleReportContent}
+            style={{
+              width: "100%",
+              padding: "0.75rem 1rem",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "0.5rem",
+              border: "none",
+              background: "var(--surface)",
+              cursor: "pointer",
+              fontSize: "1rem",
+              fontWeight: 600,
+              textAlign: "left",
+            }}
+          >
+            <span>Report content</span>
+            <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{reportContentMinimized ? "▶ Expand" : "▼ Minimize"}</span>
+          </button>
+          {!reportContentMinimized && (
+            <div style={{ padding: "1.25rem", borderTop: "1px solid var(--border)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "1rem", marginBottom: "1rem" }}>
           <div>
-            <h2 style={{ fontSize: "1.15rem", margin: 0, marginBottom: "0.25rem" }}>Report content</h2>
             <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: 0 }}>Add blocks in order. Use ↑↓ to reorder.</p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -759,7 +970,7 @@ export default function ReportDesignPage() {
                   if (v === "title") addBlock({ type: "title", useTemplateName: true, customText: "" });
                   else if (v === "section_heading") addBlock({ type: "section_heading", text: "New section", level: 2 });
                   else if (v === "text") addBlock({ type: "text", content: "" });
-                  else if (v === "kpi_table") addBlock({ type: "kpi_table", kpiIds: [], fieldKeys: [], oneTablePerKpi: true });
+                  else if (v === "kpi_table") addBlock({ type: "kpi_table", kpiIds: [], fieldKeys: [], oneTablePerKpi: true, fieldsLayout: "columns", multiLineSubFieldKeys: {} });
                   else if (v === "simple_table") addBlock({ type: "simple_table", rows: [{ cells: [{ type: "text", content: "" }] }] });
                 }}
               >
@@ -777,9 +988,10 @@ export default function ReportDesignPage() {
                 else if (v === "domain_list") addBlock({ type: "domain_list", domainIds: [] });
                 else if (v === "domain_categories") addBlock({ type: "domain_categories", domainIds: [] });
                 else if (v === "domain_kpis") addBlock({ type: "domain_kpis", domainIds: [] });
-                else if (v === "kpi_grid") addBlock({ type: "kpi_grid", kpiIds: [], fieldKeys: [] });
-                else if (v === "kpi_list") addBlock({ type: "kpi_list", kpiIds: [], fieldKeys: [] });
+                else if (v === "kpi_grid") addBlock({ type: "kpi_grid", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {} });
+                else if (v === "kpi_list") addBlock({ type: "kpi_list", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {} });
                 else if (v === "single_value") addBlock({ type: "single_value", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "", subFieldKey: "", entryIndex: 0 });
+                else if (v === "kpi_multi_table") addBlock({ type: "kpi_multi_table", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "" });
               }}
             >
               <option value="">More…</option>
@@ -790,6 +1002,7 @@ export default function ReportDesignPage() {
               <option value="kpi_grid">{BLOCK_LABELS.kpi_grid}</option>
               <option value="kpi_list">{BLOCK_LABELS.kpi_list}</option>
               <option value="single_value">{BLOCK_LABELS.single_value}</option>
+              <option value="kpi_multi_table">{BLOCK_LABELS.kpi_multi_table}</option>
             </select>
             <button type="button" className="btn btn-primary" onClick={saveVisual} disabled={saving} style={{ marginLeft: "0.5rem" }}>
               {saving ? "Saving…" : "Save"}
@@ -812,29 +1025,89 @@ export default function ReportDesignPage() {
           </div>
         ) : (
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {blocks.map((block, index) => (
-              <li key={(block as { id?: string }).id || index} style={{ marginBottom: "0.75rem" }}>
-                <BlockCard
-                  block={block}
-                  index={index}
-                  total={blocks.length}
-                  detail={detail}
-                  templateId={id}
-                  fieldsByKpiId={fieldsByKpiId}
-                  loadFieldsForKpis={loadFieldsForKpis}
-                  onUpdate={(u) => updateBlock(index, u)}
-                  onRemove={() => removeBlock(index)}
-                  onMoveUp={() => moveBlock(index, "up")}
-                  onMoveDown={() => moveBlock(index, "down")}
-                />
-              </li>
-            ))}
+            {blocks.map((block, index) => {
+              const blockId = (block as { id?: string }).id ?? `idx-${index}`;
+              return (
+                <li key={blockId} style={{ marginBottom: "0.75rem" }}>
+                  <BlockCard
+                    block={block}
+                    blockId={blockId}
+                    index={index}
+                    total={blocks.length}
+                    detail={detail}
+                    templateId={id}
+                    fieldsByKpiId={fieldsByKpiId}
+                    loadFieldsForKpis={loadFieldsForKpis}
+                    isMinimized={minimizedBlockIds.has(blockId)}
+                    onToggleMinimize={() => toggleBlockMinimized(blockId)}
+                    onUpdate={(u) => updateBlock(index, u)}
+                    onRemove={() => removeBlock(index)}
+                    onMoveUp={() => moveBlock(index, "up")}
+                    onMoveDown={() => moveBlock(index, "down")}
+                  />
+                </li>
+              );
+            })}
           </ul>
         )}
-      </section>
+            </div>
+          )}
+        </div>
+        )}
 
-      {/* Advanced: raw template */}
-      <section className="card" style={{ marginBottom: "1rem", padding: "0" }}>
+        {/* Right column: Live preview (collapsible) — hidden when viewMode === "design" */}
+        {(viewMode === "both" || viewMode === "preview") && (
+        <div className="card" style={{ padding: 0, marginBottom: 0, overflow: "hidden" }}>
+          <button
+            type="button"
+            onClick={toggleLivePreview}
+            style={{
+              width: "100%",
+              padding: "0.75rem 1rem",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "0.5rem",
+              border: "none",
+              background: "var(--surface)",
+              cursor: "pointer",
+              fontSize: "1rem",
+              fontWeight: 600,
+              textAlign: "left",
+            }}
+          >
+            <span>Live preview</span>
+            <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{livePreviewMinimized ? "▶ Expand" : "▼ Minimize"}</span>
+          </button>
+          {!livePreviewMinimized && (
+            <div style={{ padding: "1rem", borderTop: "1px solid var(--border)" }}>
+              {previewLoading && <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.5rem 0" }}>Updating…</p>}
+              {previewError && <p className="form-error" style={{ margin: "0.5rem 0", fontSize: "0.9rem" }}>{previewError}</p>}
+              {!previewLoading && !previewError && previewHtml != null && (
+                <iframe
+                  title="Report preview"
+                  srcDoc={previewDoc}
+                  style={{
+                    width: "100%",
+                    minHeight: 480,
+                    height: "60vh",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    background: "var(--surface)",
+                  }}
+                />
+              )}
+              {!previewLoading && !previewError && previewHtml == null && templateForPreview.trim() && (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Preview will appear as you add content.</p>
+              )}
+            </div>
+          )}
+        </div>
+        )}
+      </div>
+
+      {/* Advanced: raw template (full width below grid) */}
+      <section className="card" style={{ marginTop: "1.5rem", padding: "0" }}>
         <button
           type="button"
           onClick={() => setAdvancedOpen((o) => !o)}
@@ -891,7 +1164,7 @@ export default function ReportDesignPage() {
         )}
       </section>
 
-      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "1rem" }}>
         <Link className="btn btn-primary" href={`/dashboard/reports/${id}`}>
           View / Print report
         </Link>
@@ -1159,24 +1432,30 @@ function TextBlockWithKpiInsert({
 
 function BlockCard({
   block,
+  blockId,
   index,
   total,
   detail,
   templateId,
   fieldsByKpiId,
   loadFieldsForKpis,
+  isMinimized,
+  onToggleMinimize,
   onUpdate,
   onRemove,
   onMoveUp,
   onMoveDown,
 }: {
   block: ReportBlock;
+  blockId: string;
   index: number;
   total: number;
   detail: TemplateDetail;
   templateId: number;
   fieldsByKpiId: Record<number, FieldOption[]>;
   loadFieldsForKpis: (kpiIds: number[]) => void;
+  isMinimized: boolean;
+  onToggleMinimize: () => void;
   onUpdate: (u: Partial<ReportBlock>) => void;
   onRemove: () => void;
   onMoveDown: () => void;
@@ -1187,6 +1466,10 @@ function BlockCard({
   const domains = detail.attached_domains;
 
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [customNamesModalOpen, setCustomNamesModalOpen] = useState(false);
+  const [localFieldDisplayNames, setLocalFieldDisplayNames] = useState<Record<string, string>>({});
+  const [localSubFieldDisplayNames, setLocalSubFieldDisplayNames] = useState<Record<string, Record<string, string>>>({});
+  const [customNamesActiveTab, setCustomNamesActiveTab] = useState<string>("fields");
 
   useEffect(() => {
     if (type === "text") {
@@ -1199,7 +1482,7 @@ function BlockCard({
     } else if (type === "simple_table") {
       const toLoad = detail.kpis_from_domains.map((k) => k.kpi_id);
       if (toLoad.length) loadFieldsForKpis(toLoad);
-    } else if (type === "single_value") {
+    } else if (type === "single_value" || type === "kpi_multi_table") {
       const kpiId = (block as { kpiId?: number }).kpiId;
       if (kpiId) loadFieldsForKpis([kpiId]);
     }
@@ -1207,9 +1490,27 @@ function BlockCard({
 
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", background: "var(--surface)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0.5rem 0.75rem", background: "var(--bg-muted, #f5f5f5)", borderBottom: "1px solid var(--border)" }}>
-        <span style={{ fontWeight: 600, fontSize: "0.9rem" }}>{BLOCK_LABELS[type] || type}</span>
-        <div style={{ display: "flex", gap: "0.25rem" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0.5rem 0.75rem", background: "var(--bg-subtle)", borderBottom: isMinimized ? "none" : "1px solid var(--border)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
+          <button
+            type="button"
+            onClick={onToggleMinimize}
+            style={{
+              padding: "0.2rem",
+              border: "none",
+              background: "none",
+              cursor: "pointer",
+              fontSize: "0.85rem",
+              color: "var(--muted)",
+              flexShrink: 0,
+            }}
+            title={isMinimized ? "Expand block" : "Minimize block"}
+          >
+            {isMinimized ? "▶" : "▼"}
+          </button>
+          <span style={{ fontWeight: 600, fontSize: "0.9rem" }}>{BLOCK_LABELS[type] || type}</span>
+        </div>
+        <div style={{ display: "flex", gap: "0.25rem", flexShrink: 0 }}>
           <button type="button" className="btn" style={{ padding: "0.2rem 0.4rem", fontSize: "0.8rem" }} onClick={onMoveUp} disabled={index === 0} title="Move up">
             ↑
           </button>
@@ -1221,6 +1522,7 @@ function BlockCard({
           </button>
         </div>
       </div>
+      {!isMinimized && (
       <div style={{ padding: "0.75rem 1rem" }}>
         {type === "title" && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "flex-end" }}>
@@ -1369,16 +1671,365 @@ function BlockCard({
                 })()}
               </select>
             </div>
+            <div style={{ marginTop: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setLocalFieldDisplayNames((block as { fieldDisplayNames?: Record<string, string> }).fieldDisplayNames ?? {});
+                  setLocalSubFieldDisplayNames((block as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames ?? {});
+                  setCustomNamesActiveTab("fields");
+                  setCustomNamesModalOpen(true);
+                }}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--primary, #0066cc)",
+                  cursor: "pointer",
+                  textDecoration: "underline",
+                  fontSize: "0.9rem",
+                  padding: 0,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.35rem",
+                }}
+              >
+                <span style={{ opacity: 0.9 }}>✎</span> Custom names…
+              </button>
+              <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Override labels for fields and sub-fields in the report</span>
+            </div>
+            {(() => {
+              const kpiIdsBlock = (block as { kpiIds?: number[] }).kpiIds || [];
+              const fieldKeysBlock = (block as { fieldKeys?: string[] }).fieldKeys || [];
+              const multiLineSubFieldKeys = (block as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys ?? {};
+              const showMultiLineAsTable = (block as { showMultiLineAsTable?: boolean }).showMultiLineAsTable !== false;
+              const kids = kpiIdsBlock.length ? kpiIdsBlock : kpis.map((k) => k.kpi_id);
+              const allFields = kids.flatMap((kid) => (fieldsByKpiId[kid] || []).map((f) => ({ ...f, kpiId: kid })));
+              const seenKeys = new Set<string>();
+              const multiLineFields = allFields.filter((f) => {
+                if (seenKeys.has(f.key)) return false;
+                if (f.field_type !== "multi_line_items" || !(f.sub_fields?.length)) return false;
+                seenKeys.add(f.key);
+                return fieldKeysBlock.length === 0 || fieldKeysBlock.includes(f.key);
+              });
+              if (multiLineFields.length === 0) return null;
+              return (
+                <div className="form-group" style={{ margin: 0, marginTop: "0.5rem" }}>
+                  <label style={{ fontSize: "0.85rem" }}>Sub-fields to show (multi-line fields; empty = all)</label>
+                  <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.25rem 0 0.5rem 0" }}>
+                    Choose which sub-field columns to include. Use <strong>Custom names…</strong> above to set display labels.
+                    {showMultiLineAsTable
+                      ? " Multi-line values are shown as a nested table inside each cell."
+                      : " Multi-line values are shown as stacked labels and values inside each cell (no nested table)."}
+                  </p>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.8rem", marginBottom: "0.35rem" }}>
+                    <input
+                      type="checkbox"
+                      checked={showMultiLineAsTable}
+                      onChange={(e) => onUpdate({ showMultiLineAsTable: e.target.checked })}
+                    />
+                    Show multi-line items as nested table
+                  </label>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginTop: "0.25rem" }}>
+                    {multiLineFields.map((f) => {
+                      const selected = multiLineSubFieldKeys[f.key] ?? [];
+                      const isChecked = (subKey: string) => selected.length === 0 || selected.includes(subKey);
+                      const toggleSub = (subKey: string, checked: boolean) => {
+                        const next = { ...multiLineSubFieldKeys };
+                        const list = next[f.key] ?? [];
+                        const allSubKeys = (f.sub_fields || []).map((s) => s.key);
+                        if (checked) {
+                          next[f.key] = list.length === 0 ? allSubKeys : list.includes(subKey) ? list : [...list, subKey];
+                        } else {
+                          next[f.key] = list.length === 0
+                            ? allSubKeys.filter((k) => k !== subKey)
+                            : list.filter((k) => k !== subKey);
+                        }
+                        onUpdate({ ...block, multiLineSubFieldKeys: next });
+                      };
+                      const selectAll = () => {
+                        const next = { ...multiLineSubFieldKeys, [f.key]: (f.sub_fields || []).map((s) => s.key) };
+                        onUpdate({ ...block, multiLineSubFieldKeys: next });
+                      };
+                      const selectNone = () => {
+                        const next = { ...multiLineSubFieldKeys, [f.key]: [] };
+                        onUpdate({ ...block, multiLineSubFieldKeys: next });
+                      };
+                      return (
+                        <div key={f.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "0.5rem", background: "var(--bg-subtle)" }}>
+                          <div style={{ fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.35rem" }}>{f.name} ({f.key})</div>
+                          <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.25rem" }}>
+                            <button type="button" onClick={selectAll} style={{ fontSize: "0.75rem", padding: "0.15rem 0.4rem" }}>All</button>
+                            <button type="button" onClick={selectNone} style={{ fontSize: "0.75rem", padding: "0.15rem 0.4rem" }}>None (show all)</button>
+                          </div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                            {(f.sub_fields || []).map((sf) => (
+                              <label key={sf.key} style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.85rem", cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked(sf.key)}
+                                  onChange={() => toggleSub(sf.key, !isChecked(sf.key))}
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                                {sf.name || sf.key}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
             {type === "kpi_table" && (
-              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.5rem" }}>
-                <input
-                  type="checkbox"
-                  checked={(block as { oneTablePerKpi?: boolean }).oneTablePerKpi !== false}
-                  onChange={(e) => onUpdate({ oneTablePerKpi: e.target.checked })}
-                />
-                One table per KPI
-              </label>
+              <div style={{ marginTop: "0.5rem", display: "flex", flexWrap: "wrap", gap: "1rem", alignItems: "center" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={(block as { oneTablePerKpi?: boolean }).oneTablePerKpi !== false}
+                    onChange={(e) => onUpdate({ oneTablePerKpi: e.target.checked })}
+                  />
+                  One table per KPI
+                </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <input
+                type="checkbox"
+                checked={(block as { showTableHeading?: boolean }).showTableHeading !== false}
+                onChange={(e) => onUpdate({ showTableHeading: e.target.checked })}
+              />
+              Show KPI heading above table
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }} title="When unchecked, the field name (e.g. Grant List) is hidden for multi-line fields; only the inner table with sub-fields remains.">
+              <input
+                type="checkbox"
+                checked={(block as { showMultiLineFieldLabel?: boolean }).showMultiLineFieldLabel !== false}
+                onChange={(e) => onUpdate({ showMultiLineFieldLabel: e.target.checked })}
+              />
+              Show multi-line field name (parent label)
+            </label>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Fields:</span>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.9rem" }}>
+                    <input
+                      type="radio"
+                      name={`fieldsLayout-${blockId}`}
+                      checked={((block as { fieldsLayout?: "columns" | "rows" }).fieldsLayout ?? "columns") === "columns"}
+                      onChange={() => onUpdate({ fieldsLayout: "columns" })}
+                    />
+                    As columns
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.9rem" }}>
+                    <input
+                      type="radio"
+                      name={`fieldsLayout-${blockId}`}
+                      checked={((block as { fieldsLayout?: "columns" | "rows" }).fieldsLayout ?? "columns") === "rows"}
+                      onChange={() => onUpdate({ fieldsLayout: "rows" })}
+                    />
+                    As rows
+                  </label>
+                </div>
+              </div>
             )}
+            {customNamesModalOpen && (() => {
+              const kpiIdsBlock = (block as { kpiIds?: number[] }).kpiIds || [];
+              const fieldKeysBlock = (block as { fieldKeys?: string[] }).fieldKeys || [];
+              const kids = kpiIdsBlock.length ? kpiIdsBlock : kpis.map((k) => k.kpi_id);
+              const allFields = kids.flatMap((kid) => (fieldsByKpiId[kid] || []).map((f) => ({ ...f, kpiId: kid })));
+              const seenKeys = new Set<string>();
+              const selectedFields = allFields.filter((f) => {
+                if (seenKeys.has(f.key)) return false;
+                seenKeys.add(f.key);
+                return fieldKeysBlock.length === 0 || fieldKeysBlock.includes(f.key);
+              });
+              const seenKeys2 = new Set<string>();
+              const multiLineFields = allFields.filter((f) => {
+                if (seenKeys2.has(f.key)) return false;
+                if (f.field_type !== "multi_line_items" || !(f.sub_fields?.length)) return false;
+                seenKeys2.add(f.key);
+                return fieldKeysBlock.length === 0 || fieldKeysBlock.includes(f.key);
+              });
+              return (
+                <div
+                  style={{
+                    position: "fixed",
+                    inset: 0,
+                    zIndex: 1000,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: "rgba(0,0,0,0.4)",
+                  }}
+                  onClick={() => setCustomNamesModalOpen(false)}
+                >
+                  <div
+                    style={{
+                      background: "var(--surface, #fff)",
+                      borderRadius: 8,
+                      boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+                      maxWidth: 720,
+                      width: "92%",
+                      maxHeight: "85vh",
+                      overflow: "auto",
+                      padding: "1.25rem",
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                      <h3 style={{ margin: 0, fontSize: "1.1rem" }}>Custom names in report</h3>
+                      <button type="button" className="btn" style={{ padding: "0.25rem 0.5rem" }} onClick={() => setCustomNamesModalOpen(false)} aria-label="Close">×</button>
+                    </div>
+                    <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0 0 1rem 0" }}>Override the labels shown for fields and sub-fields. Leave empty to use the default name.</p>
+                    <div>
+                      <div style={{ display: "flex", borderBottom: "1px solid var(--border)", marginBottom: "0.75rem", overflowX: "auto" }}>
+                        <button
+                          type="button"
+                          onClick={() => setCustomNamesActiveTab("fields")}
+                          style={{
+                            padding: "0.35rem 0.75rem",
+                            border: "none",
+                            borderBottom: customNamesActiveTab === "fields" ? "2px solid var(--primary, #0066cc)" : "2px solid transparent",
+                            background: "none",
+                            cursor: "pointer",
+                            fontSize: "0.85rem",
+                            fontWeight: customNamesActiveTab === "fields" ? 600 : 500,
+                            color: customNamesActiveTab === "fields" ? "var(--primary, #0066cc)" : "inherit",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          Fields
+                        </button>
+                        {multiLineFields.map((f) => {
+                          const tabKey = `multi:${f.key}`;
+                          return (
+                            <button
+                              key={tabKey}
+                              type="button"
+                              onClick={() => setCustomNamesActiveTab(tabKey)}
+                              style={{
+                                padding: "0.35rem 0.75rem",
+                                border: "none",
+                                borderBottom: customNamesActiveTab === tabKey ? "2px solid var(--primary, #0066cc)" : "2px solid transparent",
+                                background: "none",
+                                cursor: "pointer",
+                                fontSize: "0.85rem",
+                                fontWeight: customNamesActiveTab === tabKey ? 600 : 500,
+                                color: customNamesActiveTab === tabKey ? "var(--primary, #0066cc)" : "inherit",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {f.name || f.key}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div>
+                        {customNamesActiveTab === "fields" && (
+                          <>
+                            <h4 style={{ margin: "0 0 0.5rem 0", fontSize: "0.95rem" }}>Fields</h4>
+                            {selectedFields.length === 0 ? (
+                              <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: 0 }}>Select KPIs and fields above first.</p>
+                            ) : (
+                              <div style={{ border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                                  <thead>
+                                    <tr style={{ background: "var(--bg-subtle)" }}>
+                                      <th style={{ textAlign: "left", padding: "0.5rem 0.6rem", borderBottom: "1px solid var(--border)" }}>Field</th>
+                                      <th style={{ textAlign: "left", padding: "0.5rem 0.6rem", borderBottom: "1px solid var(--border)", width: "55%" }}>Display name</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {selectedFields.map((f) => (
+                                      <tr key={f.key} style={{ borderBottom: "1px solid var(--border)" }}>
+                                        <td style={{ padding: "0.4rem 0.6rem", verticalAlign: "middle" }}>{f.name} <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>({f.key})</span></td>
+                                        <td style={{ padding: "0.35rem 0.6rem" }}>
+                                          <input
+                                            type="text"
+                                            value={localFieldDisplayNames[f.key] ?? ""}
+                                            onChange={(e) => setLocalFieldDisplayNames((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                                            placeholder={f.name || f.key}
+                                            style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                                          />
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </>
+                        )}
+                        {customNamesActiveTab !== "fields" && customNamesActiveTab.startsWith("multi:") && (() => {
+                          const targetKey = customNamesActiveTab.slice("multi:".length);
+                          const mf = multiLineFields.find((f) => f.key === targetKey);
+                          if (!mf) {
+                            return (
+                              <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: 0 }}>
+                                No multi-line field selected. Choose another tab.
+                              </p>
+                            );
+                          }
+                          return (
+                            <>
+                              <h4 style={{ margin: "0 0 0.5rem 0", fontSize: "0.95rem" }}>
+                                {mf.name || mf.key} <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>({mf.key})</span>
+                              </h4>
+                              <div style={{ border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
+                                  <thead>
+                                    <tr style={{ background: "var(--surface)" }}>
+                                      <th style={{ textAlign: "left", padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>Sub-field</th>
+                                      <th style={{ textAlign: "left", padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)", width: "55%" }}>Display name</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {(mf.sub_fields || []).map((sf) => (
+                                      <tr key={sf.key} style={{ borderBottom: "1px solid var(--border)" }}>
+                                        <td style={{ padding: "0.3rem 0.5rem", verticalAlign: "middle" }}>{sf.name || sf.key}</td>
+                                        <td style={{ padding: "0.25rem 0.5rem" }}>
+                                          <input
+                                            type="text"
+                                            value={localSubFieldDisplayNames[mf.key]?.[sf.key] ?? ""}
+                                            onChange={(e) => {
+                                              const nextInner = { ...(localSubFieldDisplayNames[mf.key] ?? {}), [sf.key]: e.target.value };
+                                              setLocalSubFieldDisplayNames((prev) => ({ ...prev, [mf.key]: nextInner }));
+                                            }}
+                                            placeholder={sf.name || sf.key}
+                                            style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.85rem" }}
+                                          />
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: "0.5rem", marginTop: "1.25rem", justifyContent: "flex-end" }}>
+                      <button type="button" className="btn" onClick={() => setCustomNamesModalOpen(false)}>Cancel</button>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => {
+                          const trimRecord = (r: Record<string, string>) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, (v ?? "").trim()]));
+                          const trimNested = (n: Record<string, Record<string, string>>) => Object.fromEntries(Object.entries(n).map(([k, v]) => [k, trimRecord(v ?? {})]));
+                          onUpdate({
+                            ...block,
+                            fieldDisplayNames: trimRecord(localFieldDisplayNames),
+                            subFieldDisplayNames: trimNested(localSubFieldDisplayNames),
+                          });
+                          setCustomNamesModalOpen(false);
+                        }}
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
           </>
         )}
         {type === "simple_table" && (() => {
@@ -1569,7 +2220,49 @@ function BlockCard({
             </div>
           </div>
         )}
+        {type === "kpi_multi_table" && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "flex-end" }}>
+            <div className="form-group" style={{ margin: 0, minWidth: 180 }}>
+              <label style={{ fontSize: "0.85rem" }}>KPI</label>
+              <select
+                value={(block as { kpiId?: number }).kpiId ?? ""}
+                onChange={(e) => onUpdate({ kpiId: e.target.value ? Number(e.target.value) : 0, fieldKey: "" })}
+                style={{ width: "100%" }}
+              >
+                <option value="">— Select —</option>
+                {kpis.map((k) => (
+                  <option key={k.kpi_id} value={k.kpi_id}>{k.kpi_name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ margin: 0, minWidth: 200 }}>
+              <label style={{ fontSize: "0.85rem" }}>Multi-line field</label>
+              <select
+                value={(block as { fieldKey?: string }).fieldKey || ""}
+                onChange={(e) => onUpdate({ fieldKey: e.target.value })}
+                style={{ width: "100%" }}
+              >
+                <option value="">— Select —</option>
+                {(() => {
+                  const kid = (block as { kpiId?: number }).kpiId;
+                  const fields = kid ? (fieldsByKpiId[kid] || []) : [];
+                  return fields
+                    .filter((f) => f.field_type === "multi_line_items")
+                    .map((f) => (
+                      <option key={f.id} value={f.key}>
+                        {f.name} ({f.key})
+                      </option>
+                    ));
+                })()}
+              </select>
+              <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.25rem 0 0" }}>
+                Renders only the sub-items table for this field (no outer KPI table row).
+              </p>
+            </div>
+          </div>
+        )}
       </div>
+      )}
     </div>
   );
 }
