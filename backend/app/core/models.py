@@ -45,6 +45,53 @@ class FieldType(str, enum.Enum):
     formula = "formula"
 
 
+class TimeDimension(str, enum.Enum):
+    """Time granularity: multi_year, yearly, half_yearly, quarterly, monthly."""
+
+    MULTI_YEAR = "multi_year"
+    YEARLY = "yearly"
+    HALF_YEARLY = "half_yearly"
+    QUARTERLY = "quarterly"
+    MONTHLY = "monthly"
+
+
+def time_dimension_order_key(td: TimeDimension) -> int:
+    """Finer = higher number. Yearly=0, Monthly=4."""
+    order = (TimeDimension.YEARLY, TimeDimension.HALF_YEARLY, TimeDimension.QUARTERLY, TimeDimension.MONTHLY)
+    for i, t in enumerate(order):
+        if td == t:
+            return i
+    return -1
+
+
+def time_dimension_allowed_for_kpi(kpi_td: TimeDimension | None, org_td: TimeDimension) -> bool:
+    """KPI can inherit (None) or be same/finer than org. Cannot be coarser."""
+    if kpi_td is None:
+        return True
+    return time_dimension_order_key(kpi_td) >= time_dimension_order_key(org_td)
+
+
+def effective_kpi_time_dimension(kpi_td: TimeDimension | None, org_td: TimeDimension) -> TimeDimension:
+    """Return KPI time dimension or org default."""
+    if kpi_td is not None:
+        return kpi_td
+    return org_td
+
+
+def period_key_sort_order(period_key: str, dimension: TimeDimension) -> int:
+    """Sort key for period_key within a dimension (for consistent ordering)."""
+    pk = (period_key or "").strip()
+    if not pk or dimension == TimeDimension.YEARLY or dimension == TimeDimension.MULTI_YEAR:
+        return 0
+    if dimension == TimeDimension.HALF_YEARLY:
+        return 2 if pk.upper() == "H2" else 1
+    if dimension == TimeDimension.QUARTERLY:
+        return {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}.get(pk.upper(), 0)
+    if dimension == TimeDimension.MONTHLY and pk.isdigit():
+        return int(pk) if 1 <= int(pk) <= 12 else 0
+    return 0
+
+
 class Organization(Base):
     """Tenant (university) model."""
 
@@ -54,6 +101,9 @@ class Organization(Base):
     name = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    time_dimension = Column(
+        String(32), nullable=False, default=TimeDimension.YEARLY.value, server_default=TimeDimension.YEARLY.value
+    )
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -281,6 +331,7 @@ class KPI(Base):
     # Entry mode: manual (default) or api. When api, we call api_endpoint_url to fetch entry data.
     entry_mode = Column(String(20), nullable=False, default="manual", server_default="manual")
     api_endpoint_url = Column(String(2048), nullable=True)  # URL we call (GET or POST with year) to get entry payload
+    time_dimension = Column(String(32), nullable=True)  # None = inherit org; else yearly, half_yearly, quarterly, monthly
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -391,7 +442,7 @@ class KPIAssignment(Base):
 
 
 class KPIEntry(Base):
-    """KPI data entry (one per organization per KPI per year)."""
+    """KPI data entry (one per organization per KPI per year per period_key). period_key '' = full year."""
 
     __tablename__ = "kpi_entries"
 
@@ -406,6 +457,7 @@ class KPIEntry(Base):
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     year = Column(Integer, nullable=False, index=True)
+    period_key = Column(String(8), nullable=False, default="", server_default="", index=True)
     is_draft = Column(Boolean, default=True, nullable=False)
     is_locked = Column(Boolean, default=False, nullable=False)
     submitted_at = Column(DateTime, nullable=True)
@@ -413,7 +465,9 @@ class KPIEntry(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     __table_args__ = (
-        UniqueConstraint("organization_id", "kpi_id", "year", name="uq_kpi_entry_org_kpi_year"),
+        UniqueConstraint(
+            "organization_id", "kpi_id", "year", "period_key", name="uq_kpi_entry_org_kpi_year_period"
+        ),
     )
 
     organization = relationship("Organization", back_populates="kpi_entries")

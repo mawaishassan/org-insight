@@ -41,10 +41,35 @@ interface EntryRow {
   organization_id: number;
   user_id: number | null;
   year: number;
+  period_key?: string;
   is_draft: boolean;
   is_locked: boolean;
   submitted_at: string | null;
   values: FieldValueResp[];
+  entered_by_user_name?: string | null;
+  updated_at?: string | null;
+}
+
+const PERIOD_LABELS: Record<string, string> = {
+  "": "Full year",
+  H1: "H1",
+  H2: "H2",
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+  "01": "Jan", "02": "Feb", "03": "Mar", "04": "Apr", "05": "May", "06": "Jun",
+  "07": "Jul", "08": "Aug", "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
+};
+
+const TIME_DIMENSION_ORDER = ["yearly", "half_yearly", "quarterly", "monthly"] as const;
+
+function expectedPeriods(dimension: string): string[] {
+  if (!dimension || dimension === "yearly") return [""];
+  if (dimension === "half_yearly") return ["H1", "H2"];
+  if (dimension === "quarterly") return ["Q1", "Q2", "Q3", "Q4"];
+  if (dimension === "monthly") return Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
+  return [""];
 }
 
 function qs(params: Record<string, string | number | undefined>) {
@@ -63,30 +88,56 @@ export default function EntryDetailPage() {
   const organizationIdFromUrl = orgIdParam ? Number(orgIdParam) : undefined;
   const fromDomainId = searchParams.get("from_domain");
   const domainId = fromDomainId ? Number(fromDomainId) : undefined;
+  const periodKeyFromUrl = searchParams.get("period_key") ?? "";
 
   const [meOrgId, setMeOrgId] = useState<number | null>(null);
   const [kpiName, setKpiName] = useState<string>("");
   const [kpiEntryMode, setKpiEntryMode] = useState<string | null>(null);
   const [kpiApiEndpointUrl, setKpiApiEndpointUrl] = useState<string | null>(null);
   const [fields, setFields] = useState<FieldDef[]>([]);
+  const [allEntries, setAllEntries] = useState<EntryRow[]>([]);
   const [existingEntry, setExistingEntry] = useState<EntryRow | null>(null);
+  const [kpiTimeDimension, setKpiTimeDimension] = useState<string | null>(null);
+  const [orgTimeDimension, setOrgTimeDimension] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const token = getAccessToken();
   const effectiveOrgId = organizationIdFromUrl ?? meOrgId ?? existingEntry?.organization_id ?? undefined;
+  const orgForKpi = organizationIdFromUrl ?? meOrgId ?? undefined;
 
-  const entriesQuery = effectiveOrgId != null ? `?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}` : `?kpi_id=${kpiId}&year=${year}`;
+  const expectedPeriodsList = kpiTimeDimension ? expectedPeriods(kpiTimeDimension) : [""];
+  const hasSubPeriods = expectedPeriodsList.length > 1;
+
+  useEffect(() => {
+    const pk = periodKeyFromUrl ?? "";
+    const match = allEntries.find((e) => (e.period_key ?? "") === pk);
+    setExistingEntry(match ?? null);
+  }, [periodKeyFromUrl, allEntries]);
+
+  const entriesQuery =
+    effectiveOrgId != null
+      ? `?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}`
+      : `?kpi_id=${kpiId}&year=${year}`;
   const fieldsQuery = effectiveOrgId != null ? `?${qs({ kpi_id: kpiId, organization_id: effectiveOrgId })}` : `?kpi_id=${kpiId}`;
   const availableKpisQuery = effectiveOrgId != null ? `?${qs({ organization_id: effectiveOrgId })}` : "";
+
   const loadEntry = async (opts?: { cacheBust?: boolean }) => {
     if (!token) return;
     try {
-      let q = effectiveOrgId != null ? `?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}` : `?kpi_id=${kpiId}&year=${year}`;
+      let q =
+        effectiveOrgId != null
+          ? `?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}`
+          : `?kpi_id=${kpiId}&year=${year}`;
       if (opts?.cacheBust) q += (q ? "&" : "?") + "_=" + Date.now();
       const entries = await api<EntryRow[]>(`/entries${q}`, { token });
-      setExistingEntry(entries[0] ?? null);
+      setAllEntries(entries);
+      const forPeriod = periodKeyFromUrl !== undefined
+        ? entries.find((e) => (e.period_key ?? "") === periodKeyFromUrl)
+        : entries[0] ?? null;
+      setExistingEntry(forPeriod ?? null);
     } catch {
+      setAllEntries([]);
       setExistingEntry(null);
     }
   };
@@ -108,8 +159,26 @@ export default function EntryDetailPage() {
       }),
       api<FieldDef[]>(`/entries/fields${fieldsQuery}`, { token }).then(setFields).catch(() => setFields([])),
       api<EntryRow[]>(`/entries${entriesQuery}`, { token })
-        .then((entries) => setExistingEntry(entries[0] ?? null))
-        .catch(() => setExistingEntry(null)),
+        .then((entries) => {
+          setAllEntries(entries);
+          const pk = periodKeyFromUrl ?? "";
+          const match = entries.find((e) => (e.period_key ?? "") === pk);
+          setExistingEntry(match ?? entries[0] ?? null);
+        })
+        .catch(() => {
+          setAllEntries([]);
+          setExistingEntry(null);
+        }),
+      orgForKpi != null
+        ? api<{ time_dimension: string }>(`/organizations/${orgForKpi}/time-dimension`, { token })
+            .then((r) => setOrgTimeDimension(r.time_dimension ?? null))
+            .catch(() => setOrgTimeDimension(null))
+        : Promise.resolve(),
+      orgForKpi != null
+        ? api<{ time_dimension?: string | null }>(`/kpis/${kpiId}?${qs({ organization_id: orgForKpi })}`, { token })
+            .then((k) => setKpiTimeDimension(k.time_dimension ?? null))
+            .catch(() => setKpiTimeDimension(null))
+        : Promise.resolve(),
       effectiveOrgId != null
         ? api<{ entry_mode?: string; api_endpoint_url?: string | null }>(`/entries/kpi-api-info?${qs({ kpi_id: kpiId, organization_id: effectiveOrgId })}`, { token })
             .then((info) => {
@@ -124,7 +193,7 @@ export default function EntryDetailPage() {
     ])
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
-  }, [token, kpiId, year, entriesQuery, fieldsQuery, availableKpisQuery, effectiveOrgId]);
+  }, [token, kpiId, year, entriesQuery, fieldsQuery, availableKpisQuery, effectiveOrgId, orgForKpi, periodKeyFromUrl]);
 
   if (!kpiId || !year) return <p>Invalid KPI or year.</p>;
   if (loading) return <p>Loading...</p>;
@@ -135,6 +204,42 @@ export default function EntryDetailPage() {
         ? `/dashboard/domains/${domainId}?organization_id=${effectiveOrgId}`
         : `/dashboard/domains/${domainId}`
       : null;
+
+  const periodBar =
+    hasSubPeriods && expectedPeriodsList.length > 0 ? (
+      <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+        <span style={{ fontSize: "0.9rem", color: "var(--muted)", marginRight: "0.5rem" }}>Period:</span>
+        {expectedPeriodsList.map((pk) => {
+          const entry = allEntries.find((e) => (e.period_key ?? "") === pk);
+          const isSubmitted = entry && !entry.is_draft && entry.submitted_at;
+          const isDraft = entry?.is_draft ?? false;
+          const isActive = (periodKeyFromUrl ?? "") === pk;
+          const periodLabel = PERIOD_LABELS[pk] ?? pk || "Full year";
+          const href = `/dashboard/entries/${kpiId}/${year}?${qs({
+            ...(effectiveOrgId != null ? { organization_id: effectiveOrgId } : {}),
+            period_key: pk,
+          })}`;
+          return (
+            <Link
+              key={pk || "full"}
+              href={href}
+              style={{
+                padding: "0.35rem 0.65rem",
+                borderRadius: 6,
+                fontSize: "0.9rem",
+                fontWeight: 500,
+                textDecoration: "none",
+                border: `1px solid ${isActive ? "var(--primary)" : isSubmitted ? "var(--success)" : isDraft ? "var(--warning)" : "var(--border)"}`,
+                background: isActive ? "var(--primary)" : isSubmitted ? "var(--success)" : isDraft ? "var(--warning)" : "transparent",
+                color: isActive ? "var(--on-primary)" : "var(--text)",
+              }}
+            >
+              {periodLabel}
+            </Link>
+          );
+        })}
+      </div>
+    ) : null;
 
   const content = (
     <div>
@@ -147,7 +252,8 @@ export default function EntryDetailPage() {
         </Link>
       </div>
       <h1 style={{ marginBottom: "0.5rem", fontSize: "1.5rem" }}>{kpiName || `KPI #${kpiId}`}</h1>
-      <p style={{ color: "var(--muted)", marginBottom: "1.5rem" }}>Year {year}</p>
+      <p style={{ color: "var(--muted)", marginBottom: "0.5rem" }}>Year {year}</p>
+      {periodBar}
 
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
 
@@ -155,11 +261,20 @@ export default function EntryDetailPage() {
         <div className="card">
           <p style={{ color: "var(--muted)" }}>No fields defined for this KPI. Ask admin to add fields, or you may not have access.</p>
         </div>
+      ) : hasSubPeriods && (periodKeyFromUrl ?? "") === "" ? (
+        <div className="card">
+          <p style={{ color: "var(--muted)" }}>
+            This KPI uses a finer time dimension than the organization (e.g. Quarterly). Please select a period above (such as Q1, Q2, Q3, Q4) to start entering data.
+          </p>
+        </div>
       ) : (
         <div className="card">
           <EntryForm
             kpiId={kpiId}
             year={year}
+            periodKey={periodKeyFromUrl}
+            allEntries={allEntries}
+            setAllEntries={setAllEntries}
             kpiName={kpiName}
             fields={fields}
             existingEntry={existingEntry}
@@ -180,6 +295,9 @@ export default function EntryDetailPage() {
 function EntryForm({
   kpiId,
   year,
+  periodKey,
+  allEntries,
+  setAllEntries,
   kpiName,
   fields,
   existingEntry,
@@ -192,6 +310,9 @@ function EntryForm({
 }: {
   kpiId: number;
   year: number;
+  periodKey: string;
+  allEntries: EntryRow[];
+  setAllEntries: (e: EntryRow[]) => void;
   kpiName: string;
   fields: FieldDef[];
   existingEntry: EntryRow | null;
@@ -284,10 +405,11 @@ function EntryForm({
       const saveQuery = organizationId != null ? `?${qs({ organization_id: organizationId })}` : "";
       const entry = await api<EntryRow>(`/entries${saveQuery}`, {
         method: "POST",
-        body: JSON.stringify({ kpi_id: kpiId, year, is_draft: true, values }),
+        body: JSON.stringify({ kpi_id: kpiId, year, period_key: periodKey || "", is_draft: true, values }),
         token,
       });
       setExistingEntry(entry);
+      setAllEntries((prev) => [...prev.filter((e) => (e.period_key ?? "") !== (entry.period_key ?? "")), entry]);
       setSaved(true);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Save failed");
@@ -301,8 +423,13 @@ function EntryForm({
     setSaveError(null);
     setSubmitLoading(true);
     try {
-      await api("/entries/submit", { method: "POST", body: JSON.stringify({ entry_id: existingEntry.id }), token });
-      setExistingEntry({ ...existingEntry, is_draft: false, submitted_at: new Date().toISOString() });
+      const entry = await api<EntryRow>("/entries/submit", {
+        method: "POST",
+        body: JSON.stringify({ entry_id: existingEntry.id }),
+        token,
+      });
+      setExistingEntry(entry);
+      setAllEntries((prev) => [...prev.filter((e) => (e.period_key ?? "") !== (entry.period_key ?? "")), entry]);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Submit failed");
     } finally {
@@ -390,10 +517,56 @@ function EntryForm({
     </div>
   );
 
+  const formatDate = (s: string | null | undefined) => {
+    if (!s) return "—";
+    try {
+      const d = new Date(s);
+      return Number.isNaN(d.getTime()) ? s : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    } catch {
+      return s;
+    }
+  };
+
   return (
     <form onSubmit={handleSaveDraft}>
       {saveError && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{saveError}</p>}
       {saved && <p style={{ color: "var(--success)", marginBottom: "0.75rem", fontSize: "0.9rem" }}>Draft saved.</p>}
+
+      {existingEntry && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "1rem 1.5rem",
+            padding: "0.75rem 1rem",
+            marginBottom: "1rem",
+            background: "var(--surface)",
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            fontSize: "0.9rem",
+            color: "var(--muted)",
+          }}
+        >
+          <span>
+            <strong style={{ color: "var(--text)" }}>Status:</strong>{" "}
+            {existingEntry.is_draft ? "Draft" : "Submitted"}
+          </span>
+          <span>
+            <strong style={{ color: "var(--text)" }}>Entry by:</strong>{" "}
+            {existingEntry.entered_by_user_name ?? "—"}
+          </span>
+          <span>
+            <strong style={{ color: "var(--text)" }}>Last updated:</strong>{" "}
+            {formatDate(existingEntry.updated_at)}
+          </span>
+          {existingEntry.submitted_at && (
+            <span>
+              <strong style={{ color: "var(--text)" }}>Submitted at:</strong>{" "}
+              {formatDate(existingEntry.submitted_at)}
+            </span>
+          )}
+        </div>
+      )}
 
       {!hasMultiLineItems && syncRow}
 

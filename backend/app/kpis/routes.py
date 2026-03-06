@@ -106,6 +106,7 @@ def _kpi_to_response(k):
         sort_order=k.sort_order,
         entry_mode=getattr(k, "entry_mode", None) or "manual",
         api_endpoint_url=getattr(k, "api_endpoint_url", None),
+        time_dimension=getattr(k, "time_dimension", None),
         card_display_field_ids=getattr(k, "card_display_field_ids", None) or None,
         fields_count=fields_count,
         domain_tags=domain_tags,
@@ -198,13 +199,18 @@ async def get_org_kpi(
     kpi_id: int,
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_org_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    """Get KPI by id with domain and category tags. Super admin without organization_id gets KPI by id (org resolved from KPI)."""
+    """Get KPI by id with domain and category tags. Super admin without organization_id gets KPI by id (org resolved from KPI).
+    Org admin: full access. Data entry and view users: allowed if they have view or data_entry permission on this KPI (so period bar etc. work on entry page)."""
     if current_user.role.value == "SUPER_ADMIN" and organization_id is None:
         kpi = await get_kpi_with_tags_by_id(db, kpi_id)
     else:
         org_id = _org_id(current_user, organization_id)
+        if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
+            can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+            if not can_view:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
         kpi = await get_kpi_with_tags(db, kpi_id, org_id)
     if not kpi:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")

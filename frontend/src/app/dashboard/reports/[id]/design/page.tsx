@@ -61,11 +61,11 @@ export type ReportBlock =
   | { type: "domain_list"; id?: string; domainIds?: number[] }
   | { type: "domain_categories"; id?: string; domainIds?: number[] }
   | { type: "domain_kpis"; id?: string; domainIds?: number[] }
-  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean; fieldsLayout?: "columns" | "rows"; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; showTableHeading?: boolean; showMultiLineAsTable?: boolean; showMultiLineFieldLabel?: boolean; columnAlign?: Record<string, CellAlign> }
+  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean; fieldsLayout?: "columns" | "rows"; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; showTableHeading?: boolean; showMultiLineAsTable?: boolean; showMultiLineFieldLabel?: boolean; columnAlign?: Record<string, CellAlign>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
   | { type: "kpi_multi_table"; id?: string; kpiId?: number; fieldKey?: string }
   | { type: "simple_table"; id?: string; rows?: SimpleTableRow[] }
-  | { type: "kpi_grid"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>> }
-  | { type: "kpi_list"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>> }
+  | { type: "kpi_grid"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
+  | { type: "kpi_list"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
   | { type: "single_value"; id?: string; kpiId?: number; fieldKey?: string; subFieldKey?: string; entryIndex?: number };
 
 export type CellAlign = "left" | "center" | "right" | "justify";
@@ -75,6 +75,29 @@ export type SimpleTableCell =
   | { type: "formula"; kpiId?: number; fieldKey?: string; entryIndex?: number; formula?: string; align?: CellAlign };
 export type SimpleTableRow = { cells: SimpleTableCell[] };
 const DEFAULT_SIMPLE_TABLE_ROW: SimpleTableRow = { cells: [{ type: "text", content: "" }] };
+
+/** Period options for report block "single period" time dimension */
+const REPORT_PERIOD_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "Full year" },
+  { value: "H1", label: "Half 1 (H1)" },
+  { value: "H2", label: "Half 2 (H2)" },
+  { value: "Q1", label: "Q1" },
+  { value: "Q2", label: "Q2" },
+  { value: "Q3", label: "Q3" },
+  { value: "Q4", label: "Q4" },
+  { value: "01", label: "Jan" },
+  { value: "02", label: "Feb" },
+  { value: "03", label: "Mar" },
+  { value: "04", label: "Apr" },
+  { value: "05", label: "May" },
+  { value: "06", label: "Jun" },
+  { value: "07", label: "Jul" },
+  { value: "08", label: "Aug" },
+  { value: "09", label: "Sep" },
+  { value: "10", label: "Oct" },
+  { value: "11", label: "Nov" },
+  { value: "12", label: "Dec" },
+];
 
 const BLOCK_LABELS: Record<string, string> = {
   title: "Report title",
@@ -1040,7 +1063,7 @@ export default function ReportDesignPage() {
                   if (v === "title") addBlock({ type: "title", useTemplateName: true, customText: "" });
                   else if (v === "section_heading") addBlock({ type: "section_heading", text: "New section", level: 2 });
                   else if (v === "text") addBlock({ type: "text", content: "" });
-                  else if (v === "kpi_table") addBlock({ type: "kpi_table", kpiIds: [], fieldKeys: [], oneTablePerKpi: true, fieldsLayout: "columns", multiLineSubFieldKeys: {} });
+                  else if (v === "kpi_table") addBlock({ type: "kpi_table", kpiIds: [], fieldKeys: [], oneTablePerKpi: true, fieldsLayout: "columns", multiLineSubFieldKeys: {}, timeDimensionMode: "latest", periodKey: "" });
                   else if (v === "simple_table") addBlock({ type: "simple_table", rows: [{ cells: [{ type: "text", content: "" }] }] });
                 }}
               >
@@ -1058,8 +1081,8 @@ export default function ReportDesignPage() {
                 else if (v === "domain_list") addBlock({ type: "domain_list", domainIds: [] });
                 else if (v === "domain_categories") addBlock({ type: "domain_categories", domainIds: [] });
                 else if (v === "domain_kpis") addBlock({ type: "domain_kpis", domainIds: [] });
-                else if (v === "kpi_grid") addBlock({ type: "kpi_grid", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {} });
-                else if (v === "kpi_list") addBlock({ type: "kpi_list", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {} });
+                else if (v === "kpi_grid") addBlock({ type: "kpi_grid", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {}, timeDimensionMode: "latest", periodKey: "" });
+                else if (v === "kpi_list") addBlock({ type: "kpi_list", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {}, timeDimensionMode: "latest", periodKey: "" });
                 else if (v === "single_value") addBlock({ type: "single_value", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "", subFieldKey: "", entryIndex: 0 });
                 else if (v === "kpi_multi_table") addBlock({ type: "kpi_multi_table", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "" });
               }}
@@ -1820,6 +1843,37 @@ function BlockCard({
                   ));
                 })()}
               </select>
+            </div>
+            <div className="form-group" style={{ margin: 0, marginTop: "0.5rem" }}>
+              <label style={{ fontSize: "0.85rem" }}>Data period</label>
+              <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.25rem 0 0.35rem 0" }}>
+                Choose which time dimension data to show: latest entry only, all periods (e.g. Q1–Q4), or a single period.
+              </p>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                <select
+                  value={(block as { timeDimensionMode?: string }).timeDimensionMode ?? "latest"}
+                  onChange={(e) => {
+                    const v = e.target.value as "latest" | "single_period" | "all_periods";
+                    onUpdate({ timeDimensionMode: v, ...(v !== "single_period" ? { periodKey: "" } : {}) });
+                  }}
+                  style={{ minWidth: 180 }}
+                >
+                  <option value="latest">Use latest entry</option>
+                  <option value="all_periods">All periods (consolidated)</option>
+                  <option value="single_period">Single period</option>
+                </select>
+                {(block as { timeDimensionMode?: string }).timeDimensionMode === "single_period" && (
+                  <select
+                    value={(block as { periodKey?: string }).periodKey ?? ""}
+                    onChange={(e) => onUpdate({ periodKey: e.target.value })}
+                    style={{ minWidth: 140 }}
+                  >
+                    {REPORT_PERIOD_OPTIONS.map((o) => (
+                      <option key={o.value || "full"} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
             </div>
             <div style={{ marginTop: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
               <button

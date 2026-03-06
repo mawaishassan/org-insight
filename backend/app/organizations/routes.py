@@ -111,6 +111,21 @@ async def get_org(
     return OrganizationResponse.model_validate(org)
 
 
+@router.get("/{org_id}/time-dimension")
+async def get_org_time_dimension(
+    org_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get organization time dimension (Super Admin or member of that org)."""
+    if current_user.role.value != "SUPER_ADMIN" and current_user.organization_id != org_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+    org = await get_organization(db, org_id)
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    return {"organization_id": org.id, "time_dimension": getattr(org, "time_dimension", None) or "yearly"}
+
+
 @router.patch("/{org_id}", response_model=OrganizationResponse)
 async def update_org(
     org_id: int,

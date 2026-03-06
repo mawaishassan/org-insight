@@ -37,12 +37,17 @@ def _org_id(user: User, org_id_param: int | None) -> int:
 
 
 def _entry_to_response(entry):
+    entered_by_name = None
+    if getattr(entry, "user", None):
+        u = entry.user
+        entered_by_name = (getattr(u, "full_name", None) or getattr(u, "username", None) or "").strip() or getattr(u, "username", None)
     return EntryResponse(
         id=entry.id,
         kpi_id=entry.kpi_id,
         organization_id=entry.organization_id,
         user_id=entry.user_id,
         year=entry.year,
+        period_key=getattr(entry, "period_key", "") or "",
         is_draft=entry.is_draft,
         is_locked=entry.is_locked,
         submitted_at=entry.submitted_at,
@@ -57,6 +62,8 @@ def _entry_to_response(entry):
             )
             for fv in (entry.field_values or [])
         ],
+        entered_by_user_name=entered_by_name,
+        updated_at=getattr(entry, "updated_at", None),
     )
 
 
@@ -676,6 +683,7 @@ async def import_entry_excel(
 async def list_my_entries(
     kpi_id: int | None = Query(None),
     year: int | None = Query(None),
+    period_key: str | None = Query(None, description="Filter by period: '', H1, H2, Q1-Q4, 01-12"),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -683,7 +691,9 @@ async def list_my_entries(
     """List entries for current user; org admin can list all org entries with organization_id."""
     org_id = _org_id(current_user, organization_id)
     as_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
-    entries = await list_entries(db, current_user.id, org_id, kpi_id=kpi_id, year=year, as_admin=as_admin)
+    entries = await list_entries(
+        db, current_user.id, org_id, kpi_id=kpi_id, year=year, period_key=period_key, as_admin=as_admin
+    )
     return [_entry_to_response(e) for e in entries]
 
 
@@ -699,13 +709,14 @@ async def create_or_update_entry(
     can = await user_can_edit_kpi(db, current_user.id, body.kpi_id)
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not assigned to this KPI")
-    entry, _ = await get_or_create_entry(db, current_user.id, org_id, body.kpi_id, body.year)
+    entry, _ = await get_or_create_entry(
+        db, current_user.id, org_id, body.kpi_id, body.year, period_key=body.period_key or ""
+    )
     if not entry:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
     await save_entry_values(db, entry.id, current_user.id, body.values, body.kpi_id, org_id)
     await db.commit()
-    await db.refresh(entry)
-    entry.field_values  # load
+    await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
     return _entry_to_response(entry)
 
 
@@ -729,8 +740,7 @@ async def submit_entry_route(
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found or locked")
     await db.commit()
-    await db.refresh(entry)
-    entry.field_values
+    await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
     return _entry_to_response(entry)
 
 
@@ -747,6 +757,5 @@ async def lock_entry_route(
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
     await db.commit()
-    await db.refresh(entry)
-    entry.field_values
+    await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
     return _entry_to_response(entry)

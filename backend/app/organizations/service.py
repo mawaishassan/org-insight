@@ -140,6 +140,8 @@ async def update_organization(
         org.description = data.description
     if data.is_active is not None:
         org.is_active = data.is_active
+    if data.time_dimension is not None and data.time_dimension.strip() in ("yearly", "half_yearly", "quarterly", "monthly"):
+        org.time_dimension = data.time_dimension.strip()
     await db.flush()
     return org
 

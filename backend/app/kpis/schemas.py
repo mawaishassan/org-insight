@@ -57,6 +57,7 @@ class KPIUpdate(BaseModel):
     category_ids: list[int] | None = Field(None, description="Replace category tags with this list")
     organization_tag_ids: list[int] | None = Field(None, description="Replace organization tags for search")
     card_display_field_ids: list[int] | None = Field(None, description="Field IDs to show on domain KPI card (order preserved)")
+    time_dimension: str | None = Field(None, description="yearly, half_yearly, quarterly, monthly; empty/null = inherit org")
 
 
 class DomainTagRef(BaseModel):
@@ -103,6 +104,7 @@ class KPIResponse(BaseModel):
     sort_order: int
     entry_mode: str = "manual"
     api_endpoint_url: str | None = None
+    time_dimension: str | None = None
     card_display_field_ids: list[int] | None = None
     fields_count: int = 0
     domain_tags: list[DomainTagRef] = []

@@ -12,6 +12,10 @@ from app.core.models import (
     KPI,
     KPIAssignment,
     User,
+    Organization,
+    TimeDimension,
+    effective_kpi_time_dimension,
+    period_key_sort_order,
 )
 from app.core.models import FieldType
 
@@ -45,14 +49,16 @@ async def _get_entry_admin(db: AsyncSession, entry_id: int, org_id: int) -> KPIE
 
 
 async def get_or_create_entry(
-    db: AsyncSession, user_id: int, org_id: int, kpi_id: int, year: int
+    db: AsyncSession, user_id: int, org_id: int, kpi_id: int, year: int, period_key: str = ""
 ) -> tuple[KPIEntry | None, bool]:
-    """Get existing entry or create new one (one per organization per KPI per year). Returns (entry, created)."""
+    """Get existing entry or create new one (one per organization per KPI per year per period_key). Returns (entry, created)."""
+    pk = (period_key or "").strip()[:8]
     result = await db.execute(
         select(KPIEntry).where(
             KPIEntry.organization_id == org_id,
             KPIEntry.kpi_id == kpi_id,
             KPIEntry.year == year,
+            KPIEntry.period_key == pk,
         )
     )
     entry = result.scalar_one_or_none()
@@ -66,6 +72,7 @@ async def get_or_create_entry(
         kpi_id=kpi_id,
         user_id=user_id,
         year=year,
+        period_key=pk,
         is_draft=True,
     )
     db.add(entry)
@@ -314,22 +321,24 @@ async def list_entries(
     org_id: int,
     kpi_id: int | None = None,
     year: int | None = None,
+    period_key: str | None = None,
     as_admin: bool = False,
 ) -> list[KPIEntry]:
-    """List entries for org (one per KPI per year). Non-admin: only KPIs the user is assigned to."""
+    """List entries for org (per KPI per year per period_key). Non-admin: only KPIs the user is assigned to."""
     q = select(KPIEntry).where(KPIEntry.organization_id == org_id)
     if kpi_id is not None:
         q = q.where(KPIEntry.kpi_id == kpi_id)
     if year is not None:
         q = q.where(KPIEntry.year == year)
+    if period_key is not None:
+        q = q.where(KPIEntry.period_key == (period_key.strip()[:8] if period_key else ""))
     if not as_admin:
-        # Restrict to KPIs the user is assigned to
         q = q.join(
             KPIAssignment,
             (KPIAssignment.kpi_id == KPIEntry.kpi_id) & (KPIAssignment.user_id == user_id),
         )
-    q = q.order_by(KPIEntry.year.desc(), KPIEntry.kpi_id)
-    q = q.options(selectinload(KPIEntry.field_values))
+    q = q.order_by(KPIEntry.year.desc(), KPIEntry.period_key, KPIEntry.kpi_id)
+    q = q.options(selectinload(KPIEntry.field_values), selectinload(KPIEntry.user))
     result = await db.execute(q)
     return list(result.unique().scalars().all())
 
@@ -483,15 +492,45 @@ def _format_multi_line_for_display(fv) -> str:
     return out[:250]
 
 
-async def _get_entry_for_overview(
-    db: AsyncSession, org_id: int, kpi_id: int, year: int
-) -> KPIEntry | None:
-    """Load the single entry (org/kpi/year) with field_values and field for overview preview."""
+def _expected_period_keys(dimension: TimeDimension) -> list[str]:
+    """Return expected period_key values for the dimension (for display order)."""
+    if dimension in (TimeDimension.YEARLY, TimeDimension.MULTI_YEAR):
+        return [""]
+    if dimension == TimeDimension.HALF_YEARLY:
+        return ["H1", "H2"]
+    if dimension == TimeDimension.QUARTERLY:
+        return ["Q1", "Q2", "Q3", "Q4"]
+    if dimension == TimeDimension.MONTHLY:
+        return [f"{i:02d}" for i in range(1, 13)]
+    return [""]
+
+
+def _period_display(period_key: str) -> str:
+    """Human-readable label for period_key."""
+    if not period_key or not period_key.strip():
+        return "Full year"
+    pk = period_key.strip().upper()
+    if pk in ("H1", "H2"):
+        return f"Half {pk[1]}"
+    if pk in ("Q1", "Q2", "Q3", "Q4"):
+        return pk
+    if period_key.isdigit() and 1 <= int(period_key) <= 12:
+        months = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+        return months[int(period_key) - 1]
+    return period_key or "Full year"
+
+
+async def _get_entries_for_overview(
+    db: AsyncSession, org_id: int, kpi_ids: list[int], year: int
+) -> list[KPIEntry]:
+    """Load all entries for org, kpi_ids, year with field_values and user."""
+    if not kpi_ids:
+        return []
     q = (
         select(KPIEntry)
         .where(
             KPIEntry.organization_id == org_id,
-            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.kpi_id.in_(kpi_ids),
             KPIEntry.year == year,
         )
         .options(
@@ -500,19 +539,25 @@ async def _get_entry_for_overview(
         )
     )
     res = await db.execute(q)
-    return res.scalar_one_or_none()
+    return list(res.unique().scalars().all())
 
 
 async def list_entries_overview(
     db: AsyncSession, user_id: int, org_id: int, year: int, as_admin: bool = False
 ) -> list[dict]:
     """
-    For the given year, return KPIs with entry status and first 2 field preview.
-    One entry per organization per KPI per year. Includes last data entry user and assigned users.
+    For the given year, return KPIs with entry status, effective time dimension, and per-period entries.
+    Includes last data entry user and assigned users. entries[] has one slot per expected period.
     """
     kpis = await list_available_kpis(db, user_id, org_id)
     kpi_ids = [k.id for k in kpis]
-    # Load assigned users per KPI with permission (data_entry vs view); data_entry-only for "assigned" label
+    org = await db.get(Organization, org_id)
+    org_td_raw = getattr(org, "time_dimension", None) or "yearly"
+    try:
+        org_td = TimeDimension(org_td_raw)
+    except ValueError:
+        org_td = TimeDimension.YEARLY
+
     assigned_by_kpi: dict[int, list[str]] = {kid: [] for kid in kpi_ids}
     assigned_users_detail_by_kpi: dict[int, list[dict]] = {kid: [] for kid in kpi_ids}
     assigned_data_entry_ids_by_kpi: dict[int, set[int]] = {kid: set() for kid in kpi_ids}
@@ -545,61 +590,108 @@ async def list_entries_overview(
                 "email": (email or "").strip() or None,
                 "permission": perm,
             })
-    # Org admin / super admin see all KPIs with data_entry permission (no assignment row)
     user_res = await db.execute(select(User).where(User.id == user_id))
     current_user_obj = user_res.scalar_one_or_none()
     if current_user_obj and current_user_obj.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
         for kid in kpi_ids:
             current_user_permission_by_kpi[kid] = "data_entry"
+
+    all_entries = await _get_entries_for_overview(db, org_id, kpi_ids, year)
+    entry_by_kpi_period: dict[tuple[int, str], KPIEntry] = {}
+    for e in all_entries:
+        pk = getattr(e, "period_key", "") or ""
+        entry_by_kpi_period[(e.kpi_id, pk)] = e
+
     result = []
     for kpi in kpis:
-        entry = await _get_entry_for_overview(db, org_id, kpi.id, year)
+        kpi_td_raw = getattr(kpi, "time_dimension", None)
+        kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
+        effective_td = effective_kpi_time_dimension(kpi_td, org_td)
+        expected_periods = _expected_period_keys(effective_td)
+
+        periods_out = []
+        primary_entry: KPIEntry | None = None
+        for pk in expected_periods:
+            entry = entry_by_kpi_period.get((kpi.id, pk))
+            if entry and primary_entry is None:
+                primary_entry = entry
+            preview = []
+            entered_by_name = None
+            if entry:
+                field_values = list(entry.field_values or [])
+                card_ids = getattr(kpi, "card_display_field_ids", None)
+                if isinstance(card_ids, list) and len(card_ids) > 0:
+                    id_to_fv = {fv.field_id: fv for fv in field_values if fv.field}
+                    for field_id in card_ids:
+                        fv = id_to_fv.get(field_id)
+                        if fv and fv.field:
+                            preview.append({"field_name": fv.field.name, "value": _format_field_value(fv)})
+                else:
+                    field_values.sort(key=lambda fv: (fv.field.sort_order if fv.field else 0, fv.field_id))
+                    for fv in field_values[:2]:
+                        if fv.field:
+                            preview.append({"field_name": fv.field.name, "value": _format_field_value(fv)})
+                if entry.user:
+                    entered_by_name = (entry.user.full_name or entry.user.username or "").strip() or entry.user.username
+            assigned_ids = assigned_data_entry_ids_by_kpi.get(kpi.id, set())
+            data_entry_user_is_assigned = entry and entry.user_id is not None and entry.user_id in assigned_ids if entry else False
+            period_payload = {
+                "period_key": pk,
+                "period_display": _period_display(pk),
+                "entry": None,
+            }
+            if entry:
+                period_payload["entry"] = {
+                    "id": entry.id,
+                    "is_draft": entry.is_draft,
+                    "is_locked": entry.is_locked,
+                    "submitted_at": entry.submitted_at.isoformat() if entry.submitted_at else None,
+                    "preview": preview,
+                    "entered_by_user_name": entered_by_name,
+                    "last_updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+                    "data_entry_user_is_assigned": data_entry_user_is_assigned,
+                }
+            periods_out.append(period_payload)
+
         item = {
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,
             "kpi_year": kpi.year,
+            "org_time_dimension": org_td.value,
+            "kpi_time_dimension": kpi_td_raw,
+            "effective_time_dimension": effective_td.value,
+            "entries": periods_out,
             "assigned_user_names": assigned_by_kpi.get(kpi.id, []),
             "assigned_users": assigned_users_detail_by_kpi.get(kpi.id, []),
             "current_user_permission": current_user_permission_by_kpi.get(kpi.id) or "data_entry",
             "entry": None,
         }
-        if entry:
-            field_values = list(entry.field_values or [])
+        if primary_entry:
+            field_values = list(primary_entry.field_values or [])
             card_ids = getattr(kpi, "card_display_field_ids", None)
             if isinstance(card_ids, list) and len(card_ids) > 0:
-                # Show only selected fields in configured order
                 id_to_fv = {fv.field_id: fv for fv in field_values if fv.field}
                 preview = []
                 for field_id in card_ids:
                     fv = id_to_fv.get(field_id)
                     if fv and fv.field:
-                        preview.append({
-                            "field_name": fv.field.name,
-                            "value": _format_field_value(fv),
-                        })
+                        preview.append({"field_name": fv.field.name, "value": _format_field_value(fv)})
             else:
-                # Fallback: first 2 fields by sort_order
                 field_values.sort(key=lambda fv: (fv.field.sort_order if fv.field else 0, fv.field_id))
-                preview = []
-                for fv in field_values[:2]:
-                    if fv.field:
-                        preview.append({
-                            "field_name": fv.field.name,
-                            "value": _format_field_value(fv),
-                        })
+                preview = [{"field_name": fv.field.name, "value": _format_field_value(fv)} for fv in field_values[:2] if fv.field]
             entered_by_name = None
-            if entry.user:
-                entered_by_name = (entry.user.full_name or entry.user.username or "").strip() or entry.user.username
+            if primary_entry.user:
+                entered_by_name = (primary_entry.user.full_name or primary_entry.user.username or "").strip() or primary_entry.user.username
             assigned_ids = assigned_data_entry_ids_by_kpi.get(kpi.id, set())
-            data_entry_user_is_assigned = entry.user_id is not None and entry.user_id in assigned_ids
+            data_entry_user_is_assigned = primary_entry.user_id is not None and primary_entry.user_id in assigned_ids
             item["entry"] = {
-                "id": entry.id,
-                "is_draft": entry.is_draft,
-                "is_locked": entry.is_locked,
-                "submitted_at": entry.submitted_at.isoformat() if entry.submitted_at else None,
+                "id": primary_entry.id,
+                "is_draft": primary_entry.is_draft,
+                "is_locked": primary_entry.is_locked,
+                "submitted_at": primary_entry.submitted_at.isoformat() if primary_entry.submitted_at else None,
                 "preview": preview,
                 "entered_by_user_name": entered_by_name,
-                "last_updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+                "last_updated_at": primary_entry.updated_at.isoformat() if primary_entry.updated_at else None,
                 "data_entry_user_is_assigned": data_entry_user_is_assigned,
             }
         result.append(item)
