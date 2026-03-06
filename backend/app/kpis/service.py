@@ -25,6 +25,9 @@ from app.core.models import (
     ReportTemplateField,
     ReportTemplateKPI,
     FieldType,
+    Organization,
+    TimeDimension,
+    time_dimension_allowed_for_kpi,
 )
 from app.kpis.schemas import KPICreate, KPIUpdate
 from app.entries.service import get_or_create_entry, save_entry_values
@@ -272,6 +275,23 @@ async def update_kpi(
             kpi.api_endpoint_url = None
     if data.api_endpoint_url is not None and kpi.entry_mode == "api":
         kpi.api_endpoint_url = data.api_endpoint_url.strip() or None
+    if data.time_dimension is not None:
+        val = (data.time_dimension or "").strip().lower() or None
+        if val:
+            try:
+                kpi_td = TimeDimension(val)
+            except ValueError:
+                kpi_td = None
+            if kpi_td:
+                org = await db.get(Organization, org_id)
+                org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly")
+                if time_dimension_allowed_for_kpi(kpi_td, org_td):
+                    kpi.time_dimension = kpi_td.value
+                # else leave unchanged
+            else:
+                kpi.time_dimension = None
+        else:
+            kpi.time_dimension = None
     if data.card_display_field_ids is not None:
         kpi.card_display_field_ids = data.card_display_field_ids
     await db.flush()

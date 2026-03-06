@@ -19,6 +19,10 @@ from app.core.models import (
     ReportTemplateTextBlock,
     Category,
     KPICategory,
+    Organization,
+    TimeDimension,
+    effective_kpi_time_dimension,
+    period_key_sort_order,
 )
 from app.reports.schemas import ReportTemplateCreate, ReportTemplateUpdate, ReportTemplateKPIAdd
 from app.formula_engine.evaluator import evaluate_formula
@@ -76,6 +80,9 @@ async def get_report_template_detail(
     # KPIs that will be included (all KPIs from attached domains, with all fields)
     kpis_from_domains = []
     if domain_ids:
+        org_row = await db.execute(select(Organization).where(Organization.id == org_id))
+        org = org_row.scalar_one_or_none()
+        org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
         kpi_ids_subq = _kpi_ids_in_domains_query(domain_ids)
         result = await db.execute(
             select(KPI)
@@ -85,10 +92,17 @@ async def get_report_template_detail(
         )
         for kpi in result.unique().scalars().all():
             field_count = len(kpi.fields) if kpi.fields else 0
+            kpi_td_raw = getattr(kpi, "time_dimension", None)
+            try:
+                kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
+            except (ValueError, TypeError):
+                kpi_td = None
+            effective_td = effective_kpi_time_dimension(kpi_td, org_td)
             kpis_from_domains.append({
                 "kpi_id": kpi.id,
                 "kpi_name": kpi.name,
                 "fields_count": field_count,
+                "time_dimension": effective_td.value,
             })
 
     return {
@@ -540,6 +554,63 @@ def _evaluate_report_formula(kpis: list, expression: str, kpi_id: int, entry_ind
 _jinja_env.globals["evaluate_report_formula"] = _evaluate_report_formula
 
 
+def _filter_entries_by_period(entries: list, period_key: str | None = None, all_periods: bool = False) -> list:
+    """
+    Jinja filter: filter entry list by time dimension.
+    - If all_periods True: return all entries.
+    - If period_key set (e.g. 'Q1'): return entries with that period_key only.
+    - Else (latest): return the last entry only (entries assumed sorted by period).
+    """
+    if not entries:
+        return []
+    if all_periods:
+        return entries
+    if period_key is not None and str(period_key).strip():
+        pk = str(period_key).strip()
+        return [e for e in entries if (e.get("period_key") or "") == pk]
+    return [entries[-1]] if entries else []
+
+
+_jinja_env.filters["filter_entries_by_period"] = _filter_entries_by_period
+
+
+def _block_time_dimension_vars(b: dict) -> tuple[str, bool]:
+    """
+    Return (jinja_prefix, use_filter) for block time dimension.
+    prefix sets _td_period and _td_all for use in filter_entries_by_period.
+    use_filter True => caller should inject _td_entries and replace kpi.entries in content.
+    """
+    mode = (b.get("timeDimensionMode") or b.get("time_dimension_mode") or "latest").strip().lower()
+    period_key = b.get("periodKey") or b.get("period_key") or ""
+    if isinstance(period_key, str):
+        period_key = period_key.strip()
+    else:
+        period_key = str(period_key).strip()
+    all_periods = mode == "all_periods" or mode == "all"
+    if all_periods:
+        return "{% set _td_period = none %}{% set _td_all = true %}", True
+    if mode == "single_period" and period_key:
+        # Escape for Jinja string
+        pk_esc = str(period_key).replace("\\", "\\\\").replace("'", "\\'")
+        return f"{{% set _td_period = '{pk_esc}' %}}{{% set _td_all = false %}}", True
+    return "{% set _td_period = none %}{% set _td_all = false %}", True
+
+
+def _inject_time_dimension_filter(content: str, td_prefix: str) -> str:
+    """Prepend td_prefix and replace kpi.entries with _td_entries (with filter)."""
+    if not content.strip():
+        return content
+    inject = "{% set _td_entries = __KPI_ENTRIES__ | filter_entries_by_period(_td_period, _td_all) %}"
+    content = td_prefix + content
+    content = content.replace("{% for kpi in kpis %}", "{% for kpi in kpis %}" + inject, 1)
+    content = content.replace("kpi.entries", "_td_entries")
+    content = content.replace("__KPI_ENTRIES__", "kpi.entries")
+    # Safe access when _td_entries is empty (e.g. latest with no data, or single_period with no match)
+    content = content.replace("_td_entries[0].fields", "((_td_entries|first)|default({})).fields|default([])")
+    content = content.replace("_td_entries[0]", "(_td_entries|first)")
+    return content
+
+
 def _blocks_to_jinja(blocks: list[dict]) -> str:
     """
     Convert visual builder block list to Jinja2 HTML template.
@@ -695,7 +766,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
             _td_style_f = ' style="text-align: {{ column_align.get(f.field_key, \'left\') }}"'
             _td_style_ef = ' style="text-align: {{ column_align.get(ef.field_key, \'left\') }}"'
             _label_f_cond = "{% if show_multi_line_field_label or f.field_type != 'multi_line_items' %}" + _label_f + "{% endif %}"
-            _label_key_cond = "{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (_fl[0].field_type != 'multi_line_items') %}" + _label_key + "{% endif %}"
+            _label_key_cond = "{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (((_fl|first)|default({})).field_type != 'multi_line_items') %}" + _label_key + "{% endif %}"
             if show_multi_as_table:
                 _cell_multi = (
                     "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
@@ -745,9 +816,10 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     "</div>{% else %}{{ ef.value }}{% endif %}"
                 )
             heading_html = '<h4>{{ kpi.kpi_name }}</h4>' if show_table_heading else ""
+            _td_prefix, _ = _block_time_dimension_vars(b)
             if fields_layout == "rows":
                 if not kpi_ids and not field_keys:
-                    out.append(
+                    _content = (
                         _display_prefix
                         + _sub_display_prefix
                         + _sub_keys_prefix
@@ -769,13 +841,14 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         "</tbody></table>"
                         "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                     )
+                    out.append(_inject_time_dimension_filter(_content, _td_prefix))
                 else:
                     fid_list = ", ".join(str(i) for i in kpi_ids)
                     fkeys_list = ", ".join(repr(k) for k in field_keys)
                     _cell_by_key = (
                         "{% for f in entry.fields %}{% if f.field_key == key %}<td" + _td_style_key + ">" + _cell_multi + "</td>{% endif %}{% endfor %}"
                     )
-                    out.append(
+                    _content = (
                         _display_prefix
                         + _sub_display_prefix
                         + _sub_keys_prefix
@@ -797,9 +870,10 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         "{% endif %}"
                         "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                     )
+                    out.append(_inject_time_dimension_filter(_content, _td_prefix))
             else:
                 if not kpi_ids and not field_keys:
-                    out.append(
+                    _content = (
                         _display_prefix
                         + _sub_display_prefix
                         + _sub_keys_prefix
@@ -818,13 +892,14 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         "</tbody></table>"
                         "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                     )
+                    out.append(_inject_time_dimension_filter(_content, _td_prefix))
                 else:
                     fid_list = ", ".join(str(i) for i in kpi_ids)
                     fkeys_list = ", ".join(repr(k) for k in field_keys)
                     _cell_by_key = (
                         "{% for f in entry.fields %}{% if f.field_key == key %}<td" + _td_style_key + ">" + _cell_multi + "</td>{% endif %}{% endfor %}"
                     )
-                    out.append(
+                    _content = (
                         _display_prefix
                         + _sub_display_prefix
                         + _sub_keys_prefix
@@ -847,6 +922,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         "{% endif %}"
                         "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                     )
+                    out.append(_inject_time_dimension_filter(_content, _td_prefix))
         elif block_type == "kpi_multi_table":
             kpi_id = int(b.get("kpiId") or 0)
             field_key = (b.get("fieldKey") or "").strip()
@@ -965,8 +1041,9 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                 "{% for item in f.value_items %}<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}</tr>{% endfor %}"
                 "</table>{% else %}{{ f.value }}{% endif %}"
             )
+            _td_prefix_grid, _ = _block_time_dimension_vars(b)
             if not kpi_ids and not field_keys:
-                out.append(
+                _content = (
                     _display_prefix
                     + _sub_display_prefix
                     + _sub_keys_prefix
@@ -980,13 +1057,14 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     "{% endfor %}</div>"
                     "{% endfor %}{% endfor %}{% endif %}</div>"
                 )
+                out.append(_inject_time_dimension_filter(_content, _td_prefix_grid))
             else:
                 fid_list = ", ".join(str(i) for i in kpi_ids)
                 fkeys_list = ", ".join(repr(k) for k in field_keys)
                 _grid_cell_by_key = (
                     "{% for f in entry.fields %}{% if f.field_key == key %}" + _grid_cell_multi + "{% endif %}{% endfor %}"
                 )
-                out.append(
+                _content = (
                     _display_prefix
                     + _sub_display_prefix
                     + _sub_keys_prefix
@@ -1003,6 +1081,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     "{% endfor %}</div>"
                     "{% endfor %}{% endif %}{% endfor %}{% endif %}</div>"
                 )
+                out.append(_inject_time_dimension_filter(_content, _td_prefix_grid))
         elif block_type == "kpi_list":
             kpi_ids = b.get("kpiIds") or []
             field_keys = b.get("fieldKeys") or []
@@ -1041,8 +1120,9 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                 "<ul style=\"margin: 0.25rem 0;\">{% for item in f.value_items %}<li>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}{{ item[sf.key] }}{% if not loop.last %} – {% endif %}{% endif %}{% endfor %}</li>{% endfor %}</ul>"
                 "{% else %}{{ f.value }}{% endif %}"
             )
+            _td_prefix_list, _ = _block_time_dimension_vars(b)
             if not kpi_ids and not field_keys:
-                out.append(
+                _content = (
                     _display_prefix
                     + _sub_display_prefix
                     + _sub_keys_prefix
@@ -1055,13 +1135,14 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     "{% endfor %}{% endfor %}</dl>"
                     "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                 )
+                out.append(_inject_time_dimension_filter(_content, _td_prefix_list))
             else:
                 fid_list = ", ".join(str(i) for i in kpi_ids)
                 fkeys_list = ", ".join(repr(k) for k in field_keys)
                 _list_cell_by_key = (
                     "{% for f in entry.fields %}{% if f.field_key == key %}" + _list_cell_multi + "{% endif %}{% endfor %}"
                 )
-                out.append(
+                _content = (
                     _display_prefix
                     + _sub_display_prefix
                     + _sub_keys_prefix
@@ -1077,6 +1158,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                     "{% endfor %}{% endfor %}</dl>"
                     "{% endif %}{% endfor %}{% endif %}</div>"
                 )
+                out.append(_inject_time_dimension_filter(_content, _td_prefix_list))
     if not out:
         return "<p>No content. Add blocks in the visual designer.</p>"
     return "\n".join(out)
@@ -1090,6 +1172,21 @@ def _kpi_ids_in_domains_query(domain_ids: list[int]):
         .where(Category.domain_id.in_(domain_ids))
         .distinct()
     )
+
+
+def _report_period_display(year: int, period_key: str, dimension: TimeDimension) -> str:
+    """Human-readable period for report (e.g. '2026 Q1')."""
+    if not period_key or not period_key.strip():
+        return str(year)
+    pk = period_key.strip().upper()
+    if pk in ("H1", "H2"):
+        return f"{year} H{pk[1]}"
+    if pk in ("Q1", "Q2", "Q3", "Q4"):
+        return f"{year} {pk}"
+    if period_key.isdigit() and 1 <= int(period_key) <= 12:
+        months = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+        return f"{year} {months[int(period_key) - 1]}"
+    return f"{year} {period_key}"
 
 
 async def generate_report_data(
@@ -1145,9 +1242,15 @@ async def generate_report_data(
         "text_blocks": text_blocks,
         "kpis": [],
     }
+    org = await db.get(Organization, org_id)
+    org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
+
     for kpi in template_kpis:
         fields_to_include = list(kpi.fields)
-        # One submitted entry per org per KPI per year
+        kpi_td_raw = getattr(kpi, "time_dimension", None)
+        kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
+        effective_td = effective_kpi_time_dimension(kpi_td, org_td)
+
         entries_result = await db.execute(
             select(KPIEntry)
             .where(
@@ -1158,10 +1261,15 @@ async def generate_report_data(
             )
             .options(selectinload(KPIEntry.field_values))
         )
-        entries = list(entries_result.scalars().all())
-        # Build value by entry and field
+        all_entries = list(entries_result.scalars().all())
+        # Sort by period (e.g. Q1, Q2, Q3, Q4) so "latest" filter returns last; report can show all or one period
+        entries_sorted = sorted(
+            all_entries,
+            key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td),
+        )
+        # Build value by entry and field (one row per entry; each row has period_key and period_display)
         rows = []
-        if not entries:
+        if not entries_sorted:
             # No submitted data for this KPI: provide one placeholder entry so the report shows "No data entered"
             _NO_DATA_PLACEHOLDER = "No data entered"
             field_values_out = []
@@ -1181,9 +1289,11 @@ async def generate_report_data(
                     field_payload["sub_field_keys"] = [sf.key for sf in sub_fields_orm]
                     field_payload["sub_fields"] = [{"key": sf.key, "name": getattr(sf, "name", sf.key)} for sf in sub_fields_orm]
                 field_values_out.append(field_payload)
-            rows.append({"entry_id": None, "fields": field_values_out})
+            rows.append({"entry_id": None, "fields": field_values_out, "period_key": "", "period_display": str(yr)})
         else:
-            for entry in entries:
+            for entry in entries_sorted:
+                _pk = getattr(entry, "period_key", "") or ""
+                _pd = _report_period_display(yr, _pk, effective_td)
                 fv_by_field = {fv.field_id: fv for fv in entry.field_values}
                 value_by_key = {}
                 field_values_out = []
@@ -1246,7 +1356,12 @@ async def generate_report_data(
                         })
                         if computed is not None:
                             value_by_key[f.key] = computed
-                rows.append({"entry_id": entry.id, "fields": field_values_out})
+                rows.append({
+                    "entry_id": entry.id,
+                    "fields": field_values_out,
+                    "period_key": _pk,
+                    "period_display": _pd,
+                })
         # Map field_key -> field_name for template headers when only key is in scope
         field_names_map = {}
         if rows and rows[0].get("fields"):
@@ -1254,11 +1369,18 @@ async def generate_report_data(
                 fkey = f.get("field_key")
                 if fkey is not None:
                     field_names_map[fkey] = f.get("field_name", fkey)
+        _latest_period = ""
+        _latest_display = str(yr)
+        if rows and rows[-1].get("period_display"):
+            _latest_display = rows[-1]["period_display"]
+            _latest_period = rows[-1].get("period_key") or ""
         out["kpis"].append({
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,
             "entries": rows,
             "field_names": field_names_map,
+            "period_display": _latest_display,
+            "time_dimension_used": effective_td.value,
         })
 
     # Build domains → categories → KPIs for template access

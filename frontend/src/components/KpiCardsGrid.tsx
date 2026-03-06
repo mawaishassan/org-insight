@@ -5,14 +5,39 @@ import Link from "next/link";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 
+const TIME_DIMENSION_ORDER = ["yearly", "half_yearly", "quarterly", "monthly"] as const;
+const TIME_DIMENSION_LABELS: Record<string, string> = {
+  yearly: "Yearly",
+  half_yearly: "Half-yearly",
+  quarterly: "Quarterly",
+  monthly: "Monthly",
+};
+
 export interface OverviewItem {
   kpi_id: number;
   kpi_name: string;
   kpi_year: number;
   assigned_user_names?: string[];
   assigned_users?: Array<{ display_name: string; email: string | null; permission?: string }>;
-  /** Current user's permission for this KPI: data_entry (can edit) or view (read-only) */
   current_user_permission?: "data_entry" | "view";
+  org_time_dimension?: string;
+  kpi_time_dimension?: string | null;
+  effective_time_dimension?: string;
+  /** Per-period entries when KPI has sub-periods (e.g. Q1–Q4). */
+  entries?: Array<{
+    period_key: string;
+    period_display: string;
+    entry: {
+      id: number;
+      is_draft: boolean;
+      is_locked: boolean;
+      submitted_at: string | null;
+      preview: Array<{ field_name: string; value: string }>;
+      entered_by_user_name?: string | null;
+      last_updated_at?: string | null;
+      data_entry_user_is_assigned?: boolean;
+    } | null;
+  }>;
   entry: {
     id: number;
     is_draft: boolean;
@@ -266,6 +291,34 @@ export function KpiCardsGrid({
               >
                 {kpi.name}
               </h3>
+              {item?.effective_time_dimension && (
+                <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.25rem 0 0 0" }}>
+                  Time: {TIME_DIMENSION_LABELS[item.effective_time_dimension] ?? item.effective_time_dimension}
+                </p>
+              )}
+              {Array.isArray(item?.entries) && item.entries.length > 1 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem", marginTop: "0.35rem" }}>
+                  {item.entries.map(({ period_display: label, entry: periodEntry }) => {
+                    const isSubmitted = periodEntry && !periodEntry.is_draft && periodEntry.submitted_at;
+                    const isDraft = periodEntry?.is_draft ?? false;
+                    return (
+                      <span
+                        key={label}
+                        style={{
+                          fontSize: "0.75rem",
+                          padding: "0.2rem 0.4rem",
+                          borderRadius: 4,
+                          border: `1px solid ${isSubmitted ? "var(--success)" : isDraft ? "var(--warning)" : "var(--border)"}`,
+                          background: isSubmitted ? "var(--success)" : isDraft ? "var(--warning)" : "transparent",
+                          color: "var(--text)",
+                        }}
+                      >
+                        {label}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             <div

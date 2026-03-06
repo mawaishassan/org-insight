@@ -20,6 +20,7 @@ class OrganizationUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
     is_active: bool | None = None
+    time_dimension: str | None = Field(None, description="yearly, half_yearly, quarterly, monthly")
 
 
 class OrganizationResponse(BaseModel):
@@ -29,6 +30,7 @@ class OrganizationResponse(BaseModel):
     name: str
     description: str | None
     is_active: bool
+    time_dimension: str = "yearly"
 
     class Config:
         from_attributes = True

@@ -92,6 +92,7 @@ interface KpiInfo {
   card_display_field_ids?: number[] | null;
   entry_mode?: string;
   api_endpoint_url?: string | null;
+  time_dimension?: string | null;
   organization_tags?: OrgTagRef[];
 }
 
@@ -120,8 +121,17 @@ const kpiUpdateSchema = z.object({
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
+  time_dimension: z.string().optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
 });
+
+const TIME_DIMENSION_ORDER = ["yearly", "half_yearly", "quarterly", "monthly"] as const;
+const TIME_DIMENSION_LABELS: Record<string, string> = {
+  yearly: "Yearly",
+  half_yearly: "Half-yearly",
+  quarterly: "Quarterly",
+  monthly: "Monthly",
+};
 
 type CreateFormData = z.infer<typeof createSchema>;
 type UpdateFormData = z.infer<typeof updateSchema>;
@@ -148,6 +158,7 @@ export default function KpiFieldsPage() {
   const autosaveTimerRef = useRef<number | null>(null);
   const [kpiSaveError, setKpiSaveError] = useState<string | null>(null);
   const [kpiSaving, setKpiSaving] = useState(false);
+  const [orgTimeDimension, setOrgTimeDimension] = useState<string>("yearly");
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncMode, setSyncMode] = useState<"override" | "append">("override");
   const [contractOpen, setContractOpen] = useState(false);
@@ -185,6 +196,7 @@ export default function KpiFieldsPage() {
       sort_order: 0,
       entry_mode: "manual",
       api_endpoint_url: "",
+      time_dimension: "",
       organization_tag_ids: [],
     },
   });
@@ -198,10 +210,11 @@ export default function KpiFieldsPage() {
         sort_order: kpi.sort_order ?? 0,
         entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
         api_endpoint_url: kpi.api_endpoint_url ?? "",
+        time_dimension: kpi.time_dimension ?? "",
         organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
       });
     }
-  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.year, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.organization_tags, orgIdFromUrl]);
+  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.year, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.organization_tags, orgIdFromUrl]);
 
   useEffect(() => {
     if (!token) return;
@@ -249,6 +262,13 @@ export default function KpiFieldsPage() {
     api<OrgTagRef[]>(`/organizations/${orgIdFromUrl}/tags`, { token })
       .then(setOrgTags)
       .catch(() => setOrgTags([]));
+  }, [token, orgIdFromUrl]);
+
+  useEffect(() => {
+    if (!token || orgIdFromUrl == null) return;
+    api<{ organization_id: number; time_dimension: string }>(`/organizations/${orgIdFromUrl}/time-dimension`, { token })
+      .then((r) => setOrgTimeDimension(r.time_dimension ?? "yearly"))
+      .catch(() => setOrgTimeDimension("yearly"));
   }, [token, orgIdFromUrl]);
 
   const [createSubFields, setCreateSubFields] = useState<Array<{ name: string; key: string; field_type: string; is_required: boolean; sort_order: number }>>([]);
@@ -413,6 +433,7 @@ export default function KpiFieldsPage() {
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
+          time_dimension: data.time_dimension && data.time_dimension.trim() ? data.time_dimension.trim() : null,
           organization_tag_ids: data.organization_tag_ids ?? [],
         }),
       });
@@ -562,6 +583,24 @@ export default function KpiFieldsPage() {
             <div className="form-group">
               <label>Sort order</label>
               <input type="number" min={0} {...kpiEditForm.register("sort_order")} />
+            </div>
+            <div className="form-group">
+              <label>Time dimension</label>
+              <select {...kpiEditForm.register("time_dimension")}>
+                <option value="">Inherit from organization ({TIME_DIMENSION_LABELS[orgTimeDimension] ?? orgTimeDimension})</option>
+                {TIME_DIMENSION_ORDER.filter((td) => {
+                  const orgIdx = TIME_DIMENSION_ORDER.indexOf(orgTimeDimension as (typeof TIME_DIMENSION_ORDER)[number]);
+                  const kpiIdx = TIME_DIMENSION_ORDER.indexOf(td);
+                  return orgIdx >= 0 && kpiIdx >= orgIdx;
+                }).map((td) => (
+                  <option key={td} value={td}>
+                    {TIME_DIMENSION_LABELS[td] ?? td}
+                  </option>
+                ))}
+              </select>
+              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+                Leave as inherit to use the organization default. Otherwise choose same or finer (e.g. Quarterly when org is Yearly).
+              </p>
             </div>
             <div className="form-group">
               <label>Entry mode</label>

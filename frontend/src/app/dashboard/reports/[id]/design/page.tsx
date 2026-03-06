@@ -25,6 +25,7 @@ interface KpiFromDomain {
   kpi_id: number;
   kpi_name: string;
   fields_count: number;
+  time_dimension?: string | null;
 }
 
 interface SubFieldOption {
@@ -61,11 +62,11 @@ export type ReportBlock =
   | { type: "domain_list"; id?: string; domainIds?: number[] }
   | { type: "domain_categories"; id?: string; domainIds?: number[] }
   | { type: "domain_kpis"; id?: string; domainIds?: number[] }
-  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean; fieldsLayout?: "columns" | "rows"; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; showTableHeading?: boolean; showMultiLineAsTable?: boolean; showMultiLineFieldLabel?: boolean; columnAlign?: Record<string, CellAlign> }
+  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean; fieldsLayout?: "columns" | "rows"; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; showTableHeading?: boolean; showMultiLineAsTable?: boolean; showMultiLineFieldLabel?: boolean; columnAlign?: Record<string, CellAlign>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
   | { type: "kpi_multi_table"; id?: string; kpiId?: number; fieldKey?: string }
   | { type: "simple_table"; id?: string; rows?: SimpleTableRow[] }
-  | { type: "kpi_grid"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>> }
-  | { type: "kpi_list"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>> }
+  | { type: "kpi_grid"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
+  | { type: "kpi_list"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
   | { type: "single_value"; id?: string; kpiId?: number; fieldKey?: string; subFieldKey?: string; entryIndex?: number };
 
 export type CellAlign = "left" | "center" | "right" | "justify";
@@ -75,6 +76,67 @@ export type SimpleTableCell =
   | { type: "formula"; kpiId?: number; fieldKey?: string; entryIndex?: number; formula?: string; align?: CellAlign };
 export type SimpleTableRow = { cells: SimpleTableCell[] };
 const DEFAULT_SIMPLE_TABLE_ROW: SimpleTableRow = { cells: [{ type: "text", content: "" }] };
+
+/** Period options for report block "single period" time dimension */
+const REPORT_PERIOD_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "Full year" },
+  { value: "H1", label: "Half 1 (H1)" },
+  { value: "H2", label: "Half 2 (H2)" },
+  { value: "Q1", label: "Q1" },
+  { value: "Q2", label: "Q2" },
+  { value: "Q3", label: "Q3" },
+  { value: "Q4", label: "Q4" },
+  { value: "01", label: "Jan" },
+  { value: "02", label: "Feb" },
+  { value: "03", label: "Mar" },
+  { value: "04", label: "Apr" },
+  { value: "05", label: "May" },
+  { value: "06", label: "Jun" },
+  { value: "07", label: "Jul" },
+  { value: "08", label: "Aug" },
+  { value: "09", label: "Sep" },
+  { value: "10", label: "Oct" },
+  { value: "11", label: "Nov" },
+  { value: "12", label: "Dec" },
+];
+
+/** Expected period keys for a time dimension (for report block single-period dropdown). */
+function expectedPeriodsForDimension(dimension: string | null | undefined): string[] {
+  if (!dimension || dimension === "yearly" || dimension === "multi_year") return [""];
+  if (dimension === "half_yearly") return ["", "H1", "H2"];
+  if (dimension === "quarterly") return ["", "Q1", "Q2", "Q3", "Q4"];
+  if (dimension === "monthly") return ["", ...Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"))];
+  return [""];
+}
+
+/** Build Jinja prefix for block time dimension (mirrors backend _block_time_dimension_vars). */
+function blockTimeDimensionPrefix(b: { timeDimensionMode?: string; periodKey?: string }): string {
+  const mode = (b.timeDimensionMode || "latest").trim().toLowerCase();
+  const periodKey = (b.periodKey ?? "").trim();
+  if (mode === "all_periods" || mode === "all") {
+    return "{% set _td_period = none %}{% set _td_all = true %}";
+  }
+  if (mode === "single_period" && periodKey) {
+    const pkEsc = periodKey.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    return `{% set _td_period = '${pkEsc}' %}{% set _td_all = false %}`;
+  }
+  return "{% set _td_period = none %}{% set _td_all = false %}";
+}
+
+/** Inject time dimension filter into content: prepend prefix and replace kpi.entries with _td_entries (mirrors backend _inject_time_dimension_filter). */
+function injectTimeDimensionFilter(content: string, tdPrefix: string): string {
+  if (!content.trim()) return content;
+  // Use placeholder so the global replace doesn't overwrite the source in the inject line
+  const inject = "{% set _td_entries = __KPI_ENTRIES__ | filter_entries_by_period(_td_period, _td_all) %}";
+  let out = tdPrefix + content;
+  out = out.replace("{% for kpi in kpis %}", "{% for kpi in kpis %}" + inject, 1);
+  out = out.replace(/kpi\.entries/g, "_td_entries");
+  out = out.replace(/__KPI_ENTRIES__/g, "kpi.entries");
+  // Safe access when _td_entries is empty (e.g. latest with no data, or single_period with no match)
+  out = out.replace(/_td_entries\[0\]\.fields/g, "((_td_entries|first)|default({})).fields|default([])");
+  out = out.replace(/_td_entries\[0\]/g, "(_td_entries|first)");
+  return out;
+}
 
 const BLOCK_LABELS: Record<string, string> = {
   title: "Report title",
@@ -434,7 +496,7 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       const showMultiLineFieldLabel = (b as { showMultiLineFieldLabel?: boolean }).showMultiLineFieldLabel !== false;
       const showMlLabelPrefix = `{% set show_multi_line_field_label = ${showMultiLineFieldLabel ? "true" : "false"} %}`;
       const fieldLabelFCond = `{% if show_multi_line_field_label or f.field_type != 'multi_line_items' %}${fieldLabelF}{% endif %}`;
-      const fieldLabelKeyCond = `{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (_fl[0].field_type != 'multi_line_items') %}${fieldLabelKey}{% endif %}`;
+      const fieldLabelKeyCond = `{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (((_fl|first)|default({})).field_type != 'multi_line_items') %}${fieldLabelKey}{% endif %}`;
       const multiLineSubFieldKeys = (b as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys;
       const fieldDisplayNames = (b as { fieldDisplayNames?: Record<string, string> }).fieldDisplayNames;
       const subFieldDisplayNames = (b as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames;
@@ -444,30 +506,27 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       const cellMulti = multiLineCellSnippet("f");
       const cellMultiEf = multiLineCellSnippet("ef");
       const cellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td${tdStyleKey}>${cellMulti}</td>{% endif %}{% endfor %}`;
+      const tdPrefix = blockTimeDimensionPrefix(b);
       if (fieldsLayout === "rows") {
         if (!kpiIds.length && !fieldKeys.length) {
-          out.push(
-            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for f in kpi.entries[0].fields if kpi.entries %}<tr><td${tdStyleF}>${fieldLabelFCond}</td>{% for entry in kpi.entries %}{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td${tdStyleEf}>${cellMultiEf}</td>{% endif %}{% endfor %}{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
-          );
+          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for f in kpi.entries[0].fields if kpi.entries %}<tr><td${tdStyleF}>${fieldLabelFCond}</td>{% for entry in kpi.entries %}{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td${tdStyleEf}>${cellMultiEf}</td>{% endif %}{% endfor %}{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
+          out.push(injectTimeDimensionFilter(raw, tdPrefix));
         } else {
           const fidList = kpiIds.join(", ");
           const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
           const rowCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td${tdStyleKey}>${cellMulti}</td>{% endif %}{% endfor %}`;
-          out.push(
-            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for key in field_keys_list %}<tr><td>${fieldLabelKeyCond}</td>{% for entry in kpi.entries %}${rowCellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
-          );
+          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for key in field_keys_list %}<tr><td>${fieldLabelKeyCond}</td>{% for entry in kpi.entries %}${rowCellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
+          out.push(injectTimeDimensionFilter(raw, tdPrefix));
         }
       } else {
         if (!kpiIds.length && !fieldKeys.length) {
-          out.push(
-            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th${tdStyleF}>${fieldLabelFCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for f in entry.fields %}<td${tdStyleF}>${cellMulti}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
-          );
+          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th${tdStyleF}>${fieldLabelFCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for f in entry.fields %}<td${tdStyleF}>${cellMulti}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
+          out.push(injectTimeDimensionFilter(raw, tdPrefix));
         } else {
           const fidList = kpiIds.join(", ");
           const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
-          out.push(
-            displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for key in field_keys_list %}<th${thStyle}>${fieldLabelKeyCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for key in field_keys_list %}${cellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
-          );
+          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for key in field_keys_list %}<th${thStyle}>${fieldLabelKeyCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for key in field_keys_list %}${cellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
+          out.push(injectTimeDimensionFilter(raw, tdPrefix));
         }
       }
     } else if (type === "kpi_multi_table") {
@@ -536,17 +595,16 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       const subFieldDisplayPrefix = buildSubFieldDisplayNamesJinja((b as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames);
       const subKeysPrefix = buildFieldSubFieldKeysJinja((b as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys);
       const gridCellMulti = multiLineCellSnippet("f");
+      const tdPrefixGrid = blockTimeDimensionPrefix(b);
       if (!kpiIds.length && !fieldKeys.length) {
-        out.push(
-          displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">{% if kpis %}{% for kpi in kpis %}{% for entry in kpi.entries %}<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;"><h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>{% for f in entry.fields %}<p style="margin: 0.25rem 0;"><strong>${fieldLabelF}:</strong> ${gridCellMulti}</p>{% endfor %}</div>{% endfor %}{% endfor %}{% endif %}</div>`
-        );
+        const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">{% if kpis %}{% for kpi in kpis %}{% for entry in kpi.entries %}<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;"><h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>{% for f in entry.fields %}<p style="margin: 0.25rem 0;"><strong>${fieldLabelF}:</strong> ${gridCellMulti}</p>{% endfor %}</div>{% endfor %}{% endfor %}{% endif %}</div>`;
+        out.push(injectTimeDimensionFilter(raw, tdPrefixGrid));
       } else {
         const fidList = kpiIds.join(", ");
         const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
         const gridCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}${gridCellMulti}{% endif %}{% endfor %}`;
-        out.push(
-          displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}{% for entry in kpi.entries %}<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;"><h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>{% for key in field_keys_list %}<p style="margin: 0.25rem 0;"><strong>${fieldLabelKey}:</strong> ${gridCellByKey}</p>{% endfor %}</div>{% endfor %}{% endif %}{% endfor %}{% endif %}</div>`
-        );
+        const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}{% for entry in kpi.entries %}<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;"><h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>{% for key in field_keys_list %}<p style="margin: 0.25rem 0;"><strong>${fieldLabelKey}:</strong> ${gridCellByKey}</p>{% endfor %}</div>{% endfor %}{% endif %}{% endfor %}{% endif %}</div>`;
+        out.push(injectTimeDimensionFilter(raw, tdPrefixGrid));
       }
     } else if (type === "kpi_list") {
       const kpiIds = (b as { kpiIds?: number[] }).kpiIds || [];
@@ -555,17 +613,16 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       const subFieldDisplayPrefix = buildSubFieldDisplayNamesJinja((b as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames);
       const subKeysPrefix = buildFieldSubFieldKeysJinja((b as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys);
       const listCellMulti = multiLineCellSnippet("f");
+      const tdPrefixList = blockTimeDimensionPrefix(b);
       if (!kpiIds.length && !fieldKeys.length) {
-        out.push(
-          displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `<div class="report-kpi-list">{% if kpis %}{% for kpi in kpis %}<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">{% for entry in kpi.entries %}{% for f in entry.fields %}<dt style="font-weight: 600;">${fieldLabelF}</dt><dd style="margin-left: 1rem;">${listCellMulti}</dd>{% endfor %}{% endfor %}</dl>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`
-        );
+        const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `<div class="report-kpi-list">{% if kpis %}{% for kpi in kpis %}<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">{% for entry in kpi.entries %}{% for f in entry.fields %}<dt style="font-weight: 600;">${fieldLabelF}</dt><dd style="margin-left: 1rem;">${listCellMulti}</dd>{% endfor %}{% endfor %}</dl>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
+        out.push(injectTimeDimensionFilter(raw, tdPrefixList));
       } else {
         const fidList = kpiIds.join(", ");
         const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
         const listCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}${listCellMulti}{% endif %}{% endfor %}`;
-        out.push(
-          displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-list">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">{% for entry in kpi.entries %}{% for key in field_keys_list %}<dt style="font-weight: 600;">${fieldLabelKey}</dt><dd style="margin-left: 1rem;">${listCellByKey}</dd>{% endfor %}{% endfor %}</dl>{% endif %}{% endfor %}{% endif %}</div>`
-        );
+        const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-list">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">{% for entry in kpi.entries %}{% for key in field_keys_list %}<dt style="font-weight: 600;">${fieldLabelKey}</dt><dd style="margin-left: 1rem;">${listCellByKey}</dd>{% endfor %}{% endfor %}</dl>{% endif %}{% endfor %}{% endif %}</div>`;
+        out.push(injectTimeDimensionFilter(raw, tdPrefixList));
       }
     }
   }
@@ -1040,7 +1097,7 @@ export default function ReportDesignPage() {
                   if (v === "title") addBlock({ type: "title", useTemplateName: true, customText: "" });
                   else if (v === "section_heading") addBlock({ type: "section_heading", text: "New section", level: 2 });
                   else if (v === "text") addBlock({ type: "text", content: "" });
-                  else if (v === "kpi_table") addBlock({ type: "kpi_table", kpiIds: [], fieldKeys: [], oneTablePerKpi: true, fieldsLayout: "columns", multiLineSubFieldKeys: {} });
+                  else if (v === "kpi_table") addBlock({ type: "kpi_table", kpiIds: [], fieldKeys: [], oneTablePerKpi: true, fieldsLayout: "columns", multiLineSubFieldKeys: {}, timeDimensionMode: "latest", periodKey: "" });
                   else if (v === "simple_table") addBlock({ type: "simple_table", rows: [{ cells: [{ type: "text", content: "" }] }] });
                 }}
               >
@@ -1058,8 +1115,8 @@ export default function ReportDesignPage() {
                 else if (v === "domain_list") addBlock({ type: "domain_list", domainIds: [] });
                 else if (v === "domain_categories") addBlock({ type: "domain_categories", domainIds: [] });
                 else if (v === "domain_kpis") addBlock({ type: "domain_kpis", domainIds: [] });
-                else if (v === "kpi_grid") addBlock({ type: "kpi_grid", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {} });
-                else if (v === "kpi_list") addBlock({ type: "kpi_list", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {} });
+                else if (v === "kpi_grid") addBlock({ type: "kpi_grid", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {}, timeDimensionMode: "latest", periodKey: "" });
+                else if (v === "kpi_list") addBlock({ type: "kpi_list", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {}, timeDimensionMode: "latest", periodKey: "" });
                 else if (v === "single_value") addBlock({ type: "single_value", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "", subFieldKey: "", entryIndex: 0 });
                 else if (v === "kpi_multi_table") addBlock({ type: "kpi_multi_table", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "" });
               }}
@@ -1820,6 +1877,66 @@ function BlockCard({
                   ));
                 })()}
               </select>
+            </div>
+            <div className="form-group" style={{ margin: 0, marginTop: "0.5rem" }}>
+              <label style={{ fontSize: "0.85rem" }}>Data period</label>
+              <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.25rem 0 0.35rem 0" }}>
+                Choose which time dimension data to show: latest entry only, all periods (e.g. Q1–Q4), or a single period.
+              </p>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                {(() => {
+                  const kpiIdsBlock = (block as { kpiIds?: number[] }).kpiIds || [];
+                  const blockKpis = kpiIdsBlock.length
+                    ? kpis.filter((k) => kpiIdsBlock.includes(k.kpi_id))
+                    : kpis;
+                  const hasSubPeriods = blockKpis.some(
+                    (k) => k.time_dimension && k.time_dimension !== "yearly" && k.time_dimension !== "multi_year"
+                  );
+                  const periodKeysSet = new Set<string>();
+                  blockKpis.forEach((k) => {
+                    if (k.time_dimension && k.time_dimension !== "yearly" && k.time_dimension !== "multi_year") {
+                      expectedPeriodsForDimension(k.time_dimension).forEach((pk) => periodKeysSet.add(pk));
+                    }
+                  });
+                  const periodOptionsForBlock = Array.from(periodKeysSet).map((value) => ({
+                    value,
+                    label: REPORT_PERIOD_OPTIONS.find((o) => o.value === value)?.label ?? (value || "Full year"),
+                  })).sort((a, b) => {
+                    const order = ["", "H1", "H2", "Q1", "Q2", "Q3", "Q4", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"];
+                    return order.indexOf(a.value) - order.indexOf(b.value);
+                  });
+                  const effectiveMode = !hasSubPeriods && (block as { timeDimensionMode?: string }).timeDimensionMode === "single_period"
+                    ? "latest"
+                    : ((block as { timeDimensionMode?: string }).timeDimensionMode ?? "latest");
+                  return (
+                    <>
+                      <select
+                        value={effectiveMode}
+                        onChange={(e) => {
+                          const v = e.target.value as "latest" | "single_period" | "all_periods";
+                          onUpdate({ timeDimensionMode: v, ...(v !== "single_period" ? { periodKey: "" } : {}) });
+                        }}
+                        style={{ minWidth: 180 }}
+                      >
+                        <option value="latest">Use latest entry</option>
+                        <option value="all_periods">All periods (consolidated)</option>
+                        {hasSubPeriods && <option value="single_period">Single period</option>}
+                      </select>
+                      {(block as { timeDimensionMode?: string }).timeDimensionMode === "single_period" && (
+                        <select
+                          value={(block as { periodKey?: string }).periodKey ?? ""}
+                          onChange={(e) => onUpdate({ periodKey: e.target.value })}
+                          style={{ minWidth: 140 }}
+                        >
+                          {periodOptionsForBlock.map((o) => (
+                            <option key={o.value || "full"} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
             </div>
             <div style={{ marginTop: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
               <button

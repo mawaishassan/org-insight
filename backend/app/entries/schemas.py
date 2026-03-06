@@ -21,6 +21,7 @@ class EntryCreate(BaseModel):
 
     kpi_id: int = Field(...)
     year: int = Field(..., ge=2000, le=2100)
+    period_key: str = Field(default="", max_length=8, description="'' for yearly; H1/H2, Q1-Q4, 01-12 for sub-periods")
     is_draft: bool = True
     values: list[FieldValueInput] = Field(default_factory=list)
 
@@ -57,10 +58,13 @@ class EntryResponse(BaseModel):
     organization_id: int
     user_id: int | None
     year: int
+    period_key: str = ""
     is_draft: bool
     is_locked: bool
     submitted_at: datetime | None
     values: list[FieldValueResponse] = []
+    entered_by_user_name: str | None = None
+    updated_at: datetime | None = None
 
     class Config:
         from_attributes = True

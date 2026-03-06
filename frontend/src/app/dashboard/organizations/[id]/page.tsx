@@ -46,7 +46,7 @@ const WHERE_OPERATORS = [
   { value: "op_lte", label: "less or equal (≤)" },
 ] as const;
 
-type TabId = "domains" | "kpis" | "fields" | "tags" | "reports" | "storage";
+type TabId = "domains" | "kpis" | "fields" | "tags" | "reports" | "storage" | "settings";
 
 interface SubFieldDef {
   id?: number;
@@ -63,6 +63,7 @@ interface OrgInfo {
   name: string;
   description: string | null;
   is_active: boolean;
+  time_dimension?: string;
 }
 
 interface DomainRow {
@@ -323,7 +324,7 @@ export default function OrganizationDetailPage() {
   const token = getAccessToken();
   const tabFromUrl = searchParams.get("tab") as TabId | null;
   const initialTab: TabId =
-    tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage"].includes(tabFromUrl)
+    tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage", "settings"].includes(tabFromUrl)
       ? tabFromUrl
       : "domains";
 
@@ -332,7 +333,7 @@ export default function OrganizationDetailPage() {
   const [domains, setDomains] = useState<DomainWithSummary[]>([]);
 
   useEffect(() => {
-    if (tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage"].includes(tabFromUrl)) {
+    if (tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage", "settings"].includes(tabFromUrl)) {
       setTab(tabFromUrl as TabId);
     }
   }, [tabFromUrl]);
@@ -355,6 +356,12 @@ export default function OrganizationDetailPage() {
   const [fieldShowCreate, setFieldShowCreate] = useState(false);
   const [fieldEditingId, setFieldEditingId] = useState<number | null>(null);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
+  const [timeDimension, setTimeDimension] = useState(org?.time_dimension ?? "yearly");
+  const [timeDimensionSaving, setTimeDimensionSaving] = useState(false);
+
+  useEffect(() => {
+    setTimeDimension(org?.time_dimension ?? "yearly");
+  }, [org?.time_dimension]);
 
   const loadOrg = () => {
     if (!token || !orgId) return;
@@ -509,6 +516,15 @@ export default function OrganizationDetailPage() {
             Storage
           </button>
         )}
+        {userRole === "SUPER_ADMIN" && (
+          <button
+            type="button"
+            className={tab === "settings" ? "btn btn-primary" : "btn"}
+            onClick={() => setTab("settings")}
+          >
+            Settings
+          </button>
+        )}
       </div>
 
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
@@ -591,6 +607,53 @@ export default function OrganizationDetailPage() {
           orgId={orgId}
           token={token!}
         />
+      )}
+
+      {tab === "settings" && userRole === "SUPER_ADMIN" && (
+        <div className="card" style={{ maxWidth: 480 }}>
+          <h3 style={{ marginBottom: "0.75rem" }}>Organization settings</h3>
+          <div className="form-group">
+            <label htmlFor="time_dimension">Time dimension</label>
+            <select
+              id="time_dimension"
+              value={timeDimension}
+              onChange={(e) => setTimeDimension(e.target.value)}
+              disabled={timeDimensionSaving}
+              style={{ maxWidth: 240 }}
+            >
+              <option value="yearly">Yearly</option>
+              <option value="half_yearly">Half-yearly</option>
+              <option value="quarterly">Quarterly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+            <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+              Default reporting period for this organization. KPIs can use this or a finer dimension (e.g. Quarterly when org is Yearly).
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={timeDimensionSaving || !token}
+            onClick={async () => {
+              if (!token || !orgId) return;
+              setTimeDimensionSaving(true);
+              try {
+                await api(`/organizations/${orgId}`, {
+                  method: "PATCH",
+                  body: JSON.stringify({ time_dimension: timeDimension }),
+                  token,
+                });
+                loadOrg();
+              } catch {
+                // leave state unchanged
+              } finally {
+                setTimeDimensionSaving(false);
+              }
+            }}
+          >
+            {timeDimensionSaving ? "Saving…" : "Save"}
+          </button>
+        </div>
       )}
 
       {tab === "storage" && userRole === "SUPER_ADMIN" && (
