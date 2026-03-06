@@ -41,10 +41,13 @@ interface EntryRow {
   organization_id: number;
   user_id: number | null;
   year: number;
+  period_key?: string;
   is_draft: boolean;
   is_locked: boolean;
   submitted_at: string | null;
   values: FieldValueResp[];
+  entered_by_user_name?: string | null;
+  updated_at?: string | null;
 }
 
 interface OverviewItem {
@@ -88,6 +91,21 @@ const FORMULA_BOX_COLORS = [
   "var(--warning)",
 ];
 
+const PERIOD_LABELS: Record<string, string> = {
+  "": "Full year", H1: "H1", H2: "H2",
+  Q1: "Q1", Q2: "Q2", Q3: "Q3", Q4: "Q4",
+  "01": "Jan", "02": "Feb", "03": "Mar", "04": "Apr", "05": "May", "06": "Jun",
+  "07": "Jul", "08": "Aug", "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
+};
+
+function expectedPeriods(dimension: string): string[] {
+  if (!dimension || dimension === "yearly") return [""];
+  if (dimension === "half_yearly") return ["H1", "H2"];
+  if (dimension === "quarterly") return ["Q1", "Q2", "Q3", "Q4"];
+  if (dimension === "monthly") return Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
+  return [""];
+}
+
 function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
   if (!v) return "—";
   if (v.value_text != null) return String(v.value_text);
@@ -103,11 +121,13 @@ export default function DomainKpiDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
   const domainId = params.id != null ? Number(params.id) : undefined;
+  const isEntriesRoute = domainId === undefined;
   const kpiId = Number(params.kpiId);
-  const yearParam = searchParams.get("year");
+  const yearParam = isEntriesRoute ? (params.year as string) : searchParams.get("year");
   const year = yearParam ? Number(yearParam) : new Date().getFullYear();
   const orgIdParam = searchParams.get("organization_id");
   const organizationIdFromUrl = orgIdParam ? Number(orgIdParam) : undefined;
+  const periodKeyFromUrl = searchParams.get("period_key") ?? "";
 
   const [meOrgId, setMeOrgId] = useState<number | null>(null);
   const [meRole, setMeRole] = useState<string | null>(null);
@@ -142,6 +162,10 @@ export default function DomainKpiDetailPage() {
   const [kpiFiles, setKpiFiles] = useState<KpiFileItem[]>([]);
   const [kpiFilesUploading, setKpiFilesUploading] = useState(false);
   const [kpiFilesError, setKpiFilesError] = useState<string | null>(null);
+  /** Entries route: time dimension and all entries for period bar */
+  const [kpiTimeDimension, setKpiTimeDimension] = useState<string | null>(null);
+  const [orgTimeDimension, setOrgTimeDimension] = useState<string | null>(null);
+  const [allEntriesForPeriodBar, setAllEntriesForPeriodBar] = useState<EntryRow[]>([]);
 
   type FormCell = { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
@@ -174,11 +198,16 @@ export default function DomainKpiDetailPage() {
   }, [formulaFields, valuesByFieldId]);
 
   const lastUpdatedFormatted =
-    overviewItem?.entry?.last_updated_at &&
-    (() => {
-      const d = new Date(overviewItem.entry!.last_updated_at!);
-      return `${String(d.getDate()).padStart(2, "0")}-${d.toLocaleString("en", { month: "short" })}-${d.getFullYear()}`;
-    })();
+    (entry?.updated_at &&
+      (() => {
+        const d = new Date(entry.updated_at);
+        return Number.isNaN(d.getTime()) ? undefined : `${String(d.getDate()).padStart(2, "0")}-${d.toLocaleString("en", { month: "short" })}-${d.getFullYear()}`;
+      })()) ||
+    (overviewItem?.entry?.last_updated_at &&
+      (() => {
+        const d = new Date(overviewItem.entry!.last_updated_at!);
+        return `${String(d.getDate()).padStart(2, "0")}-${d.toLocaleString("en", { month: "short" })}-${d.getFullYear()}`;
+      })());
 
   useEffect(() => {
     if (!token) return;
@@ -220,7 +249,14 @@ export default function DomainKpiDetailPage() {
       api<{ entry_mode?: string; api_endpoint_url?: string | null; can_edit?: boolean }>(`/entries/kpi-api-info${apiInfoQuery}`, { token }).catch(() => null),
     ]);
     setFields(fieldsList);
-    setEntry(entriesList[0] ?? null);
+    if (isEntriesRoute) {
+      setAllEntriesForPeriodBar(entriesList);
+      const pk = periodKeyFromUrl ?? "";
+      const match = entriesList.find((e) => (e.period_key ?? "") === pk);
+      setEntry(match ?? entriesList[0] ?? null);
+    } else {
+      setEntry(entriesList[0] ?? null);
+    }
     setOverviewItem(overviewList.find((x) => x.kpi_id === kpiId) ?? null);
     const ov = overviewList.find((x) => x.kpi_id === kpiId);
     if (kpiResp?.name) setKpiName(kpiResp.name);
@@ -232,13 +268,22 @@ export default function DomainKpiDetailPage() {
     api<KpiFileItem[]>(`/kpis/${kpiId}/files?${qs({ year })}`, { token })
       .then(setKpiFiles)
       .catch(() => setKpiFiles([]));
+
+    if (isEntriesRoute && effectiveOrgId != null) {
+      api<{ time_dimension: string }>(`/organizations/${effectiveOrgId}/time-dimension`, { token })
+        .then((r) => setOrgTimeDimension(r.time_dimension ?? null))
+        .catch(() => setOrgTimeDimension(null));
+      api<{ time_dimension?: string | null }>(`/kpis/${kpiId}?${kpiQuery}`, { token })
+        .then((k) => setKpiTimeDimension(k.time_dimension ?? null))
+        .catch(() => setKpiTimeDimension(null));
+    }
   };
 
   useEffect(() => {
     if (!token || !kpiId || effectiveOrgId == null) return;
     setError(null);
     loadData().catch((e) => setError(e instanceof Error ? e.message : "Failed to load")).finally(() => setLoading(false));
-  }, [token, kpiId, year, effectiveOrgId]);
+  }, [token, kpiId, year, effectiveOrgId, periodKeyFromUrl, isEntriesRoute]);
 
   const buildFormValuesFromEntry = (e: EntryRow | null): Record<number, FormCell> => {
     const out: Record<number, FormCell> = {};
@@ -290,9 +335,16 @@ export default function DomainKpiDetailPage() {
           return payload;
         });
       const saveQuery = `?${qs({ organization_id: effectiveOrgId })}`;
+      const body: { kpi_id: number; year: number; is_draft: boolean; values: unknown[]; period_key?: string } = {
+        kpi_id: kpiId,
+        year,
+        is_draft: entry?.is_draft ?? true,
+        values,
+      };
+      if (isEntriesRoute && (periodKeyFromUrl ?? "") !== "") body.period_key = periodKeyFromUrl!.trim().slice(0, 8);
       const updated = await api<EntryRow>(`/entries${saveQuery}`, {
         method: "POST",
-        body: JSON.stringify({ kpi_id: kpiId, year, is_draft: entry?.is_draft ?? true, values }),
+        body: JSON.stringify(body),
         token,
       });
       setEntry(updated);
@@ -359,23 +411,86 @@ export default function DomainKpiDetailPage() {
   const isLocked = entry?.is_locked ?? false;
   const isApiKpi = kpiApiInfo?.entry_mode === "api" && kpiApiInfo?.api_endpoint_url && effectiveOrgId != null;
 
+  const expectedPeriodsList = kpiTimeDimension ? expectedPeriods(kpiTimeDimension) : [""];
+  const hasSubPeriods = expectedPeriodsList.length > 1;
+  const requirePeriodSelection = isEntriesRoute && hasSubPeriods && (periodKeyFromUrl ?? "") === "";
+  const currentPeriodKey = (periodKeyFromUrl ?? "").trim();
+  const currentPeriodLabel = currentPeriodKey !== "" ? (PERIOD_LABELS[currentPeriodKey] ?? currentPeriodKey) : (hasSubPeriods ? "Full year" : null);
+  const timeDimensionLabel = currentPeriodLabel != null ? currentPeriodLabel : null;
+  const formatDate = (s: string | null | undefined) => {
+    if (!s) return "—";
+    try {
+      const d = new Date(s);
+      return Number.isNaN(d.getTime()) ? s : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    } catch {
+      return s;
+    }
+  };
+
+  const periodBar = isEntriesRoute && hasSubPeriods && expectedPeriodsList.length > 0 ? (
+    <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+      <span style={{ fontSize: "0.9rem", color: "var(--muted)", marginRight: "0.5rem" }}>Period:</span>
+      {expectedPeriodsList.map((pk) => {
+        const ent = allEntriesForPeriodBar.find((e) => (e.period_key ?? "") === pk);
+        const isSubmitted = ent && !ent.is_draft && ent.submitted_at;
+        const isDraft = ent?.is_draft ?? false;
+        const isActive = (periodKeyFromUrl ?? "") === pk;
+        const periodLabel = PERIOD_LABELS[pk] ?? pk || "Full year";
+        const href = `/dashboard/entries/${kpiId}/${year}?${qs({
+          ...(effectiveOrgId != null ? { organization_id: effectiveOrgId } : {}),
+          period_key: pk,
+        })}`;
+        return (
+          <Link
+            key={pk || "full"}
+            href={href}
+            style={{
+              padding: "0.35rem 0.65rem",
+              borderRadius: 6,
+              fontSize: "0.9rem",
+              fontWeight: 500,
+              textDecoration: "none",
+              border: `1px solid ${isActive ? "var(--primary)" : isSubmitted ? "var(--success)" : isDraft ? "var(--warning)" : "var(--border)"}`,
+              background: isActive ? "var(--primary)" : isSubmitted ? "var(--success)" : isDraft ? "var(--warning)" : "transparent",
+              color: isActive ? "var(--on-primary)" : "var(--text)",
+            }}
+          >
+            {periodLabel}
+          </Link>
+        );
+      })}
+    </div>
+  ) : null;
+
   if (!kpiId) return <p>Invalid KPI.</p>;
   if (loading) return <p>Loading...</p>;
   if (effectiveOrgId == null) return <p>Organization context required.</p>;
 
   return (
     <div>
-      {domainId != null && (
-        <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+      <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+        {domainId != null ? (
           <Link href={backHref} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
             ← Back to Domain
           </Link>
-        </div>
-      )}
+        ) : (
+          <Link href={backHref} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+            ← Back to Data entry
+          </Link>
+        )}
+      </div>
 
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
       {saveError && <p className="form-error" style={{ marginBottom: "1rem" }}>{saveError}</p>}
 
+      {periodBar}
+
+      {requirePeriodSelection ? (
+        <div className="card" style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>
+          <p style={{ margin: 0, fontSize: "1rem" }}>This KPI has sub-periods. Select a period above to view or edit the entry.</p>
+        </div>
+      ) : (
+        <>
       {/* Section 1: Formula fields in colored boxes (max 4) */}
       {formulaBoxes.length > 0 && (
         <div
@@ -425,6 +540,22 @@ export default function DomainKpiDetailPage() {
               >
                 {year}
               </span>
+              {timeDimensionLabel != null && (
+                <span
+                  style={{
+                    fontSize: "0.8rem",
+                    fontWeight: 500,
+                    padding: "0.25rem 0.6rem",
+                    borderRadius: 12,
+                    background: "var(--bg-subtle, #f0f0f0)",
+                    color: "var(--text)",
+                    border: "1px solid var(--border)",
+                  }}
+                  title={hasSubPeriods ? "Time dimension period" : undefined}
+                >
+                  {timeDimensionLabel}
+                </span>
+              )}
               {!canEditKpi && (
                 <span
                   style={{
@@ -476,8 +607,20 @@ export default function DomainKpiDetailPage() {
               </div>
               {lastUpdatedFormatted && (
                 <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-subtle, #f8f9fa)", borderRadius: 8 }}>
-                  <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Updated</div>
+                  <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Last updated</div>
                   <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>{lastUpdatedFormatted}</div>
+                </div>
+              )}
+              {entry && (entry.entered_by_user_name != null || entry.user_id != null) && (
+                <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-subtle, #f8f9fa)", borderRadius: 8 }}>
+                  <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Entry by</div>
+                  <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>{entry.entered_by_user_name ?? `User #${entry.user_id}`}</div>
+                </div>
+              )}
+              {entry?.submitted_at && (
+                <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-subtle, #f8f9fa)", borderRadius: 8 }}>
+                  <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Submitted at</div>
+                  <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>{formatDate(entry.submitted_at)}</div>
                 </div>
               )}
             </div>
@@ -634,13 +777,16 @@ export default function DomainKpiDetailPage() {
               <div
                 style={{
                   display: "flex",
+                  flexDirection: "column",
                   gap: "0.5rem",
-                  flexWrap: "wrap",
-                  alignItems: "center",
                   paddingTop: "0.5rem",
                   borderTop: "1px solid var(--border)",
                 }}
               >
+                <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: 0, fontWeight: 500 }}>
+                  You are entering data for <span style={{ color: "var(--text)" }}>{timeDimensionLabel != null ? `${timeDimensionLabel} (${year})` : year}</span>.
+                </p>
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
                 <span style={{ fontSize: "0.8rem", color: "var(--muted)", marginRight: "0.25rem" }}>Excel:</span>
                 <button
                   type="button"
@@ -661,7 +807,7 @@ export default function DomainKpiDetailPage() {
                     if (!token) return;
                     setExportExcelLoading(true);
                     try {
-                      const url = getApiUrl(`/entries/export-excel?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}`);
+                      const url = getApiUrl(`/entries/export-excel?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId, ...(periodKeyFromUrl ? { period_key: periodKeyFromUrl } : {}) })}`);
                       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
                       if (!res.ok) throw new Error("Export failed");
                       const blob = await res.blob();
@@ -709,8 +855,11 @@ export default function DomainKpiDetailPage() {
                         const file = e.target.files?.[0];
                         e.target.value = "";
                         if (!file || !token) return;
+                        const periodPhrase = timeDimensionLabel != null
+                          ? ` You are about to add data for the period: ${timeDimensionLabel} (${year}).`
+                          : "";
                         const confirmed = window.confirm(
-                          "This will replace all existing data for this KPI entry with the data from the uploaded file.\n\nAre you sure you want to continue?"
+                          `This will replace all existing data for this KPI entry with the data from the uploaded file.${periodPhrase}\n\nAre you sure you want to continue?`
                         );
                         if (!confirmed) return;
                         setImportExcelLoading(true);
@@ -718,7 +867,7 @@ export default function DomainKpiDetailPage() {
                         try {
                           const form = new FormData();
                           form.append("file", file);
-                          const url = getApiUrl(`/entries/import-excel?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId })}`);
+                          const url = getApiUrl(`/entries/import-excel?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId, ...(periodKeyFromUrl ? { period_key: periodKeyFromUrl } : {}) })}`);
                           const res = await fetch(url, {
                             method: "POST",
                             headers: { Authorization: `Bearer ${token}` },
@@ -738,6 +887,7 @@ export default function DomainKpiDetailPage() {
                     />
                   </label>
                 )}
+                </div>
               </div>
             )}
           </div>
@@ -906,6 +1056,22 @@ export default function DomainKpiDetailPage() {
 
       {/* Section 3: Tabs – Field details (scalar + formula), then one tab per multi_line_items */}
       <div className="card">
+        <div
+          style={{
+            padding: "0.6rem 1rem",
+            marginBottom: "1rem",
+            borderRadius: 8,
+            background: isEditing ? "var(--warning)" : "var(--bg-subtle, #f0f0f0)",
+            color: isEditing ? "var(--on-warning, #000)" : "var(--text)",
+            fontSize: "0.9rem",
+            fontWeight: 500,
+            border: isEditing ? "1px solid var(--warning-dark, #b38600)" : "1px solid var(--border)",
+          }}
+        >
+          {isEditing
+            ? `You are updating data for ${timeDimensionLabel != null ? `${timeDimensionLabel} (${year})` : year}.`
+            : `You are viewing the data for ${timeDimensionLabel != null ? `${timeDimensionLabel} (${year})` : year}.`}
+        </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", borderBottom: "1px solid var(--border)", marginBottom: "1rem", paddingBottom: "0.5rem" }}>
           <button
             type="button"
@@ -1186,7 +1352,10 @@ export default function DomainKpiDetailPage() {
                                 const file = e.target.files?.[0];
                                 e.target.value = "";
                                 if (!file || !entry || uploadOption == null) return;
-                                if (uploadOption === "override" && !window.confirm("Are you sure you want to replace all existing data? This cannot be undone.")) return;
+                                if (uploadOption === "override") {
+                                  const periodNote = timeDimensionLabel != null ? ` Data will apply to period: ${timeDimensionLabel} (${year}).` : "";
+                                  if (!window.confirm(`Are you sure you want to replace all existing data for this field?${periodNote} This cannot be undone.`)) return;
+                                }
                                 setUploadingFieldId(f.id);
                                 try {
                                   const form = new FormData();
@@ -1229,7 +1398,10 @@ export default function DomainKpiDetailPage() {
                           style={{ opacity: syncOption != null ? 1 : 0.6, marginTop: "0.25rem" }}
                           onClick={async () => {
                             if (syncOption == null) return;
-                            if (syncOption === "override" && !window.confirm("Are you sure you want to replace all existing data? This cannot be undone.")) return;
+                            if (syncOption === "override") {
+                              const periodNote = timeDimensionLabel != null ? ` Data will apply to period: ${timeDimensionLabel} (${year}).` : "";
+                              if (!window.confirm(`Are you sure you want to replace all existing data?${periodNote} This cannot be undone.`)) return;
+                            }
                             setFetchingFromApi(true);
                             setSaveError(null);
                             setSyncFeedback(null);
@@ -1382,6 +1554,8 @@ export default function DomainKpiDetailPage() {
         })}
       </div>
 
+        </>
+      )}
     </div>
   );
 }

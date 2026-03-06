@@ -440,6 +440,7 @@ def _build_kpi_entry_xlsx(
 async def export_entry_excel(
     kpi_id: int = Query(...),
     year: int = Query(..., ge=2000, le=2100),
+    period_key: str = Query("", description="Period: '', H1, H2, Q1-Q4, 01-12 for time dimension"),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -456,12 +457,14 @@ async def export_entry_excel(
     if not kpi:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
     fields = await list_kpi_fields_service(db, kpi_id, org_id)
+    pk = (period_key or "").strip()[:8]
     entry_res = await db.execute(
         select(KPIEntry)
         .where(
             KPIEntry.kpi_id == kpi_id,
             KPIEntry.organization_id == org_id,
             KPIEntry.year == year,
+            KPIEntry.period_key == pk,
         )
         .options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
     )
@@ -628,6 +631,7 @@ def _parse_kpi_entry_xlsx(
 async def import_entry_excel(
     kpi_id: int = Query(...),
     year: int = Query(..., ge=2000, le=2100),
+    period_key: str = Query("", description="Period: '', H1, H2, Q1-Q4, 01-12 for time dimension"),
     organization_id: int | None = Query(None),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
@@ -650,8 +654,8 @@ async def import_entry_excel(
         parsed = _parse_kpi_entry_xlsx(content, fields)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to parse Excel: {e}")
-    # Get or create entry
-    entry, _ = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year)
+    # Get or create entry for this period
+    entry, _ = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=(period_key or "").strip()[:8])
     if not entry:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
     if entry.is_locked:

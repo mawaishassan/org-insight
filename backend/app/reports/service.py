@@ -80,6 +80,9 @@ async def get_report_template_detail(
     # KPIs that will be included (all KPIs from attached domains, with all fields)
     kpis_from_domains = []
     if domain_ids:
+        org_row = await db.execute(select(Organization).where(Organization.id == org_id))
+        org = org_row.scalar_one_or_none()
+        org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
         kpi_ids_subq = _kpi_ids_in_domains_query(domain_ids)
         result = await db.execute(
             select(KPI)
@@ -89,10 +92,17 @@ async def get_report_template_detail(
         )
         for kpi in result.unique().scalars().all():
             field_count = len(kpi.fields) if kpi.fields else 0
+            kpi_td_raw = getattr(kpi, "time_dimension", None)
+            try:
+                kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
+            except (ValueError, TypeError):
+                kpi_td = None
+            effective_td = effective_kpi_time_dimension(kpi_td, org_td)
             kpis_from_domains.append({
                 "kpi_id": kpi.id,
                 "kpi_name": kpi.name,
                 "fields_count": field_count,
+                "time_dimension": effective_td.value,
             })
 
     return {
@@ -595,6 +605,9 @@ def _inject_time_dimension_filter(content: str, td_prefix: str) -> str:
     content = content.replace("{% for kpi in kpis %}", "{% for kpi in kpis %}" + inject, 1)
     content = content.replace("kpi.entries", "_td_entries")
     content = content.replace("__KPI_ENTRIES__", "kpi.entries")
+    # Safe access when _td_entries is empty (e.g. latest with no data, or single_period with no match)
+    content = content.replace("_td_entries[0].fields", "((_td_entries|first)|default({})).fields|default([])")
+    content = content.replace("_td_entries[0]", "(_td_entries|first)")
     return content
 
 
@@ -753,7 +766,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
             _td_style_f = ' style="text-align: {{ column_align.get(f.field_key, \'left\') }}"'
             _td_style_ef = ' style="text-align: {{ column_align.get(ef.field_key, \'left\') }}"'
             _label_f_cond = "{% if show_multi_line_field_label or f.field_type != 'multi_line_items' %}" + _label_f + "{% endif %}"
-            _label_key_cond = "{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (_fl[0].field_type != 'multi_line_items') %}" + _label_key + "{% endif %}"
+            _label_key_cond = "{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (((_fl|first)|default({})).field_type != 'multi_line_items') %}" + _label_key + "{% endif %}"
             if show_multi_as_table:
                 _cell_multi = (
                     "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
