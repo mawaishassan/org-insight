@@ -47,6 +47,17 @@ class ReportAccessAssign(BaseModel):
     can_export: bool = True
 
 
+class ReportAssignmentResponse(BaseModel):
+    """One user assignment for a report template."""
+
+    user_id: int
+    email: str | None
+    full_name: str | None
+    can_view: bool
+    can_print: bool
+    can_export: bool
+
+
 class ReportTemplateResponse(BaseModel):
     """Report template in API response."""
 

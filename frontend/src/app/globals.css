@@ -136,6 +136,34 @@ textarea {
   margin-top: 0.25rem;
 }
 
+/* Report view: same look as design live preview (iframe uses minimal CSS + default table borders) */
+.print-report .report-rendered-body {
+  font-family: inherit;
+  margin: 0;
+  color: #111;
+  line-height: 1.5;
+}
+.print-report .report-rendered-body table {
+  border-collapse: collapse !important;
+  width: 100% !important;
+  border: 1px solid #333 !important;
+}
+.print-report .report-rendered-body table td,
+.print-report .report-rendered-body table th {
+  border: 1px solid #333 !important;
+  padding: 6px !important;
+}
+.print-report .report-rendered-body .report-kpi-table,
+.print-report .report-rendered-body .report-simple-table,
+.print-report .report-rendered-body .report-kpi-multi-table {
+  margin-bottom: 1rem;
+}
+.print-report .report-rendered-body .report-card {
+  border: 1px solid #ddd !important;
+  padding: 1rem;
+  border-radius: 8px;
+}
+
 @media print {
   body {
     background: #fff;
@@ -144,6 +172,12 @@ textarea {
     background: #fff !important;
     border-color: #e2e8f0 !important;
     box-shadow: none !important;
+  }
+  .print-report .report-rendered-body table,
+  .print-report .report-rendered-body table td,
+  .print-report .report-rendered-body table th {
+    border: 1px solid #333 !important;
+    padding: 6px !important;
   }
 }
 

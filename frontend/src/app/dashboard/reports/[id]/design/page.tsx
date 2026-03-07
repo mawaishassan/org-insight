@@ -6,7 +6,12 @@ const AUTO_SAVE_DELAY_MS = 45_000; // 45 seconds after last change
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { api, getApiUrl } from "@/lib/api";
+import {
+  buildReportPrintDocument,
+  openReportPrintWindow,
+  type ReportData,
+} from "@/app/dashboard/reports/reportPrint";
 import {
   buildFormulaPlaceholder,
   buildKpiValuePlaceholder,
@@ -652,6 +657,8 @@ export default function ReportDesignPage() {
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [printLoading, setPrintLoading] = useState(false);
+  const [printError, setPrintError] = useState<string | null>(null);
   const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const [previewFrameHeight, setPreviewFrameHeight] = useState<number>(480);
@@ -825,7 +832,8 @@ export default function ReportDesignPage() {
   const isTemplateFromBlocks = blocks.length > 0;
   const templateForPreview = templateSourceDisplay;
 
-  // Live preview: debounced fetch when template changes
+  // Live preview: debounced fetch when template changes (long timeout + retry to avoid transient failures)
+  const PREVIEW_TIMEOUT_MS = 90_000;
   useEffect(() => {
     if (!detail || !token || !templateForPreview.trim()) {
       setPreviewHtml(null);
@@ -843,26 +851,72 @@ export default function ReportDesignPage() {
         organization_id: detail.organization_id,
         year: detail.year,
       });
-      api<{ html: string }>(`/reports/templates/${id}/preview?${query}`, {
-        method: "POST",
-        token,
-        body: JSON.stringify({ body_template: templateForPreview }),
-      })
-        .then((res) => setPreviewHtml(res.html))
-        .catch((e) => {
-          const msg = e instanceof Error ? e.message : "Preview failed";
-          setPreviewError(
-            msg === "Failed to fetch"
-              ? "Preview request failed. Check that the backend is running and the request reaches the server (network/CORS)."
-              : msg
-          );
+      const url = getApiUrl(`/reports/templates/${id}/preview?${query}`);
+      const doRequest = (retry = false): Promise<void> => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), PREVIEW_TIMEOUT_MS);
+        return fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ body_template: templateForPreview }),
+          signal: controller.signal,
         })
-        .finally(() => setPreviewLoading(false));
+          .then((res) => {
+            clearTimeout(timeoutId);
+            if (!res.ok) {
+              return res.json().catch(() => ({ detail: res.statusText })).then((err) => {
+                throw new Error(Array.isArray(err?.detail) ? err.detail.map((d: { msg?: string }) => d?.msg).join(", ") : err?.detail || res.statusText);
+              });
+            }
+            return res.json();
+          })
+          .then((data: { html: string }) => {
+            setPreviewHtml(data.html);
+            setPreviewLoading(false);
+          })
+          .catch((e) => {
+            clearTimeout(timeoutId);
+            const isAbort = e?.name === "AbortError";
+            const isNetwork = e?.message === "Failed to fetch" || e?.message?.includes("Load failed");
+            if ((isAbort || isNetwork) && !retry) {
+              setTimeout(() => doRequest(true), 1500);
+              return;
+            }
+            setPreviewLoading(false);
+            const msg = e instanceof Error ? e.message : "Preview failed";
+            setPreviewError(
+              isAbort
+                ? "Preview timed out. Try simplifying the report or try again."
+                : isNetwork
+                  ? "Preview request failed (network or CORS). Ensure the backend is running and reachable."
+                  : msg
+            );
+          });
+      };
+      doRequest();
     }, 500);
     return () => {
       if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
     };
   }, [id, token, detail?.organization_id, detail?.year, templateForPreview]);
+
+  const openReportForPrint = () => {
+    const t = getAccessToken();
+    if (!t) return;
+    setPrintError(null);
+    setPrintLoading(true);
+    const url = `/reports/templates/${id}/generate?format=json&_t=${Date.now()}`;
+    api<ReportData>(url, { token: t, cache: "no-store" })
+      .then((reportData) => {
+        const doc = buildReportPrintDocument(reportData);
+        openReportPrintWindow(doc, true);
+      })
+      .catch((e) => setPrintError(e instanceof Error ? e.message : "Failed to load report"))
+      .finally(() => setPrintLoading(false));
+  };
 
   const saveAdvanced = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -994,15 +1048,6 @@ export default function ReportDesignPage() {
           </button>
         )}
       </div>
-
-      {detail.attached_domains.length === 0 && (
-        <div className="card" style={{ marginBottom: "1rem", borderLeft: "4px solid var(--warn, #c90)", background: "var(--surface)" }}>
-          <p style={{ margin: 0, fontWeight: 500 }}>No domains attached.</p>
-          <p style={{ margin: "0.5rem 0 0", fontSize: "0.9rem", color: "var(--muted)" }}>
-            Attach this template to domains in Organization → Reports to include KPIs and fields.
-          </p>
-        </div>
-      )}
 
       {/* Grid: Report content | Live preview — hide one to give the other full space */}
       <div
@@ -1222,14 +1267,17 @@ export default function ReportDesignPage() {
           {!livePreviewMinimized && (
             <div style={{ padding: "1rem", borderTop: "1px solid var(--border)" }}>
               {!previewLoading && !previewError && previewHtml != null && (
-                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem" }}>
-                  <Link
-                    href={`/dashboard/reports/${id}`}
+                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem", flexWrap: "wrap", gap: "0.5rem" }}>
+                  <button
+                    type="button"
                     className="btn btn-primary"
-                    style={{ fontSize: "0.9rem", textDecoration: "none" }}
+                    style={{ fontSize: "0.9rem" }}
+                    onClick={openReportForPrint}
+                    disabled={printLoading}
                   >
-                    View report (print / export PDF)
-                  </Link>
+                    {printLoading ? "Opening…" : "Print / Export PDF"}
+                  </button>
+                  {printError && <p className="form-error" style={{ margin: 0, fontSize: "0.9rem" }}>{printError}</p>}
                 </div>
               )}
               {previewLoading && <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.5rem 0" }}>Updating…</p>}
@@ -1336,9 +1384,15 @@ export default function ReportDesignPage() {
       </section>
 
       <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "1rem" }}>
-        <Link className="btn btn-primary" href={`/dashboard/reports/${id}`}>
-          View / Print report
-        </Link>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={openReportForPrint}
+          disabled={printLoading}
+        >
+          {printLoading ? "Opening…" : "Print / Export PDF"}
+        </button>
+        {printError && <p className="form-error" style={{ margin: 0 }}>{printError}</p>}
       </div>
     </div>
   );
