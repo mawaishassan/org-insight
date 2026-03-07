@@ -26,7 +26,9 @@ from app.reports.service import (
     get_report_template,
     get_report_template_detail,
     list_report_templates,
+    list_all_report_templates,
     update_report_template,
+    delete_report_template,
     add_kpi_to_template,
     remove_kpi_from_template,
     assign_report_to_user,
@@ -71,13 +73,15 @@ async def _org_id_for_template(
 @router.get("/templates", response_model=list[ReportTemplateResponse])
 async def list_templates(
     organization_id: int | None = Query(None),
-    year: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List report templates (org admin: all org; others: only assigned)."""
-    org_id = _org_id(current_user, organization_id)
-    templates = await list_report_templates(db, org_id, year=year)
+    """List report templates (org admin: all org; others: only assigned). Super Admin with no org sees all templates."""
+    if current_user.role.value == "SUPER_ADMIN" and organization_id is None:
+        templates = await list_all_report_templates(db)
+    else:
+        org_id = _org_id(current_user, organization_id)
+        templates = await list_report_templates(db, org_id)
     if current_user.role.value not in ("ORG_ADMIN", "SUPER_ADMIN"):
         from sqlalchemy import select
         from app.core.models import ReportAccessPermission
@@ -96,9 +100,9 @@ async def create_template(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Create report template (Super Admin)."""
+    """Create report template (Super Admin only)."""
     if current_user.role.value != "SUPER_ADMIN":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may design report templates")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may create report templates")
     org_id = _org_id(current_user, organization_id)
     rt = await create_report_template(db, org_id, body)
     await db.commit()
@@ -150,9 +154,9 @@ async def update_template(
   db: AsyncSession = Depends(get_db),
   current_user: User = Depends(require_org_admin),
 ):
-    """Update report template."""
+    """Update report template (Super Admin only)."""
     if current_user.role.value != "SUPER_ADMIN":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may design report templates")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may update report templates")
     org_id = _org_id(current_user, organization_id)
     rt = await update_report_template(db, template_id, org_id, body)
     if not rt:
@@ -160,6 +164,23 @@ async def update_template(
     await db.commit()
     await db.refresh(rt)
     return ReportTemplateResponse.model_validate(rt)
+
+
+@router.delete("/templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_template(
+    template_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Delete report template (Super Admin only)."""
+    if current_user.role.value != "SUPER_ADMIN":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may delete report templates")
+    org_id = await _org_id_for_template(db, current_user, template_id, organization_id)
+    ok = await delete_report_template(db, template_id, org_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+    await db.commit()
 
 
 @router.post("/templates/{template_id}/kpis", status_code=status.HTTP_201_CREATED)
@@ -170,9 +191,9 @@ async def add_kpi(
   db: AsyncSession = Depends(get_db),
   current_user: User = Depends(require_org_admin),
 ):
-    """Add KPI to report template."""
+    """Add KPI to report template (Super Admin only)."""
     if current_user.role.value != "SUPER_ADMIN":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may design report templates")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may add KPIs to report templates")
     org_id = await _org_id_for_template(db, current_user, template_id, organization_id)
     rtk = await add_kpi_to_template(db, template_id, org_id, body)
     if not rtk:
@@ -189,9 +210,9 @@ async def remove_kpi(
   db: AsyncSession = Depends(get_db),
   current_user: User = Depends(require_org_admin),
 ):
-    """Remove KPI from report template."""
+    """Remove KPI from report template (Super Admin only)."""
     if current_user.role.value != "SUPER_ADMIN":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may design report templates")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may remove KPIs from report templates")
     org_id = await _org_id_for_template(db, current_user, template_id, organization_id)
     ok = await remove_kpi_from_template(db, template_id, org_id, rtk_id)
     if not ok:
@@ -258,7 +279,7 @@ async def create_text_block(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Add a text block to a template (Super Admin)."""
+    """Add a text block to a template (Super Admin only)."""
     if current_user.role.value != "SUPER_ADMIN":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may edit report text blocks")
     org_id = await _org_id_for_template(db, current_user, template_id, organization_id)
@@ -277,7 +298,7 @@ async def remove_text_block(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Remove a text block from a template (Super Admin)."""
+    """Remove a text block from a template (Super Admin only)."""
     if current_user.role.value != "SUPER_ADMIN":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may edit report text blocks")
     org_id = await _org_id_for_template(db, current_user, template_id, organization_id)

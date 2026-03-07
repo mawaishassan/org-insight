@@ -15,16 +15,18 @@ export async function api<T>(
   path: string,
   options: RequestInit & { token?: string } = {}
 ): Promise<T> {
-  const { token, ...init } = options;
+  const { token, body, ...init } = options;
   const url = getApiUrl(path);
   const headers: HeadersInit = {
-    "Content-Type": "application/json",
     ...(init.headers as Record<string, string>),
   };
+  if (body !== undefined && body !== null) {
+    (headers as Record<string, string>)["Content-Type"] = "application/json";
+  }
   if (token) {
     (headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
   }
-  const res = await fetch(url, { ...init, headers });
+  const res = await fetch(url, { ...init, body, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(Array.isArray(err.detail) ? err.detail.map((e: { msg: string }) => e.msg).join(", ") : err.detail || res.statusText);

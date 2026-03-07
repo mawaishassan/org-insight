@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 
 const AUTO_SAVE_DELAY_MS = 45_000; // 45 seconds after last change
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 import {
@@ -12,6 +12,7 @@ import {
   openReportPrintWindow,
   type ReportData,
 } from "@/app/dashboard/reports/reportPrint";
+import { ReportLoadProgress } from "@/app/dashboard/reports/ReportLoadProgress";
 import {
   buildFormulaPlaceholder,
   buildKpiValuePlaceholder,
@@ -52,7 +53,6 @@ interface TemplateDetail {
   organization_id: number;
   name: string;
   description: string | null;
-  year: number;
   body_template: string | null;
   body_blocks: ReportBlock[] | null;
   attached_domains: AttachedDomain[];
@@ -636,8 +636,10 @@ function blocksToJinja(blocks: ReportBlock[]): string {
 
 export default function ReportDesignPage() {
   const params = useParams();
+  const router = useRouter();
   const id = Number(params.id);
   const token = getAccessToken();
+  const [designAllowed, setDesignAllowed] = useState<boolean | null>(null);
   const [detail, setDetail] = useState<TemplateDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -659,7 +661,6 @@ export default function ReportDesignPage() {
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [printLoading, setPrintLoading] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
-  const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const [previewFrameHeight, setPreviewFrameHeight] = useState<number>(480);
 
@@ -667,6 +668,9 @@ export default function ReportDesignPage() {
   const [livePreviewMinimized, setLivePreviewMinimized] = useState(false);
   const [minimizedBlockIds, setMinimizedBlockIds] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<"both" | "design" | "preview">("both");
+  const [reportYear, setReportYear] = useState(() => new Date().getFullYear());
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printModalYear, setPrintModalYear] = useState(() => new Date().getFullYear());
 
   const toggleBlockMinimized = useCallback((blockId: string) => {
     setMinimizedBlockIds((prev) => {
@@ -693,9 +697,22 @@ export default function ReportDesignPage() {
       .finally(() => setLoading(false));
   }, [id, token]);
 
+  // Only SUPER_ADMIN may access the design page
   useEffect(() => {
+    if (!token) return;
+    api<{ role: string }>("/auth/me", { token })
+      .then((me) => {
+        const allowed = me.role === "SUPER_ADMIN";
+        setDesignAllowed(allowed);
+        if (!allowed) router.replace(`/dashboard/reports/${id}`);
+      })
+      .catch(() => setDesignAllowed(false));
+  }, [token, id, router]);
+
+  useEffect(() => {
+    if (designAllowed !== true) return;
     loadDetail();
-  }, [loadDetail]);
+  }, [loadDetail, designAllowed]);
 
   blocksRef.current = blocks;
   bodyTemplateRef.current = bodyTemplate;
@@ -820,6 +837,7 @@ export default function ReportDesignPage() {
         }),
       });
       setIsDirty(false);
+      fetchPreview();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Failed to save");
     } finally {
@@ -832,90 +850,103 @@ export default function ReportDesignPage() {
   const isTemplateFromBlocks = blocks.length > 0;
   const templateForPreview = templateSourceDisplay;
 
-  // Live preview: debounced fetch when template changes (long timeout + retry to avoid transient failures)
   const PREVIEW_TIMEOUT_MS = 90_000;
-  useEffect(() => {
+  const fetchPreview = useCallback(() => {
     if (!detail || !token || !templateForPreview.trim()) {
       setPreviewHtml(null);
       return;
     }
-    if (previewDebounceRef.current) {
-      clearTimeout(previewDebounceRef.current);
-      previewDebounceRef.current = null;
-    }
-    previewDebounceRef.current = setTimeout(() => {
-      previewDebounceRef.current = null;
-      setPreviewLoading(true);
-      setPreviewError(null);
-      const query = qs({
-        organization_id: detail.organization_id,
-        year: detail.year,
-      });
-      const url = getApiUrl(`/reports/templates/${id}/preview?${query}`);
-      const doRequest = (retry = false): Promise<void> => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), PREVIEW_TIMEOUT_MS);
-        return fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ body_template: templateForPreview }),
-          signal: controller.signal,
+    setPreviewLoading(true);
+    setPreviewError(null);
+    const query = qs({
+      organization_id: detail.organization_id,
+      year: reportYear,
+    });
+    const url = getApiUrl(`/reports/templates/${id}/preview?${query}`);
+    const doRequest = (retry = false): Promise<void> => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), PREVIEW_TIMEOUT_MS);
+      return fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ body_template: templateForPreview }),
+        signal: controller.signal,
+      })
+        .then((res) => {
+          clearTimeout(timeoutId);
+          if (!res.ok) {
+            return res.json().catch(() => ({ detail: res.statusText })).then((err: { detail?: string | { msg?: string }[] }) => {
+              throw new Error(Array.isArray(err?.detail) ? err.detail.map((d: { msg?: string }) => d?.msg).join(", ") : (err?.detail as string) || res.statusText);
+            });
+          }
+          return res.json();
         })
-          .then((res) => {
-            clearTimeout(timeoutId);
-            if (!res.ok) {
-              return res.json().catch(() => ({ detail: res.statusText })).then((err) => {
-                throw new Error(Array.isArray(err?.detail) ? err.detail.map((d: { msg?: string }) => d?.msg).join(", ") : err?.detail || res.statusText);
-              });
-            }
-            return res.json();
-          })
-          .then((data: { html: string }) => {
-            setPreviewHtml(data.html);
-            setPreviewLoading(false);
-          })
-          .catch((e) => {
-            clearTimeout(timeoutId);
-            const isAbort = e?.name === "AbortError";
-            const isNetwork = e?.message === "Failed to fetch" || e?.message?.includes("Load failed");
-            if ((isAbort || isNetwork) && !retry) {
-              setTimeout(() => doRequest(true), 1500);
-              return;
-            }
-            setPreviewLoading(false);
-            const msg = e instanceof Error ? e.message : "Preview failed";
-            setPreviewError(
-              isAbort
-                ? "Preview timed out. Try simplifying the report or try again."
-                : isNetwork
-                  ? "Preview request failed (network or CORS). Ensure the backend is running and reachable."
-                  : msg
-            );
-          });
-      };
-      doRequest();
-    }, 500);
-    return () => {
-      if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
+        .then((data: { html: string }) => {
+          setPreviewHtml(data.html);
+          setPreviewLoading(false);
+        })
+        .catch((e: unknown) => {
+          clearTimeout(timeoutId);
+          const err = e as { name?: string; message?: string };
+          const isAbort = err?.name === "AbortError";
+          const isNetwork = err?.message === "Failed to fetch" || (typeof err?.message === "string" && err.message.includes("Load failed"));
+          if ((isAbort || isNetwork) && !retry) {
+            setTimeout(() => doRequest(true), 1500);
+            return;
+          }
+          setPreviewLoading(false);
+          const msg = err instanceof Error ? err.message : "Preview failed";
+          setPreviewError(
+            isAbort
+              ? "Preview timed out. Try simplifying the report or try again."
+              : isNetwork
+                ? "Preview request failed (network or CORS). Ensure the backend is running and reachable."
+                : String(msg)
+          );
+        });
     };
-  }, [id, token, detail?.organization_id, detail?.year, templateForPreview]);
+    doRequest();
+  }, [id, token, detail?.organization_id, reportYear, templateForPreview]);
 
-  const openReportForPrint = () => {
+  const hasAutoRefreshedPreviewOnLoad = useRef(false);
+  useEffect(() => {
+    if (!detail || loading || !templateForPreview.trim()) return;
+    if (hasAutoRefreshedPreviewOnLoad.current) return;
+    hasAutoRefreshedPreviewOnLoad.current = true;
+    fetchPreview();
+  }, [detail, loading, templateForPreview, fetchPreview]);
+
+  const openReportForPrint = (year?: number) => {
     const t = getAccessToken();
     if (!t) return;
+    const yr = year ?? reportYear;
     setPrintError(null);
     setPrintLoading(true);
-    const url = `/reports/templates/${id}/generate?format=json&_t=${Date.now()}`;
+    const url = `/reports/templates/${id}/generate?format=json&year=${yr}&_t=${Date.now()}`;
     api<ReportData>(url, { token: t, cache: "no-store" })
       .then((reportData) => {
         const doc = buildReportPrintDocument(reportData);
-        openReportPrintWindow(doc, true);
+        const opened = openReportPrintWindow(doc, true);
+        if (!opened) setPrintError("Pop-up was blocked. Allow pop-ups for this site to open print/PDF in a new tab.");
       })
       .catch((e) => setPrintError(e instanceof Error ? e.message : "Failed to load report"))
-      .finally(() => setPrintLoading(false));
+      .finally(() => {
+        setPrintLoading(false);
+        setPrintModalOpen(false);
+      });
+  };
+
+  const openPrintModal = () => {
+    setPrintModalYear(reportYear);
+    setPrintModalOpen(true);
+  };
+
+  const confirmPrintFromModal = () => {
+    openReportForPrint(printModalYear);
+    // Modal stays open; progress shown inside until load finishes
   };
 
   const saveAdvanced = async (e: React.FormEvent) => {
@@ -939,6 +970,7 @@ export default function ReportDesignPage() {
       });
       setIsDirty(false);
       loadDetail();
+      fetchPreview();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Failed to save");
     } finally {
@@ -946,6 +978,8 @@ export default function ReportDesignPage() {
     }
   };
 
+  if (designAllowed === null) return <p style={{ padding: "1rem" }}>Checking access…</p>;
+  if (designAllowed === false) return <p style={{ padding: "1rem" }}>Redirecting…</p>;
   if (loading) return <p>Loading…</p>;
   if (error) return <p className="form-error">{error}</p>;
   if (!detail) return null;
@@ -964,8 +998,15 @@ export default function ReportDesignPage() {
     <div style={{ padding: "0 1rem 1rem" }}>
       {/* Full-width header */}
       <div style={{ marginBottom: "1rem" }}>
-        <Link href={`/dashboard/reports/${id}`} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-          {"\u2190"} Back to report
+        <Link
+          href="/dashboard/reports"
+          style={{ color: "var(--muted)", fontSize: "0.9rem" }}
+          onClick={(e) => {
+            e.preventDefault();
+            router.push("/dashboard/reports");
+          }}
+        >
+          {"\u2190"} Back to reports
         </Link>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.25rem" }}>
@@ -989,7 +1030,15 @@ export default function ReportDesignPage() {
           {saving ? "Saving…" : isDirty ? "Draft" : "Saved"}
         </span>
       </div>
-      <p style={{ color: "var(--muted)", marginBottom: "0.5rem" }}>Year {detail.year}. Add blocks below—drag to reorder, then Save.</p>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+        <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Report year for preview and print:</span>
+        <select value={reportYear} onChange={(e) => setReportYear(Number(e.target.value))} style={{ padding: "0.35rem 0.5rem" }}>
+          {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+            <option key={y} value={y}>{y}</option>
+          ))}
+        </select>
+      </div>
+      <p style={{ color: "var(--muted)", marginBottom: "0.5rem" }}>Add blocks below—drag to reorder, then Save.</p>
       <p style={{ fontSize: "0.9rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
         Use <strong>Text with KPI data</strong> to write paragraphs and insert numbers or text from KPIs anywhere in the text.
       </p>
@@ -1176,7 +1225,7 @@ export default function ReportDesignPage() {
               <option value="single_value">{BLOCK_LABELS.single_value}</option>
               <option value="kpi_multi_table">{BLOCK_LABELS.kpi_multi_table}</option>
             </select>
-            <button type="button" className="btn btn-primary" onClick={saveVisual} disabled={saving} style={{ marginLeft: "0.5rem" }}>
+            <button type="button" className="btn btn-primary" onClick={saveVisual} disabled={saving || previewLoading} style={{ marginLeft: "0.5rem" }}>
               {saving ? "Saving…" : "Save"}
             </button>
           </div>
@@ -1208,6 +1257,7 @@ export default function ReportDesignPage() {
                     total={blocks.length}
                     detail={detail}
                     templateId={id}
+                    reportYear={reportYear}
                     fieldsByKpiId={fieldsByKpiId}
                     loadFieldsForKpis={loadFieldsForKpis}
                     isMinimized={minimizedBlockIds.has(blockId)}
@@ -1266,20 +1316,34 @@ export default function ReportDesignPage() {
           </button>
           {!livePreviewMinimized && (
             <div style={{ padding: "1rem", borderTop: "1px solid var(--border)" }}>
-              {!previewLoading && !previewError && previewHtml != null && (
-                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem", flexWrap: "wrap", gap: "0.5rem" }}>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    style={{ fontSize: "0.9rem" }}
-                    onClick={openReportForPrint}
-                    disabled={printLoading}
-                  >
-                    {printLoading ? "Opening…" : "Print / Export PDF"}
-                  </button>
-                  {printError && <p className="form-error" style={{ margin: 0, fontSize: "0.9rem" }}>{printError}</p>}
-                </div>
-              )}
+              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem", flexWrap: "wrap", gap: "0.5rem" }}>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ fontSize: "0.9rem" }}
+                  onClick={fetchPreview}
+                  disabled={previewLoading || !templateForPreview.trim()}
+                >
+                  {previewLoading ? "Loading…" : "Refresh preview"}
+                </button>
+                {!previewLoading && !previewError && previewHtml != null && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ fontSize: "0.9rem" }}
+                      onClick={openPrintModal}
+                      disabled={printLoading}
+                    >
+                      {printLoading ? "Opening…" : "Print / Export PDF"}
+                    </button>
+                    {printLoading && (
+                      <ReportLoadProgress label="Preparing report for view/print…" compact />
+                    )}
+                    {printError && <p className="form-error" style={{ margin: 0, fontSize: "0.9rem" }}>{printError}</p>}
+                  </>
+                )}
+              </div>
               {previewLoading && <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.5rem 0" }}>Updating…</p>}
               {previewError && <p className="form-error" style={{ margin: "0.5rem 0", fontSize: "0.9rem" }}>{previewError}</p>}
               {!previewLoading && !previewError && previewHtml != null && (
@@ -1317,7 +1381,7 @@ export default function ReportDesignPage() {
                 </>
               )}
               {!previewLoading && !previewError && previewHtml == null && templateForPreview.trim() && (
-                <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Preview will appear as you add content.</p>
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Click Save or Refresh preview to load the report.</p>
               )}
             </div>
           )}
@@ -1375,7 +1439,7 @@ export default function ReportDesignPage() {
                   background: isTemplateFromBlocks ? "var(--bg-muted, #f8f9fa)" : undefined,
                 }}
               />
-              <button type="submit" className="btn btn-primary" disabled={saving} style={{ marginTop: "0.5rem" }}>
+              <button type="submit" className="btn btn-primary" disabled={saving || previewLoading} style={{ marginTop: "0.5rem" }}>
                 {isTemplateFromBlocks ? "Use this as raw template (replace blocks)" : "Save raw template"}
               </button>
             </form>
@@ -1383,17 +1447,74 @@ export default function ReportDesignPage() {
         )}
       </section>
 
-      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "1rem" }}>
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginTop: "1rem" }}>
         <button
           type="button"
           className="btn btn-primary"
-          onClick={openReportForPrint}
+          onClick={openPrintModal}
           disabled={printLoading}
         >
           {printLoading ? "Opening…" : "Print / Export PDF"}
         </button>
+        {printLoading && (
+          <ReportLoadProgress label="Preparing report for view/print…" compact />
+        )}
         {printError && <p className="form-error" style={{ margin: 0 }}>{printError}</p>}
       </div>
+
+      {printModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="design-print-year-modal-title"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.45)",
+            padding: "1rem",
+          }}
+          onClick={(e) => e.target === e.currentTarget && setPrintModalOpen(false)}
+        >
+          <div className="card" style={{ maxWidth: 360, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+            {printLoading ? (
+              <>
+                <h3 id="design-print-year-modal-title" style={{ margin: "0 0 0.5rem 0", fontSize: "1.1rem" }}>Preparing report</h3>
+                <ReportLoadProgress label="Loading report data…" />
+              </>
+            ) : (
+              <>
+                <h3 id="design-print-year-modal-title" style={{ margin: "0 0 1rem 0", fontSize: "1.1rem" }}>Select year for report</h3>
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>Choose the reporting year for data in the report.</p>
+                <div className="form-group" style={{ marginBottom: "1rem" }}>
+                  <label htmlFor="design-print-modal-year">Year</label>
+                  <select
+                    id="design-print-modal-year"
+                    value={printModalYear}
+                    onChange={(e) => setPrintModalYear(Number(e.target.value))}
+                    style={{ width: "100%", padding: "0.5rem" }}
+                  >
+                    {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
+                <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+                  <button type="button" className="btn" onClick={() => setPrintModalOpen(false)}>
+                    Cancel
+                  </button>
+                  <button type="button" className="btn btn-primary" onClick={confirmPrintFromModal}>
+                    Print / Export PDF
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1467,7 +1588,7 @@ function TextBlockWithKpiInsert({
       const body: Record<string, unknown> = {
         type: addMode,
         organization_id: detail.organization_id,
-        year: detail.year ?? undefined,
+        year: reportYear,
         entry_index: addMode === "kpi_value" ? (kpiValueConfig.entryIndex ?? 0) : formulaEntryIndex,
       };
       if (addMode === "kpi_value") {
@@ -1494,7 +1615,7 @@ function TextBlockWithKpiInsert({
     } finally {
       setEvaluateLoading(false);
     }
-  }, [addMode, token, detail.organization_id, detail.year, templateId, kpiValueConfig, formulaKpiId, formulaEntryIndex, formulaExpression]);
+  }, [addMode, token, detail.organization_id, reportYear, templateId, kpiValueConfig, formulaKpiId, formulaEntryIndex, formulaExpression]);
 
   const handleInsertFromModal = useCallback(() => {
     if (addMode === "formula") {
@@ -1662,14 +1783,15 @@ function BlockCard({
   total,
   detail,
   templateId,
+  reportYear,
   fieldsByKpiId,
   loadFieldsForKpis,
   isMinimized,
   onToggleMinimize,
   onUpdate,
   onRemove,
-  onMoveUp,
   onMoveDown,
+  onMoveUp,
 }: {
   block: ReportBlock;
   blockId: string;
@@ -1677,6 +1799,7 @@ function BlockCard({
   total: number;
   detail: TemplateDetail;
   templateId: number;
+  reportYear: number;
   fieldsByKpiId: Record<number, FieldOption[]>;
   loadFieldsForKpis: (kpiIds: number[]) => void;
   isMinimized: boolean;
@@ -1717,7 +1840,7 @@ function BlockCard({
           body: JSON.stringify({
             type: "formula",
             organization_id: detail.organization_id,
-            year: detail.year ?? undefined,
+            year: reportYear,
             entry_index: simpleTableFormulaDraft.entryIndex,
             kpi_id: simpleTableFormulaDraft.kpiId,
             expression: simpleTableFormulaDraft.formula.trim() || null,
@@ -1730,7 +1853,7 @@ function BlockCard({
     } finally {
       setSimpleTableEvalLoading(false);
     }
-  }, [simpleTableFormulaDraft, templateId, detail.organization_id, detail.year, token]);
+  }, [simpleTableFormulaDraft, templateId, detail.organization_id, reportYear, token]);
 
   useEffect(() => {
     if (type === "text") {

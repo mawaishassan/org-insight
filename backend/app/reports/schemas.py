@@ -4,13 +4,12 @@ from pydantic import BaseModel, Field
 
 
 class ReportTemplateCreate(BaseModel):
-    """Create report template."""
+    """Create report template (general; year is passed at generate/print time)."""
 
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
     # Optional rich layout template text (Jinja2-style) used when rendering HTML.
     body_template: str | None = None
-    year: int = Field(..., ge=2000, le=2100)
 
 
 class ReportTemplateUpdate(BaseModel):
@@ -20,7 +19,6 @@ class ReportTemplateUpdate(BaseModel):
     description: str | None = None
     body_template: str | None = None
     body_blocks: list[dict] | None = None
-    year: int | None = Field(None, ge=2000, le=2100)
 
 
 class ReportTemplateKPIAdd(BaseModel):
@@ -59,13 +57,12 @@ class ReportAssignmentResponse(BaseModel):
 
 
 class ReportTemplateResponse(BaseModel):
-    """Report template in API response."""
+    """Report template in API response (general; year passed at generate time)."""
 
     id: int
     organization_id: int
     name: str
     description: str | None
-    year: int
 
     class Config:
         from_attributes = True
@@ -81,7 +78,7 @@ class ReportGenerateOptions(BaseModel):
     """Options for report generation."""
 
     format: str = Field(default="json", pattern="^(json|csv|pdf)$")
-    year: int | None = None  # override template year if needed
+    year: int | None = None  # year for data; required at generate/print time
 
 
 class ReportPreviewRequest(BaseModel):
@@ -95,7 +92,7 @@ class EvaluateSnippetRequest(BaseModel):
 
     type: str = Field(..., pattern="^(kpi_value|formula)$")
     organization_id: int = Field(...)
-    year: int | None = None  # use template year if not provided
+    year: int | None = None  # year for report data (required for correct context)
     # For kpi_value: which value to resolve
     kpi_id: int | None = None
     field_key: str | None = None

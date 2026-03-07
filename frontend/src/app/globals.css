@@ -181,6 +181,32 @@ textarea {
   }
 }
 
+/* Report load progress bar (indeterminate) */
+@keyframes report-load-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+.report-load-progress-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  min-width: 160px;
+}
+
+.report-load-progress-bar__fill {
+  height: 100%;
+  width: 25%;
+  background: var(--accent);
+  border-radius: 4px;
+  animation: report-load-progress 1.4s ease-in-out infinite;
+}
+
 /* Report design page: two-column grid stacks on narrow screens */
 @media (max-width: 768px) {
   .report-design-grid {

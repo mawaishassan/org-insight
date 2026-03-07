@@ -84,14 +84,17 @@ export function buildReportPrintDocument(data: ReportData): string {
   return parts.join("");
 }
 
-export function openReportPrintWindow(doc: string, autoPrint = true): void {
+/**
+ * Opens the report in a new tab for print/PDF. Returns true if the window opened, false if blocked (e.g. pop-up blocker).
+ * Callers should show an inline message if false instead of using alert().
+ */
+export function openReportPrintWindow(doc: string, autoPrint = true): boolean {
   const blob = new Blob([doc], { type: "text/html;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const win = window.open(url, "_blank", "noopener,noreferrer");
   if (!win) {
     URL.revokeObjectURL(url);
-    alert("Please allow pop-ups for this site to print or export PDF.");
-    return;
+    return false;
   }
   const doPrint = () => {
     URL.revokeObjectURL(url);
@@ -115,4 +118,5 @@ export function openReportPrintWindow(doc: string, autoPrint = true): void {
   } catch {
     win.addEventListener("load", doPrint);
   }
+  return true;
 }

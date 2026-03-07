@@ -1,5 +1,6 @@
 """Report template CRUD, KPI/field selection, access control, and report generation."""
 
+import datetime
 from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -41,7 +42,6 @@ async def create_report_template(
         name=data.name,
         description=data.description,
         body_template=data.body_template,
-        year=data.year,
     )
     db.add(rt)
     await db.flush()
@@ -100,7 +100,6 @@ async def get_report_template_detail(
         "organization_id": rt.organization_id,
         "name": rt.name,
         "description": rt.description,
-        "year": rt.year,
         "body_template": rt.body_template,
         "body_blocks": getattr(rt, "body_blocks", None),
         "attached_domains": [],
@@ -108,14 +107,16 @@ async def get_report_template_detail(
     }
 
 
-async def list_report_templates(
-    db: AsyncSession, org_id: int, year: int | None = None
-) -> list[ReportTemplate]:
-    """List report templates in organization."""
-    q = select(ReportTemplate).where(ReportTemplate.organization_id == org_id)
-    if year is not None:
-        q = q.where(ReportTemplate.year == year)
-    q = q.order_by(ReportTemplate.name)
+async def list_report_templates(db: AsyncSession, org_id: int) -> list[ReportTemplate]:
+    """List report templates in organization (templates are general; year is passed at generate time)."""
+    q = select(ReportTemplate).where(ReportTemplate.organization_id == org_id).order_by(ReportTemplate.name)
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+async def list_all_report_templates(db: AsyncSession) -> list[ReportTemplate]:
+    """List all report templates across organizations (for Super Admin when no org is specified)."""
+    q = select(ReportTemplate).order_by(ReportTemplate.name)
     result = await db.execute(q)
     return list(result.scalars().all())
 
@@ -168,10 +169,20 @@ async def update_report_template(
         rt.body_template = data.body_template
     if data.body_blocks is not None:
         rt.body_blocks = data.body_blocks
-    if data.year is not None:
-        rt.year = data.year
     await db.flush()
     return rt
+
+
+async def delete_report_template(
+    db: AsyncSession, template_id: int, org_id: int
+) -> bool:
+    """Delete report template and its related data (Super Admin only). Cascades to KPIs, text blocks, access permissions."""
+    rt = await get_report_template(db, template_id, org_id)
+    if not rt:
+        return False
+    await db.delete(rt)
+    await db.flush()
+    return True
 
 
 async def add_kpi_to_template(
@@ -1171,7 +1182,7 @@ async def generate_report_data(
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
-    yr = year or rt.year
+    yr = year if year is not None else datetime.date.today().year
 
     # All KPIs in the same organization
     result = await db.execute(
@@ -1453,7 +1464,7 @@ async def evaluate_report_snippet(
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
-    yr = year if year is not None else rt.year
+    yr = year if year is not None else datetime.date.today().year
     data = await generate_report_data(db, template_id, org_id, year=yr)
     if not data or "kpis" not in data:
         return None

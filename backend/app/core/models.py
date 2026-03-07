@@ -546,7 +546,6 @@ class ReportTemplate(Base):
     body_template = Column(Text, nullable=True)
     # Visual builder: list of block configs (JSON). When set, body_template is generated from this at render time.
     body_blocks = Column(JSON, nullable=True)
-    year = Column(Integer, nullable=False, index=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -556,15 +555,20 @@ class ReportTemplate(Base):
         back_populates="report_template",
         lazy="selectin",
         order_by="ReportTemplateKPI.sort_order",
+        cascade="all, delete-orphan",
     )
     access_permissions = relationship(
-        "ReportAccessPermission", back_populates="report_template", lazy="selectin"
+        "ReportAccessPermission",
+        back_populates="report_template",
+        lazy="selectin",
+        cascade="all, delete-orphan",
     )
     text_blocks = relationship(
         "ReportTemplateTextBlock",
         back_populates="report_template",
         lazy="selectin",
         order_by="ReportTemplateTextBlock.sort_order",
+        cascade="all, delete-orphan",
     )
 
 
@@ -606,6 +610,7 @@ class ReportTemplateKPI(Base):
         back_populates="report_template_kpi",
         lazy="selectin",
         order_by="ReportTemplateField.sort_order",
+        cascade="all, delete-orphan",
     )
 
 

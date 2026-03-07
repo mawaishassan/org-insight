@@ -18,7 +18,6 @@ interface TemplateRow {
   organization_id: number;
   name: string;
   description: string | null;
-  year: number;
 }
 
 interface AssignmentRow {
