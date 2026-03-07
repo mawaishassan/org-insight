@@ -8,6 +8,11 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+import {
+  buildReportPrintDocument,
+  openReportPrintWindow,
+  type ReportData,
+} from "@/app/dashboard/reports/reportPrint";
 
 const FIELD_TYPES = [
   "single_line_text",
@@ -498,7 +503,7 @@ export default function OrganizationDetailPage() {
           KPI Fields
           {selectedKpi && ` (${selectedKpi.name})`}
         </button>
-        {userRole === "SUPER_ADMIN" && (
+        {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN") && (
           <button
             type="button"
             className={tab === "reports" ? "btn btn-primary" : "btn"}
@@ -602,10 +607,11 @@ export default function OrganizationDetailPage() {
         />
       )}
 
-      {tab === "reports" && userRole === "SUPER_ADMIN" && (
+      {tab === "reports" && (userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN") && (
         <ReportsSection
           orgId={orgId}
           token={token!}
+          userRole={userRole}
         />
       )}
 
@@ -2897,14 +2903,19 @@ function FieldEditForm({
 function ReportsSection({
   orgId,
   token,
+  userRole,
 }: {
   orgId: number;
   token: string;
+  userRole: UserRole | null;
 }) {
   const [list, setList] = useState<ReportTemplateRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [createdMsg, setCreatedMsg] = useState<string | null>(null);
+  const [printLoadingId, setPrintLoadingId] = useState<number | null>(null);
+
+  const canManageAssignments = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
 
   const loadTemplates = () => {
     if (!token || !orgId) return;
@@ -2918,6 +2929,20 @@ function ReportsSection({
   useEffect(() => {
     loadTemplates();
   }, [orgId, token]);
+
+  const openReportPrint = (templateId: number) => {
+    setPrintLoadingId(templateId);
+    const url = `/reports/templates/${templateId}/generate?format=json&_t=${Date.now()}`;
+    api<ReportData>(url, { token, cache: "no-store" })
+      .then((data) => {
+        const doc = buildReportPrintDocument(data);
+        openReportPrintWindow(doc, true);
+      })
+      .catch(() => {
+        // Popup may be blocked; user can try again
+      })
+      .finally(() => setPrintLoadingId(null));
+  };
 
   const createForm = useForm<ReportTemplateCreateFormData>({
     resolver: zodResolver(reportTemplateCreateSchema),
@@ -3012,9 +3037,19 @@ function ReportsSection({
                     <Link className="btn" href={`/dashboard/reports/${t.id}/design`}>
                       Design
                     </Link>
-                    <Link className="btn btn-primary" href={`/dashboard/reports/${t.id}`}>
-                      View / Print
-                    </Link>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={printLoadingId === t.id}
+                      onClick={() => openReportPrint(t.id)}
+                    >
+                      {printLoadingId === t.id ? "Loading…" : "View / Print"}
+                    </button>
+                    {canManageAssignments && (
+                      <Link className="btn" href={`/dashboard/reports/${t.id}/assign`} style={{ fontSize: "0.85rem" }}>
+                        Assign users
+                      </Link>
+                    )}
                   </div>
                 </div>
               </li>
@@ -3022,6 +3057,7 @@ function ReportsSection({
           </ul>
         )}
       </div>
+
     </div>
   );
 }
