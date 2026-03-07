@@ -249,7 +249,6 @@ class Domain(Base):
     kpis = relationship("KPI", back_populates="domain", lazy="selectin")
     categories = relationship("Category", back_populates="domain", lazy="selectin", order_by="Category.sort_order")
     kpi_domains = relationship("KPIDomain", back_populates="domain", lazy="selectin")
-    report_templates = relationship("ReportTemplateDomain", back_populates="domain", lazy="selectin")
 
 
 class Category(Base):
@@ -561,39 +560,12 @@ class ReportTemplate(Base):
     access_permissions = relationship(
         "ReportAccessPermission", back_populates="report_template", lazy="selectin"
     )
-    domains = relationship(
-        "ReportTemplateDomain",
-        back_populates="report_template",
-        lazy="selectin",
-        order_by="ReportTemplateDomain.id",
-    )
     text_blocks = relationship(
         "ReportTemplateTextBlock",
         back_populates="report_template",
         lazy="selectin",
         order_by="ReportTemplateTextBlock.sort_order",
     )
-
-
-class ReportTemplateDomain(Base):
-    """Attach a report template to a domain (domain admins can view/print/export attached templates)."""
-
-    __tablename__ = "report_template_domains"
-
-    id = Column(Integer, primary_key=True, index=True)
-    report_template_id = Column(
-        Integer, ForeignKey("report_templates.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    domain_id = Column(
-        Integer, ForeignKey("domains.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-
-    __table_args__ = (
-        UniqueConstraint("report_template_id", "domain_id", name="uq_report_template_domain"),
-    )
-
-    report_template = relationship("ReportTemplate", back_populates="domains")
-    domain = relationship("Domain", back_populates="report_templates")
 
 
 class ReportTemplateTextBlock(Base):
