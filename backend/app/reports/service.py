@@ -1,5 +1,6 @@
 """Report template CRUD, KPI/field selection, access control, and report generation."""
 
+import datetime
 from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -15,12 +16,12 @@ from app.core.models import (
     KPIEntry,
     KPIFieldValue,
     Domain,
-    ReportTemplateDomain,
     ReportTemplateTextBlock,
     Category,
     KPICategory,
     Organization,
     TimeDimension,
+    User,
     effective_kpi_time_dimension,
     period_key_sort_order,
 )
@@ -41,7 +42,6 @@ async def create_report_template(
         name=data.name,
         description=data.description,
         body_template=data.body_template,
-        year=data.year,
     )
     db.add(rt)
     await db.flush()
@@ -64,140 +64,61 @@ async def get_report_template(
 async def get_report_template_detail(
     db: AsyncSession, template_id: int, org_id: int
 ) -> dict | None:
-    """Get template with body_template, attached_domains, and kpis_from_domains (read-only; no add/remove)."""
+    """Get template with body_template and kpis_from_domains (all KPIs in org; read-only)."""
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
-    # Attached domains (template is attached to these domains)
-    rtd_result = await db.execute(
-        select(ReportTemplateDomain, Domain.name)
-        .join(Domain, Domain.id == ReportTemplateDomain.domain_id)
-        .where(ReportTemplateDomain.report_template_id == template_id)
-    )
-    attached_domains = [{"id": row[0].domain_id, "name": row[1]} for row in rtd_result.all()]
-    domain_ids = [d["id"] for d in attached_domains]
 
-    # KPIs that will be included (all KPIs from attached domains, with all fields)
+    # All KPIs in the same organization (no domain attachment required)
     kpis_from_domains = []
-    if domain_ids:
-        org_row = await db.execute(select(Organization).where(Organization.id == org_id))
-        org = org_row.scalar_one_or_none()
-        org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
-        kpi_ids_subq = _kpi_ids_in_domains_query(domain_ids)
-        result = await db.execute(
-            select(KPI)
-            .where(KPI.id.in_(kpi_ids_subq), KPI.organization_id == org_id)
-            .order_by(KPI.sort_order, KPI.name)
-            .options(selectinload(KPI.fields))
-        )
-        for kpi in result.unique().scalars().all():
-            field_count = len(kpi.fields) if kpi.fields else 0
-            kpi_td_raw = getattr(kpi, "time_dimension", None)
-            try:
-                kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
-            except (ValueError, TypeError):
-                kpi_td = None
-            effective_td = effective_kpi_time_dimension(kpi_td, org_td)
-            kpis_from_domains.append({
-                "kpi_id": kpi.id,
-                "kpi_name": kpi.name,
-                "fields_count": field_count,
-                "time_dimension": effective_td.value,
-            })
+    org_row = await db.execute(select(Organization).where(Organization.id == org_id))
+    org = org_row.scalar_one_or_none()
+    org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
+    result = await db.execute(
+        select(KPI)
+        .where(KPI.organization_id == org_id)
+        .order_by(KPI.sort_order, KPI.name)
+        .options(selectinload(KPI.fields))
+    )
+    for kpi in result.unique().scalars().all():
+        field_count = len(kpi.fields) if kpi.fields else 0
+        kpi_td_raw = getattr(kpi, "time_dimension", None)
+        try:
+            kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
+        except (ValueError, TypeError):
+            kpi_td = None
+        effective_td = effective_kpi_time_dimension(kpi_td, org_td)
+        kpis_from_domains.append({
+            "kpi_id": kpi.id,
+            "kpi_name": kpi.name,
+            "fields_count": field_count,
+            "time_dimension": effective_td.value,
+        })
 
     return {
         "id": rt.id,
         "organization_id": rt.organization_id,
         "name": rt.name,
         "description": rt.description,
-        "year": rt.year,
         "body_template": rt.body_template,
         "body_blocks": getattr(rt, "body_blocks", None),
-        "attached_domains": attached_domains,
+        "attached_domains": [],
         "kpis_from_domains": kpis_from_domains,
     }
 
 
-async def list_report_templates(
-    db: AsyncSession, org_id: int, year: int | None = None, only_attached: bool = False
-) -> list[ReportTemplate]:
-    """List report templates in organization."""
-    q = select(ReportTemplate).where(ReportTemplate.organization_id == org_id)
-    if year is not None:
-        q = q.where(ReportTemplate.year == year)
-    if only_attached:
-        q = q.join(ReportTemplateDomain, ReportTemplateDomain.report_template_id == ReportTemplate.id).distinct()
-    q = q.order_by(ReportTemplate.name)
+async def list_report_templates(db: AsyncSession, org_id: int) -> list[ReportTemplate]:
+    """List report templates in organization (templates are general; year is passed at generate time)."""
+    q = select(ReportTemplate).where(ReportTemplate.organization_id == org_id).order_by(ReportTemplate.name)
     result = await db.execute(q)
     return list(result.scalars().all())
 
 
-async def list_domain_report_templates(
-    db: AsyncSession, org_id: int, domain_id: int, year: int | None = None
-) -> list[ReportTemplate]:
-    """List templates attached to a specific domain within the org."""
-    q = (
-        select(ReportTemplate)
-        .join(ReportTemplateDomain, ReportTemplateDomain.report_template_id == ReportTemplate.id)
-        .join(Domain, Domain.id == ReportTemplateDomain.domain_id)
-        .where(Domain.id == domain_id, Domain.organization_id == org_id)
-        .distinct()
-        .order_by(ReportTemplate.name)
-    )
-    if year is not None:
-        q = q.where(ReportTemplate.year == year)
+async def list_all_report_templates(db: AsyncSession) -> list[ReportTemplate]:
+    """List all report templates across organizations (for Super Admin when no org is specified)."""
+    q = select(ReportTemplate).order_by(ReportTemplate.name)
     result = await db.execute(q)
     return list(result.scalars().all())
-
-
-async def attach_template_to_domain(
-    db: AsyncSession, template_id: int, org_id: int, domain_id: int
-) -> bool:
-    """Attach template to domain (must be in same org)."""
-    rt = await get_report_template(db, template_id, org_id)
-    if not rt:
-        return False
-    d = (await db.execute(select(Domain).where(Domain.id == domain_id, Domain.organization_id == org_id))).scalar_one_or_none()
-    if not d:
-        return False
-    existing = (
-        await db.execute(
-            select(ReportTemplateDomain).where(
-                ReportTemplateDomain.report_template_id == template_id,
-                ReportTemplateDomain.domain_id == domain_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if existing:
-        return True
-    db.add(ReportTemplateDomain(report_template_id=template_id, domain_id=domain_id))
-    await db.flush()
-    return True
-
-
-async def detach_template_from_domain(
-    db: AsyncSession, template_id: int, org_id: int, domain_id: int
-) -> bool:
-    """Detach template from domain."""
-    rt = await get_report_template(db, template_id, org_id)
-    if not rt:
-        return False
-    row = (
-        await db.execute(
-            select(ReportTemplateDomain)
-            .join(Domain, Domain.id == ReportTemplateDomain.domain_id)
-            .where(
-                ReportTemplateDomain.report_template_id == template_id,
-                Domain.id == domain_id,
-                Domain.organization_id == org_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if not row:
-        return False
-    await db.delete(row)
-    await db.flush()
-    return True
 
 
 async def add_text_block(
@@ -248,10 +169,20 @@ async def update_report_template(
         rt.body_template = data.body_template
     if data.body_blocks is not None:
         rt.body_blocks = data.body_blocks
-    if data.year is not None:
-        rt.year = data.year
     await db.flush()
     return rt
+
+
+async def delete_report_template(
+    db: AsyncSession, template_id: int, org_id: int
+) -> bool:
+    """Delete report template and its related data (Super Admin only). Cascades to KPIs, text blocks, access permissions."""
+    rt = await get_report_template(db, template_id, org_id)
+    if not rt:
+        return False
+    await db.delete(rt)
+    await db.flush()
+    return True
 
 
 async def add_kpi_to_template(
@@ -318,10 +249,27 @@ async def assign_report_to_user(
     can_print: bool = True,
     can_export: bool = True,
 ) -> ReportAccessPermission | None:
-    """Assign report template to user."""
+    """Assign report template to user (upsert). Template and user must be in same org."""
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
+    user_row = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user_row or user_row.organization_id != org_id:
+        return None
+    existing = (
+        await db.execute(
+            select(ReportAccessPermission).where(
+                ReportAccessPermission.report_template_id == template_id,
+                ReportAccessPermission.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        existing.can_view = can_view
+        existing.can_print = can_print
+        existing.can_export = can_export
+        await db.flush()
+        return existing
     perm = ReportAccessPermission(
         report_template_id=template_id,
         user_id=user_id,
@@ -334,6 +282,56 @@ async def assign_report_to_user(
     return perm
 
 
+async def unassign_report_from_user(
+    db: AsyncSession, template_id: int, org_id: int, user_id: int
+) -> bool:
+    """Remove report template assignment from user."""
+    rt = await get_report_template(db, template_id, org_id)
+    if not rt:
+        return False
+    perm = (
+        await db.execute(
+            select(ReportAccessPermission).where(
+                ReportAccessPermission.report_template_id == template_id,
+                ReportAccessPermission.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not perm:
+        return False
+    await db.delete(perm)
+    await db.flush()
+    return True
+
+
+async def list_template_assignments(
+    db: AsyncSession, template_id: int, org_id: int
+) -> list[dict]:
+    """List users assigned to a report template (with user info). Returns list of dicts with user_id, email, full_name, can_view, can_print, can_export."""
+    rt = await get_report_template(db, template_id, org_id)
+    if not rt:
+        return []
+    result = await db.execute(
+        select(ReportAccessPermission, User)
+        .join(User, ReportAccessPermission.user_id == User.id)
+        .where(
+            ReportAccessPermission.report_template_id == template_id,
+        )
+    )
+    rows = result.all()
+    return [
+        {
+            "user_id": perm.user_id,
+            "email": user.email,
+            "full_name": user.full_name,
+            "can_view": perm.can_view,
+            "can_print": perm.can_print,
+            "can_export": perm.can_export,
+        }
+        for perm, user in rows
+    ]
+
+
 async def user_can_access_report(
     db: AsyncSession, user_id: int, template_id: int, action: str = "view"
 ) -> bool:
@@ -341,11 +339,9 @@ async def user_can_access_report(
 
     Rules:
     - SUPER_ADMIN: can access any template.
-    - ORG_ADMIN: can access templates in their org *only if attached to at least one domain*.
+    - ORG_ADMIN: can access any template in their organization.
     - Other roles: must be explicitly assigned (ReportAccessPermission).
     """
-    from app.core.models import User
-
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -356,15 +352,10 @@ async def user_can_access_report(
             return True
     if user.role.value == "ORG_ADMIN" and user.organization_id:
         result = await db.execute(
-            select(ReportTemplate)
-            .join(ReportTemplateDomain, ReportTemplateDomain.report_template_id == ReportTemplate.id)
-            .join(Domain, Domain.id == ReportTemplateDomain.domain_id)
-            .where(
+            select(ReportTemplate).where(
                 ReportTemplate.id == template_id,
                 ReportTemplate.organization_id == user.organization_id,
-                Domain.organization_id == user.organization_id,
             )
-            .distinct()
         )
         if result.scalar_one_or_none():
             return True
@@ -1164,16 +1155,6 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
     return "\n".join(out)
 
 
-def _kpi_ids_in_domains_query(domain_ids: list[int]):
-    """Subquery: KPI ids that have at least one category in any of the given domains."""
-    return (
-        select(KPICategory.kpi_id)
-        .join(Category, Category.id == KPICategory.category_id)
-        .where(Category.domain_id.in_(domain_ids))
-        .distinct()
-    )
-
-
 def _report_period_display(year: int, period_key: str, dimension: TimeDimension) -> str:
     """Human-readable period for report (e.g. '2026 Q1')."""
     if not period_key or not period_key.strip():
@@ -1194,35 +1175,23 @@ async def generate_report_data(
 ) -> dict | None:
     """
     Compile report data from KPI entries for the template.
-    Uses all KPIs (and all their fields) that are attached to the domains this template is attached to.
+    Uses all KPIs in the same organization.
     Returns structured dict: { template_name, year, kpis: [ { kpi_name, entries: [ { fields } ] } ] }
     Formula fields are evaluated.
     """
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
-    yr = year or rt.year
+    yr = year if year is not None else datetime.date.today().year
 
-    # Domains this template is attached to
-    rtd_result = await db.execute(
-        select(ReportTemplateDomain.domain_id).where(
-            ReportTemplateDomain.report_template_id == template_id
-        )
+    # All KPIs in the same organization
+    result = await db.execute(
+        select(KPI)
+        .where(KPI.organization_id == org_id)
+        .order_by(KPI.sort_order, KPI.name)
+        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
     )
-    domain_ids = [row[0] for row in rtd_result.all()]
-
-    # KPIs that belong to any of these domains (via categories in that domain)
-    if not domain_ids:
-        template_kpis: list[KPI] = []
-    else:
-        kpi_ids_subq = _kpi_ids_in_domains_query(domain_ids)
-        result = await db.execute(
-            select(KPI)
-            .where(KPI.id.in_(kpi_ids_subq), KPI.organization_id == org_id)
-            .order_by(KPI.sort_order, KPI.name)
-            .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
-        )
-        template_kpis = list(result.unique().scalars().all())
+    template_kpis = list(result.unique().scalars().all())
 
     # Load text blocks
     text_blocks_result = await db.execute(
@@ -1383,14 +1352,14 @@ async def generate_report_data(
             "time_dimension_used": effective_td.value,
         })
 
-    # Build domains → categories → KPIs for template access
+    # Build domains → categories → KPIs for template access (all org domains; KPIs in template)
     out["domains"] = []
-    if domain_ids and out["kpis"]:
+    if out["kpis"]:
         kpi_payload_by_id = {p["kpi_id"]: p for p in out["kpis"]}
         template_kpi_ids = set(kpi_payload_by_id.keys())
         domains_result = await db.execute(
             select(Domain)
-            .where(Domain.id.in_(domain_ids))
+            .where(Domain.organization_id == org_id)
             .order_by(Domain.sort_order, Domain.name)
             .options(selectinload(Domain.categories))
         )
@@ -1495,7 +1464,7 @@ async def evaluate_report_snippet(
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
-    yr = year if year is not None else rt.year
+    yr = year if year is not None else datetime.date.today().year
     data = await generate_report_data(db, template_id, org_id, year=yr)
     if not data or "kpis" not in data:
         return None

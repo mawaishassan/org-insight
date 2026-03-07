@@ -8,6 +8,12 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+import {
+  buildReportPrintDocument,
+  openReportPrintWindow,
+  type ReportData,
+} from "@/app/dashboard/reports/reportPrint";
+import { ReportLoadProgress } from "@/app/dashboard/reports/ReportLoadProgress";
 
 const FIELD_TYPES = [
   "single_line_text",
@@ -225,7 +231,6 @@ const fieldUpdateSchema = z.object({
 const reportTemplateCreateSchema = z.object({
   name: z.string().min(1, "Name required").max(255),
   description: z.string().optional(),
-  year: z.coerce.number().int().min(2000).max(2100),
 });
 
 type DomainCreateFormData = z.infer<typeof domainCreateSchema>;
@@ -243,7 +248,6 @@ interface ReportTemplateRow {
   organization_id: number;
   name: string;
   description: string | null;
-  year: number;
 }
 
 function qs(params: Record<string, string | number | boolean>): string {
@@ -498,7 +502,7 @@ export default function OrganizationDetailPage() {
           KPI Fields
           {selectedKpi && ` (${selectedKpi.name})`}
         </button>
-        {userRole === "SUPER_ADMIN" && (
+        {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN") && (
           <button
             type="button"
             className={tab === "reports" ? "btn btn-primary" : "btn"}
@@ -602,10 +606,11 @@ export default function OrganizationDetailPage() {
         />
       )}
 
-      {tab === "reports" && userRole === "SUPER_ADMIN" && (
+      {tab === "reports" && (userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN") && (
         <ReportsSection
           orgId={orgId}
           token={token!}
+          userRole={userRole}
         />
       )}
 
@@ -2897,18 +2902,84 @@ function FieldEditForm({
 function ReportsSection({
   orgId,
   token,
+  userRole,
 }: {
   orgId: number;
   token: string;
+  userRole: UserRole | null;
 }) {
   const [list, setList] = useState<ReportTemplateRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [createdMsg, setCreatedMsg] = useState<string | null>(null);
+  const [printLoadingId, setPrintLoadingId] = useState<number | null>(null);
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printPendingTemplateId, setPrintPendingTemplateId] = useState<number | null>(null);
+  const [printModalYear, setPrintModalYear] = useState(() => new Date().getFullYear());
+  const [addReportModalOpen, setAddReportModalOpen] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [renameTemplate, setRenameTemplate] = useState<ReportTemplateRow | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameDescription, setRenameDescription] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+
+  const canManageAssignments = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
+  const canAddReport = userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN";
+
+  const openRenameModal = (t: ReportTemplateRow) => {
+    setRenameTemplate(t);
+    setRenameName(t.name);
+    setRenameDescription(t.description ?? "");
+    setError(null);
+  };
+
+  const handleRenameSave = async () => {
+    if (!renameTemplate || !token || !orgId || userRole !== "SUPER_ADMIN") return;
+    const name = renameName.trim();
+    if (!name) return;
+    setRenameSaving(true);
+    setError(null);
+    try {
+      const updated = await api<ReportTemplateRow>(`/reports/templates/${renameTemplate.id}?${qs({ organization_id: orgId })}`, {
+        method: "PATCH",
+        token,
+        body: JSON.stringify({ name, description: renameDescription.trim() || null }),
+      });
+      setList((prev) => prev.map((x) => (x.id === renameTemplate.id ? { ...x, name: updated.name, description: updated.description } : x)));
+      setRenameTemplate(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update report template");
+    } finally {
+      setRenameSaving(false);
+    }
+  };
+
+  const handleDeleteTemplate = async (t: ReportTemplateRow) => {
+    if (!token || !orgId || userRole !== "SUPER_ADMIN") return;
+    if (!confirm(`Delete report template "${t.name}"? This cannot be undone.`)) return;
+    setError(null);
+    setDeletingId(t.id);
+    try {
+      await api(`/reports/templates/${t.id}?${qs({ organization_id: orgId })}`, {
+        method: "DELETE",
+        token,
+      });
+      setDeletingId(null);
+      setLoading(true);
+      const next = await api<ReportTemplateRow[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token });
+      setList(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete report template");
+    } finally {
+      setDeletingId(null);
+      setLoading(false);
+    }
+  };
 
   const loadTemplates = () => {
     if (!token || !orgId) return;
     setError(null);
+    setLoading(true);
     api<ReportTemplateRow[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token })
       .then(setList)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load templates"))
@@ -2919,12 +2990,43 @@ function ReportsSection({
     loadTemplates();
   }, [orgId, token]);
 
+  const openReportPrint = (templateId: number, year: number) => {
+    setPrintLoadingId(templateId);
+    setError(null);
+    const url = `/reports/templates/${templateId}/generate?format=json&year=${year}&_t=${Date.now()}`;
+    api<ReportData>(url, { token, cache: "no-store" })
+      .then((data) => {
+        const doc = buildReportPrintDocument(data);
+        const opened = openReportPrintWindow(doc, true);
+        if (!opened) setError("Pop-up was blocked. Allow pop-ups for this site to open print/PDF in a new tab.");
+      })
+      .catch(() => {
+        setError("Failed to load report.");
+      })
+      .finally(() => {
+        setPrintLoadingId(null);
+        setPrintModalOpen(false);
+        setPrintPendingTemplateId(null);
+      });
+  };
+
+  const openPrintModal = (templateId: number) => {
+    setPrintPendingTemplateId(templateId);
+    setPrintModalYear(new Date().getFullYear());
+    setPrintModalOpen(true);
+  };
+
+  const confirmPrintFromModal = () => {
+    if (printPendingTemplateId == null) return;
+    openReportPrint(printPendingTemplateId, printModalYear);
+    // Modal stays open; progress shown inside until openReportPrint finishes
+  };
+
   const createForm = useForm<ReportTemplateCreateFormData>({
     resolver: zodResolver(reportTemplateCreateSchema),
     defaultValues: {
       name: "",
       description: "",
-      year: new Date().getFullYear(),
     },
   });
 
@@ -2939,89 +3041,318 @@ function ReportsSection({
         body: JSON.stringify({
           name: data.name,
           description: data.description?.trim() || null,
-          year: data.year,
         }),
       });
-      createForm.reset({ name: "", description: "", year: data.year });
-      setCreatedMsg("Template created.");
+      createForm.reset({ name: "", description: "" });
+      setCreatedMsg("Report template created.");
+      setAddReportModalOpen(false);
       loadTemplates();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create template");
     }
   };
 
+  const openAddReportModal = () => {
+    setError(null);
+    setCreatedMsg(null);
+    createForm.reset({ name: "", description: "" });
+    setAddReportModalOpen(true);
+  };
+
   return (
     <div>
       <h2 style={{ fontSize: "1.2rem", marginBottom: "0.75rem" }}>Report templates</h2>
 
-      <div className="card" style={{ marginBottom: "1rem" }}>
-        <h3 style={{ margin: "0 0 0.75rem 0", fontSize: "1rem" }}>Create template</h3>
-        <form onSubmit={createForm.handleSubmit(onCreate)}>
-          <div className="form-group">
-            <label>Name *</label>
-            <input {...createForm.register("name")} />
-            {createForm.formState.errors.name && (
-              <p className="form-error">{createForm.formState.errors.name.message}</p>
-            )}
-          </div>
-          <div className="form-group">
-            <label>Description</label>
-            <textarea {...createForm.register("description")} rows={2} />
-          </div>
-          <div className="form-group">
-            <label>Year *</label>
-            <input type="number" min={2000} max={2100} {...createForm.register("year")} />
-            {createForm.formState.errors.year && (
-              <p className="form-error">{createForm.formState.errors.year.message}</p>
-            )}
-          </div>
-          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-            <button type="submit" className="btn btn-primary" disabled={createForm.formState.isSubmitting}>
-              {createForm.formState.isSubmitting ? "Creating…" : "Create"}
-            </button>
-            {createdMsg && <span style={{ color: "var(--success)" }}>{createdMsg}</span>}
-          </div>
-          {error && <p className="form-error" style={{ marginTop: "0.75rem" }}>{error}</p>}
-        </form>
-      </div>
-
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0, fontSize: "1rem" }}>Templates</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+            <h3 style={{ margin: 0, fontSize: "1rem" }}>Templates</h3>
+            {canAddReport && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={openAddReportModal}
+                style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+              >
+                <span aria-hidden style={{ fontSize: "1.1rem", lineHeight: 1 }}>+</span>
+                Add report
+              </button>
+            )}
+          </div>
           <button type="button" className="btn" onClick={loadTemplates} disabled={loading}>
             Refresh
           </button>
         </div>
+        {createdMsg && (
+          <p style={{ margin: "0.5rem 0 0", fontSize: "0.9rem", color: "var(--success)" }}>{createdMsg}</p>
+        )}
+        {printLoadingId != null && (
+          <div style={{ marginTop: "0.75rem" }}>
+            <ReportLoadProgress label="Preparing report for view/print…" />
+          </div>
+        )}
+        {error && (
+          <p className="form-error" style={{ marginTop: "0.75rem" }}>{error}</p>
+        )}
         {loading ? (
           <p style={{ color: "var(--muted)" }}>Loading…</p>
         ) : list.length === 0 ? (
           <p style={{ color: "var(--muted)" }}>No templates yet.</p>
         ) : (
-          <ul style={{ listStyle: "none", padding: 0, margin: "0.75rem 0 0" }}>
+          <>
+            <ul style={{ listStyle: "none", padding: 0, margin: "0.75rem 0 0" }}>
             {list.map((t) => (
               <li key={t.id} style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border)" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
                   <div>
                     <strong>{t.name}</strong>
-                    <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>Year {t.year}</span>
                     {t.description && (
                       <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>{t.description}</div>
                     )}
                   </div>
                   <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                    <Link className="btn" href={`/dashboard/reports/${t.id}/design`}>
-                      Design
-                    </Link>
-                    <Link className="btn btn-primary" href={`/dashboard/reports/${t.id}`}>
-                      View / Print
-                    </Link>
+                    {userRole === "SUPER_ADMIN" && (
+                      <Link className="btn" href={`/dashboard/reports/${t.id}/design`}>
+                        Design
+                      </Link>
+                    )}
+                    {userRole === "SUPER_ADMIN" && (
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => openRenameModal(t)}
+                        style={{ fontSize: "0.85rem" }}
+                      >
+                        Rename
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={printLoadingId === t.id}
+                      onClick={() => openPrintModal(t.id)}
+                    >
+                      {printLoadingId === t.id ? "Loading…" : "View / Print"}
+                    </button>
+                    {userRole === "SUPER_ADMIN" && (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={deletingId === t.id}
+                        onClick={() => handleDeleteTemplate(t)}
+                        style={{ color: "var(--error)", fontSize: "0.85rem" }}
+                      >
+                        {deletingId === t.id ? "Deleting…" : "Delete"}
+                      </button>
+                    )}
+                    {canManageAssignments && (
+                      <Link className="btn" href={`/dashboard/reports/${t.id}/assign`} style={{ fontSize: "0.85rem" }}>
+                        Assign users
+                      </Link>
+                    )}
                   </div>
                 </div>
               </li>
             ))}
-          </ul>
+            </ul>
+          </>
         )}
       </div>
+
+      {renameTemplate && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="rename-report-modal-title"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.5)",
+            padding: "1.5rem",
+          }}
+          onClick={(e) => e.target === e.currentTarget && setRenameTemplate(null)}
+        >
+          <div
+            className="card"
+            style={{ maxWidth: 420, width: "100%", boxShadow: "0 8px 32px rgba(0,0,0,0.15)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="rename-report-modal-title" style={{ margin: "0 0 1rem 0", fontSize: "1.25rem" }}>
+              Rename report
+            </h3>
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
+              <label htmlFor="rename-report-name">Name *</label>
+              <input
+                id="rename-report-name"
+                value={renameName}
+                onChange={(e) => setRenameName(e.target.value)}
+                style={{ width: "100%", padding: "0.5rem 0.6rem" }}
+              />
+            </div>
+            <div className="form-group" style={{ marginBottom: "1.25rem" }}>
+              <label htmlFor="rename-report-description">Description</label>
+              <textarea
+                id="rename-report-description"
+                value={renameDescription}
+                onChange={(e) => setRenameDescription(e.target.value)}
+                rows={3}
+                style={{ width: "100%", padding: "0.5rem 0.6rem", resize: "vertical" }}
+              />
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+              <button type="button" className="btn" onClick={() => setRenameTemplate(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={renameSaving || !renameName.trim()}
+                onClick={handleRenameSave}
+              >
+                {renameSaving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {addReportModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="add-report-modal-title"
+          aria-describedby="add-report-modal-desc"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.5)",
+            padding: "1.5rem",
+          }}
+          onClick={(e) => e.target === e.currentTarget && setAddReportModalOpen(false)}
+        >
+          <div
+            className="card"
+            style={{
+              maxWidth: 420,
+              width: "100%",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.15)",
+              borderRadius: 8,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="add-report-modal-title" style={{ margin: "0 0 0.25rem 0", fontSize: "1.25rem", fontWeight: 600 }}>
+              Add report template
+            </h3>
+            <p id="add-report-modal-desc" style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 1.25rem 0" }}>
+              Create a new report template for this organization. You can design the layout and assign users after saving.
+            </p>
+            <form onSubmit={createForm.handleSubmit(onCreate)}>
+              <div className="form-group" style={{ marginBottom: "1rem" }}>
+                <label htmlFor="add-report-name">Name *</label>
+                <input
+                  id="add-report-name"
+                  {...createForm.register("name")}
+                  placeholder="e.g. Annual performance report"
+                  autoFocus
+                  style={{ width: "100%", padding: "0.5rem 0.6rem" }}
+                />
+                {createForm.formState.errors.name && (
+                  <p className="form-error" style={{ marginTop: "0.25rem" }}>{createForm.formState.errors.name.message}</p>
+                )}
+              </div>
+              <div className="form-group" style={{ marginBottom: "1.25rem" }}>
+                <label htmlFor="add-report-description">Description</label>
+                <textarea
+                  id="add-report-description"
+                  {...createForm.register("description")}
+                  placeholder="Optional short description of this report"
+                  rows={3}
+                  style={{ width: "100%", padding: "0.5rem 0.6rem", resize: "vertical", minHeight: 72 }}
+                />
+              </div>
+              {error && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{error}</p>}
+              <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => { setAddReportModalOpen(false); setError(null); }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={createForm.formState.isSubmitting}
+                >
+                  {createForm.formState.isSubmitting ? "Creating…" : "Create template"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {printModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="print-year-modal-title"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.45)",
+            padding: "1rem",
+          }}
+          onClick={(e) => e.target === e.currentTarget && (setPrintModalOpen(false), setPrintPendingTemplateId(null))}
+        >
+          <div className="card" style={{ maxWidth: 360, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+            {printLoadingId === printPendingTemplateId ? (
+              <>
+                <h3 id="print-year-modal-title" style={{ margin: "0 0 0.5rem 0", fontSize: "1.1rem" }}>Preparing report</h3>
+                <ReportLoadProgress label="Loading report data…" />
+              </>
+            ) : (
+              <>
+                <h3 id="print-year-modal-title" style={{ margin: "0 0 1rem 0", fontSize: "1.1rem" }}>Select year for report</h3>
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>Choose the reporting year for data in the report.</p>
+                <div className="form-group" style={{ marginBottom: "1rem" }}>
+                  <label htmlFor="print-modal-year">Year</label>
+                  <select
+                    id="print-modal-year"
+                    value={printModalYear}
+                    onChange={(e) => setPrintModalYear(Number(e.target.value))}
+                    style={{ width: "100%", padding: "0.5rem" }}
+                  >
+                    {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
+                <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+                  <button type="button" className="btn" onClick={() => { setPrintModalOpen(false); setPrintPendingTemplateId(null); }}>
+                    Cancel
+                  </button>
+                  <button type="button" className="btn btn-primary" onClick={confirmPrintFromModal}>
+                    View / Print
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
