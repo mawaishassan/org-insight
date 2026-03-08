@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "VC KPI MIS",
-  description: "University VC KPI Collection & HEC Reporting",
+  title: "Ustadex University Insights",
+  description: "Define → Assign → Collect → Report → Ask",
 };
 
 export default function RootLayout({
