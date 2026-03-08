@@ -64,7 +64,7 @@ async def build_org_schema(db: AsyncSession, org_id: int) -> list[dict]:
     entry_res = await db.execute(entry_kpi_q)
     ids_with_entries = [row[0] for row in entry_res.all()]
 
-    order = [KPI.year.desc(), KPI.sort_order, KPI.name]
+    order = [KPI.sort_order, KPI.name]
     if ids_with_entries:
         # Put KPIs that have data first so they are never dropped by the limit
         order.insert(0, case((KPI.id.in_(ids_with_entries), 0), else_=1))

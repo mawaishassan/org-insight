@@ -9,7 +9,6 @@ class KPICreate(BaseModel):
     domain_id: int | None = None
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
-    year: int = Field(..., ge=2000, le=2100)
     sort_order: int | None = None  # ignored on create; set automatically to next in organization
     entry_mode: str = Field(default="manual", description="manual or api")
     api_endpoint_url: str | None = Field(None, max_length=2048, description="When entry_mode=api, URL we call to fetch entry data")
@@ -49,7 +48,6 @@ class KPIUpdate(BaseModel):
 
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
-    year: int | None = Field(None, ge=2000, le=2100)
     sort_order: int | None = None
     entry_mode: str | None = Field(None, description="manual or api")
     api_endpoint_url: str | None = Field(None, max_length=2048, description="When entry_mode=api, URL we call to fetch entry data")
@@ -92,6 +90,14 @@ class AssignedUserRef(BaseModel):
     permission: str = Field(default="data_entry", description="data_entry (can edit) or view (read-only)")
 
 
+class UsedInReportRef(BaseModel):
+    """Report template that includes this KPI."""
+
+    report_id: int = Field(..., description="Report template id")
+    report_name: str = Field(..., description="Report template name")
+    organization_id: int = Field(..., description="Organization id")
+
+
 class KPIResponse(BaseModel):
     """KPI in API response."""
 
@@ -100,7 +106,7 @@ class KPIResponse(BaseModel):
     domain_id: int | None = None
     name: str
     description: str | None
-    year: int
+    year: int | None = None  # deprecated; data is scoped by entry year
     sort_order: int
     entry_mode: str = "manual"
     api_endpoint_url: str | None = None
@@ -111,6 +117,7 @@ class KPIResponse(BaseModel):
     category_tags: list[CategoryTagRef] = []
     organization_tags: list[OrganizationTagRef] = []
     assigned_users: list[AssignedUserRef] = []
+    used_in_reports: list[UsedInReportRef] = []
 
     class Config:
         from_attributes = True

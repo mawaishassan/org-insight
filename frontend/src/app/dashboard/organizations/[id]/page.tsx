@@ -1,13 +1,14 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { getAccessToken, type UserRole } from "@/lib/auth";
+import { getAccessToken, clearTokens, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { ApiExportContent } from "./ApiExportContent";
 import {
   buildReportPrintDocument,
   openReportPrintWindow,
@@ -52,7 +53,8 @@ const WHERE_OPERATORS = [
   { value: "op_lte", label: "less or equal (≤)" },
 ] as const;
 
-type TabId = "domains" | "kpis" | "fields" | "tags" | "reports" | "storage" | "settings";
+type TabId = "overview" | "domains" | "kpis" | "reports" | "settings";
+type SettingsSubId = "storage" | "time_dimension" | "tags" | "organization" | "admin_user" | "api_export";
 
 interface SubFieldDef {
   id?: number;
@@ -123,7 +125,7 @@ interface KpiRow {
   domain_id: number | null;
   name: string;
   description: string | null;
-  year: number;
+  year?: number | null;
   sort_order: number;
   entry_mode?: string;
   api_endpoint_url?: string | null;
@@ -185,7 +187,6 @@ const domainUpdateSchema = z.object({
 const kpiCreateSchema = z.object({
   name: z.string().min(1, "Name required"),
   description: z.string().optional(),
-  year: z.coerce.number().int().min(2000).max(2100),
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
@@ -195,7 +196,6 @@ const kpiCreateSchema = z.object({
 const kpiUpdateSchema = z.object({
   name: z.string().min(1, "Name required"),
   description: z.string().optional(),
-  year: z.coerce.number().int().min(2000).max(2100),
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
@@ -321,26 +321,40 @@ function ApiContractBlock({ contract }: { contract: ApiContract }) {
   );
 }
 
+const TAB_IDS: TabId[] = ["overview", "domains", "kpis", "reports", "settings"];
+const SETTINGS_SUB_IDS: SettingsSubId[] = ["storage", "time_dimension", "tags", "organization", "admin_user", "api_export"];
+
 export default function OrganizationDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
+  const router = useRouter();
   const orgId = Number(params.id);
   const token = getAccessToken();
   const tabFromUrl = searchParams.get("tab") as TabId | null;
+  const settingsSubFromUrl = searchParams.get("sub") as SettingsSubId | null;
   const initialTab: TabId =
-    tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage", "settings"].includes(tabFromUrl)
+    tabFromUrl && TAB_IDS.includes(tabFromUrl)
       ? tabFromUrl
-      : "domains";
+      : "overview";
 
   const [org, setOrg] = useState<OrgInfo | null>(null);
   const [tab, setTab] = useState<TabId>(initialTab);
+  const [settingsSub, setSettingsSub] = useState<SettingsSubId>(
+    settingsSubFromUrl && SETTINGS_SUB_IDS.includes(settingsSubFromUrl) ? settingsSubFromUrl : "storage"
+  );
   const [domains, setDomains] = useState<DomainWithSummary[]>([]);
-
   useEffect(() => {
-    if (tabFromUrl && ["domains", "kpis", "fields", "tags", "reports", "storage", "settings"].includes(tabFromUrl)) {
-      setTab(tabFromUrl as TabId);
+    if (tabFromUrl && TAB_IDS.includes(tabFromUrl)) {
+      setTab(tabFromUrl);
+    } else {
+      setTab("overview");
     }
   }, [tabFromUrl]);
+  useEffect(() => {
+    if (tab === "settings" && settingsSubFromUrl && SETTINGS_SUB_IDS.includes(settingsSubFromUrl)) {
+      setSettingsSub(settingsSubFromUrl);
+    }
+  }, [tab, settingsSubFromUrl]);
   const [orgTags, setOrgTags] = useState<OrgTagRow[]>([]);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -348,8 +362,6 @@ export default function OrganizationDetailPage() {
   const [kpiFilterDomainId, setKpiFilterDomainId] = useState<number | null>(null);
   const [kpiFilterCategoryId, setKpiFilterCategoryId] = useState<number | null>(null);
   const [kpiFilterTagId, setKpiFilterTagId] = useState<number | null>(null);
-  const [selectedKpiId, setSelectedKpiId] = useState<number | null>(null);
-  const [fields, setFields] = useState<KpiField[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -357,15 +369,47 @@ export default function OrganizationDetailPage() {
   const [domainEditingId, setDomainEditingId] = useState<number | null>(null);
   const [kpiShowCreate, setKpiShowCreate] = useState(false);
   const [kpiEditingId, setKpiEditingId] = useState<number | null>(null);
-  const [fieldShowCreate, setFieldShowCreate] = useState(false);
-  const [fieldEditingId, setFieldEditingId] = useState<number | null>(null);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [timeDimension, setTimeDimension] = useState(org?.time_dimension ?? "yearly");
   const [timeDimensionSaving, setTimeDimensionSaving] = useState(false);
+  const [overviewSummary, setOverviewSummary] = useState<{
+    domainCount: number;
+    categoryCount: number;
+    kpiTotal: number;
+    kpiManual: number;
+    kpiApi: number;
+    tagCount: number;
+    reportCount: number;
+  } | null>(null);
 
   useEffect(() => {
     setTimeDimension(org?.time_dimension ?? "yearly");
   }, [org?.time_dimension]);
+
+  useEffect(() => {
+    if (!token || !orgId) return;
+    Promise.all([
+      api<DomainWithSummary[]>(`/domains?${qs({ organization_id: orgId, with_summary: true })}`, { token }),
+      api<KpiRow[]>(`/kpis?${qs({ organization_id: orgId })}`, { token }),
+      api<OrgTagRow[]>(`/organizations/${orgId}/tags`, { token }),
+      api<{ id: number }[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token }),
+    ])
+      .then(([domainsList, kpisList, tagsList, reportsList]) => {
+        const categoryCount = domainsList.reduce((s, d) => s + (d.summary?.category_count ?? 0), 0);
+        const kpiManual = kpisList.filter((k) => (k.entry_mode ?? "manual") === "manual").length;
+        const kpiApi = kpisList.filter((k) => k.entry_mode === "api").length;
+        setOverviewSummary({
+          domainCount: domainsList.length,
+          categoryCount,
+          kpiTotal: kpisList.length,
+          kpiManual,
+          kpiApi,
+          tagCount: tagsList.length,
+          reportCount: reportsList.length,
+        });
+      })
+      .catch(() => setOverviewSummary(null));
+  }, [orgId, token]);
 
   const loadOrg = () => {
     if (!token || !orgId) return;
@@ -409,14 +453,6 @@ export default function OrganizationDetailPage() {
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"));
   };
 
-  const loadFields = () => {
-    if (!token || !orgId || !selectedKpiId) return;
-    setError(null);
-    api<KpiField[]>(`/fields?${qs({ kpi_id: selectedKpiId, organization_id: orgId })}`, { token })
-      .then(setFields)
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed"));
-  };
-
   useEffect(() => {
     loadOrg();
   }, [orgId]);
@@ -433,11 +469,6 @@ export default function OrganizationDetailPage() {
   }, [orgId, kpiFilterName, kpiFilterDomainId, kpiFilterCategoryId, kpiFilterTagId]);
 
   useEffect(() => {
-    if (selectedKpiId) loadFields();
-    else setFields([]);
-  }, [selectedKpiId, orgId]);
-
-  useEffect(() => {
     if (!token) return;
     api<{ role: UserRole }>("/auth/me", { token })
       .then((me) => setUserRole(me.role))
@@ -445,93 +476,35 @@ export default function OrganizationDetailPage() {
   }, [token]);
 
   const domainById = (id: number) => domains.find((d) => d.id === id)?.name ?? `Domain #${id}`;
-  const selectedKpi = selectedKpiId ? kpis.find((k) => k.id === selectedKpiId) : null;
 
   if (!orgId || isNaN(orgId)) {
     return (
       <div>
         <p className="form-error">Invalid organization.</p>
-        <Link href="/dashboard/organizations">Back to Organizations</Link>
+        <Link href="/dashboard/organizations">Organizations</Link>
       </div>
     );
   }
 
+  const updateUrl = (newTab: TabId, newSub?: SettingsSubId) => {
+    const p = new URLSearchParams(searchParams.toString());
+    p.set("tab", newTab);
+    if (newTab === "settings" && newSub) p.set("sub", newSub);
+    else p.delete("sub");
+    router.replace(`/dashboard/organizations/${orgId}?${p.toString()}`, { scroll: false });
+  };
+
   return (
     <div>
-      <div style={{ marginBottom: "1rem" }}>
-        <Link href="/dashboard/organizations" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-          {"\u2190"} Organizations
-        </Link>
-      </div>
-      <h1 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>
-        {org ? org.name : `Organization #${orgId}`}
-      </h1>
-      {org?.description && (
-        <p style={{ color: "var(--muted)", marginBottom: "1rem" }}>{org.description}</p>
-      )}
-
-      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem", flexWrap: "wrap", borderBottom: "1px solid var(--border)", paddingBottom: "0.5rem" }}>
-        <button
-          type="button"
-          className={tab === "domains" ? "btn btn-primary" : "btn"}
-          onClick={() => setTab("domains")}
-        >
-          Domains
-        </button>
-        <button
-          type="button"
-          className={tab === "kpis" ? "btn btn-primary" : "btn"}
-          onClick={() => setTab("kpis")}
-        >
-          KPIs
-        </button>
-        <button
-          type="button"
-          className={tab === "tags" ? "btn btn-primary" : "btn"}
-          onClick={() => setTab("tags")}
-        >
-          Tags
-        </button>
-        <button
-          type="button"
-          className={tab === "fields" ? "btn btn-primary" : "btn"}
-          onClick={() => setTab("fields")}
-          disabled={!selectedKpiId}
-          title={!selectedKpiId ? "Select a KPI first" : undefined}
-        >
-          KPI Fields
-          {selectedKpi && ` (${selectedKpi.name})`}
-        </button>
-        {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN") && (
-          <button
-            type="button"
-            className={tab === "reports" ? "btn btn-primary" : "btn"}
-            onClick={() => setTab("reports")}
-          >
-            Reports
-          </button>
-        )}
-        {userRole === "SUPER_ADMIN" && (
-          <button
-            type="button"
-            className={tab === "storage" ? "btn btn-primary" : "btn"}
-            onClick={() => setTab("storage")}
-          >
-            Storage
-          </button>
-        )}
-        {userRole === "SUPER_ADMIN" && (
-          <button
-            type="button"
-            className={tab === "settings" ? "btn btn-primary" : "btn"}
-            onClick={() => setTab("settings")}
-          >
-            Settings
-          </button>
-        )}
-      </div>
-
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
+
+      {tab === "overview" && (
+        <OrganizationOverviewCards
+          orgId={orgId}
+          summary={overviewSummary}
+          updateUrl={updateUrl}
+        />
+      )}
 
       {tab === "domains" && (
         <DomainsSection
@@ -572,37 +545,7 @@ export default function OrganizationDetailPage() {
           editingId={kpiEditingId}
           setEditingId={setKpiEditingId}
           userRole={userRole}
-          onManageFields={(kpiId) => {
-            setSelectedKpiId(kpiId);
-            setTab("fields");
-          }}
-        />
-      )}
-
-      {tab === "tags" && (
-        <TagsSection
-          orgId={orgId}
-          token={token!}
-          list={orgTags}
-          loadList={loadOrgTags}
-        />
-      )}
-
-      {tab === "fields" && (
-        <FieldsSection
-          orgId={orgId}
-          token={token!}
-          kpis={kpis}
-          selectedKpiId={selectedKpiId}
-          setSelectedKpiId={setSelectedKpiId}
-          list={fields}
-          loadList={loadFields}
-          showCreate={fieldShowCreate}
-          setShowCreate={setFieldShowCreate}
-          editingId={fieldEditingId}
-          setEditingId={setFieldEditingId}
-          userRole={userRole}
-          onKpiUpdated={loadKpis}
+          onManageFields={(kpiId) => router.push(`/dashboard/kpis/${kpiId}/fields?organization_id=${orgId}`)}
         />
       )}
 
@@ -615,54 +558,532 @@ export default function OrganizationDetailPage() {
       )}
 
       {tab === "settings" && userRole === "SUPER_ADMIN" && (
-        <div className="card" style={{ maxWidth: 480 }}>
-          <h3 style={{ marginBottom: "0.75rem" }}>Organization settings</h3>
-          <div className="form-group">
-            <label htmlFor="time_dimension">Time dimension</label>
-            <select
-              id="time_dimension"
-              value={timeDimension}
-              onChange={(e) => setTimeDimension(e.target.value)}
-              disabled={timeDimensionSaving}
-              style={{ maxWidth: 240 }}
-            >
-              <option value="yearly">Yearly</option>
-              <option value="half_yearly">Half-yearly</option>
-              <option value="quarterly">Quarterly</option>
-              <option value="monthly">Monthly</option>
-            </select>
-            <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
-              Default reporting period for this organization. KPIs can use this or a finer dimension (e.g. Quarterly when org is Yearly).
-            </p>
-          </div>
+        <SettingsPage
+          orgId={orgId}
+          org={org}
+          token={token!}
+          orgTags={orgTags}
+          loadOrgTags={loadOrgTags}
+          settingsSub={settingsSub}
+          setSettingsSub={(sub) => { setSettingsSub(sub); updateUrl("settings", sub); }}
+          timeDimension={timeDimension}
+          setTimeDimension={setTimeDimension}
+          timeDimensionSaving={timeDimensionSaving}
+          setTimeDimensionSaving={setTimeDimensionSaving}
+          loadOrg={loadOrg}
+        />
+      )}
+    </div>
+  );
+}
+
+const cardLinkStyle = {
+  display: "block",
+  padding: "1.25rem",
+  borderRadius: 12,
+  border: "1px solid var(--border)",
+  background: "var(--surface)",
+  color: "inherit",
+  textDecoration: "none",
+  transition: "border-color 0.15s, box-shadow 0.15s",
+} as const;
+
+function OrganizationOverviewCards({
+  orgId,
+  summary,
+  updateUrl,
+}: {
+  orgId: number;
+  summary: { domainCount: number; categoryCount: number; kpiTotal: number; kpiManual: number; kpiApi: number; tagCount: number; reportCount: number } | null;
+  updateUrl: (tab: TabId, sub?: SettingsSubId) => void;
+}) {
+  if (!summary) {
+    return <p style={{ color: "var(--muted)" }}>Loading overview…</p>;
+  }
+  const cards: { id: string; title: string; icon: React.ReactNode; lines: string[]; href?: string; onClick?: () => void }[] = [
+    {
+      id: "kpis",
+      title: "KPIs",
+      icon: (
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 3v18h18" /><path d="M18 17V9" /><path d="M13 17V5" /><path d="M8 17v-3" />
+        </svg>
+      ),
+      lines: [
+        `${summary.kpiTotal} total KPIs`,
+        `${summary.kpiManual} manual entry`,
+        `${summary.kpiApi} API-bound`,
+      ],
+      onClick: () => updateUrl("kpis"),
+    },
+    {
+      id: "domains",
+      title: "Domains",
+      icon: (
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          <path d="M2 10h20" />
+        </svg>
+      ),
+      lines: [
+        `${summary.domainCount} domains`,
+        `${summary.categoryCount} categories`,
+      ],
+      onClick: () => updateUrl("domains"),
+    },
+    {
+      id: "reports",
+      title: "Reports",
+      icon: (
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <path d="M14 2v6h6" /><path d="M16 13H8" /><path d="M16 17H8" /><path d="M10 9H8" />
+        </svg>
+      ),
+      lines: [
+        `${summary.reportCount} report template${summary.reportCount !== 1 ? "s" : ""}`,
+      ],
+      onClick: () => updateUrl("reports"),
+    },
+    {
+      id: "chat",
+      title: "Chat with Data",
+      icon: (
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      ),
+      lines: ["Ask questions about your KPI data in natural language."],
+      href: `/dashboard/chat?organization_id=${orgId}`,
+    },
+    {
+      id: "settings",
+      title: "Settings",
+      icon: (
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+      ),
+      lines: ["Storage, time dimension, tags.", `${summary.tagCount} tag${summary.tagCount !== 1 ? "s" : ""} configured.`],
+      onClick: () => updateUrl("settings", "storage"),
+    },
+  ];
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "1.25rem" }}>
+      {cards.map((card) => {
+        const content = (
+          <>
+            <div style={{ color: "var(--accent)", marginBottom: "0.75rem" }}>{card.icon}</div>
+            <h3 style={{ fontSize: "1.1rem", marginBottom: "0.5rem", fontWeight: 600 }}>{card.title}</h3>
+            <ul style={{ margin: 0, paddingLeft: "1.25rem", color: "var(--muted)", fontSize: "0.9rem", lineHeight: 1.5 }}>
+              {card.lines.map((line, i) => (
+                <li key={i}>{line}</li>
+              ))}
+            </ul>
+          </>
+        );
+        if (card.href) {
+          return (
+            <Link key={card.id} href={card.href} style={cardLinkStyle}>
+              {content}
+            </Link>
+          );
+        }
+        return (
           <button
+            key={card.id}
             type="button"
-            className="btn btn-primary"
-            disabled={timeDimensionSaving || !token}
-            onClick={async () => {
-              if (!token || !orgId) return;
-              setTimeDimensionSaving(true);
-              try {
-                await api(`/organizations/${orgId}`, {
-                  method: "PATCH",
-                  body: JSON.stringify({ time_dimension: timeDimension }),
-                  token,
-                });
-                loadOrg();
-              } catch {
-                // leave state unchanged
-              } finally {
-                setTimeDimensionSaving(false);
-              }
+            onClick={card.onClick}
+            style={{ ...cardLinkStyle, width: "100%", textAlign: "left", cursor: "pointer", font: "inherit" }}
+          >
+            {content}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const SETTINGS_SUB_LABELS: Record<SettingsSubId, string> = {
+  storage: "Storage settings",
+  time_dimension: "Time dimension",
+  tags: "Tags settings",
+  organization: "Organization",
+  admin_user: "Admin user",
+  api_export: "API export",
+};
+
+interface UserResponse {
+  id: number;
+  username: string;
+  email: string | null;
+  full_name: string | null;
+  role: string;
+  organization_id: number | null;
+  is_active: boolean;
+}
+
+const orgUpdateSchema = z.object({
+  name: z.string().min(1, "Name required"),
+  description: z.string().optional(),
+  is_active: z.boolean(),
+});
+const adminEditSchema = z.object({
+  username: z.string().min(1, "Username required").max(100),
+  email: z.union([z.string().email(), z.literal("")]).optional(),
+  full_name: z.string().optional(),
+  password: z.union([z.string().min(8, "Min 8 characters"), z.literal("")]).optional(),
+});
+type OrgUpdateFormData = z.infer<typeof orgUpdateSchema>;
+type AdminEditFormData = z.infer<typeof adminEditSchema>;
+
+function SettingsPage({
+  orgId,
+  org,
+  token,
+  orgTags,
+  loadOrgTags,
+  settingsSub,
+  setSettingsSub,
+  timeDimension,
+  setTimeDimension,
+  timeDimensionSaving,
+  setTimeDimensionSaving,
+  loadOrg,
+}: {
+  orgId: number;
+  org: OrgInfo | null;
+  token: string;
+  orgTags: OrgTagRow[];
+  loadOrgTags: () => void;
+  settingsSub: SettingsSubId;
+  setSettingsSub: (s: SettingsSubId) => void;
+  timeDimension: string;
+  setTimeDimension: (s: string) => void;
+  timeDimensionSaving: boolean;
+  setTimeDimensionSaving: (v: boolean) => void;
+  loadOrg: () => void;
+}) {
+  const [settingsSearch, setSettingsSearch] = useState("");
+  const sortedSubIds = useMemo(() => {
+    const byLabel = [...SETTINGS_SUB_IDS].sort((a, b) =>
+      SETTINGS_SUB_LABELS[a].localeCompare(SETTINGS_SUB_LABELS[b], undefined, { sensitivity: "base" })
+    );
+    if (!settingsSearch.trim()) return byLabel;
+    const q = settingsSearch.trim().toLowerCase();
+    return byLabel.filter((sub) => SETTINGS_SUB_LABELS[sub].toLowerCase().includes(q));
+  }, [settingsSearch]);
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: "1.5rem", alignItems: "start", maxWidth: 960 }}>
+      <nav className="card" style={{ padding: "0.5rem 0", position: "sticky", top: "1rem" }}>
+        <div style={{ padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)" }}>
+          <input
+            type="search"
+            placeholder="Search settings…"
+            value={settingsSearch}
+            onChange={(e) => setSettingsSearch(e.target.value)}
+            style={{
+              width: "100%",
+              padding: "0.45rem 0.6rem",
+              fontSize: "0.9rem",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              background: "var(--bg)",
+            }}
+          />
+        </div>
+        {sortedSubIds.map((sub) => (
+          <button
+            key={sub}
+            type="button"
+            onClick={() => setSettingsSub(sub)}
+            style={{
+              display: "block",
+              width: "100%",
+              padding: "0.6rem 1rem",
+              textAlign: "left",
+              border: "none",
+              background: settingsSub === sub ? "var(--accent-subtle, rgba(0,0,0,0.06))" : "transparent",
+              font: "inherit",
+              fontSize: "0.95rem",
+              color: settingsSub === sub ? "var(--accent)" : "var(--text)",
+              cursor: "pointer",
+              borderLeft: settingsSub === sub ? "3px solid var(--accent)" : "3px solid transparent",
             }}
           >
-            {timeDimensionSaving ? "Saving…" : "Save"}
+            {SETTINGS_SUB_LABELS[sub]}
           </button>
-        </div>
-      )}
+        ))}
+      </nav>
+      <div className="card" style={{ padding: "1.25rem" }}>
+        {settingsSub === "storage" && <StorageConfigSection orgId={orgId} token={token} />}
+        {settingsSub === "time_dimension" && (
+          <div>
+            <h3 style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>Time dimension</h3>
+            <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
+              Default reporting period for this organization. KPIs can use this or a finer dimension (e.g. Quarterly when org is Yearly).
+            </p>
+            <div className="form-group">
+              <label htmlFor="time_dimension">Period</label>
+              <select
+                id="time_dimension"
+                value={timeDimension}
+                onChange={(e) => setTimeDimension(e.target.value)}
+                disabled={timeDimensionSaving}
+                style={{ maxWidth: 240 }}
+              >
+                <option value="yearly">Yearly</option>
+                <option value="half_yearly">Half-yearly</option>
+                <option value="quarterly">Quarterly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </div>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={timeDimensionSaving || !token}
+              onClick={async () => {
+                if (!token || !orgId) return;
+                setTimeDimensionSaving(true);
+                try {
+                  await api(`/organizations/${orgId}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ time_dimension: timeDimension }),
+                    token,
+                  });
+                  loadOrg();
+                } catch {
+                  // leave state unchanged
+                } finally {
+                  setTimeDimensionSaving(false);
+                }
+              }}
+            >
+              {timeDimensionSaving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        )}
+        {settingsSub === "tags" && (
+          <TagsSection orgId={orgId} token={token} list={orgTags} loadList={loadOrgTags} />
+        )}
+        {settingsSub === "organization" && (
+          <OrganizationSettingsSection orgId={orgId} org={org} token={token} loadOrg={loadOrg} />
+        )}
+        {settingsSub === "admin_user" && (
+          <AdminUserSettingsSection orgId={orgId} token={token} />
+        )}
+        {settingsSub === "api_export" && (
+          <ApiExportContent orgId={orgId} token={token} />
+        )}
+      </div>
+    </div>
+  );
+}
 
-      {tab === "storage" && userRole === "SUPER_ADMIN" && (
-        <StorageConfigSection orgId={orgId} token={token!} />
+function OrganizationSettingsSection({
+  orgId,
+  org,
+  token,
+  loadOrg,
+}: {
+  orgId: number;
+  org: OrgInfo | null;
+  token: string;
+  loadOrg: () => void;
+}) {
+  const [adminUser, setAdminUser] = useState<UserResponse | null>(null);
+  const [loadingAdmin, setLoadingAdmin] = useState(false);
+  const [orgSaveError, setOrgSaveError] = useState<string | null>(null);
+  const [adminSaveError, setAdminSaveError] = useState<string | null>(null);
+
+  const orgForm = useForm<OrgUpdateFormData>({
+    resolver: zodResolver(orgUpdateSchema),
+    defaultValues: {
+      name: org?.name ?? "",
+      description: org?.description ?? "",
+      is_active: true,
+    },
+  });
+  useEffect(() => {
+    orgForm.reset({
+      name: org?.name ?? "",
+      description: org?.description ?? "",
+      is_active: org?.is_active ?? true,
+    });
+  }, [org?.name, org?.description, org?.is_active]);
+
+  const onOrgSubmit = async (data: OrgUpdateFormData) => {
+    setOrgSaveError(null);
+    try {
+      await api(`/organizations/${orgId}`, {
+        method: "PATCH",
+        token,
+        body: JSON.stringify({ name: data.name, description: data.description || null, is_active: org?.is_active ?? true }),
+      });
+      loadOrg();
+    } catch (e) {
+      setOrgSaveError(e instanceof Error ? e.message : "Update failed");
+    }
+  };
+  const toggleActive = async () => {
+    if (!org) return;
+    setOrgSaveError(null);
+    try {
+      await api(`/organizations/${orgId}`, { method: "PATCH", token, body: JSON.stringify({ is_active: !org.is_active }) });
+      loadOrg();
+    } catch (e) {
+      setOrgSaveError(e instanceof Error ? e.message : "Update failed");
+    }
+  };
+
+  return (
+    <div>
+      <h3 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>Organization</h3>
+      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
+        Edit organization name and description. Use the toggle to activate or deactivate the organization.
+      </p>
+      {orgSaveError && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{orgSaveError}</p>}
+      <form onSubmit={orgForm.handleSubmit(onOrgSubmit)} style={{ marginBottom: "1rem" }}>
+        <div className="form-group">
+          <label>Name *</label>
+          <input {...orgForm.register("name")} />
+          {orgForm.formState.errors.name && <p className="form-error">{orgForm.formState.errors.name.message}</p>}
+        </div>
+        <div className="form-group">
+          <label>Description</label>
+          <textarea {...orgForm.register("description")} rows={2} />
+        </div>
+        <div className="form-group" style={{ marginBottom: "1rem" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer", userSelect: "none" }}>
+            <span style={{ fontWeight: 500 }}>Active</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={org?.is_active ?? false}
+              onClick={toggleActive}
+              style={{
+                width: 44,
+                height: 24,
+                borderRadius: 12,
+                border: "none",
+                background: org?.is_active ? "var(--success)" : "var(--muted)",
+                cursor: "pointer",
+                position: "relative",
+                flexShrink: 0,
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  top: 2,
+                  left: org?.is_active ? 22 : 2,
+                  width: 20,
+                  height: 20,
+                  borderRadius: "50%",
+                  background: "#fff",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                  transition: "left 0.2s ease",
+                }}
+              />
+            </button>
+            <span style={{ fontSize: "0.9rem", color: "var(--muted)" }}>
+              {org?.is_active ? "Organization is active" : "Organization is inactive"}
+            </span>
+          </label>
+        </div>
+        <button type="submit" className="btn btn-primary" disabled={orgForm.formState.isSubmitting}>
+          {orgForm.formState.isSubmitting ? "Saving…" : "Save organization"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function AdminUserSettingsSection({ orgId, token }: { orgId: number; token: string }) {
+  const [adminUser, setAdminUser] = useState<UserResponse | null>(null);
+  const [loadingAdmin, setLoadingAdmin] = useState(false);
+  const [adminSaveError, setAdminSaveError] = useState<string | null>(null);
+
+  const adminForm = useForm<AdminEditFormData>({
+    resolver: zodResolver(adminEditSchema),
+    defaultValues: {
+      username: "",
+      email: "",
+      full_name: "",
+      password: "",
+    },
+  });
+
+  useEffect(() => {
+    if (!token || !orgId) return;
+    setLoadingAdmin(true);
+    api<UserResponse[]>(`/users?organization_id=${orgId}`, { token })
+      .then((users) => {
+        const admin = users.find((u) => u.role === "ORG_ADMIN") ?? users[0] ?? null;
+        setAdminUser(admin);
+      })
+      .catch(() => setAdminUser(null))
+      .finally(() => setLoadingAdmin(false));
+  }, [orgId, token]);
+
+  useEffect(() => {
+    adminForm.reset({
+      username: adminUser?.username ?? "",
+      email: adminUser?.email ?? "",
+      full_name: adminUser?.full_name ?? "",
+      password: "",
+    });
+  }, [adminUser]);
+
+  const onAdminSubmit = async (data: AdminEditFormData) => {
+    if (!adminUser) return;
+    setAdminSaveError(null);
+    try {
+      const body: Record<string, unknown> = { username: data.username, email: data.email || null, full_name: data.full_name || null };
+      if (data.password && data.password.trim().length >= 8) body.password = data.password;
+      await api(`/users/${adminUser.id}?organization_id=${orgId}`, { method: "PATCH", token, body: JSON.stringify(body) });
+    } catch (e) {
+      setAdminSaveError(e instanceof Error ? e.message : "Update failed");
+    }
+  };
+
+  return (
+    <div>
+      <h3 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>Admin user</h3>
+      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
+        Edit the organization admin user (username, email, full name, password).
+      </p>
+      {adminSaveError && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{adminSaveError}</p>}
+      {loadingAdmin ? (
+        <p style={{ color: "var(--muted)" }}>Loading admin…</p>
+      ) : adminUser ? (
+        <form onSubmit={adminForm.handleSubmit(onAdminSubmit)}>
+          <div className="form-group">
+            <label>Username *</label>
+            <input {...adminForm.register("username")} />
+            {adminForm.formState.errors.username && <p className="form-error">{adminForm.formState.errors.username.message}</p>}
+          </div>
+          <div className="form-group">
+            <label>Email</label>
+            <input type="email" {...adminForm.register("email")} />
+          </div>
+          <div className="form-group">
+            <label>Full name</label>
+            <input {...adminForm.register("full_name")} />
+          </div>
+          <div className="form-group">
+            <label>New password (leave blank to keep current)</label>
+            <input type="password" {...adminForm.register("password")} placeholder="Optional" />
+            {adminForm.formState.errors.password && <p className="form-error">{adminForm.formState.errors.password.message}</p>}
+          </div>
+          <button type="submit" className="btn btn-primary" disabled={adminForm.formState.isSubmitting}>
+            {adminForm.formState.isSubmitting ? "Saving…" : "Save admin"}
+          </button>
+        </form>
+      ) : (
+        <p style={{ color: "var(--muted)" }}>No org admin user found.</p>
       )}
     </div>
   );
@@ -1387,7 +1808,6 @@ function KpisSection({
     defaultValues: {
       name: "",
       description: "",
-      year: new Date().getFullYear(),
       sort_order: 0,
       entry_mode: "manual",
       api_endpoint_url: "",
@@ -1403,7 +1823,6 @@ function KpisSection({
         body: JSON.stringify({
           name: data.name,
           description: data.description || null,
-          year: data.year,
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
@@ -1414,7 +1833,6 @@ function KpisSection({
       createForm.reset({
         name: "",
         description: "",
-        year: new Date().getFullYear(),
         sort_order: 0,
         entry_mode: "manual",
         api_endpoint_url: "",
@@ -1434,7 +1852,6 @@ function KpisSection({
         body: JSON.stringify({
           name: data.name,
           description: data.description || null,
-          year: data.year,
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
@@ -1477,10 +1894,49 @@ function KpisSection({
     ? categories.filter((c) => c.domain_id === filterDomainId)
     : categories;
 
+  const [showAdvancedFilter, setShowAdvancedFilter] = useState(false);
+
+  const activeFilterChips: { key: string; label: string; onClear: () => void }[] = [];
+  if (filterName.trim()) activeFilterChips.push({ key: "name", label: `Search: "${filterName.trim()}"`, onClear: () => setFilterName("") });
+  if (filterDomainId != null) {
+    const name = domains.find((d) => d.id === filterDomainId)?.name ?? `Domain #${filterDomainId}`;
+    activeFilterChips.push({ key: "domain", label: `Domain: ${name}`, onClear: () => { setFilterDomainId(null); setFilterCategoryId(null); } });
+  }
+  if (filterCategoryId != null) {
+    const cat = categories.find((c) => c.id === filterCategoryId);
+    activeFilterChips.push({ key: "category", label: `Category: ${cat?.name ?? filterCategoryId}`, onClear: () => setFilterCategoryId(null) });
+  }
+  if (filterTagId != null) {
+    const tag = orgTags.find((t) => t.id === filterTagId);
+    activeFilterChips.push({ key: "tag", label: `Tag: ${tag?.name ?? filterTagId}`, onClear: () => setFilterTagId(null) });
+  }
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
-        <h2 style={{ fontSize: "1.1rem" }}>KPIs</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", flex: 1, minWidth: 0 }}>
+          <input
+            type="search"
+            placeholder="Search KPIs…"
+            value={filterName}
+            onChange={(e) => setFilterName(e.target.value)}
+            style={{
+              padding: "0.5rem 0.75rem",
+              borderRadius: 8,
+              border: "1px solid var(--border)",
+              fontSize: "0.9rem",
+              width: "clamp(180px, 24vw, 280px)",
+            }}
+          />
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setShowAdvancedFilter((v) => !v)}
+            style={{ fontSize: "0.85rem" }}
+          >
+            {showAdvancedFilter ? "Hide advanced filters" : "Advanced filter"}
+          </button>
+        </div>
         <button
           type="button"
           className="btn btn-primary"
@@ -1489,62 +1945,101 @@ function KpisSection({
           {showCreate ? "Cancel" : "Add KPI"}
         </button>
       </div>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "0.5rem",
-          flexWrap: "wrap",
-          marginBottom: "1rem",
-          padding: "0.5rem 0",
-        }}
-      >
-        <input
-          type="search"
-          placeholder="Search KPIs…"
-          value={filterName}
-          onChange={(e) => setFilterName(e.target.value)}
+
+      {showAdvancedFilter && (
+        <div
           style={{
-            padding: "0.35rem 0.6rem",
-            borderRadius: 6,
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            flexWrap: "wrap",
+            marginBottom: "0.75rem",
+            padding: "0.75rem",
+            background: "var(--bg-subtle)",
+            borderRadius: 8,
             border: "1px solid var(--border)",
-            fontSize: "0.85rem",
-            width: "clamp(120px, 20vw, 200px)",
           }}
-        />
-        <select
-          value={filterDomainId ?? ""}
-          onChange={(e) => setFilterDomainId(e.target.value ? Number(e.target.value) : null)}
-          style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 100 }}
         >
-          <option value="">All domains</option>
-          {domains.map((d) => (
-            <option key={d.id} value={d.id}>{d.name}</option>
-          ))}
-        </select>
-        <select
-          value={filterCategoryId ?? ""}
-          onChange={(e) => setFilterCategoryId(e.target.value ? Number(e.target.value) : null)}
-          style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 100 }}
-        >
-          <option value="">All categories</option>
-          {categoriesForDomain.map((c) => (
-            <option key={c.id} value={c.id}>{c.domain_name ? `${c.name} (${c.domain_name})` : c.name}</option>
-          ))}
-        </select>
-        {orgTags.length > 0 && (
+          <span style={{ fontSize: "0.85rem", color: "var(--muted)", marginRight: "0.25rem" }}>Filter by:</span>
           <select
-            value={filterTagId ?? ""}
-            onChange={(e) => setFilterTagId(e.target.value ? Number(e.target.value) : null)}
-            style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 90 }}
+            value={filterDomainId ?? ""}
+            onChange={(e) => setFilterDomainId(e.target.value ? Number(e.target.value) : null)}
+            style={{ padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 120 }}
           >
-            <option value="">All tags</option>
-            {orgTags.map((t) => (
-              <option key={t.id} value={t.id}>{t.name}</option>
+            <option value="">All domains</option>
+            {domains.map((d) => (
+              <option key={d.id} value={d.id}>{d.name}</option>
             ))}
           </select>
-        )}
-      </div>
+          <select
+            value={filterCategoryId ?? ""}
+            onChange={(e) => setFilterCategoryId(e.target.value ? Number(e.target.value) : null)}
+            style={{ padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 120 }}
+          >
+            <option value="">All categories</option>
+            {categoriesForDomain.map((c) => (
+              <option key={c.id} value={c.id}>{c.domain_name ? `${c.name} (${c.domain_name})` : c.name}</option>
+            ))}
+          </select>
+          {orgTags.length > 0 && (
+            <select
+              value={filterTagId ?? ""}
+              onChange={(e) => setFilterTagId(e.target.value ? Number(e.target.value) : null)}
+              style={{ padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 100 }}
+            >
+              <option value="">All tags</option>
+              {orgTags.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+
+      {activeFilterChips.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: "0.35rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+          <span style={{ fontSize: "0.8rem", color: "var(--muted)", marginRight: "0.25rem" }}>Active:</span>
+          {activeFilterChips.map((chip) => (
+            <span
+              key={chip.key}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.35rem",
+                padding: "0.25rem 0.5rem",
+                borderRadius: 6,
+                background: "var(--accent-subtle, rgba(0,0,0,0.06))",
+                border: "1px solid var(--border)",
+                fontSize: "0.8rem",
+              }}
+            >
+              {chip.label}
+              <button
+                type="button"
+                onClick={chip.onClear}
+                aria-label={`Remove ${chip.label}`}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 18,
+                  height: 18,
+                  padding: 0,
+                  border: "none",
+                  background: "var(--muted)",
+                  color: "var(--surface)",
+                  borderRadius: "50%",
+                  cursor: "pointer",
+                  fontSize: "0.9rem",
+                  lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
       {showCreate && (
         <div className="card" style={{ marginBottom: "1rem" }}>
@@ -1557,10 +2052,6 @@ function KpisSection({
             <div className="form-group">
               <label>Description</label>
               <textarea {...createForm.register("description")} rows={2} />
-            </div>
-            <div className="form-group">
-              <label>Year *</label>
-              <input type="number" min={2000} max={2100} {...createForm.register("year")} />
             </div>
             <div className="form-group">
               <label>Sort order</label>
@@ -1656,9 +2147,12 @@ function KpisSection({
               colorKey = k.id;
             }
             const cardColor = cardColorPalette[colorKey % cardColorPalette.length];
+            const kpiFieldsHref = `/dashboard/kpis/${k.id}/fields?organization_id=${orgId}`;
+            const kpiEditHref = `/dashboard/organizations/${orgId}/kpis/${k.id}`;
             return (
-            <div
+            <Link
               key={k.id}
+              href={kpiFieldsHref}
               className="card"
               style={{
                 padding: "1rem",
@@ -1669,6 +2163,9 @@ function KpisSection({
                 transition: "box-shadow 0.15s ease, transform 0.15s ease",
                 background: cardColor.bg,
                 borderLeft: `3px solid ${cardColor.accent}`,
+                cursor: "pointer",
+                textDecoration: "none",
+                color: "inherit",
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.boxShadow = `0 4px 12px ${cardColor.border}`;
@@ -1684,18 +2181,6 @@ function KpisSection({
                   <div>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem", gap: "0.5rem" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                        <span
-                          style={{
-                            background: cardColor.accentBg,
-                            color: cardColor.accent,
-                            padding: "0.2rem 0.5rem",
-                            borderRadius: "4px",
-                            fontSize: "0.75rem",
-                            fontWeight: 500,
-                          }}
-                        >
-                          {k.year}
-                        </span>
                         <span
                           style={{
                             background: "rgba(107, 114, 128, 0.12)",
@@ -1815,10 +2300,9 @@ function KpisSection({
                       </div>
                     )}
                   </div>
-                  {/* Card actions */}
-                  <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.75rem", flexWrap: "wrap" }}>
-                    <button
-                      type="button"
+                  {/* Card actions: same destination as card (Fields), Edit and Delete stop propagation */}
+                  <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.75rem", flexWrap: "wrap" }} onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+                    <span
                       className="btn"
                       style={{
                         padding: "0.3rem 0.6rem",
@@ -1827,13 +2311,13 @@ function KpisSection({
                         background: cardColor.accent,
                         color: "#fff",
                         border: "none",
+                        textAlign: "center",
                       }}
-                      onClick={() => onManageFields(k.id)}
                     >
                       Fields
-                    </button>
-                    <Link
-                      href={`/dashboard/organizations/${orgId}/kpis/${k.id}`}
+                    </span>
+                    <button
+                      type="button"
                       className="btn"
                       style={{
                         padding: "0.3rem 0.6rem",
@@ -1841,23 +2325,22 @@ function KpisSection({
                         background: cardColor.accentBg,
                         color: cardColor.accent,
                         border: `1px solid ${cardColor.border}`,
-                        textDecoration: "none",
-                        display: "inline-block",
                       }}
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); router.push(kpiEditHref); }}
                     >
                       Edit
-                    </Link>
+                    </button>
                     <button
                       type="button"
                       className="btn"
                       style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem", color: "var(--error)" }}
-                      onClick={() => onDelete(k.id)}
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(k.id); }}
                     >
                       Delete
                     </button>
                   </div>
                 </>
-            </div>
+            </Link>
           );
           })}
         </div>
@@ -1889,12 +2372,12 @@ function KpiEditForm({
   const [syncMode, setSyncMode] = useState<"override" | "append">("override");
   const [contractOpen, setContractOpen] = useState(false);
   const [contract, setContract] = useState<Record<string, unknown> | null>(null);
+  const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
   const { register, handleSubmit, watch, setValue, getValues, formState: { errors, isSubmitting } } = useForm<KpiUpdateFormData>({
     resolver: zodResolver(kpiUpdateSchema),
     defaultValues: {
       name: kpi.name,
       description: kpi.description ?? "",
-      year: kpi.year,
       sort_order: kpi.sort_order,
       entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
       api_endpoint_url: kpi.api_endpoint_url ?? "",
@@ -1923,10 +2406,6 @@ function KpiEditForm({
       <div className="form-group">
         <label>Description</label>
         <textarea {...register("description")} rows={2} />
-      </div>
-      <div className="form-group">
-        <label>Year *</label>
-        <input type="number" min={2000} max={2100} {...register("year")} />
       </div>
       <div className="form-group">
         <label>Sort order</label>
@@ -1974,6 +2453,10 @@ function KpiEditForm({
                   Append to existing (multi-line rows)
                 </label>
               </div>
+              <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                <label>Year to sync</label>
+                <input type="number" min={2000} max={2100} value={syncYear} onChange={(e) => setSyncYear(Number(e.target.value) || new Date().getFullYear())} style={{ width: "6rem" }} />
+              </div>
               <button
                 type="button"
                 className="btn"
@@ -1981,7 +2464,7 @@ function KpiEditForm({
                 onClick={async () => {
                   setSyncLoading(true);
                   try {
-                    await api(`/kpis/${kpi.id}/sync-from-api?${qs({ year: kpi.year, organization_id: orgId, sync_mode: syncMode })}`, { method: "POST", token });
+                    await api(`/kpis/${kpi.id}/sync-from-api?${qs({ year: syncYear, organization_id: orgId, sync_mode: syncMode })}`, { method: "POST", token });
                     onSyncSuccess();
                   } finally {
                     setSyncLoading(false);
@@ -1990,7 +2473,7 @@ function KpiEditForm({
               >
                 {syncLoading ? "Syncing…" : "Sync from API now"}
               </button>
-              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for year {kpi.year} from your endpoint. Override or append is chosen above.</p>
+              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for the selected year from your endpoint. Override or append is chosen above.</p>
             </div>
           )}
         </>
@@ -2247,8 +2730,8 @@ function FieldsSection({
   }, [selectedKpiId, orgId, token]);
 
   const exampleApiResponse = React.useMemo(
-    () => buildExampleApiResponse(list, selectedKpi?.year ?? new Date().getFullYear()),
-    [list, selectedKpi?.year]
+    () => buildExampleApiResponse(list, new Date().getFullYear()),
+    [list]
   );
 
   if (!selectedKpiId) {
@@ -2267,7 +2750,7 @@ function FieldsSection({
             >
               <option value="">— Select —</option>
               {kpis.map((k) => (
-                <option key={k.id} value={k.id}>{k.name} ({k.year})</option>
+                <option key={k.id} value={k.id}>{k.name}</option>
               ))}
             </select>
           </div>
@@ -2287,7 +2770,7 @@ function FieldsSection({
             style={{ padding: "0.5rem", minWidth: "200px" }}
           >
             {kpis.map((k) => (
-              <option key={k.id} value={k.id}>{k.name} ({k.year})</option>
+              <option key={k.id} value={k.id}>{k.name}</option>
             ))}
           </select>
         </div>
@@ -2715,7 +3198,7 @@ function FormulaBuilder({
               <select value={refOtherKpiId} onChange={(e) => { setRefOtherKpiId(e.target.value ? Number(e.target.value) : ""); setRefOtherFieldKey(""); }} style={{ minWidth: "180px" }}>
                 <option value="">— Select KPI —</option>
                 {otherKpis.map((k) => (
-                  <option key={k.id} value={k.id}>{k.name} (year {k.year})</option>
+                  <option key={k.id} value={k.id}>{k.name}</option>
                 ))}
               </select>
             </div>
@@ -3112,7 +3595,7 @@ function ReportsSection({
                   </div>
                   <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
                     {userRole === "SUPER_ADMIN" && (
-                      <Link className="btn" href={`/dashboard/reports/${t.id}/design`}>
+                      <Link className="btn" href={`/dashboard/reports/${t.id}/design?organization_id=${orgId}`}>
                         Design
                       </Link>
                     )}
@@ -3146,7 +3629,7 @@ function ReportsSection({
                       </button>
                     )}
                     {canManageAssignments && (
-                      <Link className="btn" href={`/dashboard/reports/${t.id}/assign`} style={{ fontSize: "0.85rem" }}>
+                      <Link className="btn" href={`/dashboard/reports/${t.id}/assign?organization_id=${orgId}`} style={{ fontSize: "0.85rem" }}>
                         Assign users
                       </Link>
                     )}

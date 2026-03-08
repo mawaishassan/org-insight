@@ -2,6 +2,7 @@
 
 import re
 import uuid
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,7 @@ from app.kpis.schemas import (
     CategoryTagRef,
     OrganizationTagRef,
     AssignedUserRef,
+    UsedInReportRef,
     KpiFileResponse,
 )
 from app.kpis.service import (
@@ -96,13 +98,24 @@ def _kpi_to_response(k):
                 AssignedUserRef(id=u.id, username=u.username, full_name=u.full_name, permission=perm)
             )
     fields_count = len(getattr(k, "fields", []) or [])
+    used_in_reports = []
+    for rtk in getattr(k, "report_template_kpis", []) or []:
+        rt = getattr(rtk, "report_template", None)
+        if rt is not None:
+            used_in_reports.append(
+                UsedInReportRef(
+                    report_id=rt.id,
+                    report_name=rt.name,
+                    organization_id=rt.organization_id,
+                )
+            )
     return KPIResponse(
         id=k.id,
         organization_id=k.organization_id,
         domain_id=k.domain_id,
         name=k.name,
         description=k.description,
-        year=k.year,
+        year=getattr(k, "year", None),
         sort_order=k.sort_order,
         entry_mode=getattr(k, "entry_mode", None) or "manual",
         api_endpoint_url=getattr(k, "api_endpoint_url", None),
@@ -113,6 +126,7 @@ def _kpi_to_response(k):
         category_tags=category_tags,
         organization_tags=organization_tags,
         assigned_users=assigned_users,
+        used_in_reports=used_in_reports,
     )
 
 
@@ -135,15 +149,14 @@ async def list_org_kpis(
     domain_id: int | None = Query(None),
     category_id: int | None = Query(None),
     organization_tag_id: int | None = Query(None, description="Filter KPIs by organization tag"),
-    year: int | None = Query(None),
     name: str | None = Query(None, description="Filter KPIs by name (partial match)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """List KPIs in organization. Filter by domain_id, category_id, organization_tag_id, year, or name."""
+    """List KPIs in organization. Filter by domain_id, category_id, organization_tag_id, or name. Data is scoped by year at entry level."""
     org_id = _org_id(current_user, organization_id)
     kpis = await list_kpis(
-        db, org_id, domain_id=domain_id, category_id=category_id, organization_tag_id=organization_tag_id, year=year, name=name
+        db, org_id, domain_id=domain_id, category_id=category_id, organization_tag_id=organization_tag_id, name=name
     )
     return [_kpi_to_response(k) for k in kpis]
 
@@ -591,7 +604,9 @@ async def upload_kpi_files(
     if not kpi:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
     org_id = kpi.organization_id
-    year_val = year if year is not None else kpi.year
+    year_val = year if year is not None else getattr(kpi, "year", None)
+    if year_val is None:
+        year_val = datetime.utcnow().year
     stored: list[KpiFile] = []
     for uf in files:
         if not uf.filename:

@@ -82,11 +82,29 @@ interface OrgTagRef {
   name: string;
 }
 
+interface DomainTagRef {
+  id: number;
+  name: string;
+}
+
+interface CategoryTagRef {
+  id: number;
+  name: string;
+  domain_id?: number | null;
+  domain_name?: string | null;
+}
+
+interface UsedInReportRef {
+  report_id: number;
+  report_name: string;
+  organization_id: number;
+}
+
 interface KpiInfo {
   id: number;
   name: string;
   description?: string | null;
-  year: number;
+  year?: number | null;
   sort_order?: number;
   organization_id: number;
   card_display_field_ids?: number[] | null;
@@ -94,6 +112,9 @@ interface KpiInfo {
   api_endpoint_url?: string | null;
   time_dimension?: string | null;
   organization_tags?: OrgTagRef[];
+  domain_tags?: DomainTagRef[];
+  category_tags?: CategoryTagRef[];
+  used_in_reports?: UsedInReportRef[];
 }
 
 const createSchema = z.object({
@@ -117,7 +138,6 @@ const updateSchema = z.object({
 const kpiUpdateSchema = z.object({
   name: z.string().min(1, "Name required"),
   description: z.string().optional(),
-  year: z.coerce.number().int().min(2000).max(2100),
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
@@ -163,17 +183,28 @@ export default function KpiFieldsPage() {
   const [syncMode, setSyncMode] = useState<"override" | "append">("override");
   const [contractOpen, setContractOpen] = useState(false);
   const [contract, setContract] = useState<Record<string, unknown> | null>(null);
-  type EditTabId = "details" | "fields";
+  const [orgDomains, setOrgDomains] = useState<Array<{ id: number; name: string }>>([]);
+  const [orgCategories, setOrgCategories] = useState<Array<{ id: number; name: string; domain_id?: number; domain_name?: string }>>([]);
+  const [tagSaving, setTagSaving] = useState(false);
+  const [domainCategorySaving, setDomainCategorySaving] = useState(false);
+  const [addModal, setAddModal] = useState<null | "categories" | "tags">(null);
+  const [addModalSearch, setAddModalSearch] = useState("");
+  const [addModalCategorySearch, setAddModalCategorySearch] = useState("");
+  const [addModalSelectedIds, setAddModalSelectedIds] = useState<number[]>([]);
+  const [addModalSelectedDomainIds, setAddModalSelectedDomainIds] = useState<number[]>([]);
+  type EditTabId = "details" | "fields" | "settings";
   const tabFromUrl = searchParams.get("tab") as EditTabId | null;
   const [activeEditTab, setActiveEditTab] = useState<EditTabId>(
-    tabFromUrl === "details" || tabFromUrl === "fields" ? tabFromUrl : "details"
+    tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings" ? tabFromUrl : "details"
   );
+  const [settingsPanel, setSettingsPanel] = useState<"order" | "time_dimension" | "entry_mode" | "domain" | "tags" | null>(null);
+  const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
 
   const token = getAccessToken();
   const router = useRouter();
 
   useEffect(() => {
-    if (tabFromUrl === "details" || tabFromUrl === "fields") {
+    if (tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings") {
       setActiveEditTab(tabFromUrl);
     }
   }, [tabFromUrl]);
@@ -192,7 +223,6 @@ export default function KpiFieldsPage() {
     defaultValues: {
       name: "",
       description: "",
-      year: new Date().getFullYear(),
       sort_order: 0,
       entry_mode: "manual",
       api_endpoint_url: "",
@@ -206,7 +236,6 @@ export default function KpiFieldsPage() {
       kpiEditForm.reset({
         name: kpi.name,
         description: kpi.description ?? "",
-        year: kpi.year,
         sort_order: kpi.sort_order ?? 0,
         entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
         api_endpoint_url: kpi.api_endpoint_url ?? "",
@@ -214,7 +243,7 @@ export default function KpiFieldsPage() {
         organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
       });
     }
-  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.year, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.organization_tags, orgIdFromUrl]);
+  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.organization_tags, orgIdFromUrl]);
 
   useEffect(() => {
     if (!token) return;
@@ -269,6 +298,20 @@ export default function KpiFieldsPage() {
     api<{ organization_id: number; time_dimension: string }>(`/organizations/${orgIdFromUrl}/time-dimension`, { token })
       .then((r) => setOrgTimeDimension(r.time_dimension ?? "yearly"))
       .catch(() => setOrgTimeDimension("yearly"));
+  }, [token, orgIdFromUrl]);
+
+  useEffect(() => {
+    if (!token || orgIdFromUrl == null) return;
+    api<Array<{ id: number; name: string }>>(`/domains?${qs({ organization_id: orgIdFromUrl })}`, { token })
+      .then(setOrgDomains)
+      .catch(() => setOrgDomains([]));
+  }, [token, orgIdFromUrl]);
+
+  useEffect(() => {
+    if (!token || orgIdFromUrl == null) return;
+    api<Array<{ id: number; name: string; domain_id?: number; domain_name?: string }>>(`/categories?${qs({ organization_id: orgIdFromUrl })}`, { token })
+      .then(setOrgCategories)
+      .catch(() => setOrgCategories([]));
   }, [token, orgIdFromUrl]);
 
   const [createSubFields, setCreateSubFields] = useState<Array<{ name: string; key: string; field_type: string; is_required: boolean; sort_order: number }>>([]);
@@ -464,6 +507,59 @@ export default function KpiFieldsPage() {
     }
   };
 
+  const addCategoriesBatch = async (categoryIds: number[]) => {
+    if (!token || !kpiId || orgIdFromUrl == null || categoryIds.length === 0) return;
+    setDomainCategorySaving(true);
+    try {
+      for (const id of categoryIds) {
+        await api(`/kpis/${kpiId}/categories/${id}?${qs({ organization_id: orgIdFromUrl })}`, { method: "POST", token });
+      }
+      loadKpi();
+      setAddModal(null);
+      setAddModalSearch("");
+      setAddModalCategorySearch("");
+      setAddModalSelectedIds([]);
+      setAddModalSelectedDomainIds([]);
+    } finally {
+      setDomainCategorySaving(false);
+    }
+  };
+
+  const addTagsBatch = async (tagIds: number[]) => {
+    if (!token || !kpiId || orgIdFromUrl == null || tagIds.length === 0) return;
+    const currentIds = (kpi?.organization_tags ?? []).map((t) => t.id);
+    await updateOrgTags([...currentIds, ...tagIds]);
+    setAddModal(null);
+    setAddModalSearch("");
+    setAddModalSelectedIds([]);
+  };
+
+  const removeCategory = async (categoryId: number) => {
+    if (!token || !kpiId || orgIdFromUrl == null) return;
+    setDomainCategorySaving(true);
+    try {
+      await api(`/kpis/${kpiId}/categories/${categoryId}?${qs({ organization_id: orgIdFromUrl })}`, { method: "DELETE", token });
+      loadKpi();
+    } finally {
+      setDomainCategorySaving(false);
+    }
+  };
+
+  const updateOrgTags = async (tagIds: number[]) => {
+    if (!token || !kpiId || orgIdFromUrl == null) return;
+    setTagSaving(true);
+    try {
+      const updated = await api<KpiInfo>(`/kpis/${kpiId}?${qs({ organization_id: orgIdFromUrl })}`, {
+        method: "PATCH",
+        token,
+        body: JSON.stringify({ organization_tag_ids: tagIds }),
+      });
+      setKpi(updated);
+    } finally {
+      setTagSaving(false);
+    }
+  };
+
   const onDeleteKpi = async () => {
     if (!token || !kpiId || orgIdFromUrl == null) return;
     try {
@@ -514,30 +610,73 @@ export default function KpiFieldsPage() {
     }) as const;
 
   const content = (
+    <>
     <div>
-      <div style={{ marginBottom: "1rem" }}>
-        {isOrgContext ? (
-          <Link
-            href={`/dashboard/organizations/${orgIdFromUrl}?tab=kpis`}
-            style={{ color: "var(--muted)", fontSize: "0.9rem" }}
-          >
-            {"\u2190"} Organization KPIs
-          </Link>
-        ) : (
+      {!isOrgContext && (
+        <div style={{ marginBottom: "1rem" }}>
           <Link href="/dashboard/kpis" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
             {"\u2190"} KPIs
           </Link>
-        )}
-      </div>
+        </div>
+      )}
 
       {isOrgContext && (
         <>
-          <h1 style={{ fontSize: "1.35rem", margin: "0 0 0.5rem 0", fontWeight: 600 }}>
-            {kpi.name} ({kpi.year})
-          </h1>
-          <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 1rem 0" }}>
-            Edit KPI settings and manage fields below.
-          </p>
+          {kpi && (
+          <>
+          {/* KPI summary card: name, collapse toggle, domains/categories/tags (add/remove), used in reports */}
+          <div
+            className="card"
+            style={{
+              marginBottom: "1.25rem",
+              padding: "1.25rem 1.5rem",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              background: "var(--surface)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+              <h1 style={{ fontSize: "1.5rem", fontWeight: 700, margin: 0, letterSpacing: "-0.02em", color: "var(--text)" }}>
+                {kpi.name}
+              </h1>
+              {kpi.entry_mode === "api" && (
+                <span style={{ fontSize: "0.75rem", fontWeight: 500, color: "var(--primary)", padding: "0.2rem 0.5rem", borderRadius: 6, background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)" }}>
+                  API
+                </span>
+              )}
+            </div>
+            {(kpi.category_tags?.length ?? 0) > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.35rem", marginTop: "0.5rem" }}>
+                {kpi.category_tags!.map((c) => {
+                  const full = c.domain_name ? `${c.domain_name} → ${c.name}` : c.name;
+                  return (
+                    <span
+                      key={c.id}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "0.35rem",
+                        padding: "0.25rem 0.5rem",
+                        borderRadius: 6,
+                        background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)",
+                        border: "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)",
+                        fontSize: "0.8rem",
+                        color: "var(--text)",
+                        fontWeight: 500,
+                      }}
+                    >
+                      <span>{full}</span>
+                      {userRole === "SUPER_ADMIN" && (
+                        <button type="button" onClick={() => removeCategory(c.id)} disabled={domainCategorySaving} style={{ flexShrink: 0, background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${full}`}>×</button>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          </>
+          )}
           <div style={tabBarStyle} role="tablist" aria-label="KPI edit sections">
             <button
               type="button"
@@ -556,6 +695,15 @@ export default function KpiFieldsPage() {
               onClick={() => setEditTab("fields")}
             >
               Fields {list.length > 0 && <span style={{ marginLeft: "0.35rem", opacity: 0.8 }}>({list.length})</span>}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeEditTab === "settings"}
+              style={tabButtonStyle(activeEditTab === "settings")}
+              onClick={() => setEditTab("settings")}
+            >
+              Settings
             </button>
           </div>
         </>
@@ -576,171 +724,6 @@ export default function KpiFieldsPage() {
               <label>Description</label>
               <textarea {...kpiEditForm.register("description")} rows={2} />
             </div>
-            <div className="form-group">
-              <label>Year *</label>
-              <input type="number" min={2000} max={2100} {...kpiEditForm.register("year")} />
-            </div>
-            <div className="form-group">
-              <label>Sort order</label>
-              <input type="number" min={0} {...kpiEditForm.register("sort_order")} />
-            </div>
-            <div className="form-group">
-              <label>Time dimension</label>
-              <select {...kpiEditForm.register("time_dimension")}>
-                <option value="">Inherit from organization ({TIME_DIMENSION_LABELS[orgTimeDimension] ?? orgTimeDimension})</option>
-                {TIME_DIMENSION_ORDER.filter((td) => {
-                  const orgIdx = TIME_DIMENSION_ORDER.indexOf(orgTimeDimension as (typeof TIME_DIMENSION_ORDER)[number]);
-                  const kpiIdx = TIME_DIMENSION_ORDER.indexOf(td);
-                  return orgIdx >= 0 && kpiIdx >= orgIdx;
-                }).map((td) => (
-                  <option key={td} value={td}>
-                    {TIME_DIMENSION_LABELS[td] ?? td}
-                  </option>
-                ))}
-              </select>
-              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
-                Leave as inherit to use the organization default. Otherwise choose same or finer (e.g. Quarterly when org is Yearly).
-              </p>
-            </div>
-            <div className="form-group">
-              <label>Entry mode</label>
-              <select
-                {...kpiEditForm.register("entry_mode")}
-                disabled={userRole !== "SUPER_ADMIN"}
-              >
-                <option value="manual">Manual (default)</option>
-                <option value="api">API</option>
-              </select>
-            </div>
-            {userRole === "SUPER_ADMIN" && kpiEditForm.watch("entry_mode") === "api" && (
-              <>
-                <div className="form-group">
-                  <label>API endpoint URL</label>
-                  <input
-                    type="url"
-                    placeholder="https://your-server.com/kpi-data"
-                    {...kpiEditForm.register("api_endpoint_url")}
-                    style={{ width: "100%", maxWidth: "480px" }}
-                  />
-                </div>
-                <div className="form-group" style={{ marginBottom: "0.5rem" }}>
-                  <button type="button" className="btn" onClick={fetchContract}>
-                    {contractOpen ? "Hide" : "Show"} operation contract
-                  </button>
-                  {contractOpen && contract && (
-                    <pre
-                      style={{
-                        marginTop: "0.5rem",
-                        padding: "0.75rem",
-                        background: "var(--bg-subtle)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 8,
-                        fontSize: "0.85rem",
-                        overflow: "auto",
-                        maxHeight: 320,
-                      }}
-                    >
-                      {JSON.stringify(contract, null, 2)}
-                    </pre>
-                  )}
-                </div>
-                {kpi?.entry_mode === "api" && kpi?.api_endpoint_url && (
-                  <div className="form-group">
-                    <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.35rem" }}>When syncing:</p>
-                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
-                      <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
-                        <input
-                          type="radio"
-                          name="syncMode"
-                          checked={syncMode === "override"}
-                          onChange={() => setSyncMode("override")}
-                        />
-                        Override existing data
-                      </label>
-                      <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
-                        <input
-                          type="radio"
-                          name="syncMode"
-                          checked={syncMode === "append"}
-                          onChange={() => setSyncMode("append")}
-                        />
-                        Append to existing (multi-line rows)
-                      </label>
-                    </div>
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={syncLoading}
-                      onClick={async () => {
-                        setSyncLoading(true);
-                        try {
-                          await api(
-                            `/kpis/${kpiId}/sync-from-api?${qs({
-                              year: kpi.year,
-                              organization_id: orgIdFromUrl!,
-                              sync_mode: syncMode,
-                            })}`,
-                            { method: "POST", token: token! }
-                          );
-                          loadKpi();
-                        } finally {
-                          setSyncLoading(false);
-                        }
-                      }}
-                    >
-                      {syncLoading ? "Syncing…" : "Sync from API now"}
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
-            {orgTags.length > 0 && (
-              <div className="form-group">
-                <label>Organization tags</label>
-                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.35rem 0" }}>
-                  Use tags to group and filter KPIs inside this organization.
-                </p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
-                  {orgTags.map((t) => {
-                    const ids = kpiEditForm.watch("organization_tag_ids") ?? [];
-                    const checked = ids.includes(t.id);
-                    return (
-                      <button
-                        key={t.id}
-                        type="button"
-                        onClick={() => {
-                          const prev = kpiEditForm.getValues("organization_tag_ids") ?? [];
-                          const next = prev.includes(t.id)
-                            ? prev.filter((id) => id !== t.id)
-                            : [...prev, t.id];
-                          kpiEditForm.setValue("organization_tag_ids", next);
-                        }}
-                        style={{
-                          borderRadius: 999,
-                          padding: "0.25rem 0.75rem",
-                          fontSize: "0.85rem",
-                          border: checked ? "1px solid var(--primary)" : "1px solid var(--border)",
-                          backgroundColor: checked ? "rgba(59, 130, 246, 0.08)" : "transparent",
-                          color: checked ? "var(--primary)" : "var(--muted)",
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: "0.35rem",
-                          cursor: "pointer",
-                          transition: "background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease",
-                        }}
-                      >
-                        {checked && (
-                          <span aria-hidden="true" style={{ fontSize: "0.8rem" }}>
-                            ✓
-                          </span>
-                        )}
-                        <span>{t.name}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
             {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
             <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
               <button
@@ -748,7 +731,7 @@ export default function KpiFieldsPage() {
                 className="btn btn-primary"
                 disabled={kpiEditForm.formState.isSubmitting || kpiSaving}
               >
-                {kpiSaving ? "Saving…" : "Save KPI"}
+                {kpiSaving ? "Saving…" : "Save"}
               </button>
               <button
                 type="button"
@@ -763,12 +746,346 @@ export default function KpiFieldsPage() {
         </div>
       )}
 
+      {isOrgContext && activeEditTab === "settings" && (
+        <div className="card" style={{ marginBottom: "1.5rem" }}>
+          <h2 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>Settings</h2>
+          <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: "1.5rem", minHeight: 320, alignItems: "start" }}>
+            <nav style={{ display: "flex", flexDirection: "column", gap: "0.25rem", borderRight: "1px solid var(--border)", paddingRight: "1rem" }}>
+              {[
+                { id: "order" as const, label: "Order" },
+                { id: "time_dimension" as const, label: "Time dimension" },
+                { id: "entry_mode" as const, label: "Entry mode" },
+                { id: "domain" as const, label: "Domain" },
+                { id: "tags" as const, label: "Tags" },
+              ].map(({ id, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setSettingsPanel(id)}
+                  style={{
+                    textAlign: "left",
+                    padding: "0.5rem 0.6rem",
+                    borderRadius: 6,
+                    border: "none",
+                    background: settingsPanel === id ? "rgba(var(--primary-rgb, 59, 130, 246), 0.12)" : "transparent",
+                    color: settingsPanel === id ? "var(--primary)" : "var(--text)",
+                    cursor: "pointer",
+                    fontSize: "0.9rem",
+                    fontWeight: settingsPanel === id ? 600 : 400,
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </nav>
+            <div style={{ minWidth: 0 }}>
+              {settingsPanel === "order" && (
+                <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
+                  <div className="form-group">
+                    <label>Sort order</label>
+                    <input type="number" min={0} {...kpiEditForm.register("sort_order")} />
+                  </div>
+                  {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
+                  <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
+                    {kpiSaving ? "Saving…" : "Save"}
+                  </button>
+                </form>
+              )}
+              {settingsPanel === "time_dimension" && (
+                <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
+                  <div className="form-group">
+                    <label>Time dimension</label>
+                    <select {...kpiEditForm.register("time_dimension")}>
+                      <option value="">Inherit from organization ({TIME_DIMENSION_LABELS[orgTimeDimension] ?? orgTimeDimension})</option>
+                      {TIME_DIMENSION_ORDER.filter((td) => {
+                        const orgIdx = TIME_DIMENSION_ORDER.indexOf(orgTimeDimension as (typeof TIME_DIMENSION_ORDER)[number]);
+                        const kpiIdx = TIME_DIMENSION_ORDER.indexOf(td);
+                        return orgIdx >= 0 && kpiIdx >= orgIdx;
+                      }).map((td) => (
+                        <option key={td} value={td}>{TIME_DIMENSION_LABELS[td] ?? td}</option>
+                      ))}
+                    </select>
+                    <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+                      Leave as inherit to use the organization default.
+                    </p>
+                  </div>
+                  {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
+                  <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
+                    {kpiSaving ? "Saving…" : "Save"}
+                  </button>
+                </form>
+              )}
+              {settingsPanel === "entry_mode" && (
+                <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
+                  <div className="form-group">
+                    <label>Entry mode</label>
+                    <select {...kpiEditForm.register("entry_mode")} disabled={userRole !== "SUPER_ADMIN"}>
+                      <option value="manual">Manual (default)</option>
+                      <option value="api">API</option>
+                    </select>
+                  </div>
+                  {userRole === "SUPER_ADMIN" && kpiEditForm.watch("entry_mode") === "api" && (
+                    <>
+                      <div className="form-group">
+                        <label>API endpoint URL</label>
+                        <input type="url" placeholder="https://your-server.com/kpi-data" {...kpiEditForm.register("api_endpoint_url")} style={{ width: "100%", maxWidth: "480px" }} />
+                      </div>
+                      <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                        <button type="button" className="btn" onClick={fetchContract}>
+                          {contractOpen ? "Hide" : "Show"} operation contract
+                        </button>
+                        {contractOpen && contract && (
+                          <pre style={{ marginTop: "0.5rem", padding: "0.75rem", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 8, fontSize: "0.85rem", overflow: "auto", maxHeight: 320 }}>
+                            {JSON.stringify(contract, null, 2)}
+                          </pre>
+                        )}
+                      </div>
+                      {kpi?.entry_mode === "api" && kpi?.api_endpoint_url && (
+                        <div className="form-group">
+                          <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.35rem" }}>When syncing:</p>
+                          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
+                            <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                              <input type="radio" name="syncMode" checked={syncMode === "override"} onChange={() => setSyncMode("override")} />
+                              Override existing data
+                            </label>
+                            <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                              <input type="radio" name="syncMode" checked={syncMode === "append"} onChange={() => setSyncMode("append")} />
+                              Append to existing (multi-line rows)
+                            </label>
+                          </div>
+                          <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                            <label>Year to sync</label>
+                            <input type="number" min={2000} max={2100} value={syncYear} onChange={(e) => setSyncYear(Number(e.target.value) || new Date().getFullYear())} style={{ width: "6rem" }} />
+                          </div>
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={syncLoading}
+                            onClick={async () => {
+                              setSyncLoading(true);
+                              try {
+                                await api(`/kpis/${kpiId}/sync-from-api?${qs({ year: syncYear, organization_id: orgIdFromUrl!, sync_mode: syncMode })}`, { method: "POST", token: token! });
+                                loadKpi();
+                              } finally {
+                                setSyncLoading(false);
+                              }
+                            }}
+                          >
+                            {syncLoading ? "Syncing…" : "Sync from API now"}
+                          </button>
+                          <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for the selected year from your endpoint.</p>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
+                  <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
+                    {kpiSaving ? "Saving…" : "Save"}
+                  </button>
+                </form>
+              )}
+              {settingsPanel === "domain" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                  <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>Domain → Category</div>
+                  {(kpi?.category_tags?.length ?? 0) > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.5rem" }}>
+                      {kpi!.category_tags!.map((c) => {
+                        const full = c.domain_name ? `${c.domain_name} → ${c.name}` : c.name;
+                        return (
+                          <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", padding: "0.25rem 0.5rem", borderRadius: 6, background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)", border: "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)", fontSize: "0.8rem" }}>
+                            <span>{full}</span>
+                            <button type="button" onClick={() => removeCategory(c.id)} disabled={domainCategorySaving} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${full}`}>×</button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: "1rem", flex: 1, minHeight: 200, overflow: "hidden" }}>
+                    <div style={{ flex: "0 0 44%", display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)", paddingRight: "0.75rem" }}>
+                      <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Domains</div>
+                      <input type="text" placeholder="Search domains..." value={addModalSearch} onChange={(e) => setAddModalSearch(e.target.value)} style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
+                      <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                        {orgDomains.filter((d) => !addModalSearch.trim() || d.name.toLowerCase().includes(addModalSearch.trim().toLowerCase())).map((d) => {
+                          const selected = addModalSelectedDomainIds.includes(d.id);
+                          return (
+                            <li key={d.id} style={{ marginBottom: "0.2rem" }}>
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "0.5rem",
+                                  cursor: "pointer",
+                                  fontSize: "0.9rem",
+                                  padding: "0.35rem 0.5rem",
+                                  borderRadius: 6,
+                                  background: selected ? "rgba(var(--primary-rgb, 59, 130, 246), 0.12)" : "transparent",
+                                  border: selected ? "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)" : "1px solid transparent",
+                                  fontWeight: selected ? 600 : 400,
+                                  color: selected ? "var(--primary)" : "var(--text)",
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selected}
+                                  onChange={(e) => {
+                                    if (e.target.checked) setAddModalSelectedDomainIds((prev) => [...prev, d.id]);
+                                    else {
+                                      setAddModalSelectedDomainIds((prev) => prev.filter((id) => id !== d.id));
+                                      setAddModalSelectedIds((prev) => {
+                                        const inDomain = orgCategories.filter((c) => c.domain_id === d.id).map((c) => c.id);
+                                        return prev.filter((id) => !inDomain.includes(id));
+                                      });
+                                    }
+                                  }}
+                                />
+                                {d.name}
+                              </label>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                    <div style={{ flex: "1", display: "flex", flexDirection: "column", minWidth: 0 }}>
+                      {addModalSelectedDomainIds.length === 0 ? (
+                        <>
+                          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Categories</div>
+                          <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Select one or more domains to see their categories.</p>
+                        </>
+                      ) : (() => {
+                        const selectedDomainNames = orgDomains.filter((d) => addModalSelectedDomainIds.includes(d.id)).map((d) => d.name);
+                        const categoriesLabel = selectedDomainNames.length === 1
+                          ? `Categories for: ${selectedDomainNames[0]}`
+                          : `Categories for: ${selectedDomainNames.join(", ")}`;
+                        const allInSelectedDomains = orgCategories.filter((c) => c.domain_id != null && addModalSelectedDomainIds.includes(c.domain_id));
+                        const filtered = addModalCategorySearch.trim() ? allInSelectedDomains.filter((c) => c.name.toLowerCase().includes(addModalCategorySearch.trim().toLowerCase())) : allInSelectedDomains;
+                        const attachedIds = new Set((kpi?.category_tags ?? []).map((t) => t.id));
+                        return (
+                          <>
+                            <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>{categoriesLabel}</div>
+                            <input type="text" placeholder="Search categories..." value={addModalCategorySearch} onChange={(e) => setAddModalCategorySearch(e.target.value)} style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
+                            {filtered.length === 0 ? (
+                              <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>No categories match.</p>
+                            ) : (
+                              <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                                {filtered.map((c) => {
+                                  const isAttached = attachedIds.has(c.id);
+                                  return (
+                                    <li key={c.id} style={{ marginBottom: "0.2rem" }}>
+                                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: isAttached ? "default" : "pointer", fontSize: "0.9rem", opacity: isAttached ? 0.85 : 1 }}>
+                                        <input
+                                          type="checkbox"
+                                          checked={isAttached || addModalSelectedIds.includes(c.id)}
+                                          disabled={isAttached}
+                                          onChange={(e) => {
+                                            if (isAttached) return;
+                                            if (e.target.checked) {
+                                              setAddModalSelectedIds((prev) => {
+                                                const otherInDomain = orgCategories.filter((x) => x.domain_id === c.domain_id && x.id !== c.id).map((x) => x.id);
+                                                return [...prev.filter((id) => !otherInDomain.includes(id)), c.id];
+                                              });
+                                            } else setAddModalSelectedIds((prev) => prev.filter((id) => id !== c.id));
+                                          }}
+                                        />
+                                        <span style={{ color: isAttached ? "var(--muted)" : undefined }}>{c.name}</span>
+                                        {isAttached && <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>(attached)</span>}
+                                      </label>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={addModalSelectedIds.length === 0 || domainCategorySaving}
+                    onClick={() => {
+                      if (addModalSelectedIds.length === 0) return;
+                      addCategoriesBatch(addModalSelectedIds);
+                      setAddModalSearch("");
+                      setAddModalCategorySearch("");
+                      setAddModalSelectedIds([]);
+                      setAddModalSelectedDomainIds([]);
+                    }}
+                  >
+                    {domainCategorySaving ? "Adding…" : "Add selected"}
+                  </button>
+                </div>
+              )}
+              {settingsPanel === "tags" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                  <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>Organization tags</div>
+                  {(kpi?.organization_tags?.length ?? 0) > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.5rem" }}>
+                      {kpi!.organization_tags!.map((t) => (
+                        <span key={t.id} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", padding: "0.25rem 0.5rem", borderRadius: 6, background: "rgba(99, 102, 241, 0.12)", border: "1px solid rgba(99, 102, 241, 0.35)", fontSize: "0.8rem" }}>
+                          <span>{t.name}</span>
+                          <button type="button" onClick={() => updateOrgTags((kpi!.organization_tags ?? []).filter((x) => x.id !== t.id).map((x) => x.id))} disabled={tagSaving} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${t.name}`}>×</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <input type="text" placeholder="Search..." value={addModalSearch} onChange={(e) => setAddModalSearch(e.target.value)} style={{ marginBottom: "0.25rem", padding: "0.5rem 0.6rem" }} />
+                  <div style={{ flex: 1, overflowY: "auto", minHeight: 120, marginBottom: "0.5rem" }}>
+                    {(() => {
+                      const available = orgTags.filter((t) => !kpi?.organization_tags?.some((ot) => ot.id === t.id));
+                      const filtered = addModalSearch.trim() ? available.filter((t) => t.name.toLowerCase().includes(addModalSearch.trim().toLowerCase())) : available;
+                      return filtered.length === 0 ? (
+                        <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No tags to add.</p>
+                      ) : (
+                        <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                          {filtered.map((t) => (
+                            <li key={t.id} style={{ marginBottom: "0.25rem" }}>
+                              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.95rem" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={addModalSelectedIds.includes(t.id)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) setAddModalSelectedIds((prev) => [...prev, t.id]);
+                                    else setAddModalSelectedIds((prev) => prev.filter((id) => id !== t.id));
+                                  }}
+                                />
+                                {t.name}
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                      );
+                    })()}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={addModalSelectedIds.length === 0 || tagSaving}
+                    onClick={() => {
+                      if (addModalSelectedIds.length === 0) return;
+                      addTagsBatch(addModalSelectedIds);
+                      setAddModalSearch("");
+                      setAddModalSelectedIds([]);
+                    }}
+                  >
+                    {tagSaving ? "Adding…" : "Add selected"}
+                  </button>
+                </div>
+              )}
+              {!settingsPanel && (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Select a setting from the left.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {(!isOrgContext || activeEditTab === "fields") && (
         <>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
             <div>
               <h2 style={{ fontSize: isOrgContext ? "1.15rem" : "1.5rem", margin: 0 }}>
-                {isOrgContext ? "Fields" : `Fields for ${kpi ? `${kpi.name} (${kpi.year})` : `KPI #${kpiId}`}`}
+                {isOrgContext ? "Fields" : `Fields for ${kpi ? kpi.name : `KPI #${kpiId}`}`}
               </h2>
               {userRole === "SUPER_ADMIN" && (
                 <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
@@ -969,6 +1286,201 @@ export default function KpiFieldsPage() {
         </>
       )}
     </div>
+
+    {addModal && kpi && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1000,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.4)",
+        }}
+        onClick={() => setAddModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label={addModal === "categories" ? "Add domain → category" : "Add tags"}
+      >
+        <div
+          className="card"
+          style={{
+            maxWidth: addModal === "categories" ? 560 : 420,
+            width: "90%",
+            maxHeight: "80vh",
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h2 style={{ fontSize: "1.1rem", margin: "0 0 1rem 0", paddingRight: "2rem" }}>
+            {addModal === "categories" ? "Add domain → category" : "Add tags"}
+          </h2>
+          {addModal === "categories" ? (
+            <div style={{ display: "flex", gap: "1rem", flex: 1, minHeight: 200, overflow: "hidden" }}>
+              <div style={{ flex: "0 0 44%", display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)", paddingRight: "0.75rem" }}>
+                <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Domains</div>
+                <input
+                  type="text"
+                  placeholder="Search domains..."
+                  value={addModalSearch}
+                  onChange={(e) => setAddModalSearch(e.target.value)}
+                  style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+                />
+                <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                  {orgDomains
+                    .filter((d) => !addModalSearch.trim() || d.name.toLowerCase().includes(addModalSearch.trim().toLowerCase()))
+                    .map((d) => (
+                      <li key={d.id} style={{ marginBottom: "0.2rem" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                          <input
+                            type="checkbox"
+                            checked={addModalSelectedDomainIds.includes(d.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setAddModalSelectedDomainIds((prev) => [...prev, d.id]);
+                              } else {
+                                setAddModalSelectedDomainIds((prev) => prev.filter((id) => id !== d.id));
+                                setAddModalSelectedIds((prev) => {
+                                  const inDomain = orgCategories.filter((c) => c.domain_id === d.id).map((c) => c.id);
+                                  return prev.filter((id) => !inDomain.includes(id));
+                                });
+                              }
+                            }}
+                          />
+                          {d.name}
+                        </label>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+              <div style={{ flex: "1", display: "flex", flexDirection: "column", minWidth: 0 }}>
+                <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Categories (select domains first)</div>
+                {addModalSelectedDomainIds.length === 0 ? (
+                  <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Select one or more domains to see their categories.</p>
+                ) : (() => {
+                  const allInSelectedDomains = orgCategories.filter(
+                    (c) => c.domain_id != null && addModalSelectedDomainIds.includes(c.domain_id)
+                  );
+                  const filtered = addModalCategorySearch.trim()
+                    ? allInSelectedDomains.filter((c) => c.name.toLowerCase().includes(addModalCategorySearch.trim().toLowerCase()))
+                    : allInSelectedDomains;
+                  const attachedIds = new Set((kpi.category_tags ?? []).map((t) => t.id));
+                  return (
+                    <>
+                      <input
+                        type="text"
+                        placeholder="Search categories..."
+                        value={addModalCategorySearch}
+                        onChange={(e) => setAddModalCategorySearch(e.target.value)}
+                        style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+                      />
+                      {filtered.length === 0 ? (
+                        <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>No categories match.</p>
+                      ) : (
+                        <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                          {filtered.map((c) => {
+                            const isAttached = attachedIds.has(c.id);
+                            return (
+                              <li key={c.id} style={{ marginBottom: "0.2rem" }}>
+                                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: isAttached ? "default" : "pointer", fontSize: "0.9rem", opacity: isAttached ? 0.85 : 1 }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={isAttached || addModalSelectedIds.includes(c.id)}
+                                    disabled={isAttached}
+                                    onChange={(e) => {
+                                      if (isAttached) return;
+                                      if (e.target.checked) {
+                                        setAddModalSelectedIds((prev) => {
+                                          const otherInDomain = orgCategories.filter((x) => x.domain_id === c.domain_id && x.id !== c.id).map((x) => x.id);
+                                          return [...prev.filter((id) => !otherInDomain.includes(id)), c.id];
+                                        });
+                                      } else {
+                                        setAddModalSelectedIds((prev) => prev.filter((id) => id !== c.id));
+                                      }
+                                    }}
+                                  />
+                                  <span style={{ color: isAttached ? "var(--muted)" : undefined }}>{c.name}</span>
+                                  {isAttached && <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>(attached)</span>}
+                                </label>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          ) : (
+            <>
+          <input
+            type="text"
+            placeholder="Search..."
+            value={addModalSearch}
+            onChange={(e) => setAddModalSearch(e.target.value)}
+            style={{ marginBottom: "0.75rem", padding: "0.5rem 0.6rem" }}
+            autoFocus
+          />
+          <div style={{ flex: 1, overflowY: "auto", minHeight: 120, marginBottom: "1rem" }}>
+            {addModal === "tags" && (() => {
+              const available = orgTags.filter((t) => !kpi.organization_tags?.some((ot) => ot.id === t.id));
+              const filtered = addModalSearch.trim()
+                ? available.filter((t) => t.name.toLowerCase().includes(addModalSearch.trim().toLowerCase()))
+                : available;
+              return filtered.length === 0 ? (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No tags to add.</p>
+              ) : (
+                <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                  {filtered.map((t) => (
+                    <li key={t.id} style={{ marginBottom: "0.25rem" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.95rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={addModalSelectedIds.includes(t.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) setAddModalSelectedIds((prev) => [...prev, t.id]);
+                            else setAddModalSelectedIds((prev) => prev.filter((id) => id !== t.id));
+                          }}
+                        />
+                        {t.name}
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
+          </div>
+          </>
+          )}
+          {addModal === "categories" && <div style={{ marginBottom: "1rem" }} />}
+          <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => { setAddModal(null); setAddModalSearch(""); setAddModalCategorySearch(""); setAddModalSelectedIds([]); setAddModalSelectedDomainIds([]); }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={addModalSelectedIds.length === 0 || (addModal === "categories" && domainCategorySaving) || (addModal === "tags" && tagSaving)}
+              onClick={() => {
+                if (addModal === "categories") addCategoriesBatch(addModalSelectedIds);
+                else addTagsBatch(addModalSelectedIds);
+              }}
+            >
+              {addModal === "categories" ? (domainCategorySaving ? "Adding…" : "Add selected") : (tagSaving ? "Adding…" : "Add selected")}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
   return content;
 }
