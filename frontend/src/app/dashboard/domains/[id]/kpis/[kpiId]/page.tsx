@@ -385,15 +385,6 @@ export default function DomainKpiDetailPage() {
     }
   };
 
-  const backHref =
-    domainId != null
-      ? (effectiveOrgId != null
-          ? `/dashboard/domains/${domainId}?organization_id=${effectiveOrgId}&year=${year}`
-          : `/dashboard/domains/${domainId}?year=${year}`)
-      : (effectiveOrgId != null
-          ? `/dashboard/entries?year=${year}&organization_id=${effectiveOrgId}`
-          : "/dashboard/entries");
-
   const canEditKpi = kpiApiInfo?.can_edit !== false;
   const dataEntryAssignees = useMemo(
     () => assignedUsers.filter((u) => (u.permission || "data_entry") === "data_entry"),
@@ -468,18 +459,6 @@ export default function DomainKpiDetailPage() {
 
   return (
     <div>
-      <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
-        {domainId != null ? (
-          <Link href={backHref} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-            ← Back to Domain
-          </Link>
-        ) : (
-          <Link href={backHref} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-            ← Back to Data entry
-          </Link>
-        )}
-      </div>
-
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
       {saveError && <p className="form-error" style={{ marginBottom: "1rem" }}>{saveError}</p>}
 

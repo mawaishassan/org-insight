@@ -82,6 +82,24 @@ interface OrgTagRef {
   name: string;
 }
 
+interface DomainTagRef {
+  id: number;
+  name: string;
+}
+
+interface CategoryTagRef {
+  id: number;
+  name: string;
+  domain_id?: number | null;
+  domain_name?: string | null;
+}
+
+interface UsedInReportRef {
+  report_id: number;
+  report_name: string;
+  organization_id: number;
+}
+
 interface KpiInfo {
   id: number;
   name: string;
@@ -94,6 +112,9 @@ interface KpiInfo {
   api_endpoint_url?: string | null;
   time_dimension?: string | null;
   organization_tags?: OrgTagRef[];
+  domain_tags?: DomainTagRef[];
+  category_tags?: CategoryTagRef[];
+  used_in_reports?: UsedInReportRef[];
 }
 
 const createSchema = z.object({
@@ -163,6 +184,16 @@ export default function KpiFieldsPage() {
   const [syncMode, setSyncMode] = useState<"override" | "append">("override");
   const [contractOpen, setContractOpen] = useState(false);
   const [contract, setContract] = useState<Record<string, unknown> | null>(null);
+  const [detailsExpanded, setDetailsExpanded] = useState(true);
+  const [orgDomains, setOrgDomains] = useState<Array<{ id: number; name: string }>>([]);
+  const [orgCategories, setOrgCategories] = useState<Array<{ id: number; name: string; domain_id?: number; domain_name?: string }>>([]);
+  const [tagSaving, setTagSaving] = useState(false);
+  const [domainCategorySaving, setDomainCategorySaving] = useState(false);
+  const [addModal, setAddModal] = useState<null | "categories" | "tags">(null);
+  const [addModalSearch, setAddModalSearch] = useState("");
+  const [addModalCategorySearch, setAddModalCategorySearch] = useState("");
+  const [addModalSelectedIds, setAddModalSelectedIds] = useState<number[]>([]);
+  const [addModalSelectedDomainIds, setAddModalSelectedDomainIds] = useState<number[]>([]);
   type EditTabId = "details" | "fields";
   const tabFromUrl = searchParams.get("tab") as EditTabId | null;
   const [activeEditTab, setActiveEditTab] = useState<EditTabId>(
@@ -269,6 +300,20 @@ export default function KpiFieldsPage() {
     api<{ organization_id: number; time_dimension: string }>(`/organizations/${orgIdFromUrl}/time-dimension`, { token })
       .then((r) => setOrgTimeDimension(r.time_dimension ?? "yearly"))
       .catch(() => setOrgTimeDimension("yearly"));
+  }, [token, orgIdFromUrl]);
+
+  useEffect(() => {
+    if (!token || orgIdFromUrl == null) return;
+    api<Array<{ id: number; name: string }>>(`/domains?${qs({ organization_id: orgIdFromUrl })}`, { token })
+      .then(setOrgDomains)
+      .catch(() => setOrgDomains([]));
+  }, [token, orgIdFromUrl]);
+
+  useEffect(() => {
+    if (!token || orgIdFromUrl == null) return;
+    api<Array<{ id: number; name: string; domain_id?: number; domain_name?: string }>>(`/categories?${qs({ organization_id: orgIdFromUrl })}`, { token })
+      .then(setOrgCategories)
+      .catch(() => setOrgCategories([]));
   }, [token, orgIdFromUrl]);
 
   const [createSubFields, setCreateSubFields] = useState<Array<{ name: string; key: string; field_type: string; is_required: boolean; sort_order: number }>>([]);
@@ -464,6 +509,59 @@ export default function KpiFieldsPage() {
     }
   };
 
+  const addCategoriesBatch = async (categoryIds: number[]) => {
+    if (!token || !kpiId || orgIdFromUrl == null || categoryIds.length === 0) return;
+    setDomainCategorySaving(true);
+    try {
+      for (const id of categoryIds) {
+        await api(`/kpis/${kpiId}/categories/${id}?${qs({ organization_id: orgIdFromUrl })}`, { method: "POST", token });
+      }
+      loadKpi();
+      setAddModal(null);
+      setAddModalSearch("");
+      setAddModalCategorySearch("");
+      setAddModalSelectedIds([]);
+      setAddModalSelectedDomainIds([]);
+    } finally {
+      setDomainCategorySaving(false);
+    }
+  };
+
+  const addTagsBatch = async (tagIds: number[]) => {
+    if (!token || !kpiId || orgIdFromUrl == null || tagIds.length === 0) return;
+    const currentIds = (kpi?.organization_tags ?? []).map((t) => t.id);
+    await updateOrgTags([...currentIds, ...tagIds]);
+    setAddModal(null);
+    setAddModalSearch("");
+    setAddModalSelectedIds([]);
+  };
+
+  const removeCategory = async (categoryId: number) => {
+    if (!token || !kpiId || orgIdFromUrl == null) return;
+    setDomainCategorySaving(true);
+    try {
+      await api(`/kpis/${kpiId}/categories/${categoryId}?${qs({ organization_id: orgIdFromUrl })}`, { method: "DELETE", token });
+      loadKpi();
+    } finally {
+      setDomainCategorySaving(false);
+    }
+  };
+
+  const updateOrgTags = async (tagIds: number[]) => {
+    if (!token || !kpiId || orgIdFromUrl == null) return;
+    setTagSaving(true);
+    try {
+      const updated = await api<KpiInfo>(`/kpis/${kpiId}?${qs({ organization_id: orgIdFromUrl })}`, {
+        method: "PATCH",
+        token,
+        body: JSON.stringify({ organization_tag_ids: tagIds }),
+      });
+      setKpi(updated);
+    } finally {
+      setTagSaving(false);
+    }
+  };
+
   const onDeleteKpi = async () => {
     if (!token || !kpiId || orgIdFromUrl == null) return;
     try {
@@ -514,30 +612,199 @@ export default function KpiFieldsPage() {
     }) as const;
 
   const content = (
+    <>
     <div>
-      <div style={{ marginBottom: "1rem" }}>
-        {isOrgContext ? (
-          <Link
-            href={`/dashboard/organizations/${orgIdFromUrl}?tab=kpis`}
-            style={{ color: "var(--muted)", fontSize: "0.9rem" }}
-          >
-            {"\u2190"} Organization KPIs
-          </Link>
-        ) : (
+      {!isOrgContext && (
+        <div style={{ marginBottom: "1rem" }}>
           <Link href="/dashboard/kpis" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
             {"\u2190"} KPIs
           </Link>
-        )}
-      </div>
+        </div>
+      )}
 
       {isOrgContext && (
         <>
-          <h1 style={{ fontSize: "1.35rem", margin: "0 0 0.5rem 0", fontWeight: 600 }}>
-            {kpi.name} ({kpi.year})
-          </h1>
-          <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 1rem 0" }}>
-            Edit KPI settings and manage fields below.
-          </p>
+          {kpi && (
+          <>
+          {/* KPI summary card: name, collapse toggle, domains/categories/tags (add/remove), used in reports */}
+          <div
+            className="card"
+            style={{
+              marginBottom: "1.25rem",
+              padding: "1.25rem 1.5rem",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              background: "var(--surface)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => setDetailsExpanded((e) => !e)}
+                style={{
+                  padding: "0.2rem 0.35rem",
+                  border: "none",
+                  background: "none",
+                  color: "var(--muted)",
+                  cursor: "pointer",
+                  fontSize: "0.9rem",
+                  lineHeight: 1,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.25rem",
+                }}
+                title={detailsExpanded ? "Hide details" : "Show details"}
+                aria-expanded={detailsExpanded}
+              >
+                <span style={{ display: "inline-block", transform: detailsExpanded ? "rotate(0deg)" : "rotate(-90deg)" }}>▼</span>
+                <span>{detailsExpanded ? "Hide details" : "Show details"}</span>
+              </button>
+              <h1
+                style={{
+                  fontSize: "1.5rem",
+                  fontWeight: 700,
+                  margin: 0,
+                  letterSpacing: "-0.02em",
+                  color: "var(--text)",
+                }}
+              >
+                {kpi.name}
+              </h1>
+              {kpi.entry_mode === "api" && (
+                <span
+                  style={{
+                    fontSize: "0.75rem",
+                    fontWeight: 500,
+                    color: "var(--primary)",
+                    padding: "0.2rem 0.5rem",
+                    borderRadius: 6,
+                    background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)",
+                  }}
+                >
+                  API
+                </span>
+              )}
+            </div>
+
+            {detailsExpanded && (
+            <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
+              {[
+                {
+                  label: "Domain → Category",
+                  content: (kpi.category_tags?.length ?? 0) > 0 ? (
+                    <>
+                      {kpi.category_tags!.map((c) => {
+                        const full = c.domain_name ? `${c.domain_name} → ${c.name}` : c.name;
+                        return (
+                          <span
+                            key={c.id}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "0.35rem",
+                              marginRight: "0.35rem",
+                              marginBottom: "0.35rem",
+                              padding: "0.25rem 0.5rem",
+                              borderRadius: 6,
+                              background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)",
+                              border: "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)",
+                              fontSize: "0.8rem",
+                              color: "var(--text)",
+                              fontWeight: 500,
+                            }}
+                          >
+                            <span>{full}</span>
+                            <button type="button" onClick={() => removeCategory(c.id)} disabled={domainCategorySaving} style={{ flexShrink: 0, background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${full}`}>×</button>
+                          </span>
+                        );
+                      })}
+                      <button type="button" onClick={() => { setAddModal("categories"); setAddModalSearch(""); setAddModalCategorySearch(""); setAddModalSelectedIds([]); setAddModalSelectedDomainIds([...new Set((kpi.category_tags ?? []).map((c) => c.domain_id).filter((id): id is number => id != null))]); }} disabled={domainCategorySaving} style={{ background: "none", border: "none", padding: 0, color: "var(--primary)", cursor: "pointer", fontSize: "0.8rem", textDecoration: "underline", marginLeft: "0.15rem" }}>Add</button>
+                    </>
+                  ) : orgCategories.length > 0 ? (
+                    <button type="button" onClick={() => { setAddModal("categories"); setAddModalSearch(""); setAddModalCategorySearch(""); setAddModalSelectedIds([]); setAddModalSelectedDomainIds([...new Set((kpi.category_tags ?? []).map((c) => c.domain_id).filter((id): id is number => id != null))]); }} disabled={domainCategorySaving} style={{ background: "none", border: "none", padding: 0, color: "var(--primary)", cursor: "pointer", fontSize: "0.8rem", textDecoration: "underline" }}>Add</button>
+                  ) : (
+                    <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>—</span>
+                  ),
+                },
+                {
+                  label: "Tags",
+                  content: (kpi.organization_tags?.length ?? 0) > 0 ? (
+                    <>
+                      {kpi.organization_tags!.map((t) => {
+                        const full = t.name;
+                        return (
+                          <span
+                            key={t.id}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "0.35rem",
+                              marginRight: "0.35rem",
+                              marginBottom: "0.35rem",
+                              padding: "0.25rem 0.5rem",
+                              borderRadius: 6,
+                              background: "rgba(99, 102, 241, 0.12)",
+                              border: "1px solid rgba(99, 102, 241, 0.35)",
+                              fontSize: "0.8rem",
+                              color: "var(--text)",
+                              fontWeight: 500,
+                            }}
+                          >
+                            <span>{full}</span>
+                            <button type="button" onClick={() => updateOrgTags((kpi.organization_tags ?? []).filter((x) => x.id !== t.id).map((x) => x.id))} disabled={tagSaving} style={{ flexShrink: 0, background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${full}`}>×</button>
+                          </span>
+                        );
+                      })}
+                      <button type="button" onClick={() => { setAddModal("tags"); setAddModalSearch(""); setAddModalSelectedIds([]); }} disabled={tagSaving} style={{ background: "none", border: "none", padding: 0, color: "var(--primary)", cursor: "pointer", fontSize: "0.8rem", textDecoration: "underline", marginLeft: "0.15rem" }}>Add</button>
+                    </>
+                  ) : orgTags.length > 0 ? (
+                    <button type="button" onClick={() => { setAddModal("tags"); setAddModalSearch(""); setAddModalSelectedIds([]); }} disabled={tagSaving} style={{ background: "none", border: "none", padding: 0, color: "var(--primary)", cursor: "pointer", fontSize: "0.8rem", textDecoration: "underline" }}>Add</button>
+                  ) : (
+                    <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>—</span>
+                  ),
+                },
+                {
+                  label: "Reports",
+                  content: (kpi.used_in_reports?.length ?? 0) > 0 ? (
+                    <span style={{ display: "inline-flex", flexWrap: "wrap", gap: "0.2rem 0.35rem" }}>
+                      {kpi.used_in_reports!.map((r) => (
+                        <Link
+                          key={r.report_id}
+                          href={`/dashboard/reports/${r.report_id}?organization_id=${r.organization_id}`}
+                          title={r.report_name}
+                          style={{ color: "var(--primary)", textDecoration: "none", fontSize: "0.8rem", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block" }}
+                        >
+                          {r.report_name}
+                        </Link>
+                      ))}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>—</span>
+                  ),
+                },
+              ].map((row, idx) => (
+                <div
+                  key={row.label}
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: "0.75rem",
+                    padding: "0.35rem 0",
+                    borderBottom: idx < 2 ? "1px solid var(--border)" : "none",
+                    minHeight: 28,
+                  }}
+                >
+                  <span style={{ flexShrink: 0, width: 110, fontSize: "0.75rem", color: "var(--muted)" }}>{row.label}</span>
+                  <div style={{ flex: 1, minWidth: 0, display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.2rem" }}>
+                    {row.content}
+                  </div>
+                </div>
+              ))}
+            </div>
+            )}
+          </div>
+          </>
+          )}
           <div style={tabBarStyle} role="tablist" aria-label="KPI edit sections">
             <button
               type="button"
@@ -969,6 +1236,201 @@ export default function KpiFieldsPage() {
         </>
       )}
     </div>
+
+    {addModal && kpi && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1000,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.4)",
+        }}
+        onClick={() => setAddModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label={addModal === "categories" ? "Add domain → category" : "Add tags"}
+      >
+        <div
+          className="card"
+          style={{
+            maxWidth: addModal === "categories" ? 560 : 420,
+            width: "90%",
+            maxHeight: "80vh",
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h2 style={{ fontSize: "1.1rem", margin: "0 0 1rem 0", paddingRight: "2rem" }}>
+            {addModal === "categories" ? "Add domain → category" : "Add tags"}
+          </h2>
+          {addModal === "categories" ? (
+            <div style={{ display: "flex", gap: "1rem", flex: 1, minHeight: 200, overflow: "hidden" }}>
+              <div style={{ flex: "0 0 44%", display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)", paddingRight: "0.75rem" }}>
+                <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Domains</div>
+                <input
+                  type="text"
+                  placeholder="Search domains..."
+                  value={addModalSearch}
+                  onChange={(e) => setAddModalSearch(e.target.value)}
+                  style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+                />
+                <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                  {orgDomains
+                    .filter((d) => !addModalSearch.trim() || d.name.toLowerCase().includes(addModalSearch.trim().toLowerCase()))
+                    .map((d) => (
+                      <li key={d.id} style={{ marginBottom: "0.2rem" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                          <input
+                            type="checkbox"
+                            checked={addModalSelectedDomainIds.includes(d.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setAddModalSelectedDomainIds((prev) => [...prev, d.id]);
+                              } else {
+                                setAddModalSelectedDomainIds((prev) => prev.filter((id) => id !== d.id));
+                                setAddModalSelectedIds((prev) => {
+                                  const inDomain = orgCategories.filter((c) => c.domain_id === d.id).map((c) => c.id);
+                                  return prev.filter((id) => !inDomain.includes(id));
+                                });
+                              }
+                            }}
+                          />
+                          {d.name}
+                        </label>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+              <div style={{ flex: "1", display: "flex", flexDirection: "column", minWidth: 0 }}>
+                <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Categories (select domains first)</div>
+                {addModalSelectedDomainIds.length === 0 ? (
+                  <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Select one or more domains to see their categories.</p>
+                ) : (() => {
+                  const allInSelectedDomains = orgCategories.filter(
+                    (c) => c.domain_id != null && addModalSelectedDomainIds.includes(c.domain_id)
+                  );
+                  const filtered = addModalCategorySearch.trim()
+                    ? allInSelectedDomains.filter((c) => c.name.toLowerCase().includes(addModalCategorySearch.trim().toLowerCase()))
+                    : allInSelectedDomains;
+                  const attachedIds = new Set((kpi.category_tags ?? []).map((t) => t.id));
+                  return (
+                    <>
+                      <input
+                        type="text"
+                        placeholder="Search categories..."
+                        value={addModalCategorySearch}
+                        onChange={(e) => setAddModalCategorySearch(e.target.value)}
+                        style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+                      />
+                      {filtered.length === 0 ? (
+                        <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>No categories match.</p>
+                      ) : (
+                        <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                          {filtered.map((c) => {
+                            const isAttached = attachedIds.has(c.id);
+                            return (
+                              <li key={c.id} style={{ marginBottom: "0.2rem" }}>
+                                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: isAttached ? "default" : "pointer", fontSize: "0.9rem", opacity: isAttached ? 0.85 : 1 }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={isAttached || addModalSelectedIds.includes(c.id)}
+                                    disabled={isAttached}
+                                    onChange={(e) => {
+                                      if (isAttached) return;
+                                      if (e.target.checked) {
+                                        setAddModalSelectedIds((prev) => {
+                                          const otherInDomain = orgCategories.filter((x) => x.domain_id === c.domain_id && x.id !== c.id).map((x) => x.id);
+                                          return [...prev.filter((id) => !otherInDomain.includes(id)), c.id];
+                                        });
+                                      } else {
+                                        setAddModalSelectedIds((prev) => prev.filter((id) => id !== c.id));
+                                      }
+                                    }}
+                                  />
+                                  <span style={{ color: isAttached ? "var(--muted)" : undefined }}>{c.name}</span>
+                                  {isAttached && <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>(attached)</span>}
+                                </label>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          ) : (
+            <>
+          <input
+            type="text"
+            placeholder="Search..."
+            value={addModalSearch}
+            onChange={(e) => setAddModalSearch(e.target.value)}
+            style={{ marginBottom: "0.75rem", padding: "0.5rem 0.6rem" }}
+            autoFocus
+          />
+          <div style={{ flex: 1, overflowY: "auto", minHeight: 120, marginBottom: "1rem" }}>
+            {addModal === "tags" && (() => {
+              const available = orgTags.filter((t) => !kpi.organization_tags?.some((ot) => ot.id === t.id));
+              const filtered = addModalSearch.trim()
+                ? available.filter((t) => t.name.toLowerCase().includes(addModalSearch.trim().toLowerCase()))
+                : available;
+              return filtered.length === 0 ? (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No tags to add.</p>
+              ) : (
+                <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                  {filtered.map((t) => (
+                    <li key={t.id} style={{ marginBottom: "0.25rem" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.95rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={addModalSelectedIds.includes(t.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) setAddModalSelectedIds((prev) => [...prev, t.id]);
+                            else setAddModalSelectedIds((prev) => prev.filter((id) => id !== t.id));
+                          }}
+                        />
+                        {t.name}
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
+          </div>
+          </>
+          )}
+          {addModal === "categories" && <div style={{ marginBottom: "1rem" }} />}
+          <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => { setAddModal(null); setAddModalSearch(""); setAddModalCategorySearch(""); setAddModalSelectedIds([]); setAddModalSelectedDomainIds([]); }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={addModalSelectedIds.length === 0 || (addModal === "categories" && domainCategorySaving) || (addModal === "tags" && tagSaving)}
+              onClick={() => {
+                if (addModal === "categories") addCategoriesBatch(addModalSelectedIds);
+                else addTagsBatch(addModalSelectedIds);
+              }}
+            >
+              {addModal === "categories" ? (domainCategorySaving ? "Adding…" : "Add selected") : (tagSaving ? "Adding…" : "Add selected")}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
   return content;
 }

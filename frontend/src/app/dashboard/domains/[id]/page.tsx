@@ -242,24 +242,13 @@ export default function DomainDetailPage() {
     return (
       <div>
         <p className="form-error">Invalid domain.</p>
-        <Link href="/dashboard/domains">Back to Domains</Link>
+        <Link href="/dashboard/domains">Domains</Link>
       </div>
     );
   }
 
   return (
     <div>
-      <div style={{ marginBottom: "1rem" }}>
-        {organizationId != null ? (
-          <Link href={`/dashboard/organizations/${organizationId}`} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-            {"\u2190"} Back to Organization
-          </Link>
-        ) : (
-          <Link href="/dashboard/domains" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-            {"\u2190"} Domains
-          </Link>
-        )}
-      </div>
       <h1 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>
         {domain ? domain.name : `Domain #${domainId}`}
       </h1>

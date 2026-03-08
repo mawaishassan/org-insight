@@ -996,19 +996,6 @@ export default function ReportDesignPage() {
 
   return (
     <div style={{ padding: "0 1rem 1rem" }}>
-      {/* Full-width header */}
-      <div style={{ marginBottom: "1rem" }}>
-        <Link
-          href="/dashboard/reports"
-          style={{ color: "var(--muted)", fontSize: "0.9rem" }}
-          onClick={(e) => {
-            e.preventDefault();
-            router.push("/dashboard/reports");
-          }}
-        >
-          {"\u2190"} Back to reports
-        </Link>
-      </div>
       <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.25rem" }}>
         <h1 style={{ fontSize: "1.5rem", margin: 0 }}>Design report: {detail.name}</h1>
         <span

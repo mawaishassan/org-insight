@@ -25,6 +25,7 @@ from app.kpis.schemas import (
     CategoryTagRef,
     OrganizationTagRef,
     AssignedUserRef,
+    UsedInReportRef,
     KpiFileResponse,
 )
 from app.kpis.service import (
@@ -96,6 +97,17 @@ def _kpi_to_response(k):
                 AssignedUserRef(id=u.id, username=u.username, full_name=u.full_name, permission=perm)
             )
     fields_count = len(getattr(k, "fields", []) or [])
+    used_in_reports = []
+    for rtk in getattr(k, "report_template_kpis", []) or []:
+        rt = getattr(rtk, "report_template", None)
+        if rt is not None:
+            used_in_reports.append(
+                UsedInReportRef(
+                    report_id=rt.id,
+                    report_name=rt.name,
+                    organization_id=rt.organization_id,
+                )
+            )
     return KPIResponse(
         id=k.id,
         organization_id=k.organization_id,
@@ -113,6 +125,7 @@ def _kpi_to_response(k):
         category_tags=category_tags,
         organization_tags=organization_tags,
         assigned_users=assigned_users,
+        used_in_reports=used_in_reports,
     )
 
 

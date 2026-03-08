@@ -52,6 +52,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
   const [orgTags, setOrgTags] = useState<OrgTagRow[]>([]);
+  const [selectedOrgName, setSelectedOrgName] = useState<string | null>(null);
+  /** For routes outside /dashboard/organizations/[id] that still have org context (e.g. kpis/[id]/fields?organization_id=3). */
+  const [breadcrumbTail, setBreadcrumbTail] = useState<{ orgId: number; orgName: string | null; segments: { label: string; href: string }[] } | null>(null);
 
   const onEntries = pathname === "/dashboard/entries";
   const yearParam = onEntries ? searchParams.get("year") : null;
@@ -59,6 +62,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const orgId = user?.organization_id ?? null;
   const canEnter = user && canEnterData(user.role as UserRole);
   const canShowFilters = onEntries && canEnter && orgId != null;
+
+  /** When on /dashboard/organizations/{id}, the selected org id from the URL (used for super admin org-scoped menu). */
+  const orgDetailMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)(?:\/|$)/);
+  const selectedOrgId = orgDetailMatch ? Number(orgDetailMatch[1]) : null;
+
+  const kpiFieldsMatch = pathname.match(/^\/dashboard\/kpis\/(\d+)\/fields\/?$/);
+  const domainDetailMatch = pathname.match(/^\/dashboard\/domains\/(\d+)\/?$/);
+  const reportDetailMatch = pathname.match(/^\/dashboard\/reports\/(\d+)(?:\/|$)/);
+  const dataExportMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)\/data-export\/?$/);
+  const usersDetailMatch = pathname.match(/^\/dashboard\/users\/(\d+)\/?$/);
 
   useEffect(() => {
     const token = getAccessToken();
@@ -107,6 +120,106 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       .catch(() => setCategories([]));
   }, [searchParams.get("domain_id"), orgId]);
 
+  useEffect(() => {
+    if (!selectedOrgId || !getAccessToken()) {
+      setSelectedOrgName(null);
+      return;
+    }
+    api<{ id: number; name: string }>(`/organizations/${selectedOrgId}`, { token: getAccessToken()! })
+      .then((org) => setSelectedOrgName(org.name))
+      .catch(() => setSelectedOrgName(null));
+  }, [selectedOrgId]);
+
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token) {
+      setBreadcrumbTail(null);
+      return;
+    }
+    const orgIdFromQuery = searchParams.get("organization_id");
+    const oid = orgIdFromQuery ? Number(orgIdFromQuery) : null;
+
+    if (kpiFieldsMatch && oid) {
+      const kpiId = Number(kpiFieldsMatch[1]);
+      Promise.all([
+        api<{ id: number; name: string }>(`/organizations/${oid}`, { token }),
+        api<{ id: number; name: string }>(`/kpis/${kpiId}?${qs({ organization_id: oid })}`, { token }),
+      ])
+        .then(([org, kpi]) => {
+          setBreadcrumbTail({
+            orgId: oid,
+            orgName: org.name,
+            segments: [
+              { label: "KPIs", href: `/dashboard/organizations/${oid}?tab=kpis` },
+              { label: kpi.name, href: `/dashboard/kpis/${kpiId}/fields?organization_id=${oid}` },
+            ],
+          });
+        })
+        .catch(() => setBreadcrumbTail(null));
+      return;
+    }
+    if (domainDetailMatch && oid) {
+      const domainId = Number(domainDetailMatch[1]);
+      Promise.all([
+        api<{ id: number; name: string }>(`/organizations/${oid}`, { token }),
+        api<{ id: number; name: string }>(`/domains/${domainId}?${qs({ organization_id: oid })}`, { token }),
+      ])
+        .then(([org, domain]) => {
+          setBreadcrumbTail({
+            orgId: oid,
+            orgName: org.name,
+            segments: [
+              { label: "Domains", href: `/dashboard/organizations/${oid}?tab=domains` },
+              { label: domain.name, href: `/dashboard/domains/${domainId}?organization_id=${oid}` },
+            ],
+          });
+        })
+        .catch(() => setBreadcrumbTail(null));
+      return;
+    }
+    if (reportDetailMatch) {
+      const reportId = Number(reportDetailMatch[1]);
+      const designMatch = pathname.match(/^\/dashboard\/reports\/\d+\/design\/?$/);
+      const assignMatch = pathname.match(/^\/dashboard\/reports\/\d+\/assign\/?$/);
+      api<{ id: number; name: string; organization_id: number }>(`/reports/templates/${reportId}`, { token })
+        .then((report) => {
+          const rid = report.organization_id;
+          return api<{ id: number; name: string }>(`/organizations/${rid}`, { token }).then((org) => {
+            const segments: { label: string; href: string }[] = [
+              { label: "Reports", href: `/dashboard/organizations/${rid}?tab=reports` },
+              { label: report.name, href: `/dashboard/reports/${reportId}?organization_id=${rid}` },
+            ];
+            if (designMatch) {
+              segments.push({ label: "Design", href: `/dashboard/reports/${reportId}/design?organization_id=${rid}` });
+            } else if (assignMatch) {
+              segments.push({ label: "Assign", href: `/dashboard/reports/${reportId}/assign?organization_id=${rid}` });
+            }
+            return { orgId: rid, orgName: org.name, segments };
+          });
+        })
+        .then((tail) => setBreadcrumbTail(tail))
+        .catch(() => setBreadcrumbTail(null));
+      return;
+    }
+    if (usersDetailMatch) {
+      const userId = usersDetailMatch[1];
+      api<{ id: number; username: string; full_name: string | null }>(`/users/${userId}`, { token })
+        .then((u) => {
+          setBreadcrumbTail({
+            orgId: 0,
+            orgName: null,
+            segments: [
+              { label: "Users", href: "/dashboard/users" },
+              { label: u.full_name || u.username, href: `/dashboard/users/${userId}` },
+            ],
+          });
+        })
+        .catch(() => setBreadcrumbTail(null));
+      return;
+    }
+    setBreadcrumbTail(null);
+  }, [pathname, searchParams.get("organization_id")]);
+
   if (loading) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -132,10 +245,56 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   };
 
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
-    { href: "/dashboard/chat", label: "Chat with data", show: canUseChat(role) },
+    { href: "/dashboard/chat", label: "Chat with data", show: canUseChat(role) && (!isSuperAdmin || !!selectedOrgId) },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
     { href: "/dashboard/users", label: "Users", show: !isSuperAdmin && canManageUsers(role) },
   ].filter((x) => x.show);
+
+  const tabLabel: Record<string, string> = {
+    overview: "Overview",
+    kpis: "KPIs",
+    domains: "Domains",
+    reports: "Reports",
+    settings: "Settings",
+  };
+  const orgTabFromUrl = selectedOrgId ? searchParams.get("tab") : null;
+  const orgTabLabel = orgTabFromUrl && tabLabel[orgTabFromUrl] ? tabLabel[orgTabFromUrl] : null;
+  const onDataExport = pathname.match(/^\/dashboard\/organizations\/\d+\/data-export\/?$/);
+
+  /** Organization "home" = overview (cards) at /dashboard/organizations/[id] with no tab. */
+  const orgHomeHref = (id: number) => `/dashboard/organizations/${id}`;
+
+  const breadcrumbs: { label: string; href: string }[] = [];
+  if (breadcrumbTail) {
+    breadcrumbs.push({ label: "Home", href: isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries" });
+    if (breadcrumbTail.orgId > 0 && breadcrumbTail.orgName) {
+      breadcrumbs.push({
+        label: breadcrumbTail.orgName,
+        href: orgHomeHref(breadcrumbTail.orgId),
+      });
+    }
+    breadcrumbTail.segments.forEach((s) => breadcrumbs.push(s));
+  } else if (isSuperAdmin) {
+    breadcrumbs.push({ label: "Home", href: "/dashboard/organizations" });
+    if (selectedOrgId) {
+      breadcrumbs.push({
+        label: selectedOrgName ?? `Organization #${selectedOrgId}`,
+        href: orgHomeHref(selectedOrgId),
+      });
+      if (onDataExport) {
+        breadcrumbs.push({ label: "Settings", href: `/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage` });
+        breadcrumbs.push({ label: "API export", href: `/dashboard/organizations/${selectedOrgId}/data-export` });
+      } else if (orgTabLabel) {
+        const subHref = orgTabFromUrl === "settings" ? `/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage` : `/dashboard/organizations/${selectedOrgId}?tab=${orgTabFromUrl}`;
+        breadcrumbs.push({ label: orgTabLabel, href: subHref });
+      }
+    }
+  } else {
+    breadcrumbs.push({ label: "Home", href: "/dashboard/entries" });
+    if (pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users") {
+      breadcrumbs.push({ label: "Users", href: "/dashboard/users" });
+    }
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh" }}>
@@ -150,25 +309,40 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           flexWrap: "wrap",
         }}
       >
-        <Link
-          href={isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries"}
-          style={{
-            fontWeight: 700,
-            fontSize: "1rem",
-            color: (isSuperAdmin ? pathname === "/dashboard/organizations" : pathname === "/dashboard/entries") ? "var(--accent)" : "var(--text)",
-            textDecoration: "none",
-          }}
-        >
-          Home
-        </Link>
-        {pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users" && (
-          <Link
-            href="/dashboard/users"
-            style={{ fontSize: "0.95rem", color: "var(--muted)", textDecoration: "none" }}
-          >
-            ← Users
-          </Link>
-        )}
+        <nav style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.95rem", flexWrap: "wrap" }} aria-label="Breadcrumb">
+          {breadcrumbs.length === 0 ? (
+            <Link
+              href={isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries"}
+              style={{
+                fontWeight: 700,
+                fontSize: "1rem",
+                color: (isSuperAdmin ? pathname === "/dashboard/organizations" : pathname === "/dashboard/entries") ? "var(--accent)" : "var(--text)",
+                textDecoration: "none",
+              }}
+            >
+              Home
+            </Link>
+          ) : (
+            breadcrumbs.map((crumb, i) => {
+              const isLast = i === breadcrumbs.length - 1;
+              return (
+                <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+                  {i > 0 && <span style={{ color: "var(--muted)", marginRight: "0.15rem" }} aria-hidden>{"\u203A"}</span>}
+                  <Link
+                    href={crumb.href}
+                    style={{
+                      color: isLast ? "var(--text)" : "var(--muted)",
+                      textDecoration: "none",
+                      fontWeight: isLast ? 600 : undefined,
+                    }}
+                  >
+                    {crumb.label}
+                  </Link>
+                </span>
+              );
+            })
+          )}
+        </nav>
 
         {onEntries && canEnter && (
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -272,7 +446,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 top: "100%",
                 right: 0,
                 marginTop: 4,
-                minWidth: 160,
+                minWidth: 200,
                 padding: "0.5rem 0",
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -281,57 +455,138 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 zIndex: 100,
               }}
             >
-              {canManageOrgs(role) && (
-                <Link
-                  href="/dashboard/organizations"
-                  style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                  onClick={() => setMenuOpen(false)}
-                >
-                  Organizations
-                </Link>
+              {isSuperAdmin && selectedOrgId ? (
+                <>
+                  <Link
+                    href="/dashboard/organizations"
+                    style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Home
+                  </Link>
+                  <div style={{ borderTop: "1px solid var(--border)", margin: "0.35rem 0" }} />
+                  <div style={{ padding: "0.35rem 1rem", fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>
+                    {selectedOrgName ?? `Organization #${selectedOrgId}`}
+                  </div>
+                  <Link
+                    href={`/dashboard/organizations/${selectedOrgId}?tab=kpis`}
+                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    KPIs
+                  </Link>
+                  <Link
+                    href={`/dashboard/organizations/${selectedOrgId}?tab=domains`}
+                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Domains
+                  </Link>
+                  <Link
+                    href={`/dashboard/organizations/${selectedOrgId}?tab=reports`}
+                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Reports
+                  </Link>
+                  <Link
+                    href={`/dashboard/chat?organization_id=${selectedOrgId}`}
+                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Chat with data
+                  </Link>
+                  <Link
+                    href={`/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage`}
+                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Settings
+                  </Link>
+                  <div style={{ borderTop: "1px solid var(--border)", margin: "0.35rem 0" }} />
+                  <div style={{ padding: "0.35rem 1rem", fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>
+                    Account
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      clearTokens();
+                      router.push("/login");
+                      router.refresh();
+                    }}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      padding: "0.5rem 1rem",
+                      paddingLeft: "1.5rem",
+                      textAlign: "left",
+                      border: "none",
+                      background: "none",
+                      font: "inherit",
+                      color: "var(--text)",
+                      cursor: "pointer",
+                      fontSize: "0.9rem",
+                    }}
+                  >
+                    Logout
+                  </button>
+                </>
+              ) : (
+                <>
+                  {canManageOrgs(role) && (
+                    <Link
+                      href="/dashboard/organizations"
+                      style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      Home
+                    </Link>
+                  )}
+                  {hamburgerItems.map(({ href, label }) => (
+                    <Link
+                      key={href}
+                      href={href}
+                      style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      {label}
+                    </Link>
+                  ))}
+                  {!isSuperAdmin && canManageDomains(role) && (
+                    <Link
+                      href="/dashboard/domains"
+                      style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      Domains
+                    </Link>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      clearTokens();
+                      router.push("/login");
+                      router.refresh();
+                    }}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      padding: "0.5rem 1rem",
+                      textAlign: "left",
+                      border: "none",
+                      background: "none",
+                      font: "inherit",
+                      color: "var(--text)",
+                      cursor: "pointer",
+                      fontSize: "0.9rem",
+                    }}
+                  >
+                    Logout
+                  </button>
+                </>
               )}
-              {hamburgerItems.map(({ href, label }) => (
-                <Link
-                  key={href}
-                  href={href}
-                  style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                  onClick={() => setMenuOpen(false)}
-                >
-                  {label}
-                </Link>
-              ))}
-              {!isSuperAdmin && canManageDomains(role) && (
-                <Link
-                  href="/dashboard/domains"
-                  style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                  onClick={() => setMenuOpen(false)}
-                >
-                  Domains
-                </Link>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  clearTokens();
-                  router.push("/login");
-                  router.refresh();
-                }}
-                style={{
-                  display: "block",
-                  width: "100%",
-                  padding: "0.5rem 1rem",
-                  textAlign: "left",
-                  border: "none",
-                  background: "none",
-                  font: "inherit",
-                  color: "var(--text)",
-                  cursor: "pointer",
-                  fontSize: "0.9rem",
-                }}
-              >
-                Logout
-              </button>
             </div>
           )}
         </div>

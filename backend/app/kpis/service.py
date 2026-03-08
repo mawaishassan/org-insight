@@ -98,7 +98,7 @@ async def get_kpi(db: AsyncSession, kpi_id: int, org_id: int) -> KPI | None:
 
 
 async def get_kpi_with_tags(db: AsyncSession, kpi_id: int, org_id: int) -> KPI | None:
-    """Get KPI by id with domain, category tags, and assigned users loaded."""
+    """Get KPI by id with domain, category tags, assigned users, and report usage loaded."""
     result = await db.execute(
         select(KPI)
         .where(KPI.id == kpi_id, KPI.organization_id == org_id)
@@ -108,6 +108,7 @@ async def get_kpi_with_tags(db: AsyncSession, kpi_id: int, org_id: int) -> KPI |
             selectinload(KPI.category_tags).selectinload(KPICategory.category).selectinload(Category.domain),
             selectinload(KPI.organization_tags).selectinload(KPIOrganizationTag.tag),
             selectinload(KPI.assignments).selectinload(KPIAssignment.user),
+            selectinload(KPI.report_template_kpis).selectinload(ReportTemplateKPI.report_template),
         )
     )
     return result.scalar_one_or_none()
@@ -124,6 +125,7 @@ async def get_kpi_with_tags_by_id(db: AsyncSession, kpi_id: int) -> KPI | None:
             selectinload(KPI.category_tags).selectinload(KPICategory.category).selectinload(Category.domain),
             selectinload(KPI.organization_tags).selectinload(KPIOrganizationTag.tag),
             selectinload(KPI.assignments).selectinload(KPIAssignment.user),
+            selectinload(KPI.report_template_kpis).selectinload(ReportTemplateKPI.report_template),
         )
     )
     return result.scalar_one_or_none()

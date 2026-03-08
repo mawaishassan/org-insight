@@ -92,6 +92,14 @@ class AssignedUserRef(BaseModel):
     permission: str = Field(default="data_entry", description="data_entry (can edit) or view (read-only)")
 
 
+class UsedInReportRef(BaseModel):
+    """Report template that includes this KPI."""
+
+    report_id: int = Field(..., description="Report template id")
+    report_name: str = Field(..., description="Report template name")
+    organization_id: int = Field(..., description="Organization id")
+
+
 class KPIResponse(BaseModel):
     """KPI in API response."""
 
@@ -111,6 +119,7 @@ class KPIResponse(BaseModel):
     category_tags: list[CategoryTagRef] = []
     organization_tags: list[OrganizationTagRef] = []
     assigned_users: list[AssignedUserRef] = []
+    used_in_reports: list[UsedInReportRef] = []
 
     class Config:
         from_attributes = True

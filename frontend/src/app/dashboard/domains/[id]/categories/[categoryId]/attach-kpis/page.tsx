@@ -184,7 +184,7 @@ export default function AttachKpisPage() {
     return (
       <div>
         <p className="form-error">Invalid domain or category.</p>
-        <Link href="/dashboard/domains">Back to Domains</Link>
+        <Link href="/dashboard/domains">Domains</Link>
       </div>
     );
   }
@@ -193,18 +193,13 @@ export default function AttachKpisPage() {
     return (
       <div>
         <p className="form-error">Organization context required (e.g. open this page from an organization).</p>
-        <Link href="/dashboard/domains">Back to Domains</Link>
+        <Link href="/dashboard/domains">Domains</Link>
       </div>
     );
   }
 
   return (
     <div>
-      <div style={{ marginBottom: "1rem" }}>
-        <Link href={domainDetailHref} style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-          {"\u2190"} Back to domain
-        </Link>
-      </div>
       <h1 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>
         Attach KPIs to category: {category ? category.name : `Category #${categoryId}`}
       </h1>

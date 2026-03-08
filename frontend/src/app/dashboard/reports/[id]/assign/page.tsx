@@ -148,11 +148,6 @@ export default function ReportAssignPage() {
 
   return (
     <div style={{ padding: "0 1rem 1rem" }}>
-      <div style={{ marginBottom: "1rem" }}>
-        <Link href="/dashboard/reports" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-          {"\u2190"} Back to reports
-        </Link>
-      </div>
       <h1 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>Assign users: {template.name}</h1>
       <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
         Set view, print, and export rights per user. Only users in this organization are listed. Save to apply changes.
