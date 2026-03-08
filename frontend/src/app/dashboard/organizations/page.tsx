@@ -25,18 +25,6 @@ function SettingsIcon({ orgId }: { orgId: number }) {
   );
 }
 
-interface FilterOption {
-  id: number;
-  name: string;
-}
-
-interface FilterOptions {
-  domains: FilterOption[];
-  kpis: FilterOption[];
-  categories: FilterOption[];
-  tags: FilterOption[];
-}
-
 interface OrgSummary {
   user_count: number;
   domain_count: number;
@@ -62,52 +50,18 @@ const createSchema = z.object({
 
 type CreateFormData = z.infer<typeof createSchema>;
 
-function buildQuery(params: {
-  name?: string;
-  is_active?: string;
-  domain_id?: string;
-  kpi_id?: string;
-  category_id?: string;
-  organization_tag_id?: string;
-}): string {
-  const search = new URLSearchParams();
-  if (params.name?.trim()) search.set("name", params.name.trim());
-  if (params.is_active === "true") search.set("is_active", "true");
-  if (params.is_active === "false") search.set("is_active", "false");
-  if (params.domain_id) search.set("domain_id", params.domain_id);
-  if (params.kpi_id) search.set("kpi_id", params.kpi_id);
-  if (params.category_id) search.set("category_id", params.category_id);
-  if (params.organization_tag_id) search.set("organization_tag_id", params.organization_tag_id);
-  return search.toString();
-}
-
 export default function OrganizationsPage() {
   const [list, setList] = useState<OrgWithSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [filterOptions, setFilterOptions] = useState<FilterOptions>({ domains: [], kpis: [], categories: [], tags: [] });
-  const [filterName, setFilterName] = useState("");
-  const [filterStatus, setFilterStatus] = useState<string>("");
-  const [filterDomainId, setFilterDomainId] = useState<string>("");
-  const [filterKpiId, setFilterKpiId] = useState<string>("");
-  const [filterCategoryId, setFilterCategoryId] = useState<string>("");
-  const [filterTagId, setFilterTagId] = useState<string>("");
 
   const token = getAccessToken();
 
   const loadList = () => {
     if (!token) return;
     setLoading(true);
-    const query = buildQuery({
-      name: filterName || undefined,
-      is_active: filterStatus || undefined,
-      domain_id: filterDomainId || undefined,
-      kpi_id: filterKpiId || undefined,
-      category_id: filterCategoryId || undefined,
-      organization_tag_id: filterTagId || undefined,
-    });
-    api<OrgWithSummary[]>(`/organizations?with_summary=true${query ? `&${query}` : ""}`, { token })
+    api<OrgWithSummary[]>(`/organizations?with_summary=true`, { token })
       .then(setList)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
@@ -115,13 +69,6 @@ export default function OrganizationsPage() {
 
   useEffect(() => {
     loadList();
-  }, [filterName, filterStatus, filterDomainId, filterKpiId, filterCategoryId, filterTagId]);
-
-  useEffect(() => {
-    if (!token) return;
-    api<FilterOptions>("/organizations/filter-options", { token })
-      .then(setFilterOptions)
-      .catch(() => setFilterOptions({ domains: [], kpis: [], categories: [], tags: [] }));
   }, [token]);
 
   const createForm = useForm<CreateFormData>({
@@ -178,83 +125,6 @@ export default function OrganizationsPage() {
 
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
 
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: "0.75rem",
-          marginBottom: "1rem",
-          padding: "0.75rem",
-          background: "var(--bg-subtle)",
-          borderRadius: "8px",
-          border: "1px solid var(--border)",
-        }}
-      >
-        <input
-          type="search"
-          placeholder="Search organizations…"
-          value={filterName}
-          onChange={(e) => setFilterName(e.target.value)}
-          style={{
-            padding: "0.4rem 0.6rem",
-            borderRadius: 6,
-            border: "1px solid var(--border)",
-            fontSize: "0.9rem",
-            minWidth: "160px",
-          }}
-        />
-        <select
-          value={filterStatus}
-          onChange={(e) => setFilterStatus(e.target.value)}
-          style={{ padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.9rem", minWidth: "100px" }}
-        >
-          <option value="">All status</option>
-          <option value="true">Active</option>
-          <option value="false">Inactive</option>
-        </select>
-        <select
-          value={filterDomainId}
-          onChange={(e) => setFilterDomainId(e.target.value)}
-          style={{ padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.9rem", minWidth: "120px" }}
-        >
-          <option value="">All domains</option>
-          {filterOptions.domains.map((d) => (
-            <option key={d.id} value={d.id}>{d.name}</option>
-          ))}
-        </select>
-        <select
-          value={filterKpiId}
-          onChange={(e) => setFilterKpiId(e.target.value)}
-          style={{ padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.9rem", minWidth: "120px" }}
-        >
-          <option value="">All KPIs</option>
-          {filterOptions.kpis.map((k) => (
-            <option key={k.id} value={k.id}>{k.name}</option>
-          ))}
-        </select>
-        <select
-          value={filterCategoryId}
-          onChange={(e) => setFilterCategoryId(e.target.value)}
-          style={{ padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.9rem", minWidth: "120px" }}
-        >
-          <option value="">All categories</option>
-          {filterOptions.categories.map((c) => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
-        </select>
-        <select
-          value={filterTagId}
-          onChange={(e) => setFilterTagId(e.target.value)}
-          style={{ padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.9rem", minWidth: "100px" }}
-        >
-          <option value="">All tags</option>
-          {filterOptions.tags.map((t) => (
-            <option key={t.id} value={t.id}>{t.name}</option>
-          ))}
-        </select>
-      </div>
-
       {showCreate && (
         <div className="card" style={{ marginBottom: "1rem" }}>
           <h2 style={{ marginBottom: "1rem", fontSize: "1.1rem" }}>Create organization</h2>
@@ -309,23 +179,39 @@ export default function OrganizationsPage() {
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
         {list.map((o) => (
-          <div key={o.id} className="card" style={{ marginBottom: 0 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem" }}>
+          <div key={o.id} className="card" style={{ marginBottom: 0, display: "flex", flexDirection: "column", minHeight: 200 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem", flex: 1, minWidth: 0 }}>
               <Link
                 href={`/dashboard/organizations/${o.id}`}
-                style={{ textDecoration: "none", color: "inherit", flex: 1, minWidth: 0 }}
+                style={{ textDecoration: "none", color: "inherit", flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}
               >
+                {/* Section 1: Title */}
+                <div style={{ marginBottom: "0.5rem" }}>
+                  <strong style={{ fontSize: "1.1rem", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.name}</strong>
+                </div>
+                {/* Section 2: Description - always 2 lines space, clamp */}
+                <div
+                  style={{
+                    color: "var(--muted)",
+                    fontSize: "0.9rem",
+                    lineHeight: 1.35,
+                    minHeight: "2.7em",
+                    marginBottom: "0.5rem",
+                    overflow: "hidden",
+                    display: "-webkit-box",
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: "vertical",
+                    wordBreak: "break-word",
+                  }}
+                  title={o.description ?? undefined}
+                >
+                  {o.description?.trim() || "\u00A0"}
+                </div>
+                {/* Section 3: Active status */}
                 <div style={{ marginBottom: "0.75rem" }}>
-                  <strong style={{ fontSize: "1.1rem" }}>{o.name}</strong>
-                  {o.description && (
-                    <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0", lineHeight: 1.3 }}>
-                      {o.description}
-                    </p>
-                  )}
                   <span
                     style={{
                       display: "inline-block",
-                      marginTop: "0.5rem",
                       padding: "0.2rem 0.5rem",
                       borderRadius: "4px",
                       fontSize: "0.8rem",
@@ -336,7 +222,8 @@ export default function OrganizationsPage() {
                     {o.is_active ? "Active" : "Inactive"}
                   </span>
                 </div>
-                <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginTop: "0.75rem" }}>
+                {/* Section 4: Summary */}
+                <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginTop: "auto" }}>
                   <span style={{ color: "var(--muted)", fontSize: "0.85rem" }} title="Users">
                     {o.summary.user_count} users
                   </span>

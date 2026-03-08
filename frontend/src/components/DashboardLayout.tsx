@@ -63,9 +63,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const canEnter = user && canEnterData(user.role as UserRole);
   const canShowFilters = onEntries && canEnter && orgId != null;
 
-  /** When on /dashboard/organizations/{id}, the selected org id from the URL (used for super admin org-scoped menu). */
+  /** When super admin is in any organization context: org detail path, or organization_id in URL, or breadcrumb (e.g. report page loads org from API). */
   const orgDetailMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)(?:\/|$)/);
-  const selectedOrgId = orgDetailMatch ? Number(orgDetailMatch[1]) : null;
+  const orgIdFromPath = orgDetailMatch ? Number(orgDetailMatch[1]) : null;
+  const orgIdFromQuery = searchParams.get("organization_id");
+  const orgIdFromBreadcrumb = breadcrumbTail?.orgId && breadcrumbTail.orgId > 0 ? breadcrumbTail.orgId : null;
+  const selectedOrgId = orgIdFromPath ?? (orgIdFromQuery ? Number(orgIdFromQuery) : null) ?? orgIdFromBreadcrumb;
 
   const kpiFieldsMatch = pathname.match(/^\/dashboard\/kpis\/(\d+)\/fields\/?$/);
   const domainDetailMatch = pathname.match(/^\/dashboard\/domains\/(\d+)\/?$/);
@@ -283,7 +286,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       });
       if (onDataExport) {
         breadcrumbs.push({ label: "Settings", href: `/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage` });
-        breadcrumbs.push({ label: "API export", href: `/dashboard/organizations/${selectedOrgId}/data-export` });
+        breadcrumbs.push({ label: "API export", href: `/dashboard/organizations/${selectedOrgId}?tab=settings&sub=api_export` });
       } else if (orgTabLabel) {
         const subHref = orgTabFromUrl === "settings" ? `/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage` : `/dashboard/organizations/${selectedOrgId}?tab=${orgTabFromUrl}`;
         breadcrumbs.push({ label: orgTabLabel, href: subHref });

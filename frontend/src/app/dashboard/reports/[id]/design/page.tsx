@@ -652,6 +652,8 @@ export default function ReportDesignPage() {
 
   const [isDirty, setIsDirty] = useState(false);
   const [lastAutoSavedAt, setLastAutoSavedAt] = useState<number | null>(null);
+  const [autoSave, setAutoSave] = useState(true);
+  const autoSaveRef = useRef(true);
   const autoSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blocksRef = useRef<ReportBlock[]>([]);
   const bodyTemplateRef = useRef("");
@@ -752,21 +754,29 @@ export default function ReportDesignPage() {
   }, [id, token, detail]);
 
   const scheduleAutoSave = useCallback(() => {
+    if (!autoSaveRef.current) return;
     if (autoSaveTimeoutRef.current) {
       clearTimeout(autoSaveTimeoutRef.current);
       autoSaveTimeoutRef.current = null;
     }
     autoSaveTimeoutRef.current = setTimeout(() => {
       autoSaveTimeoutRef.current = null;
+      if (!autoSaveRef.current) return;
       performAutoSave();
     }, AUTO_SAVE_DELAY_MS);
   }, [performAutoSave]);
 
+  autoSaveRef.current = autoSave;
+
   useEffect(() => {
+    if (!autoSave && autoSaveTimeoutRef.current) {
+      clearTimeout(autoSaveTimeoutRef.current);
+      autoSaveTimeoutRef.current = null;
+    }
     return () => {
       if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
     };
-  }, []);
+  }, [autoSave]);
 
   const loadFieldsForKpis = useCallback(
     (kpiIds: number[]) => {
@@ -998,72 +1008,9 @@ export default function ReportDesignPage() {
     <div style={{ padding: "0 1rem 1rem" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.25rem" }}>
         <h1 style={{ fontSize: "1.5rem", margin: 0 }}>Design report: {detail.name}</h1>
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            padding: "0.25rem 0.6rem",
-            borderRadius: 6,
-            fontSize: "0.8rem",
-            fontWeight: 600,
-            textTransform: "uppercase",
-            letterSpacing: "0.03em",
-            ...(isDirty
-              ? { background: "rgba(217, 119, 6, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)" }
-              : { background: "rgba(5, 150, 105, 0.12)", color: "var(--success)", border: "1px solid var(--success)" }),
-          }}
-          title={isDirty ? "You have unsaved changes; draft is auto-saved every 45s" : "All changes saved"}
-        >
-          {saving ? "Saving…" : isDirty ? "Draft" : "Saved"}
-        </span>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
-        <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Report year for preview and print:</span>
-        <select value={reportYear} onChange={(e) => setReportYear(Number(e.target.value))} style={{ padding: "0.35rem 0.5rem" }}>
-          {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
-            <option key={y} value={y}>{y}</option>
-          ))}
-        </select>
-      </div>
-      <p style={{ color: "var(--muted)", marginBottom: "0.5rem" }}>Add blocks below—drag to reorder, then Save.</p>
-      <p style={{ fontSize: "0.9rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
-        Use <strong>Text with KPI data</strong> to write paragraphs and insert numbers or text from KPIs anywhere in the text.
-      </p>
-      <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
-        Your design is saved automatically as a draft every 45 seconds so you don&apos;t lose work. Use <strong>Save</strong> when you&apos;re done.
-        {lastAutoSavedAt != null && isDirty && (
-          <span style={{ marginLeft: "0.5rem" }}>
-            Last draft saved at {new Date(lastAutoSavedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}.
-          </span>
-        )}
-      </p>
       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "1rem", flexWrap: "wrap" }}>
-        <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>View:</span>
-        <button
-          type="button"
-          className={viewMode === "both" ? "btn btn-primary" : "btn"}
-          style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem" }}
-          onClick={() => setViewMode("both")}
-        >
-          Both
-        </button>
-        <button
-          type="button"
-          className={viewMode === "design" ? "btn btn-primary" : "btn"}
-          style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem" }}
-          onClick={() => setViewMode("design")}
-        >
-          Design only
-        </button>
-        <button
-          type="button"
-          className={viewMode === "preview" ? "btn btn-primary" : "btn"}
-          style={{ padding: "0.35rem 0.65rem", fontSize: "0.85rem" }}
-          onClick={() => setViewMode("preview")}
-        >
-          Preview only
-        </button>
-        {viewMode === "both" && livePreviewMinimized && (
+        {livePreviewMinimized && (
           <button
             type="button"
             className="btn"
@@ -1113,6 +1060,45 @@ export default function ReportDesignPage() {
           >
             <span>Report content</span>
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.4rem",
+                  fontSize: "0.85rem",
+                  fontWeight: 500,
+                  color: "var(--text)",
+                  cursor: "pointer",
+                  userSelect: "none",
+                }}
+                title={autoSave ? "Draft is saved automatically every 45 seconds" : "Auto-save is off; use Save when done"}
+              >
+                <input
+                  type="checkbox"
+                  checked={autoSave}
+                  onChange={(e) => setAutoSave(e.target.checked)}
+                  style={{ width: 16, height: 16, cursor: "pointer" }}
+                />
+                Auto-save
+              </label>
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "0.25rem 0.6rem",
+                  borderRadius: 6,
+                  fontSize: "0.8rem",
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.03em",
+                  ...(isDirty
+                    ? { background: "rgba(217, 119, 6, 0.15)", color: "var(--warning)", border: "1px solid var(--warning)" }
+                    : { background: "rgba(5, 150, 105, 0.12)", color: "var(--success)", border: "1px solid var(--success)" }),
+                }}
+                title={isDirty ? (autoSave ? "Unsaved changes; draft auto-saves every 45s" : "Unsaved changes; use Save when done") : "All changes saved"}
+              >
+                {saving ? "Saving…" : isDirty ? "Draft" : "Saved"}
+              </span>
               <button
                 type="button"
                 onClick={() => {
@@ -1277,12 +1263,7 @@ export default function ReportDesignPage() {
             alignSelf: "flex-start",
           }}
         >
-          <button
-            type="button"
-            onClick={() => {
-              setLivePreviewMinimized(true);
-              if (viewMode === "preview") setViewMode("both");
-            }}
+          <div
             style={{
               width: "100%",
               padding: "0.75rem 1rem",
@@ -1290,17 +1271,48 @@ export default function ReportDesignPage() {
               alignItems: "center",
               justifyContent: "space-between",
               gap: "0.5rem",
+              flexWrap: "wrap",
               border: "none",
               background: "var(--surface)",
-              cursor: "pointer",
               fontSize: "1rem",
               fontWeight: 600,
-              textAlign: "left",
             }}
           >
             <span>Live preview</span>
-            <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Hide Preview</span>
-          </button>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", fontWeight: 500, color: "var(--text)" }}>
+                <span style={{ color: "var(--muted)", fontWeight: 400 }}>Year</span>
+                <select
+                  value={reportYear}
+                  onChange={(e) => setReportYear(Number(e.target.value))}
+                  style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.9rem" }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  setLivePreviewMinimized(true);
+                  if (viewMode === "preview") setViewMode("both");
+                }}
+                style={{
+                  padding: "0.35rem 0.65rem",
+                  border: "none",
+                  background: "none",
+                  cursor: "pointer",
+                  fontSize: "0.9rem",
+                  fontWeight: 600,
+                  color: "var(--muted)",
+                }}
+              >
+                Hide Preview
+              </button>
+            </div>
+          </div>
           {!livePreviewMinimized && (
             <div style={{ padding: "1rem", borderTop: "1px solid var(--border)" }}>
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "0.5rem", flexWrap: "wrap", gap: "0.5rem" }}>

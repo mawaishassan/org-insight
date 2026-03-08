@@ -49,7 +49,7 @@ interface KpiRow {
   id: number;
   name: string;
   description: string | null;
-  year: number;
+  year?: number | null;
   sort_order: number;
   category_tags?: CategoryTagRef[];
   organization_tags?: OrganizationTagRef[];

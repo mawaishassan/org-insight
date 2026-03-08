@@ -301,7 +301,7 @@ async def list_available_kpis(db: AsyncSession, user_id: int, org_id: int) -> li
     if not user:
         return []
     if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
-        q = select(KPI).where(KPI.organization_id == org_id).order_by(KPI.year.desc(), KPI.name)
+        q = select(KPI).where(KPI.organization_id == org_id).order_by(KPI.sort_order, KPI.name)
         res = await db.execute(q)
         return list(res.scalars().all())
     # USER: only assigned KPIs
@@ -309,7 +309,7 @@ async def list_available_kpis(db: AsyncSession, user_id: int, org_id: int) -> li
         select(KPI)
         .join(KPIAssignment, KPIAssignment.kpi_id == KPI.id)
         .where(KPIAssignment.user_id == user_id)
-        .order_by(KPI.year.desc(), KPI.name)
+        .order_by(KPI.sort_order, KPI.name)
     )
     res = await db.execute(q)
     return list(res.scalars().all())
@@ -656,7 +656,7 @@ async def list_entries_overview(
         item = {
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,
-            "kpi_year": kpi.year,
+            "kpi_year": year,  # context year (data scope), not KPI-level year
             "org_time_dimension": org_td.value,
             "kpi_time_dimension": kpi_td_raw,
             "effective_time_dimension": effective_td.value,

@@ -32,7 +32,7 @@ interface KpiRow {
   domain_id: number | null;
   name: string;
   description: string | null;
-  year: number;
+  year?: number | null;
   sort_order: number;
   category_tags?: CategoryTagRef[];
   organization_tags?: OrganizationTagRef[];
@@ -325,7 +325,7 @@ export default function AttachKpisPage() {
                   />
                   <label htmlFor={`kpi-${kpi.id}`} style={{ flex: 1, cursor: "pointer", margin: 0 }}>
                     <span>{kpi.name}</span>
-                    {kpi.year != null && (
+                    {kpi.year != null && kpi.year !== undefined && (
                       <span style={{ color: "var(--muted)", fontSize: "0.9rem", marginLeft: "0.35rem" }}>
                         ({kpi.year})
                       </span>

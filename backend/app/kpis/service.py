@@ -63,7 +63,7 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
             domain_id=data.domain_id,
             name=data.name,
             description=data.description,
-            year=data.year,
+            year=None,
             sort_order=next_order,
             entry_mode=entry_mode,
             api_endpoint_url=api_url,
@@ -74,7 +74,7 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
             domain_id=None,
             name=data.name,
             description=data.description,
-            year=data.year,
+            year=None,
             sort_order=next_order,
             entry_mode=entry_mode,
             api_endpoint_url=api_url,
@@ -137,11 +137,10 @@ async def list_kpis(
     domain_id: int | None = None,
     category_id: int | None = None,
     organization_tag_id: int | None = None,
-    year: int | None = None,
     name: str | None = None,
     with_tags: bool = True,
 ) -> list[KPI]:
-    """List KPIs in organization, optionally by domain, category, organization tag, year, or name search."""
+    """List KPIs in organization, optionally by domain, category, organization tag, or name search. KPI is not filtered by year; data is scoped by entry year."""
     q = select(KPI).where(KPI.organization_id == org_id)
     if domain_id is not None:
         # KPIs in domain: only those attached to at least one category in this domain (single source of truth)
@@ -158,8 +157,6 @@ async def list_kpis(
         q = q.join(KPIOrganizationTag, KPI.id == KPIOrganizationTag.kpi_id).where(
             KPIOrganizationTag.organization_tag_id == organization_tag_id
         )
-    if year is not None:
-        q = q.where(KPI.year == year)
     if name is not None and name.strip():
         q = q.where(KPI.name.ilike(f"%{name.strip()}%"))
     q = q.order_by(KPI.sort_order, KPI.name)
@@ -193,7 +190,6 @@ async def list_kpis_for_formula_refs(
         out.append({
             "id": k.id,
             "name": k.name,
-            "year": k.year,
             "fields": [{"key": f.key, "name": f.name, "field_type": f.field_type.value} for f in numeric_fields],
         })
     return out
@@ -266,8 +262,6 @@ async def update_kpi(
         kpi.name = data.name
     if data.description is not None:
         kpi.description = data.description
-    if data.year is not None:
-        kpi.year = data.year
     if data.sort_order is not None:
         kpi.sort_order = data.sort_order
     if data.entry_mode is not None:
@@ -561,11 +555,8 @@ async def list_kpi_data_for_export(
         ...
     ]
     """
-    # Load KPIs in organization (optionally for a specific year) with their fields.
-    kpi_query = select(KPI).where(KPI.organization_id == org_id)
-    if year is not None:
-        kpi_query = kpi_query.where(KPI.year == year)
-    kpi_query = kpi_query.order_by(KPI.sort_order, KPI.name).options(selectinload(KPI.fields))
+    # Load all KPIs in organization with their fields; entries are filtered by year.
+    kpi_query = select(KPI).where(KPI.organization_id == org_id).order_by(KPI.sort_order, KPI.name).options(selectinload(KPI.fields))
     result = await db.execute(kpi_query)
     kpis: list[KPI] = list(result.unique().scalars().all())
     if not kpis:
@@ -621,7 +612,7 @@ async def list_kpi_data_for_export(
                     "kpi_field_key": f.key,
                     "kpi_field_data_type": _normalized_field_type(f),
                     "kpi_field_values": value,
-                    "kpi_field_year": getattr(entry, "year", None) if entry else (year or k.year),
+                    "kpi_field_year": getattr(entry, "year", None) if entry else year,
                 }
             )
 
@@ -630,7 +621,7 @@ async def list_kpi_data_for_export(
                 "kpi_id": k.id,
                 "kpi_name": k.name,
                 "kpi_description": k.description,
-                "kpi_year": k.year,
+                "kpi_year": year,  # export year (data scope), not KPI-level year
                 "kpi_fields_ids": field_ids,
                 "kpi_fields": fields_payload,
             }

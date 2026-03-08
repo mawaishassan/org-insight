@@ -46,7 +46,7 @@ interface KpiRow {
   domain_id: number | null;
   name: string;
   description: string | null;
-  year: number;
+  year?: number | null;
   sort_order: number;
   entry_mode?: string;
   api_endpoint_url?: string | null;
@@ -80,7 +80,6 @@ interface UserRow {
 const createSchema = z.object({
   name: z.string().min(1, "Name required"),
   description: z.string().optional(),
-  year: z.coerce.number().int().min(2000).max(2100),
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
@@ -89,7 +88,6 @@ const createSchema = z.object({
 const updateSchema = z.object({
   name: z.string().min(1, "Name required"),
   description: z.string().optional(),
-  year: z.coerce.number().int().min(2000).max(2100),
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
@@ -296,7 +294,6 @@ export default function KPIsPage() {
     defaultValues: {
       name: "",
       description: "",
-      year: new Date().getFullYear(),
       sort_order: 0,
       entry_mode: "manual",
       api_endpoint_url: "",
@@ -313,7 +310,6 @@ export default function KPIsPage() {
         body: JSON.stringify({
           name: data.name,
           description: data.description || null,
-          year: data.year,
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
@@ -323,7 +319,6 @@ export default function KPIsPage() {
       createForm.reset({
         name: "",
         description: "",
-        year: new Date().getFullYear(),
         sort_order: 0,
         entry_mode: "manual",
         api_endpoint_url: "",
@@ -345,7 +340,6 @@ export default function KPIsPage() {
         body: JSON.stringify({
           name: data.name,
           description: data.description || null,
-          year: data.year,
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
@@ -484,13 +478,6 @@ export default function KPIsPage() {
               <textarea {...createForm.register("description")} rows={2} />
             </div>
             <div className="form-group">
-              <label>Year *</label>
-              <input type="number" min={2000} max={2100} {...createForm.register("year")} />
-              {createForm.formState.errors.year && (
-                <p className="form-error">{createForm.formState.errors.year.message}</p>
-              )}
-            </div>
-            <div className="form-group">
               <label>Sort order</label>
               <input type="number" min={0} {...createForm.register("sort_order")} />
             </div>
@@ -559,10 +546,9 @@ export default function KPIsPage() {
                   {(k.entry_mode === "api" && k.api_endpoint_url) && (
                     <span style={{ fontSize: "0.75rem", marginLeft: "0.5rem", color: "var(--muted)" }} title="API entry">(API)</span>
                   )}
-                  <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
-                    Year {k.year}
-                    {k.description && ` — ${k.description}`}
-                  </p>
+                  {k.description && (
+                    <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>{k.description}</p>
+                  )}
                 </div>
                 {/* Domain labels - separate line, distinct color */}
                 {(k.domain_tags?.length ?? 0) > 0 && (
@@ -674,12 +660,12 @@ function KpiEditForm({
   const [syncMode, setSyncMode] = useState<"override" | "append">("override");
   const [contractOpen, setContractOpen] = useState(false);
   const [contract, setContract] = useState<Record<string, unknown> | null>(null);
+  const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
   const { register, handleSubmit, watch, formState: { errors, isSubmitting } } = useForm<UpdateFormData>({
     resolver: zodResolver(updateSchema),
     defaultValues: {
       name: kpi.name,
       description: kpi.description ?? "",
-      year: kpi.year,
       sort_order: kpi.sort_order,
       entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
       api_endpoint_url: kpi.api_endpoint_url ?? "",
@@ -709,11 +695,6 @@ function KpiEditForm({
       <div className="form-group">
         <label>Description</label>
         <textarea {...register("description")} rows={2} />
-      </div>
-      <div className="form-group">
-        <label>Year *</label>
-        <input type="number" min={2000} max={2100} {...register("year")} />
-        {errors.year && <p className="form-error">{errors.year.message}</p>}
       </div>
       <div className="form-group">
         <label>Sort order</label>
@@ -758,6 +739,10 @@ function KpiEditForm({
                   Append to existing (multi-line rows)
                 </label>
               </div>
+              <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                <label>Year to sync</label>
+                <input type="number" min={2000} max={2100} value={syncYear} onChange={(e) => setSyncYear(Number(e.target.value) || new Date().getFullYear())} style={{ width: "6rem" }} />
+              </div>
               <button
                 type="button"
                 className="btn"
@@ -765,7 +750,7 @@ function KpiEditForm({
                 onClick={async () => {
                   setSyncLoading(true);
                   try {
-                    await api(`/kpis/${kpi.id}/sync-from-api?${qs({ year: kpi.year, organization_id: orgId, sync_mode: syncMode })}`, { method: "POST", token });
+                    await api(`/kpis/${kpi.id}/sync-from-api?${qs({ year: syncYear, organization_id: orgId, sync_mode: syncMode })}`, { method: "POST", token });
                     onSyncSuccess();
                   } finally {
                     setSyncLoading(false);
@@ -774,7 +759,7 @@ function KpiEditForm({
               >
                 {syncLoading ? "Syncing…" : "Sync from API now"}
               </button>
-              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for year {kpi.year} from your endpoint. Override or append is chosen above.</p>
+              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for the selected year from your endpoint. Override or append is chosen above.</p>
             </div>
           )}
         </>

@@ -111,12 +111,7 @@ async def get_organization_summary(db: AsyncSession, org_id: int) -> Organizatio
         return None
     users_q = select(func.count(User.id)).where(User.organization_id == org_id)
     domains_q = select(func.count(Domain.id)).where(Domain.organization_id == org_id)
-    kpis_q = (
-        select(func.count(KPI.id))
-        .select_from(KPI)
-        .join(Domain, KPI.domain_id == Domain.id)
-        .where(Domain.organization_id == org_id)
-    )
+    kpis_q = select(func.count(KPI.id)).where(KPI.organization_id == org_id)
     users_r = await db.execute(users_q)
     domains_r = await db.execute(domains_q)
     kpis_r = await db.execute(kpis_q)

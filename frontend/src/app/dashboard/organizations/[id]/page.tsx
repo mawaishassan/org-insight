@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -8,6 +8,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, clearTokens, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { ApiExportContent } from "./ApiExportContent";
 import {
   buildReportPrintDocument,
   openReportPrintWindow,
@@ -53,7 +54,7 @@ const WHERE_OPERATORS = [
 ] as const;
 
 type TabId = "overview" | "domains" | "kpis" | "reports" | "settings";
-type SettingsSubId = "storage" | "time_dimension" | "tags" | "organization";
+type SettingsSubId = "storage" | "time_dimension" | "tags" | "organization" | "admin_user" | "api_export";
 
 interface SubFieldDef {
   id?: number;
@@ -124,7 +125,7 @@ interface KpiRow {
   domain_id: number | null;
   name: string;
   description: string | null;
-  year: number;
+  year?: number | null;
   sort_order: number;
   entry_mode?: string;
   api_endpoint_url?: string | null;
@@ -186,7 +187,6 @@ const domainUpdateSchema = z.object({
 const kpiCreateSchema = z.object({
   name: z.string().min(1, "Name required"),
   description: z.string().optional(),
-  year: z.coerce.number().int().min(2000).max(2100),
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
@@ -196,7 +196,6 @@ const kpiCreateSchema = z.object({
 const kpiUpdateSchema = z.object({
   name: z.string().min(1, "Name required"),
   description: z.string().optional(),
-  year: z.coerce.number().int().min(2000).max(2100),
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
@@ -323,7 +322,7 @@ function ApiContractBlock({ contract }: { contract: ApiContract }) {
 }
 
 const TAB_IDS: TabId[] = ["overview", "domains", "kpis", "reports", "settings"];
-const SETTINGS_SUB_IDS: SettingsSubId[] = ["storage", "time_dimension", "tags", "organization"];
+const SETTINGS_SUB_IDS: SettingsSubId[] = ["storage", "time_dimension", "tags", "organization", "admin_user", "api_export"];
 
 export default function OrganizationDetailPage() {
   const params = useParams();
@@ -711,6 +710,8 @@ const SETTINGS_SUB_LABELS: Record<SettingsSubId, string> = {
   time_dimension: "Time dimension",
   tags: "Tags settings",
   organization: "Organization",
+  admin_user: "Admin user",
+  api_export: "API export",
 };
 
 interface UserResponse {
@@ -764,10 +765,36 @@ function SettingsPage({
   setTimeDimensionSaving: (v: boolean) => void;
   loadOrg: () => void;
 }) {
+  const [settingsSearch, setSettingsSearch] = useState("");
+  const sortedSubIds = useMemo(() => {
+    const byLabel = [...SETTINGS_SUB_IDS].sort((a, b) =>
+      SETTINGS_SUB_LABELS[a].localeCompare(SETTINGS_SUB_LABELS[b], undefined, { sensitivity: "base" })
+    );
+    if (!settingsSearch.trim()) return byLabel;
+    const q = settingsSearch.trim().toLowerCase();
+    return byLabel.filter((sub) => SETTINGS_SUB_LABELS[sub].toLowerCase().includes(q));
+  }, [settingsSearch]);
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: "1.5rem", alignItems: "start", maxWidth: 960 }}>
       <nav className="card" style={{ padding: "0.5rem 0", position: "sticky", top: "1rem" }}>
-        {SETTINGS_SUB_IDS.map((sub) => (
+        <div style={{ padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)" }}>
+          <input
+            type="search"
+            placeholder="Search settings…"
+            value={settingsSearch}
+            onChange={(e) => setSettingsSearch(e.target.value)}
+            style={{
+              width: "100%",
+              padding: "0.45rem 0.6rem",
+              fontSize: "0.9rem",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              background: "var(--bg)",
+            }}
+          />
+        </div>
+        {sortedSubIds.map((sub) => (
           <button
             key={sub}
             type="button"
@@ -844,6 +871,12 @@ function SettingsPage({
         {settingsSub === "organization" && (
           <OrganizationSettingsSection orgId={orgId} org={org} token={token} loadOrg={loadOrg} />
         )}
+        {settingsSub === "admin_user" && (
+          <AdminUserSettingsSection orgId={orgId} token={token} />
+        )}
+        {settingsSub === "api_export" && (
+          <ApiExportContent orgId={orgId} token={token} />
+        )}
       </div>
     </div>
   );
@@ -870,7 +903,7 @@ function OrganizationSettingsSection({
     defaultValues: {
       name: org?.name ?? "",
       description: org?.description ?? "",
-      is_active: org?.is_active ?? true,
+      is_active: true,
     },
   });
   useEffect(() => {
@@ -881,58 +914,17 @@ function OrganizationSettingsSection({
     });
   }, [org?.name, org?.description, org?.is_active]);
 
-  useEffect(() => {
-    if (!token || !orgId) return;
-    setLoadingAdmin(true);
-    api<UserResponse[]>(`/users?organization_id=${orgId}`, { token })
-      .then((users) => {
-        const admin = users.find((u) => u.role === "ORG_ADMIN") ?? users[0] ?? null;
-        setAdminUser(admin);
-      })
-      .catch(() => setAdminUser(null))
-      .finally(() => setLoadingAdmin(false));
-  }, [orgId, token]);
-
-  const adminForm = useForm<AdminEditFormData>({
-    resolver: zodResolver(adminEditSchema),
-    defaultValues: {
-      username: adminUser?.username ?? "",
-      email: adminUser?.email ?? "",
-      full_name: adminUser?.full_name ?? "",
-      password: "",
-    },
-  });
-  useEffect(() => {
-    adminForm.reset({
-      username: adminUser?.username ?? "",
-      email: adminUser?.email ?? "",
-      full_name: adminUser?.full_name ?? "",
-      password: "",
-    });
-  }, [adminUser]);
-
   const onOrgSubmit = async (data: OrgUpdateFormData) => {
     setOrgSaveError(null);
     try {
       await api(`/organizations/${orgId}`, {
         method: "PATCH",
         token,
-        body: JSON.stringify({ name: data.name, description: data.description || null, is_active: data.is_active }),
+        body: JSON.stringify({ name: data.name, description: data.description || null, is_active: org?.is_active ?? true }),
       });
       loadOrg();
     } catch (e) {
       setOrgSaveError(e instanceof Error ? e.message : "Update failed");
-    }
-  };
-  const onAdminSubmit = async (data: AdminEditFormData) => {
-    if (!adminUser) return;
-    setAdminSaveError(null);
-    try {
-      const body: Record<string, unknown> = { username: data.username, email: data.email || null, full_name: data.full_name || null };
-      if (data.password && data.password.trim().length >= 8) body.password = data.password;
-      await api(`/users/${adminUser.id}?organization_id=${orgId}`, { method: "PATCH", token, body: JSON.stringify(body) });
-    } catch (e) {
-      setAdminSaveError(e instanceof Error ? e.message : "Update failed");
     }
   };
   const toggleActive = async () => {
@@ -950,10 +942,10 @@ function OrganizationSettingsSection({
     <div>
       <h3 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>Organization</h3>
       <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
-        Edit organization details, admin user, and access API export.
+        Edit organization name and description. Use the toggle to activate or deactivate the organization.
       </p>
       {orgSaveError && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{orgSaveError}</p>}
-      <form onSubmit={orgForm.handleSubmit(onOrgSubmit)} style={{ marginBottom: "1.5rem" }}>
+      <form onSubmit={orgForm.handleSubmit(onOrgSubmit)} style={{ marginBottom: "1rem" }}>
         <div className="form-group">
           <label>Name *</label>
           <input {...orgForm.register("name")} />
@@ -963,22 +955,106 @@ function OrganizationSettingsSection({
           <label>Description</label>
           <textarea {...orgForm.register("description")} rows={2} />
         </div>
-        <div className="form-group">
-          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <input type="checkbox" {...orgForm.register("is_active")} />
-            Active
+        <div className="form-group" style={{ marginBottom: "1rem" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.75rem", cursor: "pointer", userSelect: "none" }}>
+            <span style={{ fontWeight: 500 }}>Active</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={org?.is_active ?? false}
+              onClick={toggleActive}
+              style={{
+                width: 44,
+                height: 24,
+                borderRadius: 12,
+                border: "none",
+                background: org?.is_active ? "var(--success)" : "var(--muted)",
+                cursor: "pointer",
+                position: "relative",
+                flexShrink: 0,
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  top: 2,
+                  left: org?.is_active ? 22 : 2,
+                  width: 20,
+                  height: 20,
+                  borderRadius: "50%",
+                  background: "#fff",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                  transition: "left 0.2s ease",
+                }}
+              />
+            </button>
+            <span style={{ fontSize: "0.9rem", color: "var(--muted)" }}>
+              {org?.is_active ? "Organization is active" : "Organization is inactive"}
+            </span>
           </label>
         </div>
         <button type="submit" className="btn btn-primary" disabled={orgForm.formState.isSubmitting}>
           {orgForm.formState.isSubmitting ? "Saving…" : "Save organization"}
         </button>
       </form>
-      <div style={{ marginBottom: "1.5rem" }}>
-        <button type="button" className="btn" onClick={toggleActive} style={{ color: org?.is_active ? "var(--warning)" : "var(--success)" }}>
-          {org?.is_active ? "Deactivate organization" : "Activate organization"}
-        </button>
-      </div>
-      <h4 style={{ fontSize: "1rem", marginBottom: "0.75rem" }}>Organization admin</h4>
+    </div>
+  );
+}
+
+function AdminUserSettingsSection({ orgId, token }: { orgId: number; token: string }) {
+  const [adminUser, setAdminUser] = useState<UserResponse | null>(null);
+  const [loadingAdmin, setLoadingAdmin] = useState(false);
+  const [adminSaveError, setAdminSaveError] = useState<string | null>(null);
+
+  const adminForm = useForm<AdminEditFormData>({
+    resolver: zodResolver(adminEditSchema),
+    defaultValues: {
+      username: "",
+      email: "",
+      full_name: "",
+      password: "",
+    },
+  });
+
+  useEffect(() => {
+    if (!token || !orgId) return;
+    setLoadingAdmin(true);
+    api<UserResponse[]>(`/users?organization_id=${orgId}`, { token })
+      .then((users) => {
+        const admin = users.find((u) => u.role === "ORG_ADMIN") ?? users[0] ?? null;
+        setAdminUser(admin);
+      })
+      .catch(() => setAdminUser(null))
+      .finally(() => setLoadingAdmin(false));
+  }, [orgId, token]);
+
+  useEffect(() => {
+    adminForm.reset({
+      username: adminUser?.username ?? "",
+      email: adminUser?.email ?? "",
+      full_name: adminUser?.full_name ?? "",
+      password: "",
+    });
+  }, [adminUser]);
+
+  const onAdminSubmit = async (data: AdminEditFormData) => {
+    if (!adminUser) return;
+    setAdminSaveError(null);
+    try {
+      const body: Record<string, unknown> = { username: data.username, email: data.email || null, full_name: data.full_name || null };
+      if (data.password && data.password.trim().length >= 8) body.password = data.password;
+      await api(`/users/${adminUser.id}?organization_id=${orgId}`, { method: "PATCH", token, body: JSON.stringify(body) });
+    } catch (e) {
+      setAdminSaveError(e instanceof Error ? e.message : "Update failed");
+    }
+  };
+
+  return (
+    <div>
+      <h3 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>Admin user</h3>
+      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
+        Edit the organization admin user (username, email, full name, password).
+      </p>
       {adminSaveError && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{adminSaveError}</p>}
       {loadingAdmin ? (
         <p style={{ color: "var(--muted)" }}>Loading admin…</p>
@@ -1009,15 +1085,6 @@ function OrganizationSettingsSection({
       ) : (
         <p style={{ color: "var(--muted)" }}>No org admin user found.</p>
       )}
-      <div style={{ marginTop: "1.5rem", paddingTop: "1rem", borderTop: "1px solid var(--border)" }}>
-        <h4 style={{ fontSize: "1rem", marginBottom: "0.5rem" }}>API export</h4>
-        <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.5rem" }}>
-          Create and manage export tokens for programmatic access.
-        </p>
-        <Link href={`/dashboard/organizations/${orgId}/data-export`} className="btn">
-          Open API export
-        </Link>
-      </div>
     </div>
   );
 }
@@ -1741,7 +1808,6 @@ function KpisSection({
     defaultValues: {
       name: "",
       description: "",
-      year: new Date().getFullYear(),
       sort_order: 0,
       entry_mode: "manual",
       api_endpoint_url: "",
@@ -1757,7 +1823,6 @@ function KpisSection({
         body: JSON.stringify({
           name: data.name,
           description: data.description || null,
-          year: data.year,
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
@@ -1768,7 +1833,6 @@ function KpisSection({
       createForm.reset({
         name: "",
         description: "",
-        year: new Date().getFullYear(),
         sort_order: 0,
         entry_mode: "manual",
         api_endpoint_url: "",
@@ -1788,7 +1852,6 @@ function KpisSection({
         body: JSON.stringify({
           name: data.name,
           description: data.description || null,
-          year: data.year,
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
@@ -1991,10 +2054,6 @@ function KpisSection({
               <textarea {...createForm.register("description")} rows={2} />
             </div>
             <div className="form-group">
-              <label>Year *</label>
-              <input type="number" min={2000} max={2100} {...createForm.register("year")} />
-            </div>
-            <div className="form-group">
               <label>Sort order</label>
               <input type="number" min={0} {...createForm.register("sort_order")} />
             </div>
@@ -2122,18 +2181,6 @@ function KpisSection({
                   <div>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem", gap: "0.5rem" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                        <span
-                          style={{
-                            background: cardColor.accentBg,
-                            color: cardColor.accent,
-                            padding: "0.2rem 0.5rem",
-                            borderRadius: "4px",
-                            fontSize: "0.75rem",
-                            fontWeight: 500,
-                          }}
-                        >
-                          {k.year}
-                        </span>
                         <span
                           style={{
                             background: "rgba(107, 114, 128, 0.12)",
@@ -2325,12 +2372,12 @@ function KpiEditForm({
   const [syncMode, setSyncMode] = useState<"override" | "append">("override");
   const [contractOpen, setContractOpen] = useState(false);
   const [contract, setContract] = useState<Record<string, unknown> | null>(null);
+  const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
   const { register, handleSubmit, watch, setValue, getValues, formState: { errors, isSubmitting } } = useForm<KpiUpdateFormData>({
     resolver: zodResolver(kpiUpdateSchema),
     defaultValues: {
       name: kpi.name,
       description: kpi.description ?? "",
-      year: kpi.year,
       sort_order: kpi.sort_order,
       entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
       api_endpoint_url: kpi.api_endpoint_url ?? "",
@@ -2359,10 +2406,6 @@ function KpiEditForm({
       <div className="form-group">
         <label>Description</label>
         <textarea {...register("description")} rows={2} />
-      </div>
-      <div className="form-group">
-        <label>Year *</label>
-        <input type="number" min={2000} max={2100} {...register("year")} />
       </div>
       <div className="form-group">
         <label>Sort order</label>
@@ -2410,6 +2453,10 @@ function KpiEditForm({
                   Append to existing (multi-line rows)
                 </label>
               </div>
+              <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                <label>Year to sync</label>
+                <input type="number" min={2000} max={2100} value={syncYear} onChange={(e) => setSyncYear(Number(e.target.value) || new Date().getFullYear())} style={{ width: "6rem" }} />
+              </div>
               <button
                 type="button"
                 className="btn"
@@ -2417,7 +2464,7 @@ function KpiEditForm({
                 onClick={async () => {
                   setSyncLoading(true);
                   try {
-                    await api(`/kpis/${kpi.id}/sync-from-api?${qs({ year: kpi.year, organization_id: orgId, sync_mode: syncMode })}`, { method: "POST", token });
+                    await api(`/kpis/${kpi.id}/sync-from-api?${qs({ year: syncYear, organization_id: orgId, sync_mode: syncMode })}`, { method: "POST", token });
                     onSyncSuccess();
                   } finally {
                     setSyncLoading(false);
@@ -2426,7 +2473,7 @@ function KpiEditForm({
               >
                 {syncLoading ? "Syncing…" : "Sync from API now"}
               </button>
-              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for year {kpi.year} from your endpoint. Override or append is chosen above.</p>
+              <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for the selected year from your endpoint. Override or append is chosen above.</p>
             </div>
           )}
         </>
@@ -2683,8 +2730,8 @@ function FieldsSection({
   }, [selectedKpiId, orgId, token]);
 
   const exampleApiResponse = React.useMemo(
-    () => buildExampleApiResponse(list, selectedKpi?.year ?? new Date().getFullYear()),
-    [list, selectedKpi?.year]
+    () => buildExampleApiResponse(list, new Date().getFullYear()),
+    [list]
   );
 
   if (!selectedKpiId) {
@@ -2703,7 +2750,7 @@ function FieldsSection({
             >
               <option value="">— Select —</option>
               {kpis.map((k) => (
-                <option key={k.id} value={k.id}>{k.name} ({k.year})</option>
+                <option key={k.id} value={k.id}>{k.name}</option>
               ))}
             </select>
           </div>
@@ -2723,7 +2770,7 @@ function FieldsSection({
             style={{ padding: "0.5rem", minWidth: "200px" }}
           >
             {kpis.map((k) => (
-              <option key={k.id} value={k.id}>{k.name} ({k.year})</option>
+              <option key={k.id} value={k.id}>{k.name}</option>
             ))}
           </select>
         </div>
@@ -3151,7 +3198,7 @@ function FormulaBuilder({
               <select value={refOtherKpiId} onChange={(e) => { setRefOtherKpiId(e.target.value ? Number(e.target.value) : ""); setRefOtherFieldKey(""); }} style={{ minWidth: "180px" }}>
                 <option value="">— Select KPI —</option>
                 {otherKpis.map((k) => (
-                  <option key={k.id} value={k.id}>{k.name} (year {k.year})</option>
+                  <option key={k.id} value={k.id}>{k.name}</option>
                 ))}
               </select>
             </div>
@@ -3548,7 +3595,7 @@ function ReportsSection({
                   </div>
                   <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
                     {userRole === "SUPER_ADMIN" && (
-                      <Link className="btn" href={`/dashboard/reports/${t.id}/design`}>
+                      <Link className="btn" href={`/dashboard/reports/${t.id}/design?organization_id=${orgId}`}>
                         Design
                       </Link>
                     )}
@@ -3582,7 +3629,7 @@ function ReportsSection({
                       </button>
                     )}
                     {canManageAssignments && (
-                      <Link className="btn" href={`/dashboard/reports/${t.id}/assign`} style={{ fontSize: "0.85rem" }}>
+                      <Link className="btn" href={`/dashboard/reports/${t.id}/assign?organization_id=${orgId}`} style={{ fontSize: "0.85rem" }}>
                         Assign users
                       </Link>
                     )}

@@ -324,7 +324,7 @@ class KPI(Base):
     )
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    year = Column(Integer, nullable=False, index=True)
+    year = Column(Integer, nullable=True, index=True)  # deprecated: KPI not tied to year; entries scoped by year
     sort_order = Column(Integer, default=0)
     card_display_field_ids = Column(JSON, nullable=True)  # field IDs to show on domain KPI card (order preserved)
     # Entry mode: manual (default) or api. When api, we call api_endpoint_url to fetch entry data.
