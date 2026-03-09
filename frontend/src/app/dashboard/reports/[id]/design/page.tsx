@@ -1543,6 +1543,7 @@ function TextBlockWithKpiInsert({
   fieldsByKpiId,
   detail,
   templateId,
+  reportYear,
 }: {
   content: string;
   onContentChange: (content: string) => void;
@@ -1551,6 +1552,7 @@ function TextBlockWithKpiInsert({
   fieldsByKpiId: Record<number, FieldOption[]>;
   detail: TemplateDetail;
   templateId: number;
+  reportYear: number;
 }) {
   const token = getAccessToken();
   const [addMode, setAddMode] = useState<"kpi_value" | "formula">("kpi_value");
@@ -1978,6 +1980,7 @@ function BlockCard({
             fieldsByKpiId={fieldsByKpiId}
             detail={detail}
             templateId={templateId}
+            reportYear={reportYear}
           />
         )}
         {(type === "domain_list" || type === "domain_categories" || type === "domain_kpis") && (
