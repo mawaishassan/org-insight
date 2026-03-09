@@ -6,6 +6,7 @@ import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import toast from "react-hot-toast";
 import { getAccessToken, clearTokens, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { ApiExportContent } from "./ApiExportContent";
@@ -923,8 +924,10 @@ function OrganizationSettingsSection({
         body: JSON.stringify({ name: data.name, description: data.description || null, is_active: org?.is_active ?? true }),
       });
       loadOrg();
+      toast.success("Organization updated successfully");
     } catch (e) {
       setOrgSaveError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
   const toggleActive = async () => {
@@ -933,8 +936,10 @@ function OrganizationSettingsSection({
     try {
       await api(`/organizations/${orgId}`, { method: "PATCH", token, body: JSON.stringify({ is_active: !org.is_active }) });
       loadOrg();
+      toast.success(org.is_active ? "Organization deactivated" : "Organization activated");
     } catch (e) {
       setOrgSaveError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -1044,8 +1049,10 @@ function AdminUserSettingsSection({ orgId, token }: { orgId: number; token: stri
       const body: Record<string, unknown> = { username: data.username, email: data.email || null, full_name: data.full_name || null };
       if (data.password && data.password.trim().length >= 8) body.password = data.password;
       await api(`/users/${adminUser.id}?organization_id=${orgId}`, { method: "PATCH", token, body: JSON.stringify(body) });
+      toast.success("Admin updated successfully");
     } catch (e) {
       setAdminSaveError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -1357,8 +1364,10 @@ function DomainsSection({
       createForm.reset({ name: "", description: "", sort_order: 0 });
       setShowCreate(false);
       loadList();
+      toast.success("Domain created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+      toast.error(e instanceof Error ? e.message : "Create failed");
     }
   };
 
@@ -1375,8 +1384,10 @@ function DomainsSection({
       });
       setEditingId(null);
       loadList();
+      toast.success("Domain updated successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -1386,8 +1397,10 @@ function DomainsSection({
       await api(`/domains/${domainId}?${qs({ organization_id: orgId })}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
+      toast.success("Domain deleted successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
+      toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 
@@ -1598,8 +1611,10 @@ function TagsSection({
       createForm.reset({ name: "" });
       setShowCreate(false);
       loadList();
+      toast.success("Tag created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+      toast.error(e instanceof Error ? e.message : "Create failed");
     }
   };
 
@@ -1612,8 +1627,10 @@ function TagsSection({
       });
       setEditingId(null);
       loadList();
+      toast.success("Tag updated successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -1623,8 +1640,10 @@ function TagsSection({
       await api(`/organizations/${orgId}/tags/${tagId}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
+      toast.success("Tag deleted successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
+      toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 
@@ -1840,8 +1859,10 @@ function KpisSection({
       });
       setShowCreate(false);
       loadList();
+      toast.success("KPI created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+      toast.error(e instanceof Error ? e.message : "Create failed");
     }
   };
 
@@ -1863,28 +1884,6 @@ function KpisSection({
       loadList();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
-    }
-  };
-
-  const onDelete = async (kpiId: number) => {
-    try {
-      const summary = await api<{
-        has_child_data: boolean;
-        assignments_count: number;
-        entries_count: number;
-        fields_count: number;
-        field_values_count: number;
-        report_template_kpis_count: number;
-      }>(`/kpis/${kpiId}/child_data_summary?${qs({ organization_id: orgId })}`, { token });
-      const message = summary.has_child_data
-        ? `This KPI has ${summary.assignments_count} assignment(s), ${summary.entries_count} entry/entries, ${summary.fields_count} field(s), ${summary.field_values_count} stored value(s), and ${summary.report_template_kpis_count} report template reference(s). Deleting will remove all of them. Continue?`
-        : "Delete this KPI?";
-      if (!confirm(message)) return;
-      await api(`/kpis/${kpiId}?${qs({ organization_id: orgId })}`, { method: "DELETE", token });
-      setEditingId(null);
-      loadList();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Delete failed");
     }
   };
 
@@ -2084,23 +2083,32 @@ function KpisSection({
             {orgTags.length > 0 && (
               <div className="form-group">
                 <label>Organization tags</label>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem 1rem" }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
                   {orgTags.map((t) => {
                     const ids = createForm.watch("organization_tag_ids") ?? [];
                     const checked = ids.includes(t.id);
                     return (
-                      <label key={t.id} style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => {
-                            const prev = createForm.getValues("organization_tag_ids") ?? [];
-                            const next = prev.includes(t.id) ? prev.filter((id) => id !== t.id) : [...prev, t.id];
-                            createForm.setValue("organization_tag_ids", next);
-                          }}
-                        />
-                        <span>{t.name}</span>
-                      </label>
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => {
+                          const prev = createForm.getValues("organization_tag_ids") ?? [];
+                          const next = prev.includes(t.id) ? prev.filter((id) => id !== t.id) : [...prev, t.id];
+                          createForm.setValue("organization_tag_ids", next);
+                        }}
+                        style={{
+                          padding: "0.35rem 0.75rem",
+                          borderRadius: "999px",
+                          fontSize: "0.85rem",
+                          border: checked ? "1px solid var(--primary)" : "1px solid var(--border)",
+                          background: checked ? "var(--primary)" : "transparent",
+                          color: checked ? "var(--on-primary)" : "var(--text)",
+                          cursor: "pointer",
+                          transition: "all 0.2s ease-in-out",
+                        }}
+                      >
+                        {t.name}
+                      </button>
                     );
                   })}
                 </div>
@@ -2190,12 +2198,12 @@ function KpisSection({
                             fontSize: "0.75rem",
                             fontWeight: 500,
                           }}
-                          title="Number of fields"
+                          title="Time Dimension"
                         >
-                          {k.fields_count ?? 0} fields
+                          {((k as any).time_dimension || "") === "half_yearly" ? "Half Yearly" : ((k as any).time_dimension || "") === "quarterly" ? "Quarterly" : ((k as any).time_dimension || "") === "monthly" ? "Monthly" : "Yearly"}
                         </span>
                       </div>
-                      {k.entry_mode === "api" && k.api_endpoint_url && (
+                      {k.entry_mode === "api" ? (
                         <span
                           style={{
                             background: "rgba(107, 114, 128, 0.15)",
@@ -2208,6 +2216,19 @@ function KpisSection({
                         >
                           API
                         </span>
+                      ) : (
+                        <span
+                          style={{
+                            background: "rgba(16, 185, 129, 0.15)",
+                            color: "#059669",
+                            padding: "0.15rem 0.4rem",
+                            borderRadius: "4px",
+                            fontSize: "0.7rem",
+                          }}
+                          title="Manual entry mode"
+                        >
+                          Manual
+                        </span>
                       )}
                     </div>
                     <h3
@@ -2218,7 +2239,7 @@ function KpisSection({
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
-                        cursor: "default",
+                        cursor: "pointer",
                       }}
                       title={k.name}
                     >
@@ -2236,7 +2257,7 @@ function KpisSection({
                           WebkitLineClamp: 2,
                           WebkitBoxOrient: "vertical",
                           lineHeight: "1.4",
-                          cursor: "default",
+                          cursor: "pointer",
                         }}
                         title={k.description}
                       >
@@ -2300,45 +2321,7 @@ function KpisSection({
                       </div>
                     )}
                   </div>
-                  {/* Card actions: same destination as card (Fields), Edit and Delete stop propagation */}
-                  <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.75rem", flexWrap: "wrap" }} onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-                    <span
-                      className="btn"
-                      style={{
-                        padding: "0.3rem 0.6rem",
-                        fontSize: "0.8rem",
-                        flex: "1 1 auto",
-                        background: cardColor.accent,
-                        color: "#fff",
-                        border: "none",
-                        textAlign: "center",
-                      }}
-                    >
-                      Fields
-                    </span>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{
-                        padding: "0.3rem 0.6rem",
-                        fontSize: "0.8rem",
-                        background: cardColor.accentBg,
-                        color: cardColor.accent,
-                        border: `1px solid ${cardColor.border}`,
-                      }}
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); router.push(kpiEditHref); }}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem", color: "var(--error)" }}
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(k.id); }}
-                    >
-                      Delete
-                    </button>
-                  </div>
+                  {/* Card actions: removed edit and delete buttons */}
                 </>
             </Link>
           );
@@ -2466,6 +2449,9 @@ function KpiEditForm({
                   try {
                     await api(`/kpis/${kpi.id}/sync-from-api?${qs({ year: syncYear, organization_id: orgId, sync_mode: syncMode })}`, { method: "POST", token });
                     onSyncSuccess();
+                    toast.success("Sync completed successfully");
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : "Sync failed");
                   } finally {
                     setSyncLoading(false);
                   }
@@ -2481,23 +2467,32 @@ function KpiEditForm({
       {orgTags.length > 0 && (
         <div className="form-group">
           <label>Organization tags</label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem 1rem" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
             {orgTags.map((t) => {
               const ids = watch("organization_tag_ids") ?? [];
               const checked = ids.includes(t.id);
               return (
-                <label key={t.id} style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => {
-                      const prev = getValues("organization_tag_ids") ?? [];
-                      const next = prev.includes(t.id) ? prev.filter((id) => id !== t.id) : [...prev, t.id];
-                      setValue("organization_tag_ids", next);
-                    }}
-                  />
-                  <span>{t.name}</span>
-                </label>
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => {
+                    const prev = getValues("organization_tag_ids") ?? [];
+                    const next = prev.includes(t.id) ? prev.filter((id) => id !== t.id) : [...prev, t.id];
+                    setValue("organization_tag_ids", next);
+                  }}
+                  style={{
+                    padding: "0.35rem 0.75rem",
+                    borderRadius: "999px",
+                    fontSize: "0.85rem",
+                    border: checked ? "1px solid var(--primary)" : "1px solid var(--border)",
+                    background: checked ? "var(--primary)" : "transparent",
+                    color: checked ? "var(--on-primary)" : "var(--text)",
+                    cursor: "pointer",
+                    transition: "all 0.2s ease-in-out",
+                  }}
+                >
+                  {t.name}
+                </button>
               );
             })}
           </div>
@@ -2634,8 +2629,10 @@ function FieldsSection({
       setCreateSubFields([]);
       setShowCreate(false);
       loadList();
+      toast.success("Field created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+      toast.error(e instanceof Error ? e.message : "Create failed");
     }
   };
 
@@ -2665,8 +2662,10 @@ function FieldsSection({
       });
       setEditingId(null);
       loadList();
+      toast.success("Field updated successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -2683,8 +2682,10 @@ function FieldsSection({
       await api(`/fields/${fieldId}?${qs({ organization_id: orgId })}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
+      toast.success("Field deleted successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
+      toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 
@@ -2701,8 +2702,10 @@ function FieldsSection({
       });
       setCardDisplayFieldIds(orderedIds);
       setCardDisplaySaved(true);
+      toast.success("Card display settings saved");
     } catch (e) {
       setCardDisplaySaveError(e instanceof Error ? e.message : "Failed to save");
+      toast.error(e instanceof Error ? e.message : "Failed to save");
     } finally {
       setSavingCardDisplay(false);
     }
@@ -3430,8 +3433,10 @@ function ReportsSection({
       });
       setList((prev) => prev.map((x) => (x.id === renameTemplate.id ? { ...x, name: updated.name, description: updated.description } : x)));
       setRenameTemplate(null);
+      toast.success("Template updated successfully");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update report template");
+      toast.error(err instanceof Error ? err.message : "Failed to update report template");
     } finally {
       setRenameSaving(false);
     }
@@ -3451,8 +3456,10 @@ function ReportsSection({
       setLoading(true);
       const next = await api<ReportTemplateRow[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token });
       setList(next);
+      toast.success("Template deleted successfully");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete report template");
+      toast.error(err instanceof Error ? err.message : "Failed to delete report template");
     } finally {
       setDeletingId(null);
       setLoading(false);
@@ -3530,8 +3537,10 @@ function ReportsSection({
       setCreatedMsg("Report template created.");
       setAddReportModalOpen(false);
       loadTemplates();
+      toast.success("Report template created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create template");
+      toast.error(e instanceof Error ? e.message : "Failed to create template");
     }
   };
 

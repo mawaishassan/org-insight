@@ -9,6 +9,14 @@ import { z } from "zod";
 import { getAccessToken, canEditKpis, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 
+function qs(params: Record<string, string | number | undefined>) {
+  const entries = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== "" && v !== 0)
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  return new URLSearchParams(entries).toString();
+}
+import toast from "react-hot-toast";
+
 interface DomainRow {
   id: number;
   name: string;
@@ -95,13 +103,6 @@ const updateSchema = z.object({
 
 type CreateFormData = z.infer<typeof createSchema>;
 type UpdateFormData = z.infer<typeof updateSchema>;
-
-function qs(params: Record<string, string | number | undefined>) {
-  const entries = Object.entries(params)
-    .filter(([, v]) => v !== undefined && v !== "" && v !== 0)
-    .map(([k, v]) => [k, String(v)] as [string, string]);
-  return new URLSearchParams(entries).toString();
-}
 
 interface ApiContractField {
   key: string;
@@ -244,8 +245,10 @@ export default function KPIsPage() {
         token,
       });
       loadList();
+      toast.success("User assigned to KPI");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Assign failed");
+      toast.error(e instanceof Error ? e.message : "Assign failed");
     }
   };
 
@@ -255,8 +258,10 @@ export default function KPIsPage() {
     try {
       await api(`/kpis/${kpiId}/assignments/${userId}?organization_id=${effectiveOrgId}`, { method: "DELETE", token });
       loadList();
+      toast.success("User unassigned from KPI");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unassign failed");
+      toast.error(e instanceof Error ? e.message : "Unassign failed");
     }
   };
 
@@ -325,8 +330,10 @@ export default function KPIsPage() {
       });
       setShowCreate(false);
       loadList();
+      toast.success("KPI created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+      toast.error(e instanceof Error ? e.message : "Create failed");
     }
   };
 
@@ -348,8 +355,10 @@ export default function KPIsPage() {
       });
       setEditingId(null);
       loadList();
+      toast.success("KPI updated successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -373,8 +382,10 @@ export default function KPIsPage() {
       await api(`/kpis/${kpiId}${query}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
+      toast.success("KPI deleted successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
+      toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 
@@ -598,7 +609,7 @@ export default function KPIsPage() {
                     ))}
                   </div>
                 )}
-                {!canEdit && effectiveOrgId != null && (
+                {userRole === "ORG_ADMIN" && effectiveOrgId != null && (
                   <AssignDropdown
                     kpiId={k.id}
                     assignedUser={assignedUser}
@@ -752,6 +763,9 @@ function KpiEditForm({
                   try {
                     await api(`/kpis/${kpi.id}/sync-from-api?${qs({ year: syncYear, organization_id: orgId, sync_mode: syncMode })}`, { method: "POST", token });
                     onSyncSuccess();
+                    toast.success("Data synced successfully from API");
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : "Sync failed");
                   } finally {
                     setSyncLoading(false);
                   }

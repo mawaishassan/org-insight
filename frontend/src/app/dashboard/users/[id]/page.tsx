@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import {
@@ -64,6 +65,7 @@ export default function UserDetailPage() {
   const [kpiFilterRights, setKpiFilterRights] = useState<string>("all");
   const [kpiPermissions, setKpiPermissions] = useState<Record<number, KpiPermission>>({});
   const [assignmentsLoading, setAssignmentsLoading] = useState(false);
+  const [userRole, setUserRole] = useState<string | null>(null);
 
   const form = useForm<UpdateFormData>({
     resolver: zodResolver(updateSchema),
@@ -75,6 +77,13 @@ export default function UserDetailPage() {
       is_active: true,
     },
   });
+
+  useEffect(() => {
+    if (!token) return;
+    api<{ role: string }>("/auth/me", { token })
+      .then((me) => setUserRole(me.role))
+      .catch(() => setUserRole(null));
+  }, [token]);
 
   useEffect(() => {
     if (!token || !Number.isInteger(userId)) {
@@ -155,8 +164,10 @@ export default function UserDetailPage() {
         token,
       });
       setUser(updated);
+      toast.success("User updated successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -170,8 +181,10 @@ export default function UserDetailPage() {
         body: JSON.stringify({ kpi_assignments: payload }),
         token,
       });
+      toast.success("KPI permissions updated");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -180,9 +193,11 @@ export default function UserDetailPage() {
     setError(null);
     try {
       await api(`/users/${user.id}`, { method: "DELETE", token });
+      toast.success("User deleted successfully");
       router.push("/dashboard/users");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
+      toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 
@@ -198,13 +213,13 @@ export default function UserDetailPage() {
 
   const categoriesForDomain =
     kpiFilterDomainId !== ""
-      ? categories.filter((c) => c.domain_id === kpiFilterDomainId)
+      ? categories.filter((c) => c.domain_id === Number(kpiFilterDomainId))
       : categories;
 
   return (
-    <div>
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.01rem" }}>
       {error && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{error}</p>}
-
+      
       {/* Section 1: General user information — compact, all fields including username/role/active */}
       <section className="card" style={{ padding: "1rem", marginBottom: "1rem" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
@@ -279,18 +294,18 @@ export default function UserDetailPage() {
         </form>
       </section>
 
-      {/* Section 2: KPI rights with filter bar */}
-      <section className="card" style={{ padding: "1rem" }}>
-        <h2 style={{ fontSize: "1rem", marginBottom: "0.5rem", fontWeight: 600 }}>KPI rights</h2>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.4rem",
-            flexWrap: "wrap",
-            marginBottom: "0.75rem",
-          }}
-        >
+      {userRole === "ORG_ADMIN" && (
+        <section className="card" style={{ padding: "1rem" }}>
+          <h2 style={{ fontSize: "1rem", marginBottom: "0.5rem", fontWeight: 600 }}>KPI rights</h2>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.4rem",
+              flexWrap: "wrap",
+              marginBottom: "0.75rem",
+            }}
+          >
           <input
             type="search"
             placeholder="Search KPIs…"
@@ -367,6 +382,7 @@ export default function UserDetailPage() {
           </>
         )}
       </section>
+      )}
     </div>
   );
 }

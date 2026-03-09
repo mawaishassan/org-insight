@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { api, getApiUrl } from "@/lib/api";
+import toast from "react-hot-toast";
 
 export interface ExportItem {
   kpi_id: number;
@@ -88,8 +89,10 @@ export function ApiExportContent({ orgId, token }: { orgId: number; token: strin
       );
       setGeneratedToken(res.token);
       setGeneratedExpiresAt(res.expires_at);
+      toast.success("Token generated successfully");
     } catch (e) {
       setGenerateError(e instanceof Error ? e.message : "Failed to generate token");
+      toast.error(e instanceof Error ? e.message : "Failed to generate token");
     } finally {
       setGenerating(false);
     }
@@ -109,10 +112,12 @@ export function ApiExportContent({ orgId, token }: { orgId: number; token: strin
       if (year.trim()) search.set("year", year.trim());
       const data = await api<ExportItem[]>(`/kpis/data-export?${search.toString()}`, { token: authToken });
       setResponseText(JSON.stringify(data, null, 2));
+      toast.success("API test call successful");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to call API";
       setError(msg);
       setResponseText(`// Error: ${msg}`);
+      toast.error(msg);
     } finally {
       setLoading(false);
     }

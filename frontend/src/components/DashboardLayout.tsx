@@ -75,6 +75,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const reportDetailMatch = pathname.match(/^\/dashboard\/reports\/(\d+)(?:\/|$)/);
   const dataExportMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)\/data-export\/?$/);
   const usersDetailMatch = pathname.match(/^\/dashboard\/users\/(\d+)\/?$/);
+  const entryDetailMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/?$/);
 
   useEffect(() => {
     const token = getAccessToken();
@@ -215,6 +216,25 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               { label: "Users", href: "/dashboard/users" },
               { label: u.full_name || u.username, href: `/dashboard/users/${userId}` },
             ],
+          });
+        })
+        .catch(() => setBreadcrumbTail(null));
+      return;
+    }
+    if (entryDetailMatch) {
+      const kpiId = Number(entryDetailMatch[1]);
+      const targetYear = entryDetailMatch[2];
+      const orgQuery = oid ? `?organization_id=${oid}` : "";
+      api<{ id: number; name: string }>(`/kpis/${kpiId}${orgQuery}`, { token })
+        .then((kpi) => {
+          const segments = [
+            { label: targetYear, href: `/dashboard/entries?year=${targetYear}${oid ? `&organization_id=${oid}` : ""}` },
+            { label: kpi.name, href: searchParams.toString() ? `${pathname}?${searchParams.toString()}` : pathname },
+          ];
+          setBreadcrumbTail({
+            orgId: oid || 0,
+            orgName: null, // we don't need the org name prefixed before segments here, the layout handles "Home" 
+            segments,
           });
         })
         .catch(() => setBreadcrumbTail(null));

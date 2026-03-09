@@ -28,6 +28,13 @@ export async function api<T>(
   }
   const res = await fetch(url, { ...init, body, headers });
   if (!res.ok) {
+    if (res.status === 401 && typeof window !== "undefined") {
+      import("./auth").then(({ clearTokens }) => {
+        clearTokens();
+        window.location.href = "/login";
+      });
+      return new Promise(() => {}) as Promise<T>;
+    }
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(Array.isArray(err.detail) ? err.detail.map((e: { msg: string }) => e.msg).join(", ") : err.detail || res.statusText);
   }

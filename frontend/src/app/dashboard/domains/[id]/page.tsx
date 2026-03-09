@@ -9,6 +9,7 @@ import { z } from "zod";
 import { getAccessToken, canEditDomainsAndCategories, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { KpiCardsGrid } from "@/components/KpiCardsGrid";
+import toast from "react-hot-toast";
 
 interface DomainInfo {
   id: number;
@@ -195,8 +196,10 @@ export default function DomainDetailPage() {
       createForm.reset({ name: "", description: "", sort_order: categories.length });
       setShowCreate(false);
       loadCategories();
+      toast.success("Category created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+      toast.error(e instanceof Error ? e.message : "Create failed");
     }
   };
 
@@ -215,8 +218,10 @@ export default function DomainDetailPage() {
       });
       setEditingId(null);
       loadCategories();
+      toast.success("Category updated successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -228,8 +233,10 @@ export default function DomainDetailPage() {
       await api(`/categories/${categoryId}${query}`, { method: "DELETE", token });
       setEditingId(null);
       loadCategories();
+      toast.success("Category deleted successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
+      toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 

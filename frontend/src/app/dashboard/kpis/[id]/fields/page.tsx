@@ -8,6 +8,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+import toast from "react-hot-toast";
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
   return new URLSearchParams(
@@ -197,7 +198,7 @@ export default function KpiFieldsPage() {
   const [activeEditTab, setActiveEditTab] = useState<EditTabId>(
     tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings" ? tabFromUrl : "details"
   );
-  const [settingsPanel, setSettingsPanel] = useState<"order" | "time_dimension" | "entry_mode" | "domain" | "tags" | null>(null);
+  const [settingsPanel, setSettingsPanel] = useState<"order" | "time_dimension" | "entry_mode" | "domain" | "tags" | "danger_zone" | null>(null);
   const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
 
   const token = getAccessToken();
@@ -456,8 +457,10 @@ export default function KpiFieldsPage() {
       await api(`/fields/${fieldId}?${fieldsQuery()}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
+      toast.success("Field deleted successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
+      toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 
@@ -472,7 +475,6 @@ export default function KpiFieldsPage() {
         body: JSON.stringify({
           name: data.name,
           description: data.description || null,
-          year: data.year,
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
@@ -481,8 +483,10 @@ export default function KpiFieldsPage() {
         }),
       });
       setKpi(updated);
+      toast.success("KPI settings updated successfully");
     } catch (e) {
       setKpiSaveError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     } finally {
       setKpiSaving(false);
     }
@@ -520,6 +524,9 @@ export default function KpiFieldsPage() {
       setAddModalCategorySearch("");
       setAddModalSelectedIds([]);
       setAddModalSelectedDomainIds([]);
+      toast.success("Categories attached successfully");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to attach categories");
     } finally {
       setDomainCategorySaving(false);
     }
@@ -540,6 +547,9 @@ export default function KpiFieldsPage() {
     try {
       await api(`/kpis/${kpiId}/categories/${categoryId}?${qs({ organization_id: orgIdFromUrl })}`, { method: "DELETE", token });
       loadKpi();
+      toast.success("Category unattached successfully");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to unattach category");
     } finally {
       setDomainCategorySaving(false);
     }
@@ -576,9 +586,11 @@ export default function KpiFieldsPage() {
         : "Delete this KPI?";
       if (!confirm(message)) return;
       await api(`/kpis/${kpiId}?${qs({ organization_id: orgIdFromUrl })}`, { method: "DELETE", token });
+      toast.success("KPI deleted successfully");
       window.location.href = `/dashboard/organizations/${orgIdFromUrl}?tab=kpis`;
     } catch (e) {
       setKpiSaveError(e instanceof Error ? e.message : "Delete failed");
+      toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 
@@ -733,14 +745,6 @@ export default function KpiFieldsPage() {
               >
                 {kpiSaving ? "Saving…" : "Save"}
               </button>
-              <button
-                type="button"
-                className="btn"
-                style={{ color: "var(--error)" }}
-                onClick={onDeleteKpi}
-              >
-                Delete KPI
-              </button>
             </div>
           </form>
         </div>
@@ -757,6 +761,7 @@ export default function KpiFieldsPage() {
                 { id: "entry_mode" as const, label: "Entry mode" },
                 { id: "domain" as const, label: "Domain" },
                 { id: "tags" as const, label: "Tags" },
+                { id: "danger_zone" as const, label: "Danger zone" },
               ].map(({ id, label }) => (
                 <button
                   key={id}
@@ -1037,23 +1042,33 @@ export default function KpiFieldsPage() {
                       return filtered.length === 0 ? (
                         <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No tags to add.</p>
                       ) : (
-                        <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-                          {filtered.map((t) => (
-                            <li key={t.id} style={{ marginBottom: "0.25rem" }}>
-                              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.95rem" }}>
-                                <input
-                                  type="checkbox"
-                                  checked={addModalSelectedIds.includes(t.id)}
-                                  onChange={(e) => {
-                                    if (e.target.checked) setAddModalSelectedIds((prev) => [...prev, t.id]);
-                                    else setAddModalSelectedIds((prev) => prev.filter((id) => id !== t.id));
-                                  }}
-                                />
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                          {filtered.map((t) => {
+                            const checked = addModalSelectedIds.includes(t.id);
+                            return (
+                              <button
+                                key={t.id}
+                                type="button"
+                                onClick={() => {
+                                  if (!checked) setAddModalSelectedIds((prev) => [...prev, t.id]);
+                                  else setAddModalSelectedIds((prev) => prev.filter((id) => id !== t.id));
+                                }}
+                                style={{
+                                  padding: "0.35rem 0.75rem",
+                                  borderRadius: "999px",
+                                  fontSize: "0.85rem",
+                                  border: checked ? "1px solid var(--primary)" : "1px solid var(--border)",
+                                  background: checked ? "var(--primary)" : "transparent",
+                                  color: checked ? "var(--on-primary)" : "var(--text)",
+                                  cursor: "pointer",
+                                  transition: "all 0.2s ease-in-out",
+                                }}
+                              >
                                 {t.name}
-                              </label>
-                            </li>
-                          ))}
-                        </ul>
+                              </button>
+                            );
+                          })}
+                        </div>
                       );
                     })()}
                   </div>
@@ -1070,6 +1085,24 @@ export default function KpiFieldsPage() {
                   >
                     {tagSaving ? "Adding…" : "Add selected"}
                   </button>
+                </div>
+              )}
+              {settingsPanel === "danger_zone" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                  <div style={{ padding: "1rem", border: "1px solid var(--error)", borderRadius: "8px", background: "rgba(239, 68, 68, 0.05)" }}>
+                    <h3 style={{ fontSize: "1rem", color: "var(--error)", margin: "0 0 0.5rem 0" }}>Danger Zone</h3>
+                    <p style={{ fontSize: "0.9rem", color: "var(--text)", margin: "0 0 1rem 0" }}>
+                      Once you delete a KPI, there is no going back. Please be certain.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ color: "var(--error)", border: "1px solid var(--error)", background: "transparent" }}
+                      onClick={onDeleteKpi}
+                    >
+                      Delete KPI
+                    </button>
+                  </div>
                 </div>
               )}
               {!settingsPanel && (

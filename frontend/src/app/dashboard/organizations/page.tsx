@@ -7,6 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import toast from "react-hot-toast";
 
 /** Settings icon (gear) for organization card - links to org Settings tab. */
 function SettingsIcon({ orgId }: { orgId: number }) {
@@ -103,8 +104,10 @@ export default function OrganizationsPage() {
       setShowCreate(false);
       setLoading(true);
       loadList();
+      toast.success("Organization created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+      toast.error(e instanceof Error ? e.message : "Create failed");
     }
   };
 

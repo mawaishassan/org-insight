@@ -7,6 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import toast from "react-hot-toast";
 import {
   type UserRow,
   type KpiOption,
@@ -38,6 +39,7 @@ export default function UsersPage() {
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [kpiFilterDomainId, setKpiFilterDomainId] = useState<number | "">("");
+  const [userRole, setUserRole] = useState<string | null>(null);
 
   const token = getAccessToken();
 
@@ -49,6 +51,13 @@ export default function UsersPage() {
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
   };
+
+  useEffect(() => {
+    if (!token) return;
+    api<{ role: string }>("/auth/me", { token })
+      .then((me) => setUserRole(me.role))
+      .catch(() => setUserRole(null));
+  }, [token]);
 
   useEffect(() => {
     loadList();
@@ -105,8 +114,10 @@ export default function UsersPage() {
       setCreateReportIds([]);
       setShowCreate(false);
       loadList();
+      toast.success("User created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+      toast.error(e instanceof Error ? e.message : "Create failed");
     }
   };
 
@@ -159,30 +170,32 @@ export default function UsersPage() {
                 <option value="REPORT_VIEWER">REPORT_VIEWER (view/print reports only)</option>
               </select>
             </div>
-            <div className="form-group">
-              <label>KPI rights (optional)</label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center", marginBottom: "0.5rem" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem" }}>
-                  Domain
-                  <select
-                    value={kpiFilterDomainId}
-                    onChange={(e) => setKpiFilterDomainId(e.target.value === "" ? "" : Number(e.target.value))}
-                    style={{ padding: "0.35rem 0.5rem", minWidth: "10rem" }}
-                  >
-                    <option value="">All domains</option>
-                    {domains.map((d) => (
-                      <option key={d.id} value={d.id}>{d.name}</option>
-                    ))}
-                  </select>
-                </label>
+            {userRole === "ORG_ADMIN" && (
+              <div className="form-group">
+                <label>KPI rights (optional)</label>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center", marginBottom: "0.5rem" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem" }}>
+                    Domain
+                    <select
+                      value={kpiFilterDomainId}
+                      onChange={(e) => setKpiFilterDomainId(e.target.value === "" ? "" : Number(e.target.value))}
+                      style={{ padding: "0.35rem 0.5rem", minWidth: "10rem" }}
+                    >
+                      <option value="">All domains</option>
+                      {domains.map((d) => (
+                        <option key={d.id} value={d.id}>{d.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <KpiRightsTable
+                  groups={groupKpisByName(kpis)}
+                  permissions={createKpiPermissions}
+                  setPermissions={setCreateKpiPermissions}
+                  disabled={createForm.formState.isSubmitting}
+                />
               </div>
-              <KpiRightsTable
-                groups={groupKpisByName(kpis)}
-                permissions={createKpiPermissions}
-                setPermissions={setCreateKpiPermissions}
-                disabled={createForm.formState.isSubmitting}
-              />
-            </div>
+            )}
             {templates.length > 0 && (
               <div className="form-group">
                 <label>Assign report templates (optional)</label>
