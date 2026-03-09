@@ -7,6 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, canEditDomainsAndCategories, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+import toast from "react-hot-toast";
 
 interface DomainSummary {
   category_count: number;
@@ -95,8 +96,10 @@ export default function DomainsPage() {
       createForm.reset({ name: "", description: "", sort_order: 0 });
       setShowCreate(false);
       loadList();
+      toast.success("Domain created successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Create failed");
+      toast.error(e instanceof Error ? e.message : "Create failed");
     }
   };
 
@@ -115,8 +118,10 @@ export default function DomainsPage() {
       });
       setEditingId(null);
       loadList();
+      toast.success("Domain updated successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
+      toast.error(e instanceof Error ? e.message : "Update failed");
     }
   };
 
@@ -128,8 +133,10 @@ export default function DomainsPage() {
       await api(`/domains/${domainId}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
+      toast.success("Domain deleted successfully");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
+      toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 

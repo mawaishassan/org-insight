@@ -134,7 +134,7 @@ function injectTimeDimensionFilter(content: string, tdPrefix: string): string {
   // Use placeholder so the global replace doesn't overwrite the source in the inject line
   const inject = "{% set _td_entries = __KPI_ENTRIES__ | filter_entries_by_period(_td_period, _td_all) %}";
   let out = tdPrefix + content;
-  out = out.replace("{% for kpi in kpis %}", "{% for kpi in kpis %}" + inject, 1);
+  out = out.replace("{% for kpi in kpis %}", "{% for kpi in kpis %}" + inject);
   out = out.replace(/kpi\.entries/g, "_td_entries");
   out = out.replace(/__KPI_ENTRIES__/g, "kpi.entries");
   // Safe access when _td_entries is empty (e.g. latest with no data, or single_period with no match)
@@ -511,7 +511,7 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       const cellMulti = multiLineCellSnippet("f");
       const cellMultiEf = multiLineCellSnippet("ef");
       const cellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td${tdStyleKey}>${cellMulti}</td>{% endif %}{% endfor %}`;
-      const tdPrefix = blockTimeDimensionPrefix(b);
+      const tdPrefix = blockTimeDimensionPrefix(b as any);
       if (fieldsLayout === "rows") {
         if (!kpiIds.length && !fieldKeys.length) {
           const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for f in kpi.entries[0].fields if kpi.entries %}<tr><td${tdStyleF}>${fieldLabelFCond}</td>{% for entry in kpi.entries %}{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td${tdStyleEf}>${cellMultiEf}</td>{% endif %}{% endfor %}{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
@@ -600,7 +600,7 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       const subFieldDisplayPrefix = buildSubFieldDisplayNamesJinja((b as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames);
       const subKeysPrefix = buildFieldSubFieldKeysJinja((b as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys);
       const gridCellMulti = multiLineCellSnippet("f");
-      const tdPrefixGrid = blockTimeDimensionPrefix(b);
+      const tdPrefixGrid = blockTimeDimensionPrefix(b as any);
       if (!kpiIds.length && !fieldKeys.length) {
         const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `<div class="report-kpi-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">{% if kpis %}{% for kpi in kpis %}{% for entry in kpi.entries %}<div class="report-card" style="border: 1px solid #ddd; padding: 1rem; border-radius: 8px;"><h4 style="margin-top: 0;">{{ kpi.kpi_name }}</h4>{% for f in entry.fields %}<p style="margin: 0.25rem 0;"><strong>${fieldLabelF}:</strong> ${gridCellMulti}</p>{% endfor %}</div>{% endfor %}{% endfor %}{% endif %}</div>`;
         out.push(injectTimeDimensionFilter(raw, tdPrefixGrid));
@@ -618,7 +618,7 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       const subFieldDisplayPrefix = buildSubFieldDisplayNamesJinja((b as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames);
       const subKeysPrefix = buildFieldSubFieldKeysJinja((b as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys);
       const listCellMulti = multiLineCellSnippet("f");
-      const tdPrefixList = blockTimeDimensionPrefix(b);
+      const tdPrefixList = blockTimeDimensionPrefix(b as any);
       if (!kpiIds.length && !fieldKeys.length) {
         const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + `<div class="report-kpi-list">{% if kpis %}{% for kpi in kpis %}<h4>{{ kpi.kpi_name }}</h4><dl style="margin: 0.5rem 0;">{% for entry in kpi.entries %}{% for f in entry.fields %}<dt style="font-weight: 600;">${fieldLabelF}</dt><dd style="margin-left: 1rem;">${listCellMulti}</dd>{% endfor %}{% endfor %}</dl>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
         out.push(injectTimeDimensionFilter(raw, tdPrefixList));
@@ -1662,9 +1662,9 @@ function TextBlockWithKpiInsert({
           Add
         </button>
       </div>
-      <textarea
-        ref={textAreaRef}
-        value={content}
+        <textarea
+          ref={textAreaRef as React.RefObject<HTMLTextAreaElement>}
+          value={content}
         onChange={(e) => onContentChange(e.target.value)}
         rows={4}
         placeholder="Write your text. Click Add to insert KPI values or formulas at the cursor."
@@ -1814,7 +1814,7 @@ function BlockCard({
   const kpis = detail.kpis_from_domains;
   const domains = detail.attached_domains;
 
-  const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
+  const textAreaRef = useRef<HTMLTextAreaElement>(null);
   const [customNamesModalOpen, setCustomNamesModalOpen] = useState(false);
   const [localFieldDisplayNames, setLocalFieldDisplayNames] = useState<Record<string, string>>({});
   const [localSubFieldDisplayNames, setLocalSubFieldDisplayNames] = useState<Record<string, Record<string, string>>>({});

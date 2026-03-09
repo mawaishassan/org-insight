@@ -3,6 +3,7 @@
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
+import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 
@@ -348,7 +349,7 @@ export default function DomainKpiDetailPage() {
         token,
       });
       setEntry(updated);
-      const isOrgAdmin = meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN";
+      const isOrgAdmin = meRole === "ORG_ADMIN";
       if (isOrgAdmin) {
         await api(`/kpis/${kpiId}/assignments?${saveQuery}`, {
           method: "PUT",
@@ -358,8 +359,10 @@ export default function DomainKpiDetailPage() {
       }
       await loadData();
       setIsEditing(false);
+      toast.success("Entry saved successfully");
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Save failed");
+      toast.error(err instanceof Error ? err.message : "Save failed");
     } finally {
       setSaving(false);
     }
@@ -378,8 +381,10 @@ export default function DomainKpiDetailPage() {
       });
       setEntry(updated);
       await loadData();
+      toast.success("Entry submitted successfully");
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Submit failed");
+      toast.error(err instanceof Error ? err.message : "Submit failed");
     } finally {
       setSubmitLoading(false);
     }
@@ -426,7 +431,7 @@ export default function DomainKpiDetailPage() {
         const isSubmitted = ent && !ent.is_draft && ent.submitted_at;
         const isDraft = ent?.is_draft ?? false;
         const isActive = (periodKeyFromUrl ?? "") === pk;
-        const periodLabel = PERIOD_LABELS[pk] ?? pk || "Full year";
+        const periodLabel = (PERIOD_LABELS[pk] ?? pk) || "Full year";
         const href = `/dashboard/entries/${kpiId}/${year}?${qs({
           ...(effectiveOrgId != null ? { organization_id: effectiveOrgId } : {}),
           period_key: pk,
@@ -603,7 +608,7 @@ export default function DomainKpiDetailPage() {
                 </div>
               )}
             </div>
-            {(assignedUsers.length > 0 || isEditing) && (
+            {meRole === "ORG_ADMIN" && (assignedUsers.length > 0 || isEditing) && (
               <div style={{ fontSize: "0.85rem" }}>
                 <span style={{ color: "var(--muted)", marginRight: "0.5rem" }}>Assigned:</span>
                 {isEditing ? (
@@ -798,8 +803,10 @@ export default function DomainKpiDetailPage() {
                       a.download = name;
                       a.click();
                       URL.revokeObjectURL(a.href);
+                      toast.success("Export successful");
                     } catch {
                       setError("Download failed");
+                      toast.error("Download failed");
                     } finally {
                       setExportExcelLoading(false);
                     }
@@ -857,8 +864,10 @@ export default function DomainKpiDetailPage() {
                             throw new Error(err.detail ?? res.statusText);
                           }
                           await loadData();
+                          toast.success("Excel imported successfully");
                         } catch (err) {
                           setError(err instanceof Error ? err.message : "Upload failed");
+                          toast.error(err instanceof Error ? err.message : "Upload failed");
                         } finally {
                           setImportExcelLoading(false);
                         }
@@ -895,7 +904,19 @@ export default function DomainKpiDetailPage() {
           }}
         >
           <span style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <span style={{ fontSize: "1.1rem" }}>📎</span>
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              style={{ color: "var(--muted)" }}
+            >
+              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
             Attachments
             {kpiFiles.length > 0 && (
               <span
@@ -953,8 +974,10 @@ export default function DomainKpiDetailPage() {
                         }
                         const created = await res.json() as KpiFileItem[];
                         setKpiFiles((prev) => [...(created ?? []), ...prev]);
+                        toast.success("Files uploaded successfully");
                       } catch (err) {
                         setKpiFilesError(err instanceof Error ? err.message : "Upload failed");
+                        toast.error(err instanceof Error ? err.message : "Upload failed");
                       } finally {
                         setKpiFilesUploading(false);
                       }
@@ -1017,8 +1040,10 @@ export default function DomainKpiDetailPage() {
                           try {
                             await api(`/kpis/${kpiId}/files/${f.id}`, { method: "DELETE", token });
                             setKpiFiles((prev) => prev.filter((x) => x.id !== f.id));
+                            toast.success("File deleted successfully");
                           } catch {
                             setKpiFilesError("Delete failed");
+                            toast.error("Delete failed");
                           }
                         }}
                       >
@@ -1345,8 +1370,13 @@ export default function DomainKpiDetailPage() {
                                     headers: { Authorization: `Bearer ${token}` },
                                     body: form,
                                   });
-                                  if (res.ok) await loadData();
-                                  else setSaveError("Excel upload failed");
+                                  if (res.ok) {
+                                    await loadData();
+                                    toast.success("Excel uploaded successfully");
+                                  } else {
+                                    setSaveError("Excel upload failed");
+                                    toast.error("Excel upload failed");
+                                  }
                                 } finally {
                                   setUploadingFieldId(null);
                                 }
@@ -1393,8 +1423,10 @@ export default function DomainKpiDetailPage() {
                               const n = result?.fields_updated ?? 0;
                               setSyncFeedback(n > 0 ? `${n} field(s) updated.` : "Sync completed; no fields updated.");
                               setTimeout(() => setSyncFeedback(null), 5000);
+                              toast.success("Sync completed successfully");
                             } catch (err) {
                               setSaveError(err instanceof Error ? err.message : "Sync from API failed");
+                              toast.error(err instanceof Error ? err.message : "Sync from API failed");
                             } finally {
                               setFetchingFromApi(false);
                             }

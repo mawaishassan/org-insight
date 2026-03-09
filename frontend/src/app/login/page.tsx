@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import toast from "react-hot-toast";
 import { api } from "@/lib/api";
 import { setTokens } from "@/lib/auth";
 
@@ -36,10 +37,12 @@ export default function LoginPage() {
       );
       setTokens(res.access_token, res.refresh_token);
       const me = await api<{ role: string }>("/auth/me", { token: res.access_token });
+      toast.success("Logged in successfully");
       router.push(me.role === "SUPER_ADMIN" ? "/dashboard/organizations" : "/dashboard/entries");
       router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Login failed");
+      toast.error(e instanceof Error ? e.message : "Login failed");
     }
   }
 

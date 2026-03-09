@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import toast from "react-hot-toast";
 
 interface TemplateRow {
   id: number;
@@ -83,8 +84,10 @@ export default function ReportsPage() {
         token: authToken,
       });
       setList((prev) => prev.filter((x) => x.id !== t.id));
+      toast.success("Template deleted successfully");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete report");
+      toast.error(err instanceof Error ? err.message : "Failed to delete report");
     } finally {
       setDeletingId(null);
     }
@@ -153,8 +156,10 @@ export default function ReportsPage() {
       setAddDescription("");
       setAddModalOpen(false);
       setCreatedMsg("Report template created.");
+      toast.success("Template created successfully");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create report");
+      toast.error(err instanceof Error ? err.message : "Failed to create report");
     } finally {
       setAddSaving(false);
     }
