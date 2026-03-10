@@ -30,6 +30,15 @@ const FIELD_TYPES = [
 
 const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean"] as const;
 
+function slugifyKey(name: string): string {
+  if (!name) return "";
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 const GROUP_FUNCTIONS = [
   { value: "SUM_ITEMS", label: "SUM (total)" },
   { value: "AVG_ITEMS", label: "AVG (average)" },
@@ -200,6 +209,7 @@ export default function KpiFieldsPage() {
   );
   const [settingsPanel, setSettingsPanel] = useState<"order" | "time_dimension" | "entry_mode" | "domain" | "tags" | "danger_zone" | null>(null);
   const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
+  const [keyTouched, setKeyTouched] = useState(false);
 
   const token = getAccessToken();
   const router = useRouter();
@@ -315,7 +325,8 @@ export default function KpiFieldsPage() {
       .catch(() => setOrgCategories([]));
   }, [token, orgIdFromUrl]);
 
-  const [createSubFields, setCreateSubFields] = useState<Array<{ name: string; key: string; field_type: string; is_required: boolean; sort_order: number }>>([]);
+  type CreateSubFieldRow = { name: string; key: string; field_type: string; is_required: boolean; sort_order: number; keyTouched?: boolean };
+  const [createSubFields, setCreateSubFields] = useState<CreateSubFieldRow[]>([]);
 
   const createForm = useForm<CreateFormData>({
     resolver: zodResolver(createSchema),
@@ -365,6 +376,7 @@ export default function KpiFieldsPage() {
         is_required: false,
         sort_order: list.length + 1,
       });
+      setKeyTouched(false);
       setCreateSubFields([]);
       setShowCreate(false);
       loadList();
@@ -1139,29 +1151,78 @@ export default function KpiFieldsPage() {
 
       {showCreate && (
         <div className="card" style={{ marginBottom: "1rem" }}>
-          <h2 style={{ marginBottom: "1rem", fontSize: "1.1rem" }}>Create field</h2>
+          <h2 style={{ marginBottom: "0.75rem", fontSize: "1.1rem" }}>Create field</h2>
           <form onSubmit={createForm.handleSubmit(onCreateSubmit)}>
-            <div className="form-group">
-              <label>Name * (display label)</label>
-              <input {...createForm.register("name")} placeholder="e.g. Total students" />
-              {createForm.formState.errors.name && (
-                <p className="form-error">{createForm.formState.errors.name.message}</p>
-              )}
+            {/* Row 1: Name, Key, Field type — one row on wide screens, wraps on narrow */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                gap: "0.75rem 1rem",
+                alignItems: "flex-start",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+                <label>Name *</label>
+                <input
+                  placeholder="e.g. Total students"
+                  style={{ width: "100%" }}
+                  value={createForm.watch("name") ?? ""}
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    createForm.setValue("name", name, { shouldValidate: true });
+                    if (!keyTouched) {
+                      createForm.setValue("key", slugifyKey(name), { shouldValidate: false, shouldDirty: true });
+                    }
+                  }}
+                />
+                {createForm.formState.errors.name && (
+                  <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+                    {createForm.formState.errors.name.message}
+                  </p>
+                )}
+              </div>
+              <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+                <label>Key * <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.8rem" }}>(auto from name)</span></label>
+                <input
+                  {...createForm.register("key", { onChange: () => setKeyTouched(true) })}
+                  placeholder="key_name (auto from name)"
+                  style={{ width: "100%" }}
+                />
+                {createForm.formState.errors.key && (
+                  <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+                    {createForm.formState.errors.key.message}
+                  </p>
+                )}
+              </div>
+              <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+                <label>Type *</label>
+                <select {...createForm.register("field_type")} style={{ width: "100%" }}>
+                  {FIELD_TYPES.map((t) => (
+                    <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                  ))}
+                </select>
+              </div>
             </div>
-            <div className="form-group">
-              <label>Key * (unique, lowercase, e.g. total_students)</label>
-              <input {...createForm.register("key")} placeholder="total_students" />
-              {createForm.formState.errors.key && (
-                <p className="form-error">{createForm.formState.errors.key.message}</p>
-              )}
-            </div>
-            <div className="form-group">
-              <label>Field type *</label>
-              <select {...createForm.register("field_type")}>
-                {FIELD_TYPES.map((t) => (
-                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-                ))}
-              </select>
+            {/* Row 2: Required, Sort order */}
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: "1rem 1.5rem",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                <input type="checkbox" {...createForm.register("is_required")} />
+                Required
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
+                <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }} />
+              </div>
             </div>
             {createForm.watch("field_type") === "formula" && (
               <div className="form-group">
@@ -1182,55 +1243,89 @@ export default function KpiFieldsPage() {
                 <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
                   Define columns so data entry uses a table instead of raw JSON.
                 </p>
-                {createSubFields.map((s, idx) => (
-                  <div key={idx} style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
-                    <input
-                      placeholder="Name"
-                      value={s.name}
-                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
-                      style={{ width: "120px" }}
-                    />
-                    <input
-                      placeholder="key"
-                      value={s.key}
-                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, key: e.target.value } : x)))}
-                      style={{ width: "100px" }}
-                    />
-                    <select
-                      value={s.field_type}
-                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
-                    >
-                      {SUB_FIELD_TYPES.map((t) => (
-                        <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                        <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                        <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {createSubFields.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                            No sub-fields yet. Click &quot;Add sub-field&quot; below.
+                          </td>
+                        </tr>
+                      ) : createSubFields.map((s, idx) => (
+                        <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <input
+                              placeholder="Display name"
+                              value={s.name}
+                              onChange={(e) => {
+                                const name = e.target.value;
+                                setCreateSubFields((prev) =>
+                                  prev.map((x, i) =>
+                                    i === idx
+                                      ? { ...x, name, key: x.keyTouched ? x.key : slugifyKey(name) }
+                                      : x
+                                  )
+                                );
+                              }}
+                              style={{ width: "100%", minWidth: "100px" }}
+                            />
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <input
+                              placeholder="key_name (auto from name)"
+                              value={s.key}
+                              onChange={(e) =>
+                                setCreateSubFields((prev) =>
+                                  prev.map((x, i) => (i === idx ? { ...x, key: e.target.value, keyTouched: true } : x))
+                                )
+                              }
+                              style={{ width: "100%", minWidth: "90px" }}
+                            />
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <select
+                              value={s.field_type}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+                              style={{ minWidth: "120px" }}
+                            >
+                              {SUB_FIELD_TYPES.map((t) => (
+                                <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={s.is_required}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                              title="Required"
+                            />
+                            {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
+                          </td>
+                        </tr>
                       ))}
-                    </select>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.9rem" }}>
-                      <input
-                        type="checkbox"
-                        checked={s.is_required}
-                        onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
-                      />
-                      Required
-                    </label>
-                    <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => prev.filter((_, i) => i !== idx))}>Remove</button>
-                  </div>
-                ))}
-                <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length }])}>
+                    </tbody>
+                  </table>
+                </div>
+                <button type="button" className="btn btn-primary" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, keyTouched: false }])}>
                   Add sub-field
                 </button>
               </div>
             )}
-            <div className="form-group">
-              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <input type="checkbox" {...createForm.register("is_required")} />
-                Required
-              </label>
-            </div>
-            <div className="form-group">
-              <label>Sort order</label>
-              <input type="number" min={0} {...createForm.register("sort_order")} />
-            </div>
-            <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+            <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem" }}>
               <button type="submit" className="btn btn-primary" disabled={createForm.formState.isSubmitting}>
                 {createForm.formState.isSubmitting ? "Creating..." : "Create"}
               </button>
@@ -1717,8 +1812,10 @@ function FieldEditForm({
   organizationId?: number;
   currentKpiId?: number;
 }) {
-  const [editSubFields, setEditSubFields] = useState<SubFieldDef[]>(
-    () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0 }))
+  type EditSubFieldRow = SubFieldDef & { keyTouched?: boolean };
+  const [editKeyTouched, setEditKeyTouched] = useState(false);
+  const [editSubFields, setEditSubFields] = useState<EditSubFieldRow[]>(
+    () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0, keyTouched: false }))
   );
   const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting } } = useForm<UpdateFormData>({
     resolver: zodResolver(updateSchema),
@@ -1734,24 +1831,91 @@ function FieldEditForm({
   const currentFieldType = watch("field_type");
 
   return (
-    <form onSubmit={handleSubmit((data) => onSave(data, currentFieldType === "multi_line_items" ? editSubFields : undefined))} style={{ width: "100%" }}>
-      <div className="form-group">
-        <label>Name *</label>
-        <input {...register("name")} />
-        {errors.name && <p className="form-error">{errors.name.message}</p>}
+    <form
+      onSubmit={handleSubmit((data) =>
+        onSave(
+          data,
+          currentFieldType === "multi_line_items"
+            ? editSubFields.map(({ keyTouched: _, ...s }) => s)
+            : undefined
+        )
+      )}
+      style={{ width: "100%" }}
+    >
+      {/* Row 1: Name, Key, Type — aligned with create field layout */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+          gap: "0.75rem 1rem",
+          alignItems: "flex-start",
+          marginBottom: "0.75rem",
+        }}
+      >
+        <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+          <label>Name *</label>
+          <input
+            style={{ width: "100%" }}
+            value={watch("name") ?? ""}
+            onChange={(e) => {
+              const name = e.target.value;
+              setValue("name", name, { shouldValidate: true });
+              if (!editKeyTouched) {
+                setValue("key", slugifyKey(name), { shouldValidate: false, shouldDirty: true });
+              }
+            }}
+          />
+          {errors.name && (
+            <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+              {errors.name.message}
+            </p>
+          )}
+        </div>
+        <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+          <label>Key * <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.8rem" }}>(auto from name)</span></label>
+          <input
+            {...register("key", { onChange: () => setEditKeyTouched(true) })}
+            placeholder="key_name (auto from name)"
+            style={{ width: "100%" }}
+          />
+          {errors.key && (
+            <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+              {errors.key.message}
+            </p>
+          )}
+        </div>
+        <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+          <label>Type *</label>
+          <select {...register("field_type")} style={{ width: "100%" }}>
+            {FIELD_TYPES.map((t) => (
+              <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+            ))}
+          </select>
+        </div>
       </div>
-      <div className="form-group">
-        <label>Key *</label>
-        <input {...register("key")} />
-        {errors.key && <p className="form-error">{errors.key.message}</p>}
-      </div>
-      <div className="form-group">
-        <label>Field type *</label>
-        <select {...register("field_type")}>
-          {FIELD_TYPES.map((t) => (
-            <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-          ))}
-        </select>
+      {/* Row 2: Required, Sort order */}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: "1rem 1.5rem",
+          marginBottom: "0.75rem",
+        }}
+      >
+        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+          <input type="checkbox" {...register("is_required")} />
+          Required
+        </label>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+          <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
+          <input
+            type="number"
+            min={0}
+            {...register("sort_order")}
+            style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }}
+          />
+        </div>
       </div>
       {currentFieldType === "formula" && (
         <div className="form-group">
@@ -1769,54 +1933,98 @@ function FieldEditForm({
       {currentFieldType === "multi_line_items" && (
         <div className="form-group">
           <label>Sub-fields (columns for each row)</label>
-          {editSubFields.map((s, idx) => (
-            <div key={s.id ?? idx} style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
-              <input
-                placeholder="Name"
-                value={s.name}
-                onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
-                style={{ width: "120px" }}
-              />
-              <input
-                placeholder="key"
-                value={s.key}
-                onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, key: e.target.value } : x)))}
-                style={{ width: "100px" }}
-              />
-              <select
-                value={s.field_type}
-                onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
-              >
-                {SUB_FIELD_TYPES.map((t) => (
-                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+          <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+            Define columns so data entry uses a table instead of raw JSON.
+          </p>
+          <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                  <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                  <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
+                </tr>
+              </thead>
+              <tbody>
+                {editSubFields.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                      No sub-fields yet. Click &quot;Add sub-field&quot; below.
+                    </td>
+                  </tr>
+                ) : editSubFields.map((s, idx) => (
+                  <tr key={s.id ?? idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <input
+                        placeholder="Display name"
+                        value={s.name}
+                        onChange={(e) => {
+                          const name = e.target.value;
+                          setEditSubFields((prev) =>
+                            prev.map((x, i) =>
+                              i === idx ? { ...x, name, key: x.keyTouched ? x.key : slugifyKey(name) } : x
+                            )
+                          );
+                        }}
+                        style={{ width: "100%", minWidth: "100px" }}
+                      />
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <input
+                        placeholder="key_name (auto from name)"
+                        value={s.key}
+                        onChange={(e) =>
+                          setEditSubFields((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, key: e.target.value, keyTouched: true } : x))
+                          )
+                        }
+                        style={{ width: "100%", minWidth: "90px" }}
+                      />
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <select
+                        value={s.field_type}
+                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+                        style={{ minWidth: "120px" }}
+                      >
+                        {SUB_FIELD_TYPES.map((t) => (
+                          <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={s.is_required}
+                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                        title="Required"
+                      />
+                      {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <button type="button" className="btn" onClick={() => setEditSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
+                    </td>
+                  </tr>
                 ))}
-              </select>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.9rem" }}>
-                <input
-                  type="checkbox"
-                  checked={s.is_required}
-                  onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
-                />
-                Required
-              </label>
-              <button type="button" className="btn" onClick={() => setEditSubFields((prev) => prev.filter((_, i) => i !== idx))}>Remove</button>
-            </div>
-          ))}
-          <button type="button" className="btn" onClick={() => setEditSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length }])}>
+              </tbody>
+            </table>
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() =>
+              setEditSubFields((prev) => [
+                ...prev,
+                { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, keyTouched: false },
+              ])
+            }
+          >
             Add sub-field
           </button>
         </div>
       )}
-      <div className="form-group">
-        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <input type="checkbox" {...register("is_required")} />
-          Required
-        </label>
-      </div>
-      <div className="form-group">
-        <label>Sort order</label>
-        <input type="number" min={0} {...register("sort_order")} />
-      </div>
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
         <button type="submit" className="btn btn-primary" disabled={isSubmitting}>{isSubmitting ? "Saving..." : "Save"}</button>
         <button type="button" className="btn" onClick={onCancel}>Cancel</button>

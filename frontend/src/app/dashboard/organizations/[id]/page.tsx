@@ -2042,47 +2042,77 @@ function KpisSection({
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
       {showCreate && (
         <div className="card" style={{ marginBottom: "1rem" }}>
+          <h3 style={{ marginBottom: "1rem", fontSize: "1.1rem" }}>Add KPI</h3>
           <form onSubmit={createForm.handleSubmit(onCreateSubmit)}>
-            <div className="form-group">
-              <label>Name *</label>
-              <input {...createForm.register("name")} />
-              {createForm.formState.errors.name && <p className="form-error">{createForm.formState.errors.name.message}</p>}
-            </div>
-            <div className="form-group">
-              <label>Description</label>
-              <textarea {...createForm.register("description")} rows={2} />
-            </div>
-            <div className="form-group">
-              <label>Sort order</label>
-              <input type="number" min={0} {...createForm.register("sort_order")} />
-            </div>
-            <div className="form-group">
-            <label>Entry mode</label>
-            <select
-              {...createForm.register("entry_mode")}
-              disabled={userRole !== "SUPER_ADMIN"}
-            >
-              <option value="manual">Manual (default)</option>
-              <option value="api">API</option>
-            </select>
-            <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>
-              API entry can be configured by Super Admin only from this screen.
-            </p>
-          </div>
-          {userRole === "SUPER_ADMIN" && createForm.watch("entry_mode") === "api" && (
-              <div className="form-group">
-                <label>API endpoint URL</label>
-                <input
-                  type="url"
-                  placeholder="https://your-server.com/kpi-data"
-                  {...createForm.register("api_endpoint_url")}
-                  style={{ width: "100%", maxWidth: "480px" }}
-                />
+            <div style={{ marginBottom: "1.25rem" }}>
+              <h4 style={{ fontSize: "0.95rem", fontWeight: 600, marginBottom: "0.5rem", color: "var(--text)" }}>Basic information</h4>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", maxWidth: 560, borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                  <tbody>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ padding: "0.5rem 0.75rem 0.5rem 0", fontWeight: 500, width: 140, verticalAlign: "top" }}>Name *</td>
+                      <td style={{ padding: "0.5rem 0" }}>
+                        <input {...createForm.register("name")} style={{ width: "100%", maxWidth: 320 }} />
+                        {createForm.formState.errors.name && <p className="form-error" style={{ marginTop: "0.25rem" }}>{createForm.formState.errors.name.message}</p>}
+                      </td>
+                    </tr>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ padding: "0.5rem 0.75rem 0.5rem 0", fontWeight: 500, verticalAlign: "top" }}>Description</td>
+                      <td style={{ padding: "0.5rem 0" }}>
+                        <textarea {...createForm.register("description")} rows={2} style={{ width: "100%", maxWidth: 320 }} />
+                      </td>
+                    </tr>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ padding: "0.5rem 0.75rem 0.5rem 0", fontWeight: 500 }}>Sort order</td>
+                      <td style={{ padding: "0.5rem 0" }}>
+                        <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: 80 }} />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-            )}
+            </div>
+            <div style={{ marginBottom: "1.25rem" }}>
+              <h4 style={{ fontSize: "0.95rem", fontWeight: 600, marginBottom: "0.5rem", color: "var(--text)" }}>Entry & API</h4>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", maxWidth: 560, borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                  <tbody>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ padding: "0.5rem 0.75rem 0.5rem 0", fontWeight: 500, width: 140 }}>Entry mode</td>
+                      <td style={{ padding: "0.5rem 0" }}>
+                        <select
+                          {...createForm.register("entry_mode")}
+                          disabled={userRole !== "SUPER_ADMIN"}
+                          style={{ minWidth: 160 }}
+                        >
+                          <option value="manual">Manual (default)</option>
+                          <option value="api">API</option>
+                        </select>
+                        <p style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "0.25rem" }}>
+                          API entry can be configured by Super Admin only.
+                        </p>
+                      </td>
+                    </tr>
+                    {userRole === "SUPER_ADMIN" && createForm.watch("entry_mode") === "api" && (
+                      <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                        <td style={{ padding: "0.5rem 0.75rem 0.5rem 0", fontWeight: 500 }}>API endpoint URL</td>
+                        <td style={{ padding: "0.5rem 0" }}>
+                          <input
+                            type="url"
+                            placeholder="https://your-server.com/kpi-data"
+                            {...createForm.register("api_endpoint_url")}
+                            style={{ width: "100%", maxWidth: 400 }}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
             {orgTags.length > 0 && (
-              <div className="form-group">
-                <label>Organization tags</label>
+              <div style={{ marginBottom: "1rem" }}>
+                <h4 style={{ fontSize: "0.95rem", fontWeight: 600, marginBottom: "0.5rem", color: "var(--text)" }}>Organization tags</h4>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
                   {orgTags.map((t) => {
                     const ids = createForm.watch("organization_tag_ids") ?? [];
