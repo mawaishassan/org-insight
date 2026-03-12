@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_org_admin
-from app.core.models import User, KPIEntry, KPIField, KPIFieldValue, KPI, FieldType
+from app.core.models import User, KPIEntry, KPIField, KPIFieldValue, KPI, FieldType, Organization, TimeDimension, effective_kpi_time_dimension
 from app.entries.schemas import EntryCreate, EntrySubmit, EntryLock, EntryResponse, FieldValueResponse
 from app.entries.service import (
     get_or_create_entry,
@@ -22,6 +22,7 @@ from app.entries.service import (
     list_available_kpis,
     list_entries_overview,
     EntryValidationError,
+    _normalize_reference_value,
 )
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
@@ -749,6 +750,295 @@ async def import_entry_excel(
     await db.commit()
     await db.refresh(entry)
     return {"message": "Import successful", "entry_id": entry.id, "fields_updated": len(values)}
+
+
+@router.get("/reverse-references")
+async def get_reverse_references_for_entry(
+    kpi_id: int = Query(..., description="Parent KPI id"),
+    entry_id: int = Query(..., description="Parent KPI entry id"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    For a given parent KPI entry, return reverse-reference info for reference sub-fields in multi_line_items fields.
+    Response shape (list of tabs):
+    [
+      {
+        "child_kpi_id": int,
+        "child_kpi_name": str,
+        "values": [ { "token": str, "label": str, "count": int } ],
+        "rows": [
+          {
+            "entry_id": int,
+            "year": int,
+            "period_key": str,
+            "value_token": str,
+            "value_display": str,
+            "child_field_id": int,
+            "child_field_key": str,
+            "child_field_name": str,
+            "child_sub_field_key": str,
+            "child_sub_field_name": str,
+            "row_index": int,
+            "row": dict,
+          },
+          ...
+        ],
+        "sub_fields": [ { "key": str, "name": str } ]
+      },
+      ...
+    ]
+    """
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+
+    # Load parent entry with its field values and fields
+    parent_entry_res = await db.execute(
+        select(KPIEntry)
+        .where(
+            KPIEntry.id == entry_id,
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi_id,
+        )
+        .options(
+            selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field).selectinload(KPIField.sub_fields),
+        )
+    )
+    parent_entry = parent_entry_res.scalar_one_or_none()
+    if not parent_entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    parent_year = parent_entry.year
+    parent_period_key = (getattr(parent_entry, "period_key", None) or "").strip()[:8]
+
+    # Load parent KPI with fields for lookup by key
+    parent_kpi_res = await db.execute(
+        select(KPI).where(KPI.id == kpi_id).options(selectinload(KPI.fields))
+    )
+    parent_kpi = parent_kpi_res.scalar_one_or_none()
+    if not parent_kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+
+    # Resolve effective time dimension: KPI-level if set, else org-level (for filtering and display)
+    org_row = await db.get(Organization, org_id)
+    org_td_raw = getattr(org_row, "time_dimension", None) or "yearly"
+    try:
+        org_td = TimeDimension(org_td_raw)
+    except ValueError:
+        org_td = TimeDimension.YEARLY
+    parent_kpi_td_raw = getattr(parent_kpi, "time_dimension", None)
+    parent_kpi_td = None
+    if parent_kpi_td_raw:
+        try:
+            parent_kpi_td = TimeDimension(parent_kpi_td_raw)
+        except ValueError:
+            pass
+    effective_td = effective_kpi_time_dimension(parent_kpi_td, org_td)
+    parent_fields_by_key = {f.key: f for f in getattr(parent_kpi, "fields", []) or []}
+    parent_fv_by_field_id = {fv.field_id: fv for fv in getattr(parent_entry, "field_values", []) or []}
+
+    # Load all KPI fields in this org with sub_fields, to find reference sub-fields pointing to this KPI
+    fields_res = await db.execute(
+        select(KPIField)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPI.organization_id == org_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    all_fields = list(fields_res.scalars().all())
+
+    # Build descriptors for reference sub-fields that point to this parent KPI
+    descriptors_by_child_kpi: dict[int, list[dict]] = {}
+    for f in all_fields:
+        for sf in getattr(f, "sub_fields", []) or []:
+            if getattr(sf, "field_type", None) != FieldType.reference:
+                continue
+            cfg = getattr(sf, "config", None) or {}
+            sid = cfg.get("reference_source_kpi_id")
+            if not sid or int(sid) != kpi_id:
+                continue
+            skey = cfg.get("reference_source_field_key")
+            if not skey:
+                continue
+            parent_sub_key = cfg.get("reference_source_sub_field_key")
+            desc = {
+                "child_kpi_id": f.kpi_id,
+                "child_field_id": f.id,
+                "child_field_key": f.key,
+                "child_field_name": f.name,
+                "child_sub_field_key": sf.key,
+                "child_sub_field_name": sf.name,
+                "parent_field_key": str(skey),
+                "parent_sub_field_key": str(parent_sub_key) if parent_sub_key else None,
+            }
+            descriptors_by_child_kpi.setdefault(f.kpi_id, []).append(desc)
+
+    if not descriptors_by_child_kpi:
+        return {
+            "time_filter": {
+                "year": parent_year,
+                "period_key": parent_period_key,
+                "effective_time_dimension": effective_td.value if hasattr(effective_td, "value") else str(effective_td),
+            },
+            "tabs": [],
+        }
+
+    # Load child KPI names
+    child_kpi_ids = list(descriptors_by_child_kpi.keys())
+    kpi_res = await db.execute(select(KPI).where(KPI.id.in_(child_kpi_ids)))
+    child_kpis = {k.id: k for k in kpi_res.scalars().all()}
+
+    response_tabs: list[dict] = []
+
+    for child_kpi_id, desc_list in descriptors_by_child_kpi.items():
+        child_kpi = child_kpis.get(child_kpi_id)
+        child_kpi_name = getattr(child_kpi, "name", f"KPI #{child_kpi_id}")
+
+        # For this child KPI, compute all parent tokens that are relevant for each descriptor
+        descriptor_tokens: dict[str, dict[str, str]] = {}  # token -> {"label": str}
+        for d in desc_list:
+            p_key = d["parent_field_key"]
+            p_sub = d["parent_sub_field_key"]
+            parent_field = parent_fields_by_key.get(p_key)
+            if not parent_field:
+                continue
+            fv = parent_fv_by_field_id.get(parent_field.id)
+            if not fv:
+                continue
+            if p_sub:
+                items = fv.value_json if isinstance(fv.value_json, list) else []
+                for row in items:
+                    if not isinstance(row, dict):
+                        continue
+                    cell = row.get(p_sub)
+                    if cell is None or cell == "":
+                        continue
+                    label = (str(cell)).strip()
+                    token = _normalize_reference_value(label)
+                    if not token:
+                        continue
+                    descriptor_tokens.setdefault(token, {"label": label})
+            else:
+                # Scalar parent field: use its primary value_text/number/boolean/date
+                raw_val = None
+                if fv.value_text not in (None, ""):
+                    raw_val = fv.value_text
+                elif fv.value_number is not None:
+                    raw_val = fv.value_number
+                elif fv.value_boolean is not None:
+                    raw_val = fv.value_boolean
+                elif fv.value_date is not None:
+                    raw_val = fv.value_date.isoformat()
+                if raw_val is not None:
+                    label = (str(raw_val)).strip()
+                    token = _normalize_reference_value(label)
+                    if token:
+                        descriptor_tokens.setdefault(token, {"label": label})
+
+        if not descriptor_tokens:
+            continue
+
+        # Load entries for this child KPI in this org, filtered by parent's time dimension (same year and period)
+        child_entries_res = await db.execute(
+            select(KPIEntry)
+            .where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == child_kpi_id,
+                KPIEntry.year == parent_year,
+                KPIEntry.period_key == parent_period_key,
+            )
+            .options(selectinload(KPIEntry.field_values))
+        )
+        child_entries = list(child_entries_res.scalars().all())
+
+        # For table headers we can reuse the sub_fields of the first descriptor's field
+        first_desc = desc_list[0]
+        child_field = next((f for f in all_fields if f.id == first_desc["child_field_id"]), None)
+        sub_fields_payload = []
+        if child_field is not None:
+            for sf in getattr(child_field, "sub_fields", []) or []:
+                sub_fields_payload.append({"key": sf.key, "name": getattr(sf, "name", sf.key)})
+
+        rows_payload: list[dict] = []
+        token_counts: dict[str, int] = {t: 0 for t in descriptor_tokens.keys()}
+        tokens_set = set(descriptor_tokens.keys())
+
+        # Scan child entries for matching reference sub-field values
+        for entry in child_entries:
+            field_values = getattr(entry, "field_values", []) or []
+            for d in desc_list:
+                child_field_id = d["child_field_id"]
+                child_sub_key = d["child_sub_field_key"]
+                fv = next((x for x in field_values if x.field_id == child_field_id), None)
+                if not fv or not isinstance(fv.value_json, list):
+                    continue
+                for idx, row in enumerate(fv.value_json):
+                    if not isinstance(row, dict):
+                        continue
+                    cell = row.get(child_sub_key)
+                    if cell is None or cell == "":
+                        continue
+                    label = (str(cell)).strip()
+                    token = _normalize_reference_value(label)
+                    if token not in tokens_set:
+                        continue
+                    token_counts[token] = token_counts.get(token, 0) + 1
+                    rows_payload.append(
+                        {
+                            "entry_id": entry.id,
+                            "year": entry.year,
+                            "period_key": getattr(entry, "period_key", "") or "",
+                            "value_token": token,
+                            "value_display": label,
+                            "child_field_id": child_field_id,
+                            "child_field_key": d["child_field_key"],
+                            "child_field_name": d["child_field_name"],
+                            "child_sub_field_key": child_sub_key,
+                            "child_sub_field_name": d["child_sub_field_name"],
+                            "row_index": idx,
+                            "row": row,
+                        }
+                    )
+
+        # Only include child KPI if we found any rows
+        if not rows_payload:
+            continue
+
+        values_payload = []
+        for token, meta in descriptor_tokens.items():
+            count = token_counts.get(token, 0)
+            if count <= 0:
+                continue
+            values_payload.append(
+                {
+                    "token": token,
+                    "label": meta["label"],
+                    "count": count,
+                }
+            )
+        # Sort dropdown values by label
+        values_payload.sort(key=lambda x: x["label"])
+
+        response_tabs.append(
+            {
+                "child_kpi_id": child_kpi_id,
+                "child_kpi_name": child_kpi_name,
+                "values": values_payload,
+                "rows": rows_payload,
+                "sub_fields": sub_fields_payload,
+            }
+        )
+
+    return {
+        "time_filter": {
+            "year": parent_year,
+            "period_key": parent_period_key,
+            "effective_time_dimension": effective_td.value if hasattr(effective_td, "value") else str(effective_td),
+        },
+        "tabs": response_tabs,
+    }
 
 
 @router.get("/for-period", response_model=EntryResponse)
