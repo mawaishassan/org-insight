@@ -41,6 +41,7 @@ class FieldType(str, enum.Enum):
     number = "number"
     date = "date"
     boolean = "boolean"
+    attachment = "attachment"  # URL to an attachment (this KPI or other KPIs)
     multi_line_items = "multi_line_items"
     formula = "formula"
     reference = "reference"  # Reference/Lookup: values from another KPI field

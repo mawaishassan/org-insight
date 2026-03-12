@@ -451,6 +451,7 @@ def _build_kpi_entry_xlsx(
         FieldType.number,
         FieldType.date,
         FieldType.boolean,
+        FieldType.attachment,
         FieldType.formula,
         FieldType.reference,
     )

@@ -7,7 +7,14 @@ from app.core.models import FieldType
 
 
 # Allowed sub-field types for multi_line_items (one column type per sub-field)
-SUB_FIELD_TYPES = (FieldType.single_line_text, FieldType.number, FieldType.date, FieldType.boolean, FieldType.reference)
+SUB_FIELD_TYPES = (
+    FieldType.single_line_text,
+    FieldType.number,
+    FieldType.date,
+    FieldType.boolean,
+    FieldType.reference,
+    FieldType.attachment,
+)
 
 
 class KPIFieldSubFieldCreate(BaseModel):
@@ -15,7 +22,7 @@ class KPIFieldSubFieldCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=255)
     key: str = Field(..., min_length=1, max_length=100)
-    field_type: FieldType = Field(...)  # single_line_text, number, date, boolean, reference
+    field_type: FieldType = Field(...)  # single_line_text, number, date, boolean, reference, attachment
     is_required: bool = False
     sort_order: int = 0
     config: dict[str, Any] | None = None  # For reference: {"reference_source_kpi_id": int, "reference_source_field_key": str}

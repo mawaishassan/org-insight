@@ -1341,6 +1341,46 @@ export default function DomainKpiDetailPage() {
                         </div>
                       );
                     }
+                    if (f.field_type === "attachment") {
+                      const valUrl = val?.value_text ?? "";
+                      return (
+                        <div key={f.id} style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                          <label style={{ fontWeight: 500 }}>{f.name}{f.is_required ? " *" : ""}</label>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                            <input
+                              type="url"
+                              value={valUrl}
+                              onChange={(e) => updateField(f.id, "value_text", e.target.value)}
+                              placeholder="https://example.com/file.pdf"
+                              style={{ flex: "1 1 260px", minWidth: 180, padding: "0.5rem", border: "1px solid var(--border)", borderRadius: 6 }}
+                            />
+                            {kpiFiles.length > 0 && (
+                              <select
+                                value=""
+                                onChange={(e) => {
+                                  const fileId = Number(e.target.value || "0");
+                                  const file = kpiFiles.find((x) => x.id === fileId);
+                                  if (!file || !file.download_url) return;
+                                  // Store the API URL (without /api prefix) or full URL, depending on how backend expects it
+                                  updateField(f.id, "value_text", file.download_url);
+                                }}
+                                style={{ padding: "0.45rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+                              >
+                                <option value="">Select attachment…</option>
+                                {kpiFiles.map((file) => (
+                                  <option key={file.id} value={file.id}>
+                                    {file.original_filename}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                          <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.15rem 0 0" }}>
+                            Stores the URL of the selected attachment. You can also paste any URL manually.
+                          </p>
+                        </div>
+                      );
+                    }
                     if (f.field_type === "number") {
                       return (
                         <div key={f.id} style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
@@ -1809,6 +1849,69 @@ export default function DomainKpiDetailPage() {
                                             <option key={opt} value={opt}>{opt}</option>
                                           ))}
                                         </select>
+                                      );
+                                    })()
+                                  ) : s.field_type === "attachment" ? (
+                                    (() => {
+                                      const cellVal = row[s.key];
+                                      const valUrl = typeof cellVal === "string" ? cellVal : String(cellVal ?? "");
+                                      return (
+                                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                                          <input
+                                            type="url"
+                                            value={valUrl}
+                                            onChange={(e) => {
+                                              const next = [...rows];
+                                              next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value };
+                                              setRows(next);
+                                            }}
+                                            placeholder="https://example.com/file.pdf"
+                                            style={{ flex: "1 1 160px", minWidth: 140, padding: "0.35rem" }}
+                                          />
+                                          <label
+                                            className="btn"
+                                            style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
+                                          >
+                                            Upload file
+                                            <input
+                                              type="file"
+                                              style={{ display: "none" }}
+                                              onChange={async (e) => {
+                                                const file = e.target.files?.[0];
+                                                e.target.value = "";
+                                                if (!file || !entry || !token) return;
+                                                try {
+                                                  const form = new FormData();
+                                                  form.append("files", file);
+                                                  form.append("entry_id", String(entry.id));
+                                                  form.append("year", String(year));
+                                                  const url = getApiUrl(`/kpis/${kpiId}/files`);
+                                                  const res = await fetch(url, {
+                                                    method: "POST",
+                                                    headers: { Authorization: `Bearer ${token}` },
+                                                    body: form,
+                                                  });
+                                                  if (!res.ok) {
+                                                    toast.error("File upload failed");
+                                                    return;
+                                                  }
+                                                  const uploaded = (await res.json()) as KpiFileItem[];
+                                                  const latest = uploaded[0];
+                                                  if (!latest || !latest.download_url) {
+                                                    toast.error("File upload failed");
+                                                    return;
+                                                  }
+                                                  const next = [...rows];
+                                                  next[rowIdx] = { ...next[rowIdx], [s.key]: latest.download_url };
+                                                  setRows(next);
+                                                  toast.success("File uploaded");
+                                                } catch {
+                                                  toast.error("File upload failed");
+                                                }
+                                              }}
+                                            />
+                                          </label>
+                                        </div>
                                       );
                                     })()
                                   ) : (
