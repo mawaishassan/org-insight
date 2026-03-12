@@ -290,6 +290,8 @@ async def update_kpi(
             kpi.time_dimension = None
     if data.card_display_field_ids is not None:
         kpi.card_display_field_ids = data.card_display_field_ids
+    if data.carry_forward_data is not None:
+        kpi.carry_forward_data = data.carry_forward_data
     await db.flush()
     if data.domain_ids is not None:
         await _sync_kpi_domains(db, kpi_id, org_id, data.domain_ids)

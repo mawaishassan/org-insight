@@ -35,6 +35,7 @@ def _field_to_response(f):
         is_required=f.is_required,
         sort_order=f.sort_order,
         config=f.config,
+        carry_forward_data=getattr(f, "carry_forward_data", False),
         options=[KPIFieldOptionResponse.model_validate(o) for o in (f.options or [])],
         sub_fields=[KPIFieldSubFieldResponse.model_validate(s) for s in (getattr(f, "sub_fields", None) or [])],
     )

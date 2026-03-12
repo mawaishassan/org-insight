@@ -409,6 +409,7 @@ async def get_entry_fields(
             "is_required": f.is_required,
             "sort_order": f.sort_order,
             "config": getattr(f, "config", None),
+            "carry_forward_data": getattr(f, "carry_forward_data", False),
             "options": [{"value": o.value, "label": o.label} for o in (f.options or [])],
             "sub_fields": [
                 {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order, "config": getattr(s, "config", None)}
@@ -748,6 +749,30 @@ async def import_entry_excel(
     await db.commit()
     await db.refresh(entry)
     return {"message": "Import successful", "entry_id": entry.id, "fields_updated": len(values)}
+
+
+@router.get("/for-period", response_model=EntryResponse)
+async def get_or_create_entry_for_period(
+    kpi_id: int = Query(...),
+    year: int = Query(...),
+    period_key: str | None = Query(None, description="Period key: '', H1, H2, Q1-Q4, 01-12"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get entry for the given KPI/year/period; create it (with carry-forward from previous period) if missing. Requires view access."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+    pk = (period_key or "").strip()[:8]
+    entry, created = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=pk)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
+    if created:
+        await db.commit()
+    await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
+    return _entry_to_response(entry)
 
 
 @router.get("", response_model=list[EntryResponse])

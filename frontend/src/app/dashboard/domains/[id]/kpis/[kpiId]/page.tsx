@@ -265,7 +265,23 @@ export default function DomainKpiDetailPage() {
       setAllEntriesForPeriodBar(entriesList);
       const pk = periodKeyFromUrl ?? "";
       const match = entriesList.find((e) => (e.period_key ?? "") === pk);
-      setEntry(match ?? entriesList[0] ?? null);
+      if (match) {
+        setEntry(match);
+      } else if (effectiveOrgId != null) {
+        // No entry for this period: get-or-create so carry-forward from previous period is shown
+        try {
+          const forPeriod = await api<EntryRow>(
+            `/entries/for-period?${qs({ kpi_id: kpiId, year, period_key: pk, organization_id: effectiveOrgId })}`,
+            { token }
+          );
+          setAllEntriesForPeriodBar((prev) => [...prev, forPeriod]);
+          setEntry(forPeriod);
+        } catch {
+          setEntry(entriesList[0] ?? null);
+        }
+      } else {
+        setEntry(entriesList[0] ?? null);
+      }
     } else {
       setEntry(entriesList[0] ?? null);
     }

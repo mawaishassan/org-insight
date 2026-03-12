@@ -332,6 +332,7 @@ class KPI(Base):
     entry_mode = Column(String(20), nullable=False, default="manual", server_default="manual")
     api_endpoint_url = Column(String(2048), nullable=True)  # URL we call (GET or POST with year) to get entry payload
     time_dimension = Column(String(32), nullable=True)  # None = inherit org; else yearly, half_yearly, quarterly, monthly
+    carry_forward_data = Column(Boolean, default=False, nullable=False, server_default="0")  # Non-cyclic: copy from previous period when new
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -363,6 +364,7 @@ class KPIField(Base):
     is_required = Column(Boolean, default=False)
     sort_order = Column(Integer, default=0)
     config = Column(JSON, nullable=True)
+    carry_forward_data = Column(Boolean, default=False, nullable=False, server_default="0")  # Non-cyclic: copy from previous period when new
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 

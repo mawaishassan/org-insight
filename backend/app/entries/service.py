@@ -159,6 +159,73 @@ async def _get_entry_admin(db: AsyncSession, entry_id: int, org_id: int) -> KPIE
     return await _get_entry(db, entry_id, org_id)
 
 
+async def _copy_carry_forward_from_previous(
+    db: AsyncSession, org_id: int, kpi_id: int, new_entry: KPIEntry, year: int, period_key: str
+) -> None:
+    """If KPI or any field has carry_forward_data, copy values from the most recent previous period's entry."""
+    kpi_res = await db.execute(
+        select(KPI)
+        .where(KPI.id == kpi_id, KPI.organization_id == org_id)
+        .options(selectinload(KPI.fields))
+    )
+    kpi = kpi_res.scalar_one_or_none()
+    if not kpi:
+        return
+    org = await db.get(Organization, org_id)
+    if not org:
+        return
+    org_td_raw = getattr(org, "time_dimension", None) or "yearly"
+    kpi_td_raw = getattr(kpi, "time_dimension", None)
+    try:
+        org_td = TimeDimension(org_td_raw)
+    except ValueError:
+        org_td = TimeDimension.YEARLY
+    kpi_td = None
+    if kpi_td_raw:
+        try:
+            kpi_td = TimeDimension(kpi_td_raw)
+        except ValueError:
+            pass
+    dimension = effective_kpi_time_dimension(kpi_td, org_td)
+    kpi_carry = getattr(kpi, "carry_forward_data", False) or False
+    carry_field_ids = set()
+    for f in kpi.fields or []:
+        if f.field_type == FieldType.formula:
+            continue
+        if kpi_carry or getattr(f, "carry_forward_data", False):
+            carry_field_ids.add(f.id)
+    if not carry_field_ids:
+        return
+    prev = _previous_period(year, period_key, dimension)
+    while prev:
+        pyear, ppk = prev
+        prev_res = await db.execute(
+            select(KPIEntry)
+            .where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == kpi_id,
+                KPIEntry.year == pyear,
+                KPIEntry.period_key == ppk,
+            )
+            .options(selectinload(KPIEntry.field_values))
+        )
+        prev_entry = prev_res.scalar_one_or_none()
+        if prev_entry and prev_entry.field_values:
+            for fv in prev_entry.field_values:
+                if fv.field_id not in carry_field_ids:
+                    continue
+                new_fv = KPIFieldValue(entry_id=new_entry.id, field_id=fv.field_id)
+                new_fv.value_text = fv.value_text
+                new_fv.value_number = fv.value_number
+                new_fv.value_boolean = fv.value_boolean
+                new_fv.value_date = fv.value_date
+                new_fv.value_json = fv.value_json
+                db.add(new_fv)
+            await db.flush()
+            return
+        prev = _previous_period(pyear, ppk, dimension)
+
+
 async def get_or_create_entry(
     db: AsyncSession, user_id: int, org_id: int, kpi_id: int, year: int, period_key: str = ""
 ) -> tuple[KPIEntry | None, bool]:
@@ -188,6 +255,7 @@ async def get_or_create_entry(
     )
     db.add(entry)
     await db.flush()
+    await _copy_carry_forward_from_previous(db, org_id, kpi_id, entry, year, pk)
     return entry, True
 
 
@@ -669,6 +737,21 @@ def _expected_period_keys(dimension: TimeDimension) -> list[str]:
     if dimension == TimeDimension.MONTHLY:
         return [f"{i:02d}" for i in range(1, 13)]
     return [""]
+
+
+def _previous_period(year: int, period_key: str, dimension: TimeDimension) -> tuple[int, str] | None:
+    """Return (year_prev, period_key_prev) for the period before (year, period_key), or None if no previous (e.g. yearly 2020)."""
+    pk = (period_key or "").strip()
+    keys = _expected_period_keys(dimension)
+    try:
+        idx = keys.index(pk) if pk in keys else (keys.index("") if "" in keys else 0)
+    except ValueError:
+        idx = 0
+    if idx > 0:
+        return year, keys[idx - 1]
+    if year <= 2000:  # arbitrary lower bound
+        return None
+    return year - 1, keys[-1] if keys else ""
 
 
 def _period_display(period_key: str) -> str:

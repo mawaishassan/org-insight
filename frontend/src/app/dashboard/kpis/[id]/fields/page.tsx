@@ -29,7 +29,7 @@ const FIELD_TYPES = [
   "formula",
 ] as const;
 
-const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean", "reference"] as const;
+const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference"] as const;
 
 function slugifyKey(name: string): string {
   if (!name) return "";
@@ -93,6 +93,7 @@ interface KpiField {
   is_required: boolean;
   sort_order: number;
   config?: ReferenceConfig | null;
+  carry_forward_data?: boolean;
   options: Array<{ id: number; value: string; label: string; sort_order: number }>;
   sub_fields?: SubFieldDef[];
 }
@@ -131,6 +132,7 @@ interface KpiInfo {
   entry_mode?: string;
   api_endpoint_url?: string | null;
   time_dimension?: string | null;
+  carry_forward_data?: boolean;
   organization_tags?: OrgTagRef[];
   domain_tags?: DomainTagRef[];
   category_tags?: CategoryTagRef[];
@@ -144,6 +146,7 @@ const createSchema = z.object({
   formula_expression: z.string().optional(),
   is_required: z.boolean(),
   sort_order: z.coerce.number().int().min(0),
+  carry_forward_data: z.boolean().optional(),
 });
 
 const updateSchema = z.object({
@@ -153,6 +156,7 @@ const updateSchema = z.object({
   formula_expression: z.string().optional(),
   is_required: z.boolean(),
   sort_order: z.coerce.number().int().min(0),
+  carry_forward_data: z.boolean().optional(),
 });
 
 const kpiUpdateSchema = z.object({
@@ -162,6 +166,7 @@ const kpiUpdateSchema = z.object({
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
   time_dimension: z.string().optional(),
+  carry_forward_data: z.boolean().optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
 });
 
@@ -248,6 +253,7 @@ export default function KpiFieldsPage() {
       entry_mode: "manual",
       api_endpoint_url: "",
       time_dimension: "",
+      carry_forward_data: false,
       organization_tag_ids: [],
     },
   });
@@ -261,10 +267,11 @@ export default function KpiFieldsPage() {
         entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
         api_endpoint_url: kpi.api_endpoint_url ?? "",
         time_dimension: kpi.time_dimension ?? "",
+        carry_forward_data: kpi.carry_forward_data ?? false,
         organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
       });
     }
-  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.organization_tags, orgIdFromUrl]);
+  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.carry_forward_data, kpi?.organization_tags, orgIdFromUrl]);
 
   useEffect(() => {
     if (!token) return;
@@ -348,6 +355,7 @@ export default function KpiFieldsPage() {
       formula_expression: "",
       is_required: false,
       sort_order: list.length,
+      carry_forward_data: false,
     },
   });
 
@@ -363,6 +371,7 @@ export default function KpiFieldsPage() {
         formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
         is_required: data.is_required,
         sort_order: data.sort_order,
+        carry_forward_data: data.carry_forward_data ?? false,
         options: [],
       };
       if (data.field_type === "reference" && createRefConfig.reference_source_kpi_id && createRefConfig.reference_source_field_key) {
@@ -403,6 +412,7 @@ export default function KpiFieldsPage() {
         formula_expression: "",
         is_required: false,
         sort_order: list.length + 1,
+        carry_forward_data: false,
       });
       setKeyTouched(false);
       setCreateSubFields([]);
@@ -425,6 +435,7 @@ export default function KpiFieldsPage() {
         formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
         is_required: data.is_required,
         sort_order: data.sort_order,
+        carry_forward_data: data.carry_forward_data,
       };
       if (data.field_type === "reference" && refConfig?.reference_source_kpi_id && refConfig?.reference_source_field_key) {
         body.config = {
@@ -537,6 +548,7 @@ export default function KpiFieldsPage() {
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
           time_dimension: data.time_dimension && data.time_dimension.trim() ? data.time_dimension.trim() : null,
+          carry_forward_data: data.carry_forward_data,
           organization_tag_ids: data.organization_tag_ids ?? [],
         }),
       });
@@ -872,6 +884,17 @@ export default function KpiFieldsPage() {
                       Leave as inherit to use the organization default.
                     </p>
                   </div>
+                  {userRole === "SUPER_ADMIN" && (
+                    <div className="form-group" style={{ marginTop: "1rem" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                        <input type="checkbox" {...kpiEditForm.register("carry_forward_data")} />
+                        Carry forward data (non-cyclic)
+                      </label>
+                      <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+                        When enabled, new time cycles will pre-fill with values from the previous period until the user changes them. History is preserved per period.
+                      </p>
+                    </div>
+                  )}
                   {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
                   <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
                     {kpiSaving ? "Saving…" : "Save"}
@@ -1265,6 +1288,12 @@ export default function KpiFieldsPage() {
                 <input type="checkbox" {...createForm.register("is_required")} />
                 Required
               </label>
+              {userRole === "SUPER_ADMIN" && (
+                <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                  <input type="checkbox" {...createForm.register("carry_forward_data")} />
+                  Carry forward (non-cyclic)
+                </label>
+              )}
               <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
                 <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
                 <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }} />
@@ -1445,6 +1474,7 @@ export default function KpiFieldsPage() {
                     onCancel={() => setEditingId(null)}
                     organizationId={kpi?.organization_id}
                     currentKpiId={kpiId}
+                    userRole={userRole}
                   />
                 ) : (
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -1966,6 +1996,7 @@ function FieldEditForm({
   onCancel,
   organizationId,
   currentKpiId,
+  userRole,
 }: {
   field: KpiField;
   list: KpiField[];
@@ -1973,6 +2004,7 @@ function FieldEditForm({
   onCancel: () => void;
   organizationId?: number;
   currentKpiId?: number;
+  userRole?: UserRole | null;
 }) {
   type EditSubFieldRow = SubFieldDef & { keyTouched?: boolean };
   const [editKeyTouched, setEditKeyTouched] = useState(false);
@@ -1989,6 +2021,7 @@ function FieldEditForm({
       formula_expression: field.formula_expression ?? "",
       is_required: field.is_required,
       sort_order: field.sort_order,
+      carry_forward_data: field.carry_forward_data ?? false,
     },
   });
   const currentFieldType = watch("field_type");
@@ -2071,6 +2104,12 @@ function FieldEditForm({
           <input type="checkbox" {...register("is_required")} />
           Required
         </label>
+        {userRole === "SUPER_ADMIN" && (
+          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+            <input type="checkbox" {...register("carry_forward_data")} />
+            Carry forward (non-cyclic)
+          </label>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
           <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
           <input

@@ -27,7 +27,7 @@ const FIELD_TYPES = [
   "formula",
 ] as const;
 
-const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean"] as const;
+const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference"] as const;
 
 const GROUP_FUNCTIONS = [
   { value: "SUM_ITEMS", label: "SUM (total)" },

@@ -120,6 +120,7 @@ def _kpi_to_response(k):
         entry_mode=getattr(k, "entry_mode", None) or "manual",
         api_endpoint_url=getattr(k, "api_endpoint_url", None),
         time_dimension=getattr(k, "time_dimension", None),
+        carry_forward_data=getattr(k, "carry_forward_data", False),
         card_display_field_ids=getattr(k, "card_display_field_ids", None) or None,
         fields_count=fields_count,
         domain_tags=domain_tags,
