@@ -21,6 +21,7 @@ from app.entries.service import (
     list_entries,
     list_available_kpis,
     list_entries_overview,
+    EntryValidationError,
 )
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
@@ -81,8 +82,8 @@ async def _load_multi_items_field(db: AsyncSession, org_id: int, field_id: int) 
     return field
 
 
-def _xlsx_bytes_for_multi_items_template(field: KPIField) -> bytes:
-    """Create an empty Excel template for multi_line_items sub_fields."""
+def _xlsx_bytes_for_multi_items_template(field: KPIField, existing_items: list[dict] | None = None) -> bytes:
+    """Create an Excel template for multi_line_items sub_fields. Optionally include existing data."""
     # Import here so app can start even if optional dependency isn't installed yet.
     from openpyxl import Workbook
 
@@ -92,9 +93,17 @@ def _xlsx_bytes_for_multi_items_template(field: KPIField) -> bytes:
 
     sub_fields = list(field.sub_fields or [])
     # Header row uses sub-field keys (stable API identifiers).
-    ws.append([s.key for s in sub_fields])
-    # Empty sample row (user fills in).
-    ws.append(["" for _ in sub_fields])
+    keys = [s.key for s in sub_fields]
+    ws.append(keys)
+    items = existing_items if isinstance(existing_items, list) else []
+    if items:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ws.append([(item.get(k) if item.get(k) is not None else "") for k in keys])
+    else:
+        # Empty sample row (user fills in).
+        ws.append(["" for _ in keys])
 
     buf = BytesIO()
     wb.save(buf)
@@ -172,11 +181,12 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
 @router.get("/multi-items/template")
 async def download_multi_items_template(
     field_id: int = Query(...),
+    entry_id: int | None = Query(None, description="If provided, include existing rows for this entry/field"),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Download an empty Excel template for a multi_line_items field (any user who can edit this KPI)."""
+    """Download an Excel template for a multi_line_items field (any user who can edit this KPI)."""
     org_id = _org_id(current_user, organization_id)
     field = await _load_multi_items_field(db, org_id, field_id)
     if not field:
@@ -185,7 +195,21 @@ async def download_multi_items_template(
     if not can_edit:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
 
-    content = _xlsx_bytes_for_multi_items_template(field)
+    existing_items: list[dict] | None = None
+    if entry_id is not None:
+        entry_res = await db.execute(
+            select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+        )
+        entry = entry_res.scalar_one_or_none()
+        if entry and entry.kpi_id == field.kpi_id:
+            fv_res = await db.execute(
+                select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+            )
+            fv = fv_res.scalar_one_or_none()
+            if fv and isinstance(fv.value_json, list):
+                existing_items = fv.value_json
+
+    content = _xlsx_bytes_for_multi_items_template(field, existing_items=existing_items)
     filename = f"multi_items_{field.key}_{field.id}.xlsx"
     return StreamingResponse(
         BytesIO(content),
@@ -228,6 +252,44 @@ async def upload_multi_items_excel(
 
     content = await file.read()
     items = _parse_multi_items_xlsx(content, field)
+
+    # Reference consistency check for reference sub-fields (row-level errors)
+    from app.entries.service import get_reference_allowed_values, _normalize_reference_value
+    validation_errors: list[dict] = []
+    ref_sub_fields = [s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.reference]
+    allowed_cache: dict[tuple[int, str, str | None], set[str]] = {}
+    for row_idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        for sf in ref_sub_fields:
+            cfg = getattr(sf, "config", None) or {}
+            sid = cfg.get("reference_source_kpi_id")
+            skey = cfg.get("reference_source_field_key")
+            subkey = cfg.get("reference_source_sub_field_key")
+            if not sid or not skey:
+                continue
+            cache_key = (int(sid), str(skey), str(subkey) if subkey else None)
+            if cache_key not in allowed_cache:
+                allowed = await get_reference_allowed_values(
+                    db, int(sid), str(skey), org_id, source_sub_field_key=(str(subkey) if subkey else None)
+                )
+                allowed_cache[cache_key] = {_normalize_reference_value(a) for a in allowed}
+            cell = item.get(sf.key)
+            raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
+            normalized = _normalize_reference_value(raw)
+            if normalized and normalized not in allowed_cache[cache_key]:
+                validation_errors.append(
+                    {
+                        "field_key": field.key,
+                        "sub_field_key": sf.key,
+                        "row_index": row_idx,
+                        "value": raw,
+                        "row": item,
+                        "message": "Value does not exist in the referenced KPI field.",
+                    }
+                )
+    if validation_errors:
+        raise EntryValidationError(validation_errors)
 
     fv_res = await db.execute(
         select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
@@ -346,9 +408,10 @@ async def get_entry_fields(
             "formula_expression": f.formula_expression,
             "is_required": f.is_required,
             "sort_order": f.sort_order,
+            "config": getattr(f, "config", None),
             "options": [{"value": o.value, "label": o.label} for o in (f.options or [])],
             "sub_fields": [
-                {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order}
+                {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order, "config": getattr(s, "config", None)}
                 for s in (getattr(f, "sub_fields", None) or [])
             ],
         }
@@ -387,6 +450,7 @@ def _build_kpi_entry_xlsx(
         FieldType.date,
         FieldType.boolean,
         FieldType.formula,
+        FieldType.reference,
     )
     scalar_fields = [f for f in fields if getattr(f, "field_type", None) in scalar_types]
     ws_scalar = wb.active
@@ -677,7 +741,10 @@ async def import_entry_excel(
                 value_json=data.get("value_json"),
             )
         )
-    await save_entry_values(db, entry.id, current_user.id, values, kpi_id, org_id)
+    try:
+        await save_entry_values(db, entry.id, current_user.id, values, kpi_id, org_id)
+    except EntryValidationError:
+        raise  # Handled by app exception_handler; returns 400 with errors list
     await db.commit()
     await db.refresh(entry)
     return {"message": "Import successful", "entry_id": entry.id, "fields_updated": len(values)}
@@ -718,7 +785,10 @@ async def create_or_update_entry(
     )
     if not entry:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
-    await save_entry_values(db, entry.id, current_user.id, body.values, body.kpi_id, org_id)
+    try:
+        await save_entry_values(db, entry.id, current_user.id, body.values, body.kpi_id, org_id)
+    except EntryValidationError:
+        raise  # Handled by app exception_handler; returns 400 with errors list
     await db.commit()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
     return _entry_to_response(entry)

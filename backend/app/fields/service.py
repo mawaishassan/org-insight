@@ -49,6 +49,7 @@ async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> K
                 field_type=sub.field_type,
                 is_required=sub.is_required,
                 sort_order=sub.sort_order if sub.sort_order else i,
+                config=sub.config if hasattr(sub, "config") else None,
             )
         )
     await db.flush()
@@ -121,6 +122,7 @@ async def update_field(
                     field_type=sub.field_type,
                     is_required=sub.is_required,
                     sort_order=sub.sort_order if sub.sort_order else i,
+                    config=getattr(sub, "config", None),
                 )
             )
     await db.flush()

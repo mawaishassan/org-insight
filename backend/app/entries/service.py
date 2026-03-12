@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, distinct
 from sqlalchemy.orm import selectinload
 
 from app.core.models import (
@@ -19,6 +19,14 @@ from app.core.models import (
 )
 from app.core.models import FieldType
 
+
+class EntryValidationError(Exception):
+    """Raised when entry values fail validation (e.g. reference field value not in allowed list)."""
+
+    def __init__(self, errors: list[dict]):
+        self.errors = errors  # list of {"field_key": str, "sub_field_key": str|None, "row_index": int|None, "value": str, "message": str}
+        super().__init__(f"Validation failed: {len(errors)} error(s)")
+
 # Type for multi_line_items data passed to formula evaluator
 MultiLineItemsData = dict[str, list[dict]]
 from app.entries.schemas import FieldValueInput, EntryCreate
@@ -30,6 +38,109 @@ async def _resolve_org_and_kpi(db: AsyncSession, kpi_id: int) -> int | None:
     result = await db.execute(select(KPI.organization_id).where(KPI.id == kpi_id))
     row = result.one_or_none()
     return row[0] if row else None
+
+
+async def get_reference_allowed_values(
+    db: AsyncSession,
+    source_kpi_id: int,
+    source_field_key: str,
+    org_id: int,
+    source_sub_field_key: str | None = None,
+) -> list[str]:
+    """Return distinct values from a source KPI field (or multi_line_items sub-field) for reference. Same org only."""
+    result = await db.execute(
+        select(KPIField)
+        .join(KPI, KPIField.kpi_id == KPI.id)
+        .where(
+            KPIField.kpi_id == source_kpi_id,
+            KPIField.key == source_field_key,
+            KPI.organization_id == org_id,
+        )
+    )
+    source_field = result.scalar_one_or_none()
+    if not source_field:
+        return []
+    subq = select(KPIEntry.id).where(KPIEntry.organization_id == org_id)
+
+    if source_field.field_type == FieldType.multi_line_items and source_sub_field_key:
+        # Collect distinct values from value_json[*][source_sub_field_key] across all entries
+        rows = await db.execute(
+            select(KPIFieldValue.value_json).where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_json.isnot(None),
+            )
+        )
+        values_set: set[str] = set()
+        for (value_json,) in rows.all():
+            if not isinstance(value_json, list):
+                continue
+            for row in value_json:
+                if not isinstance(row, dict):
+                    continue
+                cell = row.get(source_sub_field_key)
+                if cell is None or cell == "":
+                    continue
+                s = str(cell).strip()
+                if s.lower() in ("true", "false"):
+                    s = s.lower()
+                values_set.add(s)
+        return sorted(values_set)
+    if source_field.field_type == FieldType.number:
+        rows = await db.execute(
+            select(distinct(KPIFieldValue.value_number))
+            .where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_number.isnot(None),
+            )
+        )
+        values = [str(r[0]) for r in rows.all() if r[0] is not None]
+    elif source_field.field_type == FieldType.boolean:
+        rows = await db.execute(
+            select(distinct(KPIFieldValue.value_boolean))
+            .where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_boolean.isnot(None),
+            )
+        )
+        values = [str(r[0]).lower() for r in rows.all() if r[0] is not None]
+    elif source_field.field_type == FieldType.date:
+        rows = await db.execute(
+            select(distinct(KPIFieldValue.value_date))
+            .where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_date.isnot(None),
+            )
+        )
+        values = []
+        for r in rows.all():
+            if r[0] is not None:
+                values.append(r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0]))
+    else:
+        rows = await db.execute(
+            select(distinct(KPIFieldValue.value_text))
+            .where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_text.isnot(None),
+                KPIFieldValue.value_text != "",
+            )
+        )
+        values = [r[0] for r in rows.all() if r[0]]
+    return sorted(set(values))
+
+
+def _normalize_reference_value(val: str | None) -> str:
+    """Normalize a value for comparison with allowed reference values (strip, lowercase for bool)."""
+    if val is None:
+        return ""
+    s = (val if isinstance(val, str) else str(val)).strip()
+    if s.lower() in ("true", "false"):
+        return s.lower()
+    return s
 
 
 async def _get_entry(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry | None:
@@ -176,6 +287,61 @@ async def save_entry_values(
     if not kpi:
         return None
     key_to_field = {f.key: f for f in kpi.fields}
+    validation_errors: list[dict] = []
+
+    # Reference field validation (scalar and inside multi_line_items)
+    for v in values:
+        f = next((x for x in kpi.fields if x.id == v.field_id), None)
+        if not f:
+            continue
+        if f.field_type == FieldType.reference:
+            config = getattr(f, "config", None) or {}
+            sid = config.get("reference_source_kpi_id")
+            skey = config.get("reference_source_field_key")
+            sub_key = config.get("reference_source_sub_field_key")
+            if sid and skey:
+                allowed = await get_reference_allowed_values(db, int(sid), str(skey), org_id, source_sub_field_key=sub_key)
+                allowed_normalized = {_normalize_reference_value(a) for a in allowed}
+                raw = (v.value_text or "").strip()
+                normalized = _normalize_reference_value(v.value_text)
+                if raw and normalized not in allowed_normalized:
+                    validation_errors.append({
+                        "field_key": f.key,
+                        "sub_field_key": None,
+                        "row_index": None,
+                        "value": v.value_text or "",
+                        "message": "Value must be one of the referenced field's values.",
+                    })
+        elif f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
+            for sub in getattr(f, "sub_fields", []) or []:
+                if getattr(sub, "field_type", None) != FieldType.reference:
+                    continue
+                config = getattr(sub, "config", None) or {}
+                sid = config.get("reference_source_kpi_id")
+                skey = config.get("reference_source_field_key")
+                sub_key = config.get("reference_source_sub_field_key")
+                if not sid or not skey:
+                    continue
+                allowed = await get_reference_allowed_values(db, int(sid), str(skey), org_id, source_sub_field_key=sub_key)
+                allowed_normalized = {_normalize_reference_value(a) for a in allowed}
+                for row_idx, row in enumerate(v.value_json):
+                    if not isinstance(row, dict):
+                        continue
+                    cell = row.get(sub.key)
+                    raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
+                    normalized = _normalize_reference_value(raw)
+                    if normalized and normalized not in allowed_normalized:
+                        validation_errors.append({
+                            "field_key": f.key,
+                            "sub_field_key": sub.key,
+                            "row_index": row_idx,
+                            "value": raw,
+                            "message": "Value must be one of the referenced field's values.",
+                        })
+
+    if validation_errors:
+        raise EntryValidationError(validation_errors)
+
     value_by_key: dict[str, float | int] = {}
     multi_line_items_data: MultiLineItemsData = {}
     for v in values:

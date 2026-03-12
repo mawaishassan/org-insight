@@ -7,6 +7,12 @@ import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 
+interface ReferenceConfig {
+  reference_source_kpi_id?: number;
+  reference_source_field_key?: string;
+  reference_source_sub_field_key?: string;
+}
+
 interface SubFieldDef {
   id: number;
   field_id: number;
@@ -15,6 +21,7 @@ interface SubFieldDef {
   field_type: string;
   is_required: boolean;
   sort_order: number;
+  config?: ReferenceConfig | null;
 }
 
 interface FieldDef {
@@ -24,6 +31,7 @@ interface FieldDef {
   field_type: string;
   is_required: boolean;
   formula_expression?: string | null;
+  config?: ReferenceConfig | null;
   sub_fields?: SubFieldDef[];
 }
 
@@ -154,6 +162,7 @@ export default function DomainKpiDetailPage() {
   const [fetchingFromApi, setFetchingFromApi] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [bulkMethod, setBulkMethod] = useState<"upload" | "api">("upload");
+  const [bulkUploadError, setBulkUploadError] = useState<string | null>(null);
   const [submitLoading, setSubmitLoading] = useState(false);
   const [exportExcelLoading, setExportExcelLoading] = useState(false);
   const [importExcelLoading, setImportExcelLoading] = useState(false);
@@ -167,6 +176,8 @@ export default function DomainKpiDetailPage() {
   const [kpiTimeDimension, setKpiTimeDimension] = useState<string | null>(null);
   const [orgTimeDimension, setOrgTimeDimension] = useState<string | null>(null);
   const [allEntriesForPeriodBar, setAllEntriesForPeriodBar] = useState<EntryRow[]>([]);
+  /** Reference allowed values: key = `${sourceKpiId}-${sourceFieldKey}` */
+  const [refAllowedValues, setRefAllowedValues] = useState<Record<string, string[]>>({});
 
   type FormCell = { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
@@ -286,6 +297,39 @@ export default function DomainKpiDetailPage() {
     loadData().catch((e) => setError(e instanceof Error ? e.message : "Failed to load")).finally(() => setLoading(false));
   }, [token, kpiId, year, effectiveOrgId, periodKeyFromUrl, isEntriesRoute]);
 
+  useEffect(() => {
+    if (!token || effectiveOrgId == null || fields.length === 0) return;
+    const keys: Array<{ k: string; sid: number; skey: string; subKey?: string }> = [];
+    fields.forEach((f) => {
+      if (f.field_type === "reference" && f.config?.reference_source_kpi_id && f.config?.reference_source_field_key) {
+        keys.push({
+          k: `${f.config.reference_source_kpi_id}-${f.config.reference_source_field_key}${f.config.reference_source_sub_field_key ? `-${f.config.reference_source_sub_field_key}` : ""}`,
+          sid: f.config.reference_source_kpi_id,
+          skey: f.config.reference_source_field_key,
+          subKey: f.config.reference_source_sub_field_key,
+        });
+      }
+      (f.sub_fields ?? []).forEach((s) => {
+        if (s.field_type === "reference" && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
+          keys.push({
+            k: `${s.config.reference_source_kpi_id}-${s.config.reference_source_field_key}${s.config.reference_source_sub_field_key ? `-${s.config.reference_source_sub_field_key}` : ""}`,
+            sid: s.config.reference_source_kpi_id,
+            skey: s.config.reference_source_field_key,
+            subKey: s.config.reference_source_sub_field_key,
+          });
+        }
+      });
+    });
+    const uniq = Array.from(new Map(keys.map((x) => [x.k, x])).values());
+    uniq.forEach(({ k, sid, skey, subKey }) => {
+      const params = new URLSearchParams({ source_kpi_id: String(sid), source_field_key: skey, organization_id: String(effectiveOrgId) });
+      if (subKey) params.set("source_sub_field_key", subKey);
+      api<{ values: string[] }>(`/fields/reference-allowed-values?${params}`, { token })
+        .then((r) => setRefAllowedValues((prev) => ({ ...prev, [k]: r.values })))
+        .catch(() => setRefAllowedValues((prev) => ({ ...prev, [k]: [] })));
+    });
+  }, [token, effectiveOrgId, fields]);
+
   const buildFormValuesFromEntry = (e: EntryRow | null): Record<number, FormCell> => {
     const out: Record<number, FormCell> = {};
     const valueMap = new Map((e?.values ?? []).map((v) => [v.field_id, v]));
@@ -361,7 +405,16 @@ export default function DomainKpiDetailPage() {
       setIsEditing(false);
       toast.success("Entry saved successfully");
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Save failed");
+      const errWithList = err as Error & { errors?: Array<{ field_key?: string; sub_field_key?: string; row_index?: number; value?: string; message?: string }> };
+      if (Array.isArray(errWithList.errors) && errWithList.errors.length > 0) {
+        const lines = errWithList.errors.map((e) => {
+          const loc = e.sub_field_key != null ? `Field "${e.field_key}", row ${(e.row_index ?? 0) + 1}, "${e.sub_field_key}"` : `Field "${e.field_key}"`;
+          return `${loc}: value "${e.value ?? ""}" ${e.message ?? "not allowed"}`;
+        });
+        setSaveError(`Validation failed:\n${lines.join("\n")}`);
+      } else {
+        setSaveError(err instanceof Error ? err.message : "Save failed");
+      }
       toast.error(err instanceof Error ? err.message : "Save failed");
     } finally {
       setSaving(false);
@@ -464,6 +517,43 @@ export default function DomainKpiDetailPage() {
 
   return (
     <div>
+      {bulkUploadError && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 1000,
+            background: "var(--error, #c00)",
+            color: "var(--on-error, #fff)",
+            padding: "0.75rem 1rem",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: "0.75rem",
+            boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
+          }}
+        >
+          <div style={{ whiteSpace: "pre-line", fontSize: "0.9rem" }}>{bulkUploadError}</div>
+          <button
+            type="button"
+            onClick={() => setBulkUploadError(null)}
+            style={{
+              border: "none",
+              background: "transparent",
+              color: "inherit",
+              fontSize: "1.1rem",
+              cursor: "pointer",
+              padding: "0 0.25rem",
+              lineHeight: 1,
+            }}
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
+        </div>
+      )}
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
       {saveError && <p className="form-error" style={{ marginBottom: "1rem" }}>{saveError}</p>}
 
@@ -861,6 +951,17 @@ export default function DomainKpiDetailPage() {
                           });
                           if (!res.ok) {
                             const err = await res.json().catch(() => ({}));
+                            const validationErrors = Array.isArray(err.errors) ? err.errors as Array<{ field_key?: string; sub_field_key?: string; row_index?: number; value?: string; message?: string }> : [];
+                            if (validationErrors.length > 0) {
+                              const lines = validationErrors.map((e) => {
+                                const loc = e.sub_field_key != null ? `Field "${e.field_key}", row ${(e.row_index ?? 0) + 1}, "${e.sub_field_key}"` : `Field "${e.field_key}"`;
+                                return `${loc}: value "${e.value ?? ""}" ${e.message ?? "not allowed"}`;
+                              });
+                              const msg = `Validation failed:\n${lines.join("\n")}`;
+                              setError(msg);
+                              toast.error("Validation failed – see message below");
+                              return;
+                            }
                             throw new Error(err.detail ?? res.statusText);
                           }
                           await loadData();
@@ -1180,6 +1281,27 @@ export default function DomainKpiDetailPage() {
                         </div>
                       );
                     }
+                    if (f.field_type === "reference") {
+                      const refKey = f.config?.reference_source_kpi_id && f.config?.reference_source_field_key
+                        ? `${f.config.reference_source_kpi_id}-${f.config.reference_source_field_key}${f.config.reference_source_sub_field_key ? `-${f.config.reference_source_sub_field_key}` : ""}`
+                        : "";
+                      const options = refAllowedValues[refKey] ?? [];
+                      return (
+                        <div key={f.id} style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                          <label style={{ fontWeight: 500 }}>{f.name}{f.is_required ? " *" : ""}</label>
+                          <select
+                            value={val?.value_text ?? ""}
+                            onChange={(e) => updateField(f.id, "value_text", e.target.value || undefined)}
+                            style={{ padding: "0.5rem", border: "1px solid var(--border)", borderRadius: 6, maxWidth: 320 }}
+                          >
+                            <option value="">— Select —</option>
+                            {options.map((opt) => (
+                              <option key={opt} value={opt}>{opt}</option>
+                            ))}
+                          </select>
+                        </div>
+                      );
+                    }
                     return null;
                   })}
               </div>
@@ -1219,6 +1341,7 @@ export default function DomainKpiDetailPage() {
           const subFields = f.sub_fields ?? [];
           const setRows = (next: Record<string, unknown>[]) => updateField(f.id, "value_json", next);
           const fieldQuery = `?field_id=${f.id}&organization_id=${effectiveOrgId}`;
+          const templateQuery = entry ? `?field_id=${f.id}&entry_id=${entry.id}&organization_id=${effectiveOrgId}` : fieldQuery;
           const appendUpload = uploadOption === "append";
           const uploadQuery = entry ? `?entry_id=${entry.id}&field_id=${f.id}&organization_id=${effectiveOrgId}&append=${appendUpload}` : "";
           return (
@@ -1227,6 +1350,27 @@ export default function DomainKpiDetailPage() {
                 <p style={{ color: "var(--muted)" }}>No sub-fields defined.</p>
               ) : (
                 <>
+                  {isEditing && (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                        <button type="button" className="btn btn-primary" disabled={saving || isLocked} onClick={handleSave}>
+                          {saving ? "Saving…" : "Save"}
+                        </button>
+                        <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
+                          Rows are in <strong>draft</strong> until you click Save.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={isLocked}
+                        onClick={() => setRows([...rows, Object.fromEntries(subFields.map((s) => [s.key, undefined]))])}
+                      >
+                        Add row
+                      </button>
+                    </div>
+                  )}
+
                   <div style={{ marginBottom: "0.75rem", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                     <button
                       type="button"
@@ -1326,7 +1470,7 @@ export default function DomainKpiDetailPage() {
                             type="button"
                             className="btn"
                             onClick={async () => {
-                              const url = getApiUrl(`/entries/multi-items/template${fieldQuery}`);
+                              const url = getApiUrl(`/entries/multi-items/template${templateQuery}`);
                               const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
                               if (!res.ok) return;
                               const blob = await res.blob();
@@ -1374,8 +1518,40 @@ export default function DomainKpiDetailPage() {
                                     await loadData();
                                     toast.success("Excel uploaded successfully");
                                   } else {
-                                    setSaveError("Excel upload failed");
-                                    toast.error("Excel upload failed");
+                                    const err = await res.json().catch(() => ({}));
+                                    const validationErrors = Array.isArray(err.errors)
+                                      ? (err.errors as Array<{
+                                          field_key?: string;
+                                          sub_field_key?: string;
+                                          row_index?: number;
+                                          value?: string;
+                                          message?: string;
+                                          row?: unknown;
+                                        }>)
+                                      : [];
+                                    if (validationErrors.length > 0) {
+                                      const first = validationErrors[0];
+                                      const loc =
+                                        first.sub_field_key != null
+                                          ? `Field "${first.field_key}", row ${(first.row_index ?? 0) + 1}, "${first.sub_field_key}"`
+                                          : `Field "${first.field_key}"`;
+                                      const details =
+                                        first.row != null
+                                          ? ` | row: ${
+                                              typeof first.row === "string"
+                                                ? first.row
+                                                : JSON.stringify(first.row)
+                                            }`
+                                          : "";
+                                      const msg = `Consistency check failed:\n${loc}: value "${first.value ?? ""}" ${
+                                        first.message ?? "not allowed"
+                                      }${details}`;
+                                      setBulkUploadError(msg);
+                                      window.scrollTo({ top: 0, behavior: "smooth" });
+                                    } else {
+                                      setBulkUploadError("Excel upload failed");
+                                      window.scrollTo({ top: 0, behavior: "smooth" });
+                                    }
                                   }
                                 } finally {
                                   setUploadingFieldId(null);
@@ -1442,17 +1618,7 @@ export default function DomainKpiDetailPage() {
                   </div>
                   )}
 
-                  {isEditing && (
-                    <div style={{ marginBottom: "0.75rem" }}>
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => setRows([...rows, Object.fromEntries(subFields.map((s) => [s.key, undefined]))])}
-                      >
-                        Add row
-                      </button>
-                    </div>
-                  )}
+                  {/* Add row button moved to top while editing */}
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                     <thead>
                       <tr>
@@ -1520,6 +1686,31 @@ export default function DomainKpiDetailPage() {
                                         setRows(next);
                                       }}
                                     />
+                                  ) : s.field_type === "reference" ? (
+                                    (() => {
+                                      const refKey = s.config?.reference_source_kpi_id && s.config?.reference_source_field_key
+                                        ? `${s.config.reference_source_kpi_id}-${s.config.reference_source_field_key}${s.config.reference_source_sub_field_key ? `-${s.config.reference_source_sub_field_key}` : ""}`
+                                        : "";
+                                      const options = refAllowedValues[refKey] ?? [];
+                                      const cellVal = row[s.key];
+                                      const strVal = typeof cellVal === "string" ? cellVal : String(cellVal ?? "");
+                                      return (
+                                        <select
+                                          value={strVal}
+                                          onChange={(e) => {
+                                            const next = [...rows];
+                                            next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value || undefined };
+                                            setRows(next);
+                                          }}
+                                          style={{ width: "100%", minWidth: 100, padding: "0.35rem" }}
+                                        >
+                                          <option value="">—</option>
+                                          {options.map((opt) => (
+                                            <option key={opt} value={opt}>{opt}</option>
+                                          ))}
+                                        </select>
+                                      );
+                                    })()
                                   ) : (
                                     (() => {
                                       const cellVal = row[s.key];

@@ -24,11 +24,12 @@ const FIELD_TYPES = [
   "number",
   "date",
   "boolean",
+  "reference",
   "multi_line_items",
   "formula",
 ] as const;
 
-const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean"] as const;
+const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean", "reference"] as const;
 
 function slugifyKey(name: string): string {
   if (!name) return "";
@@ -64,6 +65,13 @@ const WHERE_OPERATORS = [
   { value: "op_lte", label: "less or equal (≤)" },
 ] as const;
 
+interface ReferenceConfig {
+  reference_source_kpi_id?: number;
+  reference_source_field_key?: string;
+  /** When source is a multi_line_items field, the sub-field key to use for values */
+  reference_source_sub_field_key?: string;
+}
+
 interface SubFieldDef {
   id?: number;
   field_id?: number;
@@ -72,6 +80,7 @@ interface SubFieldDef {
   field_type: string;
   is_required: boolean;
   sort_order: number;
+  config?: ReferenceConfig | null;
 }
 
 interface KpiField {
@@ -83,6 +92,7 @@ interface KpiField {
   formula_expression: string | null;
   is_required: boolean;
   sort_order: number;
+  config?: ReferenceConfig | null;
   options: Array<{ id: number; value: string; label: string; sort_order: number }>;
   sub_fields?: SubFieldDef[];
 }
@@ -325,8 +335,9 @@ export default function KpiFieldsPage() {
       .catch(() => setOrgCategories([]));
   }, [token, orgIdFromUrl]);
 
-  type CreateSubFieldRow = { name: string; key: string; field_type: string; is_required: boolean; sort_order: number; keyTouched?: boolean };
+  type CreateSubFieldRow = { name: string; key: string; field_type: string; is_required: boolean; sort_order: number; keyTouched?: boolean; config?: ReferenceConfig };
   const [createSubFields, setCreateSubFields] = useState<CreateSubFieldRow[]>([]);
+  const [createRefConfig, setCreateRefConfig] = useState<ReferenceConfig>({});
 
   const createForm = useForm<CreateFormData>({
     resolver: zodResolver(createSchema),
@@ -354,14 +365,31 @@ export default function KpiFieldsPage() {
         sort_order: data.sort_order,
         options: [],
       };
+      if (data.field_type === "reference" && createRefConfig.reference_source_kpi_id && createRefConfig.reference_source_field_key) {
+        body.config = {
+          reference_source_kpi_id: createRefConfig.reference_source_kpi_id,
+          reference_source_field_key: createRefConfig.reference_source_field_key,
+          ...(createRefConfig.reference_source_sub_field_key ? { reference_source_sub_field_key: createRefConfig.reference_source_sub_field_key } : {}),
+        };
+      }
       if (data.field_type === "multi_line_items" && createSubFields.length > 0) {
-        body.sub_fields = createSubFields.map((s, i) => ({
-          name: s.name,
-          key: s.key,
-          field_type: s.field_type,
-          is_required: s.is_required,
-          sort_order: s.sort_order ?? i,
-        }));
+        body.sub_fields = createSubFields.map((s, i) => {
+          const sub: Record<string, unknown> = {
+            name: s.name,
+            key: s.key,
+            field_type: s.field_type,
+            is_required: s.is_required,
+            sort_order: s.sort_order ?? i,
+          };
+          if (s.field_type === "reference" && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
+            sub.config = {
+              reference_source_kpi_id: s.config.reference_source_kpi_id,
+              reference_source_field_key: s.config.reference_source_field_key,
+              ...(s.config.reference_source_sub_field_key ? { reference_source_sub_field_key: s.config.reference_source_sub_field_key } : {}),
+            };
+          }
+          return sub;
+        });
       }
       await api(`/fields?${fieldsQuery()}`, {
         method: "POST",
@@ -378,6 +406,7 @@ export default function KpiFieldsPage() {
       });
       setKeyTouched(false);
       setCreateSubFields([]);
+      setCreateRefConfig({});
       setShowCreate(false);
       loadList();
     } catch (e) {
@@ -385,7 +414,7 @@ export default function KpiFieldsPage() {
     }
   };
 
-  const onUpdateSubmit = async (fieldId: number, data: UpdateFormData, subFields?: SubFieldDef[]) => {
+  const onUpdateSubmit = async (fieldId: number, data: UpdateFormData, subFields?: SubFieldDef[], refConfig?: ReferenceConfig) => {
     if (!token || orgId == null) return;
     setError(null);
     try {
@@ -397,14 +426,31 @@ export default function KpiFieldsPage() {
         is_required: data.is_required,
         sort_order: data.sort_order,
       };
+      if (data.field_type === "reference" && refConfig?.reference_source_kpi_id && refConfig?.reference_source_field_key) {
+        body.config = {
+          reference_source_kpi_id: refConfig.reference_source_kpi_id,
+          reference_source_field_key: refConfig.reference_source_field_key,
+          ...(refConfig.reference_source_sub_field_key ? { reference_source_sub_field_key: refConfig.reference_source_sub_field_key } : {}),
+        };
+      }
       if (data.field_type === "multi_line_items" && subFields != null) {
-        body.sub_fields = subFields.map((s, i) => ({
-          name: s.name,
-          key: s.key,
-          field_type: s.field_type,
-          is_required: s.is_required,
-          sort_order: s.sort_order ?? i,
-        }));
+        body.sub_fields = subFields.map((s, i) => {
+          const sub: Record<string, unknown> = {
+            name: s.name,
+            key: s.key,
+            field_type: s.field_type,
+            is_required: s.is_required,
+            sort_order: s.sort_order ?? i,
+          };
+          if (s.field_type === "reference" && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
+            sub.config = {
+              reference_source_kpi_id: s.config.reference_source_kpi_id,
+              reference_source_field_key: s.config.reference_source_field_key,
+              ...(s.config.reference_source_sub_field_key ? { reference_source_sub_field_key: s.config.reference_source_sub_field_key } : {}),
+            };
+          }
+          return sub;
+        });
       }
       await api(`/fields/${fieldId}?${fieldsQuery()}`, {
         method: "PATCH",
@@ -1224,6 +1270,20 @@ export default function KpiFieldsPage() {
                 <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }} />
               </div>
             </div>
+            {createForm.watch("field_type") === "reference" && (
+              <div className="form-group">
+                <label>Reference source</label>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+                  Values for this field will be restricted to distinct values from the selected KPI field.
+                </p>
+                <ReferenceConfigUI
+                  organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                  currentKpiId={kpiId}
+                  value={createRefConfig}
+                  onChange={setCreateRefConfig}
+                />
+              </div>
+            )}
             {createForm.watch("field_type") === "formula" && (
               <div className="form-group">
                 <label>Formula</label>
@@ -1250,6 +1310,7 @@ export default function KpiFieldsPage() {
                         <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
                         <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
                         <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (if type = reference)</th>
                         <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
                         <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
                       </tr>
@@ -1257,7 +1318,7 @@ export default function KpiFieldsPage() {
                     <tbody>
                       {createSubFields.length === 0 ? (
                         <tr>
-                          <td colSpan={5} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                          <td colSpan={6} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
                             No sub-fields yet. Click &quot;Add sub-field&quot; below.
                           </td>
                         </tr>
@@ -1303,6 +1364,19 @@ export default function KpiFieldsPage() {
                               ))}
                             </select>
                           </td>
+                          <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                            {s.field_type === "reference" ? (
+                              <ReferenceConfigUI
+                                organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                                currentKpiId={kpiId}
+                                value={s.config ?? {}}
+                                onChange={(c) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, config: c } : x)))}
+                                labelPrefix="Source"
+                              />
+                            ) : (
+                              <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
+                            )}
+                          </td>
                           <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
                             <input
                               type="checkbox"
@@ -1320,7 +1394,7 @@ export default function KpiFieldsPage() {
                     </tbody>
                   </table>
                 </div>
-                <button type="button" className="btn btn-primary" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, keyTouched: false }])}>
+                <button type="button" className="btn btn-primary" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, keyTouched: false, config: undefined }])}>
                   Add sub-field
                 </button>
               </div>
@@ -1367,7 +1441,7 @@ export default function KpiFieldsPage() {
                   <FieldEditForm
                     field={f}
                     list={list}
-                    onSave={(data, subFields) => onUpdateSubmit(f.id, data, subFields)}
+                    onSave={(data, subFields, refConfig) => onUpdateSubmit(f.id, data, subFields, refConfig)}
                     onCancel={() => setEditingId(null)}
                     organizationId={kpi?.organization_id}
                     currentKpiId={kpiId}
@@ -1613,6 +1687,94 @@ export default function KpiFieldsPage() {
   return content;
 }
 
+/** Source KPI + source field dropdowns for reference/lookup field config. */
+function ReferenceConfigUI({
+  organizationId,
+  currentKpiId,
+  value,
+  onChange,
+  labelPrefix = "Reference source",
+}: {
+  organizationId: number | undefined;
+  currentKpiId?: number;
+  value: ReferenceConfig;
+  onChange: (c: ReferenceConfig) => void;
+  labelPrefix?: string;
+}) {
+  const [kpis, setKpis] = useState<Array<{ id: number; name: string }>>([]);
+  const [sourceFields, setSourceFields] = useState<KpiField[]>([]);
+  const token = getAccessToken();
+  useEffect(() => {
+    if (!token || organizationId == null) return;
+    api<Array<{ id: number; name: string }>>(`/kpis?${qs({ organization_id: organizationId })}`, { token })
+      .then((list) => setKpis(list))
+      .catch(() => setKpis([]));
+  }, [token, organizationId]);
+  useEffect(() => {
+    if (!token || organizationId == null || !value.reference_source_kpi_id) {
+      setSourceFields([]);
+      return;
+    }
+    api<KpiField[]>(`/fields?${qs({ kpi_id: value.reference_source_kpi_id, organization_id: organizationId })}`, { token })
+      .then((list) => setSourceFields(list))
+      .catch(() => setSourceFields([]));
+  }, [token, organizationId, value.reference_source_kpi_id]);
+  const scalarFieldTypes = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference"];
+  const sourceFieldOptions: { value: string; label: string }[] = [];
+  sourceFields.forEach((f) => {
+    if (scalarFieldTypes.includes(f.field_type)) {
+      sourceFieldOptions.push({ value: f.key, label: `${f.name} (${f.key})` });
+    }
+    if (f.field_type === "multi_line_items" && f.sub_fields?.length) {
+      f.sub_fields.forEach((s) => {
+        sourceFieldOptions.push({ value: `${f.key}|${s.key}`, label: `${f.name} → ${s.name} (${s.key})` });
+      });
+    }
+  });
+  const selectedFieldValue = value.reference_source_field_key
+    ? (value.reference_source_sub_field_key ? `${value.reference_source_field_key}|${value.reference_source_sub_field_key}` : value.reference_source_field_key)
+    : "";
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem 1rem", alignItems: "flex-end" }}>
+      <div>
+        <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>{labelPrefix}: KPI</label>
+        <select
+          value={value.reference_source_kpi_id ?? ""}
+          onChange={(e) => onChange({ reference_source_kpi_id: e.target.value ? Number(e.target.value) : undefined, reference_source_field_key: undefined, reference_source_sub_field_key: undefined })}
+          style={{ minWidth: "180px" }}
+        >
+          <option value="">— Select KPI —</option>
+          {kpis.filter((k) => k.id !== currentKpiId).map((k) => (
+            <option key={k.id} value={k.id}>{k.name}</option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>{labelPrefix}: Field</label>
+        <select
+          value={selectedFieldValue}
+          onChange={(e) => {
+            const raw = e.target.value || "";
+            if (raw.includes("|")) {
+              const [fieldKey, subKey] = raw.split("|", 2);
+              onChange({ ...value, reference_source_field_key: fieldKey, reference_source_sub_field_key: subKey || undefined });
+            } else {
+              onChange({ ...value, reference_source_field_key: raw || undefined, reference_source_sub_field_key: undefined });
+            }
+          }}
+          style={{ minWidth: "220px" }}
+          disabled={!value.reference_source_kpi_id}
+        >
+          <option value="">— Select field —</option>
+          {sourceFieldOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 interface FormulaRefKpi {
   id: number;
   name: string;
@@ -1807,7 +1969,7 @@ function FieldEditForm({
 }: {
   field: KpiField;
   list: KpiField[];
-  onSave: (data: UpdateFormData, subFields?: SubFieldDef[]) => void;
+  onSave: (data: UpdateFormData, subFields?: SubFieldDef[], refConfig?: ReferenceConfig) => void;
   onCancel: () => void;
   organizationId?: number;
   currentKpiId?: number;
@@ -1815,8 +1977,9 @@ function FieldEditForm({
   type EditSubFieldRow = SubFieldDef & { keyTouched?: boolean };
   const [editKeyTouched, setEditKeyTouched] = useState(false);
   const [editSubFields, setEditSubFields] = useState<EditSubFieldRow[]>(
-    () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0, keyTouched: false }))
+    () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0, config: s.config ?? undefined, keyTouched: false }))
   );
+  const [editRefConfig, setEditRefConfig] = useState<ReferenceConfig>(field.config ?? {});
   const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting } } = useForm<UpdateFormData>({
     resolver: zodResolver(updateSchema),
     defaultValues: {
@@ -1837,7 +2000,8 @@ function FieldEditForm({
           data,
           currentFieldType === "multi_line_items"
             ? editSubFields.map(({ keyTouched: _, ...s }) => s)
-            : undefined
+            : undefined,
+          currentFieldType === "reference" ? editRefConfig : undefined
         )
       )}
       style={{ width: "100%" }}
@@ -1917,6 +2081,20 @@ function FieldEditForm({
           />
         </div>
       </div>
+      {currentFieldType === "reference" && (
+        <div className="form-group">
+          <label>Reference source</label>
+          <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+            Values for this field will be restricted to distinct values from the selected KPI field.
+          </p>
+          <ReferenceConfigUI
+            organizationId={organizationId}
+            currentKpiId={currentKpiId}
+            value={editRefConfig}
+            onChange={setEditRefConfig}
+          />
+        </div>
+      )}
       {currentFieldType === "formula" && (
         <div className="form-group">
           <label>Formula</label>
@@ -1943,6 +2121,7 @@ function FieldEditForm({
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (if type = reference)</th>
                   <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
                   <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
                 </tr>
@@ -1950,7 +2129,7 @@ function FieldEditForm({
               <tbody>
                 {editSubFields.length === 0 ? (
                   <tr>
-                    <td colSpan={5} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                    <td colSpan={6} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
                       No sub-fields yet. Click &quot;Add sub-field&quot; below.
                     </td>
                   </tr>
@@ -1994,6 +2173,19 @@ function FieldEditForm({
                         ))}
                       </select>
                     </td>
+                    <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                      {s.field_type === "reference" ? (
+                        <ReferenceConfigUI
+                          organizationId={organizationId}
+                          currentKpiId={currentKpiId}
+                          value={s.config ?? {}}
+                          onChange={(c) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, config: c } : x)))}
+                          labelPrefix="Source"
+                        />
+                      ) : (
+                        <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
+                      )}
+                    </td>
                     <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
                       <input
                         type="checkbox"
@@ -2017,7 +2209,7 @@ function FieldEditForm({
             onClick={() =>
               setEditSubFields((prev) => [
                 ...prev,
-                { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, keyTouched: false },
+                { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, config: undefined, keyTouched: false },
               ])
             }
           >

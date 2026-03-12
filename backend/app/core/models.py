@@ -43,6 +43,7 @@ class FieldType(str, enum.Enum):
     boolean = "boolean"
     multi_line_items = "multi_line_items"
     formula = "formula"
+    reference = "reference"  # Reference/Lookup: values from another KPI field
 
 
 class TimeDimension(str, enum.Enum):
@@ -403,9 +404,10 @@ class KPIFieldSubField(Base):
     )
     name = Column(String(255), nullable=False)
     key = Column(String(100), nullable=False, index=True)
-    field_type = Column(Enum(FieldType), nullable=False)  # single_line_text, number, date, boolean only
+    field_type = Column(Enum(FieldType), nullable=False)  # single_line_text, number, date, boolean, reference
     is_required = Column(Boolean, default=False)
     sort_order = Column(Integer, default=0)
+    config = Column(JSON, nullable=True)  # For reference: {"reference_source_kpi_id": int, "reference_source_field_key": str}
 
     field = relationship("KPIField", back_populates="sub_fields")
 
