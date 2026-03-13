@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
@@ -129,6 +129,7 @@ function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
 export default function DomainKpiDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
+  const router = useRouter();
   const domainId = params.id != null ? Number(params.id) : undefined;
   const isEntriesRoute = domainId === undefined;
   const kpiId = Number(params.kpiId);
@@ -225,6 +226,10 @@ export default function DomainKpiDetailPage() {
   const multiLineFields = useMemo(
     () => fields.filter((f) => f.field_type === "multi_line_items"),
     [fields]
+  );
+  const inlineMultiLineFields = useMemo(
+    () => multiLineFields.filter((f) => !(f as any).full_page_multi_items),
+    [multiLineFields]
   );
 
   const formulaBoxes = useMemo(() => {
@@ -1259,7 +1264,7 @@ export default function DomainKpiDetailPage() {
         )}
       </div>
 
-      {/* Section 3: Tabs – Field details (scalar + formula), then one tab per multi_line_items */}
+      {/* Section 3: Tabs – Field details (scalar + formula), then one tab per multi_line_items (inline-only) */}
       <div className="card">
         <div
           style={{
@@ -1296,7 +1301,17 @@ export default function DomainKpiDetailPage() {
               style={{
                 ...(activeTab === f.id ? { background: "var(--accent)", color: "var(--on-muted)" } : {}),
               }}
-              onClick={() => setActiveTab(f.id)}
+              onClick={() => {
+                if ((f as any).full_page_multi_items && isEntriesRoute && effectiveOrgId != null) {
+                  const params = new URLSearchParams({
+                    organization_id: String(effectiveOrgId),
+                    ...(periodKeyFromUrl ? { period_key: periodKeyFromUrl } : {}),
+                  });
+                  router.push(`/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${params.toString()}`);
+                  return;
+                }
+                setActiveTab(f.id);
+              }}
             >
               {f.name}
             </button>
@@ -1473,7 +1488,7 @@ export default function DomainKpiDetailPage() {
           </div>
         )}
 
-        {multiLineFields.map((f) => {
+          {inlineMultiLineFields.map((f) => {
           if (activeTab !== f.id) return null;
           const v = valuesByFieldId.get(f.id);
           const formRows = isEditing ? (formValues[f.id]?.value_json ?? []) : [];

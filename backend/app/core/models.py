@@ -366,6 +366,8 @@ class KPIField(Base):
     sort_order = Column(Integer, default=0)
     config = Column(JSON, nullable=True)
     carry_forward_data = Column(Boolean, default=False, nullable=False, server_default="0")  # Non-cyclic: copy from previous period when new
+    # When true for multi_line_items fields, data entry uses a dedicated full-page UI instead of inline rows.
+    full_page_multi_items = Column(Boolean, default=False, nullable=False, server_default="0")
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 

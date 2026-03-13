@@ -95,6 +95,7 @@ interface KpiField {
   sort_order: number;
   config?: ReferenceConfig | null;
   carry_forward_data?: boolean;
+  full_page_multi_items?: boolean;
   options: Array<{ id: number; value: string; label: string; sort_order: number }>;
   sub_fields?: SubFieldDef[];
 }
@@ -148,6 +149,8 @@ const createSchema = z.object({
   is_required: z.boolean(),
   sort_order: z.coerce.number().int().min(0),
   carry_forward_data: z.boolean().optional(),
+  full_page_multi_items: z.boolean().optional(),
+  multi_items_api_endpoint_url: z.string().url("Must be a valid URL").optional(),
 });
 
 const updateSchema = z.object({
@@ -158,6 +161,8 @@ const updateSchema = z.object({
   is_required: z.boolean(),
   sort_order: z.coerce.number().int().min(0),
   carry_forward_data: z.boolean().optional(),
+  full_page_multi_items: z.boolean().optional(),
+  multi_items_api_endpoint_url: z.string().url("Must be a valid URL").optional(),
 });
 
 const kpiUpdateSchema = z.object({
@@ -357,6 +362,8 @@ export default function KpiFieldsPage() {
       is_required: false,
       sort_order: list.length,
       carry_forward_data: false,
+      full_page_multi_items: false,
+      multi_items_api_endpoint_url: "",
     },
   });
 
@@ -373,6 +380,7 @@ export default function KpiFieldsPage() {
         is_required: data.is_required,
         sort_order: data.sort_order,
         carry_forward_data: data.carry_forward_data ?? false,
+        full_page_multi_items: data.full_page_multi_items ?? false,
         options: [],
       };
       if (data.field_type === "reference" && createRefConfig.reference_source_kpi_id && createRefConfig.reference_source_field_key) {
@@ -400,6 +408,12 @@ export default function KpiFieldsPage() {
           }
           return sub;
         });
+        if (data.multi_items_api_endpoint_url) {
+          body.config = {
+            ...(body.config as Record<string, unknown> | undefined ?? {}),
+            multi_items_api_endpoint_url: data.multi_items_api_endpoint_url.trim(),
+          };
+        }
       }
       await api(`/fields?${fieldsQuery()}`, {
         method: "POST",
@@ -437,6 +451,7 @@ export default function KpiFieldsPage() {
         is_required: data.is_required,
         sort_order: data.sort_order,
         carry_forward_data: data.carry_forward_data,
+        full_page_multi_items: data.full_page_multi_items,
       };
       if (data.field_type === "reference" && refConfig?.reference_source_kpi_id && refConfig?.reference_source_field_key) {
         body.config = {
@@ -444,6 +459,18 @@ export default function KpiFieldsPage() {
           reference_source_field_key: refConfig.reference_source_field_key,
           ...(refConfig.reference_source_sub_field_key ? { reference_source_sub_field_key: refConfig.reference_source_sub_field_key } : {}),
         };
+      }
+      if (data.field_type === "multi_line_items") {
+        const existingConfig = (field.config as Record<string, unknown> | null) ?? {};
+        if (data.multi_items_api_endpoint_url) {
+          body.config = {
+            ...(body.config as Record<string, unknown> | undefined ?? existingConfig),
+            multi_items_api_endpoint_url: data.multi_items_api_endpoint_url.trim(),
+          };
+        } else if (existingConfig && "multi_items_api_endpoint_url" in existingConfig) {
+          const { multi_items_api_endpoint_url, ...rest } = existingConfig;
+          body.config = rest;
+        }
       }
       if (data.field_type === "multi_line_items" && subFields != null) {
         body.sub_fields = subFields.map((s, i) => {
@@ -1289,6 +1316,42 @@ export default function KpiFieldsPage() {
                 <input type="checkbox" {...createForm.register("is_required")} />
                 Required
               </label>
+              {createForm.watch("field_type") === "multi_line_items" && (
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                  <span style={{ fontWeight: 500 }}>Full-page editor</span>
+                  <span
+                    style={{
+                      position: "relative",
+                      width: 40,
+                      height: 22,
+                      borderRadius: 999,
+                      background: createForm.watch("full_page_multi_items") ? "var(--accent)" : "var(--border)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      padding: 2,
+                      transition: "background 120ms ease",
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 18,
+                        height: 18,
+                        borderRadius: "50%",
+                        background: "var(--surface)",
+                        transform: createForm.watch("full_page_multi_items") ? "translateX(18px)" : "translateX(0)",
+                        transition: "transform 120ms ease",
+                        boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                      }}
+                    />
+                  </span>
+                  <input
+                    type="checkbox"
+                    {...createForm.register("full_page_multi_items")}
+                    style={{ display: "none" }}
+                    aria-label="Use full-page editor for this multi-line field"
+                  />
+                </label>
+              )}
               {userRole === "SUPER_ADMIN" && (
                 <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer", fontSize: "0.9rem" }}>
                   <input type="checkbox" {...createForm.register("carry_forward_data")} />
@@ -1428,6 +1491,25 @@ export default function KpiFieldsPage() {
                   Add sub-field
                 </button>
               </div>
+            )}
+            {createForm.watch("field_type") === "multi_line_items" && (
+              <>
+                <div style={{ marginTop: "-0.25rem", marginBottom: "0.5rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+                  Tip: Enable <strong>Full-page editor</strong> above for large datasets (search, paging, bulk delete, bulk upload).
+                </div>
+                <div className="form-group">
+                  <label>Multi-line API endpoint URL (optional)</label>
+                  <input
+                    type="url"
+                    placeholder="https://example.com/multi-items-api"
+                    {...createForm.register("multi_items_api_endpoint_url")}
+                    style={{ width: "100%" }}
+                  />
+                  <p style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
+                    When set, Org Admins can sync this multi-line field from API on the full-page editor.
+                  </p>
+                </div>
+              </>
             )}
             <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem" }}>
               <button type="submit" className="btn btn-primary" disabled={createForm.formState.isSubmitting}>
@@ -2023,6 +2105,8 @@ function FieldEditForm({
       is_required: field.is_required,
       sort_order: field.sort_order,
       carry_forward_data: field.carry_forward_data ?? false,
+      full_page_multi_items: field.full_page_multi_items ?? false,
+      multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
     },
   });
   const currentFieldType = watch("field_type");
@@ -2109,6 +2193,42 @@ function FieldEditForm({
           <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
             <input type="checkbox" {...register("carry_forward_data")} />
             Carry forward (non-cyclic)
+          </label>
+        )}
+        {currentFieldType === "multi_line_items" && (
+          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+            <span style={{ fontWeight: 500 }}>Full-page editor</span>
+            <span
+              style={{
+                position: "relative",
+                width: 40,
+                height: 22,
+                borderRadius: 999,
+                background: watch("full_page_multi_items") ? "var(--accent)" : "var(--border)",
+                display: "inline-flex",
+                alignItems: "center",
+                padding: 2,
+                transition: "background 120ms ease",
+              }}
+            >
+              <span
+                style={{
+                  width: 18,
+                  height: 18,
+                  borderRadius: "50%",
+                  background: "var(--surface)",
+                  transform: watch("full_page_multi_items") ? "translateX(18px)" : "translateX(0)",
+                  transition: "transform 120ms ease",
+                  boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                }}
+              />
+            </span>
+            <input
+              type="checkbox"
+              {...register("full_page_multi_items")}
+              style={{ display: "none" }}
+              aria-label="Use full-page editor for this multi-line field"
+            />
           </label>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
@@ -2255,6 +2375,21 @@ function FieldEditForm({
           >
             Add sub-field
           </button>
+          <div style={{ marginTop: "0.5rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+            Tip: Enable <strong>Full-page editor</strong> above for large datasets (search, paging, bulk delete, bulk upload).
+          </div>
+          <div className="form-group" style={{ marginTop: "0.75rem" }}>
+            <label>Multi-line API endpoint URL (optional)</label>
+            <input
+              type="url"
+              placeholder="https://example.com/multi-items-api"
+              {...register("multi_items_api_endpoint_url")}
+              style={{ width: "100%" }}
+            />
+            <p style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
+              When set, Org Admins can sync this multi-line field from API on the full-page editor.
+            </p>
+          </div>
         </div>
       )}
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>

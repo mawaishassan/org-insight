@@ -1,11 +1,16 @@
 """KPI entry API routes (data entry + admin lock)."""
 
 from io import BytesIO
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+import csv
+import json
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
+import httpx
 
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_org_admin
@@ -179,6 +184,19 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
     return out
 
 
+class MultiItemsRow(BaseModel):
+    index: int
+    data: dict
+
+
+class MultiItemsListResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    rows: list[MultiItemsRow]
+    sub_fields: list[dict]
+
+
 @router.get("/multi-items/template")
 async def download_multi_items_template(
     field_id: int = Query(...),
@@ -309,6 +327,539 @@ async def upload_multi_items_excel(
     return {"entry_id": entry.id, "field_id": field.id, "items": fv.value_json, "append": append}
 
 
+@router.get("/multi-items/rows", response_model=MultiItemsListResponse)
+async def list_multi_items_rows(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    search: str | None = Query(None, description="Simple text search across row values"),
+    sort_by: str | None = Query(None, description="Sub-field key to sort by"),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    filters: str | None = Query(
+        None,
+        description='Optional JSON object of column filters, e.g. {"program_name": "MBA"} (case-insensitive substring).',
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List multi_line_items rows for an entry+field with search, sort, and paging."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    rows: list[dict] = fv.value_json if fv and isinstance(fv.value_json, list) else []
+
+    # Build sub_fields payload
+    sub_fields = [
+        {
+            "key": getattr(sf, "key", ""),
+            "name": getattr(sf, "name", getattr(sf, "key", "")),
+            "field_type": getattr(sf, "field_type", None).value if getattr(sf, "field_type", None) else None,
+            "is_required": getattr(sf, "is_required", False),
+        }
+        for sf in (field.sub_fields or [])
+    ]
+
+    # Filter by search
+    if search:
+        q = search.lower().strip()
+        def matches(row: dict) -> bool:
+            for v in row.values():
+                if v is None:
+                    continue
+                s = str(v).lower()
+                if q in s:
+                    return True
+            return False
+        rows = [r for r in rows if isinstance(r, dict) and matches(r)]
+
+    # Advanced column filters (JSON: key -> value, case-insensitive substring)
+    if filters:
+        try:
+            raw_filters = json.loads(filters)
+            if isinstance(raw_filters, dict):
+                def passes_filters(row: dict) -> bool:
+                    for fk, fv in raw_filters.items():
+                        if fv is None or fv == "":
+                            continue
+                        cell = row.get(fk)
+                        if cell is None:
+                            return False
+                        if str(fv).strip().lower() not in str(cell).lower():
+                            return False
+                    return True
+
+                rows = [r for r in rows if isinstance(r, dict) and passes_filters(r)]
+        except json.JSONDecodeError:
+            # Ignore invalid filters payload
+            pass
+
+    # Sort
+    if sort_by:
+        reverse = sort_dir == "desc"
+        def sort_key(row: dict):
+            v = row.get(sort_by)
+            # Try numeric, then string
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return str(v) if v is not None else ""
+        try:
+            rows = sorted(rows, key=sort_key, reverse=reverse)
+        except Exception:
+            pass
+
+    total = len(rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paged_rows = rows[start:end]
+
+    return MultiItemsListResponse(
+        total=total,
+        page=page,
+        page_size=page_size,
+        rows=[MultiItemsRow(index=start + i, data=r) for i, r in enumerate(paged_rows)],
+        sub_fields=sub_fields,
+    )
+
+
+@router.post("/multi-items/rows", response_model=MultiItemsRow)
+async def add_multi_items_row(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    row: dict = Body(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Append a new row to multi_line_items value_json for an entry+field."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if fv is None:
+        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id, value_json=[])
+        db.add(fv)
+    if not isinstance(fv.value_json, list):
+        fv.value_json = []
+    fv.value_json.append(row)
+    flag_modified(fv, "value_json")
+    await db.flush()
+    await db.commit()
+    index = len(fv.value_json) - 1
+    return MultiItemsRow(index=index, data=row)
+
+
+@router.put("/multi-items/rows/{row_index}", response_model=MultiItemsRow)
+async def update_multi_items_row(
+    row_index: int,
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    row: dict = Body(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update a single row in multi_line_items value_json."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if not fv or not isinstance(fv.value_json, list):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rows to update")
+    if row_index < 0 or row_index >= len(fv.value_json):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Row index out of range")
+    fv.value_json[row_index] = row
+    flag_modified(fv, "value_json")
+    await db.flush()
+    await db.commit()
+    return MultiItemsRow(index=row_index, data=row)
+
+
+@router.post("/multi-items/rows/{row_index}/cell", response_model=MultiItemsRow)
+async def update_multi_items_row_cell(
+    row_index: int,
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    key: str = Query(..., description="Sub-field key to update"),
+    value: str | None = Body(None, description="New value for the sub-field (stringified)"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Update a single cell in a multi_line_items row.
+
+    Intended for cases like per-row file upload where we only want to change one sub-field
+    without overwriting the rest of the row.
+    """
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if not fv or not isinstance(fv.value_json, list):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rows to update")
+    if row_index < 0 or row_index >= len(fv.value_json):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Row index out of range")
+
+    row = fv.value_json[row_index]
+    if not isinstance(row, dict):
+        row = {}
+        fv.value_json[row_index] = row
+
+    row[key] = value
+    flag_modified(fv, "value_json")  # SQLAlchemy does not track in-place JSON mutations
+    await db.flush()
+    await db.commit()
+    return MultiItemsRow(index=row_index, data=row)
+
+
+@router.delete("/multi-items/rows/{row_index}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_multi_items_row(
+    row_index: int,
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a single row in multi_line_items value_json."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if not fv or not isinstance(fv.value_json, list):
+        return
+    if row_index < 0 or row_index >= len(fv.value_json):
+        return
+    del fv.value_json[row_index]
+    flag_modified(fv, "value_json")
+    await db.flush()
+    await db.commit()
+
+
+@router.post("/multi-items/rows/bulk-delete", status_code=status.HTTP_204_NO_CONTENT)
+async def bulk_delete_multi_items_rows(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    indices: list[int] = Body(..., embed=True),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Bulk delete rows in multi_line_items value_json by index list."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if not fv or not isinstance(fv.value_json, list):
+        return
+    index_set = {i for i in indices if isinstance(i, int) and i >= 0}
+    if not index_set:
+        return
+    fv.value_json = [r for idx, r in enumerate(fv.value_json) if idx not in index_set]
+    flag_modified(fv, "value_json")
+    await db.flush()
+    await db.commit()
+
+
+@router.post("/multi-items/sync-from-api")
+async def sync_multi_items_from_api(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    sync_mode: str = Query("override", description="override = replace existing; append = append rows"),
+    api_url: str | None = Query(None, description="Optional override for field config multi_items_api_endpoint_url"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """
+    Sync a multi_line_items field from its own API endpoint.
+
+    - API URL is taken from KPIField.config['multi_items_api_endpoint_url'].
+    - Request payload: { year, kpi_id, field_id, field_key, organization_id, entry_id }.
+    - Expected response:
+        {
+          "year": 2026,
+          "items": [ { ...row1 }, { ...row2 }, ... ],
+          "override_existing": true | false   # optional, defaults to true
+        }
+    - sync_mode:
+        - "override": replace existing rows with items
+        - "append": append items to existing rows
+    """
+    org_id = _org_id(current_user, organization_id)
+    # Load entry and field
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+
+    field_res = await db.execute(
+        select(KPIField)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPIField.id == field_id, KPI.organization_id == org_id)
+    )
+    field = field_res.scalar_one_or_none()
+    if not field or field.field_type != FieldType.multi_line_items or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-line field not found")
+
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    cfg = getattr(field, "config", None) or {}
+    configured_url = (cfg.get("multi_items_api_endpoint_url") or "").strip()
+    final_api_url = (api_url or configured_url or "").strip()
+    if not final_api_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No multi_items_api_endpoint_url configured for this field")
+
+    payload = {
+        "year": entry.year,
+        "kpi_id": field.kpi_id,
+        "field_id": field.id,
+        "field_key": field.key,
+        "organization_id": org_id,
+        "entry_id": entry.id,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(final_api_url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Field API error: {e!s}",
+        )
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Field API response must be a JSON object")
+    resp_year = data.get("year")
+    items = data.get("items")
+    override_existing = data.get("override_existing", True)
+    if resp_year is not None and int(resp_year) != int(entry.year):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Year in field API response does not match entry year")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Field API response 'items' must be a list")
+
+    # Load existing rows
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    existing_rows: list[dict] = []
+    if fv and isinstance(fv.value_json, list):
+        existing_rows = fv.value_json
+
+    effective_mode = (sync_mode or "override").lower()
+    if effective_mode == "append":
+        new_rows = existing_rows + items
+    else:
+        # If override_existing is false and there is existing data, skip (similar to KPI-level behaviour)
+        if not override_existing and existing_rows:
+            return {
+                "skipped": True,
+                "reason": "Field already has rows and override_existing=false in API response.",
+                "rows_imported": 0,
+            }
+        new_rows = items
+
+    if fv is None:
+        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id, value_json=new_rows)
+        db.add(fv)
+    else:
+        fv.value_json = new_rows
+    await db.flush()
+    await db.commit()
+    return {"entry_id": entry.id, "field_id": field.id, "rows_imported": len(items)}
+
+
+@router.get("/multi-items/export")
+async def export_multi_items_csv(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    search: str | None = Query(None),
+    sort_by: str | None = Query(None),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
+    filters: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Export multi_line_items rows for an entry+field as CSV, honoring search, sort, and filters.
+    """
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    rows: list[dict] = fv.value_json if fv and isinstance(fv.value_json, list) else []
+
+    # Filter by search
+    if search:
+        q = search.lower().strip()
+
+        def matches(row: dict) -> bool:
+            for v in row.values():
+                if v is None:
+                    continue
+                s = str(v).lower()
+                if q in s:
+                    return True
+            return False
+
+        rows = [r for r in rows if isinstance(r, dict) and matches(r)]
+
+    # Advanced filters
+    if filters:
+        try:
+            raw_filters = json.loads(filters)
+            if isinstance(raw_filters, dict):
+
+                def passes_filters(row: dict) -> bool:
+                    for fk, fv in raw_filters.items():
+                        if fv is None or fv == "":
+                            continue
+                        cell = row.get(fk)
+                        if cell is None:
+                            return False
+                        if str(fv).strip().lower() not in str(cell).lower():
+                            return False
+                    return True
+
+                rows = [r for r in rows if isinstance(r, dict) and passes_filters(r)]
+        except json.JSONDecodeError:
+            pass
+
+    # Sort
+    if sort_by:
+        reverse = sort_dir == "desc"
+
+        def sort_key(row: dict):
+            v = row.get(sort_by)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return str(v) if v is not None else ""
+
+        try:
+            rows = sorted(rows, key=sort_key, reverse=reverse)
+        except Exception:
+            pass
+
+    # Build CSV
+    sub_fields = [sf for sf in (field.sub_fields or [])]
+    headers = [getattr(sf, "key", "") for sf in sub_fields]
+    output = BytesIO()
+    writer = csv.writer(output)
+    writer.writerow(headers)
+    for r in rows:
+        writer.writerow([r.get(key, "") for key in headers])
+
+    filename = f"multi_items_{field.key}_{field.id}.csv"
+    return StreamingResponse(
+        BytesIO(output.getvalue()),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+    )
+
+
 @router.get("/overview")
 async def get_entries_overview(
     year: int = Query(..., ge=2000, le=2100),
@@ -411,6 +962,7 @@ async def get_entry_fields(
             "sort_order": f.sort_order,
             "config": getattr(f, "config", None),
             "carry_forward_data": getattr(f, "carry_forward_data", False),
+            "full_page_multi_items": getattr(f, "full_page_multi_items", False),
             "options": [{"value": o.value, "label": o.label} for o in (f.options or [])],
             "sub_fields": [
                 {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order, "config": getattr(s, "config", None)}

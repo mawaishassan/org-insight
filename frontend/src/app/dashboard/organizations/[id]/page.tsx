@@ -3003,6 +3003,17 @@ function FieldsSection({
                 </button>
               </div>
             )}
+            {createForm.watch("field_type") === "multi_line_items" && (
+              <div className="form-group">
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <input type="checkbox" {...createForm.register("full_page_multi_items")} />
+                  Use full-page editor for this multi-line field
+                </label>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
+                  When enabled, data entry for this multi-line field will use a dedicated full-page screen instead of inline rows.
+                </p>
+              </div>
+            )}
             <div className="form-group">
               <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 <input type="checkbox" {...createForm.register("is_required")} />

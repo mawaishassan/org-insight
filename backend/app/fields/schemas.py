@@ -64,6 +64,7 @@ class KPIFieldCreate(BaseModel):
     sort_order: int = 0
     config: dict[str, Any] | None = None
     carry_forward_data: bool = False
+    full_page_multi_items: bool = False
     options: list[KPIFieldOptionCreate] = Field(default_factory=list)
     sub_fields: list[KPIFieldSubFieldCreate] = Field(default_factory=list, description="For multi_line_items: column definitions")
 
@@ -79,6 +80,7 @@ class KPIFieldUpdate(BaseModel):
     sort_order: int | None = None
     config: dict[str, Any] | None = None
     carry_forward_data: bool | None = None
+    full_page_multi_items: bool | None = None
     options: list[KPIFieldOptionCreate] | None = None
     sub_fields: list[KPIFieldSubFieldCreate] | None = Field(None, description="For multi_line_items: replace column definitions")
 
@@ -108,6 +110,7 @@ class KPIFieldResponse(BaseModel):
     sort_order: int
     config: dict[str, Any] | None = None
     carry_forward_data: bool = False
+    full_page_multi_items: bool = False
     options: list[KPIFieldOptionResponse] = []
     sub_fields: list[KPIFieldSubFieldResponse] = []
 

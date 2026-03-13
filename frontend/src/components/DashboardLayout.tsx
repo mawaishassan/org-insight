@@ -76,6 +76,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const dataExportMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)\/data-export\/?$/);
   const usersDetailMatch = pathname.match(/^\/dashboard\/users\/(\d+)\/?$/);
   const entryDetailMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/?$/);
+  const entryMultiMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/?$/);
+  const entryMultiRowMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/row\/([^/]+)\/?$/);
 
   useEffect(() => {
     const token = getAccessToken();
@@ -216,6 +218,89 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               { label: "Users", href: "/dashboard/users" },
               { label: u.full_name || u.username, href: `/dashboard/users/${userId}` },
             ],
+          });
+        })
+        .catch(() => setBreadcrumbTail(null));
+      return;
+    }
+    if (entryMultiRowMatch) {
+      const kpiId = Number(entryMultiRowMatch[1]);
+      const targetYear = entryMultiRowMatch[2];
+      const fieldId = Number(entryMultiRowMatch[3]);
+      const rowIndexStr = entryMultiRowMatch[4];
+      const isNew = rowIndexStr === "new";
+      const rowIndexNum = isNew ? null : Number(rowIndexStr);
+      const orgForQuery = oid || undefined;
+      const params = qs({ kpi_id: kpiId, organization_id: orgForQuery });
+
+      Promise.all([
+        api<{ id: number; name: string }>(`/kpis/${kpiId}?${qs({ organization_id: orgForQuery })}`, { token }),
+        api<Array<{ id: number; name: string }>>(`/entries/fields?${params}`, { token }),
+      ])
+        .then(([kpi, fields]) => {
+          const field = fields.find((f) => f.id === fieldId) || null;
+          const kpisHref = `/dashboard/kpis?${qs({ year: targetYear, organization_id: orgForQuery })}`;
+          const yearHref = `/dashboard/entries?${qs({ year: targetYear, organization_id: orgForQuery })}`;
+          const entryHref = `/dashboard/entries/${kpiId}/${targetYear}${
+            orgForQuery ? `?${qs({ organization_id: orgForQuery })}` : ""
+          }`;
+          const multiHref = `/dashboard/entries/${kpiId}/${targetYear}/multi/${fieldId}${
+            orgForQuery ? `?${qs({ organization_id: orgForQuery })}` : ""
+          }`;
+          const lastLabel = isNew
+            ? "New record"
+            : rowIndexNum != null
+            ? `Record #${rowIndexNum + 1} detail`
+            : "Record detail";
+          const segments = [
+            { label: "KPIs", href: kpisHref },
+            { label: targetYear, href: yearHref },
+            { label: kpi.name, href: entryHref },
+            {
+              label: field ? `${field.name} (multiple record entry)` : "Multiple record entry",
+              href: multiHref,
+            },
+            { label: lastLabel, href: pathname + (searchParams.toString() ? `?${searchParams.toString()}` : "") },
+          ];
+          setBreadcrumbTail({
+            orgId: oid || 0,
+            orgName: null,
+            segments,
+          });
+        })
+        .catch(() => setBreadcrumbTail(null));
+      return;
+    }
+    if (entryMultiMatch) {
+      const kpiId = Number(entryMultiMatch[1]);
+      const targetYear = entryMultiMatch[2];
+      const fieldId = Number(entryMultiMatch[3]);
+      const orgForQuery = oid || undefined;
+      const params = qs({ kpi_id: kpiId, organization_id: orgForQuery });
+
+      Promise.all([
+        api<{ id: number; name: string }>(`/kpis/${kpiId}?${qs({ organization_id: orgForQuery })}`, { token }),
+        api<Array<{ id: number; name: string }>>(`/entries/fields?${params}`, { token }),
+      ])
+        .then(([kpi, fields]) => {
+          const field = fields.find((f) => f.id === fieldId) || null;
+          const kpisHref = `/dashboard/kpis?${qs({ year: targetYear, organization_id: orgForQuery })}`;
+          const yearHref = `/dashboard/entries?${qs({ year: targetYear, organization_id: orgForQuery })}`;
+          const entryHref = `/dashboard/entries/${kpiId}/${targetYear}${
+            orgForQuery ? `?${qs({ organization_id: orgForQuery })}` : ""
+          }`;
+          const multiHref = searchParams.toString() ? `${pathname}?${searchParams.toString()}` : pathname;
+          const lastLabel = field ? `${field.name} (multiple record entry)` : "Multiple record entry";
+          const segments = [
+            { label: "KPIs", href: kpisHref },
+            { label: targetYear, href: yearHref },
+            { label: kpi.name, href: entryHref },
+            { label: lastLabel, href: multiHref },
+          ];
+          setBreadcrumbTail({
+            orgId: oid || 0,
+            orgName: null,
+            segments,
           });
         })
         .catch(() => setBreadcrumbTail(null));

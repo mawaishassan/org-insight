@@ -29,6 +29,7 @@ async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> K
         sort_order=data.sort_order,
         config=data.config,
         carry_forward_data=getattr(data, "carry_forward_data", False),
+        full_page_multi_items=getattr(data, "full_page_multi_items", False),
     )
     db.add(field)
     await db.flush()
@@ -103,6 +104,8 @@ async def update_field(
         field.config = data.config
     if data.carry_forward_data is not None:
         field.carry_forward_data = data.carry_forward_data
+    if data.full_page_multi_items is not None:
+        field.full_page_multi_items = data.full_page_multi_items
     if data.options is not None:
         await db.execute(delete(KPIFieldOption).where(KPIFieldOption.field_id == field_id))
         for i, opt in enumerate(data.options):
