@@ -79,6 +79,7 @@ export default function FullPageMultiItems() {
   const [showColumnsPopup, setShowColumnsPopup] = useState(false);
   const [columnsPopupSearch, setColumnsPopupSearch] = useState("");
   const [columnsPopupDraft, setColumnsPopupDraft] = useState<string[]>([]);
+  const [canEditKpi, setCanEditKpi] = useState<boolean>(true);
 
   const effectiveOrgId = useMemo(
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
@@ -122,6 +123,12 @@ export default function FullPageMultiItems() {
         { token }
       );
       setEntryId(forPeriod.id);
+      // User's edit rights for this KPI (view-only users get can_edit: false)
+      const apiInfo = await api<{ can_edit?: boolean }>(
+        `/entries/kpi-api-info?${new URLSearchParams({ kpi_id: String(kpiId), organization_id: String(effectiveOrgId) }).toString()}`,
+        { token }
+      ).catch(() => ({ can_edit: false }));
+      setCanEditKpi(apiInfo?.can_edit !== false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load context");
     }
@@ -309,29 +316,33 @@ export default function FullPageMultiItems() {
             }}
             style={{ flex: "1 1 220px", minWidth: 160, padding: "0.4rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
           />
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => {
-              if (!entryId) return;
-              const params = new URLSearchParams({
-                organization_id: String(effectiveOrgId ?? ""),
-                ...(periodKey ? { period_key: periodKey } : {}),
-              });
-              router.push(
-                `/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/new?${params.toString()}`
-              );
-            }}
-          >
-            Add row
-          </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setBulkPanelOpen((open) => !open)}
-          >
-            Bulk upload
-          </button>
+          {canEditKpi && (
+            <>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  if (!entryId) return;
+                  const params = new URLSearchParams({
+                    organization_id: String(effectiveOrgId ?? ""),
+                    ...(periodKey ? { period_key: periodKey } : {}),
+                  });
+                  router.push(
+                    `/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/new?${params.toString()}`
+                  );
+                }}
+              >
+                Add row
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setBulkPanelOpen((open) => !open)}
+              >
+                Bulk upload
+              </button>
+            </>
+          )}
           <button
             type="button"
             className="btn"
@@ -493,7 +504,7 @@ export default function FullPageMultiItems() {
       )}
 
       {/* Bulk upload panel */}
-      {bulkPanelOpen && (
+      {canEditKpi && bulkPanelOpen && (
         <div className="card" style={{ padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
             <span style={{ fontSize: "0.9rem", fontWeight: 600 }}>Bulk upload</span>
@@ -791,7 +802,7 @@ export default function FullPageMultiItems() {
 
       {/* Rows list */}
       <div className="card" style={{ padding: "0.75rem" }}>
-        {selectedIndices.length > 0 && !loading && total > 0 && (
+        {canEditKpi && selectedIndices.length > 0 && !loading && total > 0 && (
           <div
             style={{
               display: "flex",
@@ -970,24 +981,28 @@ export default function FullPageMultiItems() {
         {loading ? (
           <p style={{ color: "var(--muted)" }}>Loading rows…</p>
         ) : rows.length === 0 ? (
-          <p style={{ color: "var(--muted)" }}>No rows yet. Use "Add row" above to create one.</p>
+          <p style={{ color: "var(--muted)" }}>
+            {canEditKpi ? 'No rows yet. Use "Add row" above to create one.' : "No rows in this field."}
+          </p>
         ) : (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
             <thead>
               <tr>
-                <th style={{ width: 32, padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedIndices.length > 0 && selectedIndices.length === rows.length}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setSelectedIndices(rows.map((r) => r.index));
-                      } else {
-                        setSelectedIndices([]);
-                      }
-                    }}
-                  />
-                </th>
+                {canEditKpi && (
+                  <th style={{ width: 32, padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedIndices.length > 0 && selectedIndices.length === rows.length}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedIndices(rows.map((r) => r.index));
+                        } else {
+                          setSelectedIndices([]);
+                        }
+                      }}
+                    />
+                  </th>
+                )}
                 <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>#</th>
                 {subFields
                   .filter((sf) => visibleColumns.length === 0 || visibleColumns.includes(sf.key))
@@ -1025,34 +1040,42 @@ export default function FullPageMultiItems() {
                     </th>
                   );
                 })}
-                <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", width: 88, textAlign: "right" }}>
-                  Actions
-                </th>
+                {canEditKpi && (
+                  <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", width: 88, textAlign: "right" }}>
+                    Actions
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={row.index}>
-                  <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
-                    <input
-                      type="checkbox"
-                      checked={selectedIndices.includes(row.index)}
-                      onChange={(e) => {
-                        setSelectedIndices((prev) =>
-                          e.target.checked ? [...new Set([...prev, row.index])] : prev.filter((i) => i !== row.index)
-                        );
-                      }}
-                    />
-                  </td>
+                  {canEditKpi && (
+                    <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIndices.includes(row.index)}
+                        onChange={(e) => {
+                          setSelectedIndices((prev) =>
+                            e.target.checked ? [...new Set([...prev, row.index])] : prev.filter((i) => i !== row.index)
+                          );
+                        }}
+                      />
+                    </td>
+                  )}
                   <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>{row.index + 1}</td>
                 {subFields
                   .filter((sf) => visibleColumns.length === 0 || visibleColumns.includes(sf.key))
                   .map((sf) => (
                     <td
                       key={sf.key}
-                      style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)", cursor: "pointer" }}
+                      style={{
+                        padding: "0.35rem 0.5rem",
+                        borderBottom: "1px solid var(--border)",
+                        cursor: canEditKpi ? "pointer" : "default",
+                      }}
                       onClick={() => {
-                        startEdit(row);
+                        if (canEditKpi) startEdit(row);
                       }}
                     >
                       {(() => {
@@ -1097,84 +1120,86 @@ export default function FullPageMultiItems() {
                       })()}
                     </td>
                   ))}
-                  <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "right", whiteSpace: "nowrap" }}>
-                    <div style={{ display: "inline-flex", gap: "0.25rem", alignItems: "center", justifyContent: "flex-end" }}>
-                      <button
-                        type="button"
-                        title="Edit row"
-                        aria-label="Edit row"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          startEdit(row);
-                        }}
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          width: 32,
-                          height: 32,
-                          padding: 0,
-                          border: "1px solid var(--border)",
-                          borderRadius: 6,
-                          background: "var(--bg-subtle, #f5f5f5)",
-                          color: "var(--text)",
-                          cursor: "pointer",
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.background = "var(--accent-muted, #e8e8e8)";
-                          e.currentTarget.style.borderColor = "var(--accent)";
-                          e.currentTarget.style.color = "var(--accent)";
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.background = "var(--bg-subtle, #f5f5f5)";
-                          e.currentTarget.style.borderColor = "var(--border)";
-                          e.currentTarget.style.color = "var(--text)";
-                        }}
-                      >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                        </svg>
-                      </button>
-                      <button
-                        type="button"
-                        title="Delete row"
-                        aria-label="Delete row"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteRow(row.index);
-                        }}
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          width: 32,
-                          height: 32,
-                          padding: 0,
-                          border: "1px solid var(--border)",
-                          borderRadius: 6,
-                          background: "var(--bg-subtle, #f5f5f5)",
-                          color: "var(--error, #b91c1c)",
-                          cursor: "pointer",
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.background = "var(--error-muted, #fef2f2)";
-                          e.currentTarget.style.borderColor = "var(--error)";
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.background = "var(--bg-subtle, #f5f5f5)";
-                          e.currentTarget.style.borderColor = "var(--border)";
-                        }}
-                      >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                          <polyline points="3 6 5 6 21 6" />
-                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                          <line x1="10" y1="11" x2="10" y2="17" />
-                          <line x1="14" y1="11" x2="14" y2="17" />
-                        </svg>
-                      </button>
-                    </div>
-                  </td>
+                  {canEditKpi && (
+                    <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "right", whiteSpace: "nowrap" }}>
+                      <div style={{ display: "inline-flex", gap: "0.25rem", alignItems: "center", justifyContent: "flex-end" }}>
+                        <button
+                          type="button"
+                          title="Edit row"
+                          aria-label="Edit row"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            startEdit(row);
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            width: 32,
+                            height: 32,
+                            padding: 0,
+                            border: "1px solid var(--border)",
+                            borderRadius: 6,
+                            background: "var(--bg-subtle, #f5f5f5)",
+                            color: "var(--text)",
+                            cursor: "pointer",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "var(--accent-muted, #e8e8e8)";
+                            e.currentTarget.style.borderColor = "var(--accent)";
+                            e.currentTarget.style.color = "var(--accent)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "var(--bg-subtle, #f5f5f5)";
+                            e.currentTarget.style.borderColor = "var(--border)";
+                            e.currentTarget.style.color = "var(--text)";
+                          }}
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          title="Delete row"
+                          aria-label="Delete row"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteRow(row.index);
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            width: 32,
+                            height: 32,
+                            padding: 0,
+                            border: "1px solid var(--border)",
+                            borderRadius: 6,
+                            background: "var(--bg-subtle, #f5f5f5)",
+                            color: "var(--error, #b91c1c)",
+                            cursor: "pointer",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "var(--error-muted, #fef2f2)";
+                            e.currentTarget.style.borderColor = "var(--error)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "var(--bg-subtle, #f5f5f5)";
+                            e.currentTarget.style.borderColor = "var(--border)";
+                          }}
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <polyline points="3 6 5 6 21 6" />
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            <line x1="10" y1="11" x2="10" y2="17" />
+                            <line x1="14" y1="11" x2="14" y2="17" />
+                          </svg>
+                        </button>
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

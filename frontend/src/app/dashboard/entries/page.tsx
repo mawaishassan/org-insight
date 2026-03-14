@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { KpiCardsGrid } from "@/components/KpiCardsGrid";
@@ -36,7 +36,6 @@ interface OrgTagRow {
 }
 
 export default function EntriesPage() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const yearParam = searchParams.get("year");
   const year = yearParam ? Number(yearParam) : currentYear;
@@ -128,14 +127,6 @@ export default function EntriesPage() {
       .catch(() => setTagName(null));
   }, [token, organizationId, tagIdParam]);
 
-  const removeFilter = (key: string) => {
-    const next = new URLSearchParams(searchParams.toString());
-    next.delete(key);
-    if (key === "domain_id") next.delete("category_id");
-    const query = next.toString();
-    router.push(query ? `/dashboard/entries?${query}` : "/dashboard/entries");
-  };
-
   const filterTags: { key: string; label: string }[] = [];
   if (domainIdParam) filterTags.push({ key: "domain_id", label: domainName ? `Domain: ${domainName}` : `Domain` });
   if (categoryIdParam) filterTags.push({ key: "category_id", label: categoryName ? `Category: ${categoryName}` : `Category` });
@@ -153,90 +144,8 @@ export default function EntriesPage() {
 
   if (loading && organizationId == null) return <p>Loading...</p>;
 
-  const headingText =
-    filteredKpiCount !== null ? `${filteredKpiCount} Data Points` : "Data Points";
-
   return (
     <div>
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "1rem", marginBottom: "0.75rem" }}>
-        <h1 style={{ fontSize: "1.5rem", marginBottom: 0 }}>
-          {headingText}
-        </h1>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <span style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Show:</span>
-          <button
-            type="button"
-            onClick={() => setAssignedToMeOnly(false)}
-            style={{
-              padding: "0.35rem 0.65rem",
-              borderRadius: 6,
-              border: "1px solid var(--border)",
-              background: !assignedToMeOnly ? "var(--accent)" : "var(--surface)",
-              color: !assignedToMeOnly ? "var(--on-muted)" : "var(--text)",
-              cursor: "pointer",
-              fontSize: "0.85rem",
-              fontWeight: 500,
-            }}
-          >
-            All
-          </button>
-          <button
-            type="button"
-            onClick={() => setAssignedToMeOnly(true)}
-            style={{
-              padding: "0.35rem 0.65rem",
-              borderRadius: 6,
-              border: "1px solid var(--border)",
-              background: assignedToMeOnly ? "var(--accent)" : "var(--surface)",
-              color: assignedToMeOnly ? "var(--on-muted)" : "var(--text)",
-              cursor: "pointer",
-              fontSize: "0.85rem",
-              fontWeight: 500,
-            }}
-          >
-            Only assigned to me
-          </button>
-        </div>
-      </div>
-      {filterTags.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.5rem", marginBottom: "1rem" }}>
-          {filterTags.map(({ key, label }) => (
-            <span
-              key={key}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.35rem",
-                padding: "0.25rem 0.5rem",
-                borderRadius: 6,
-                background: "var(--border)",
-                fontSize: "0.85rem",
-                color: "var(--text)",
-              }}
-            >
-              {label}
-              <button
-                type="button"
-                onClick={() => removeFilter(key)}
-                aria-label={`Remove ${label}`}
-                style={{
-                  padding: 0,
-                  margin: 0,
-                  border: "none",
-                  background: "none",
-                  cursor: "pointer",
-                  fontSize: "1rem",
-                  lineHeight: 1,
-                  color: "var(--muted)",
-                }}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
 
       {organizationId == null ? (
@@ -245,19 +154,20 @@ export default function EntriesPage() {
         </div>
       ) : (
         <KpiCardsGrid
-          organizationId={organizationId}
-          year={year}
-          kpisOverride={kpisOverride}
-          filterName={q}
-          statusFilter={status}
-          assignedToMeOnly={assignedToMeOnly}
-          onFilteredCountChange={setFilteredKpiCount}
-          emptyMessage={
-            filterTags.length > 0
-              ? "There are no KPIs for the selected filters. Change filters to view KPIs or ask your admin to add or assign KPIs for these filters."
-              : "You have no KPIs assigned for data entry. Ask your admin to assign KPIs to your user."
-          }
-        />
+            organizationId={organizationId}
+            year={year}
+            kpisOverride={kpisOverride}
+            filterName={q}
+            statusFilter={status}
+            assignedToMeOnly={assignedToMeOnly}
+            onFilteredCountChange={setFilteredKpiCount}
+            cardLayout="org_admin"
+            emptyMessage={
+              filterTags.length > 0 || q.trim() || status !== "all" || assignedToMeOnly
+                ? "No KPIs match the filters. Change filters or ask your admin to add or assign KPIs."
+                : "You have no KPIs assigned for data entry. Ask your admin to assign KPIs to your user."
+            }
+          />
       )}
     </div>
   );

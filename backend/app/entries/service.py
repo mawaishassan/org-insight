@@ -16,6 +16,8 @@ from app.core.models import (
     TimeDimension,
     effective_kpi_time_dimension,
     period_key_sort_order,
+    KPIOrganizationTag,
+    OrganizationTag,
 )
 from app.core.models import FieldType
 
@@ -851,6 +853,18 @@ async def list_entries_overview(
         pk = getattr(e, "period_key", "") or ""
         entry_by_kpi_period[(e.kpi_id, pk)] = e
 
+    tag_names_by_kpi: dict[int, list[str]] = {kid: [] for kid in kpi_ids}
+    if kpi_ids:
+        tag_res = await db.execute(
+            select(KPIOrganizationTag.kpi_id, OrganizationTag.name)
+            .join(OrganizationTag, OrganizationTag.id == KPIOrganizationTag.organization_tag_id)
+            .where(KPIOrganizationTag.kpi_id.in_(kpi_ids))
+        )
+        for row in tag_res.all():
+            kpi_id, name = row[0], (row[1] or "").strip()
+            if name and name not in tag_names_by_kpi.get(kpi_id, []):
+                tag_names_by_kpi.setdefault(kpi_id, []).append(name)
+
     result = []
     for kpi in kpis:
         kpi_td_raw = getattr(kpi, "time_dimension", None)
@@ -905,10 +919,13 @@ async def list_entries_overview(
         item = {
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,
+            "kpi_description": getattr(kpi, "description", None) or None,
+            "entry_mode": getattr(kpi, "entry_mode", None) or "manual",
             "kpi_year": year,  # context year (data scope), not KPI-level year
             "org_time_dimension": org_td.value,
             "kpi_time_dimension": kpi_td_raw,
             "effective_time_dimension": effective_td.value,
+            "organization_tag_names": tag_names_by_kpi.get(kpi.id, []),
             "entries": periods_out,
             "assigned_user_names": assigned_by_kpi.get(kpi.id, []),
             "assigned_users": assigned_users_detail_by_kpi.get(kpi.id, []),

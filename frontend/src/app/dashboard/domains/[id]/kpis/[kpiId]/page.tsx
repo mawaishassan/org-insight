@@ -1526,6 +1526,8 @@ export default function DomainKpiDetailPage() {
                     </div>
                   )}
 
+                  {canEditKpi && (
+                  <>
                   <div style={{ marginBottom: "0.75rem", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                     <button
                       type="button"
@@ -1771,6 +1773,8 @@ export default function DomainKpiDetailPage() {
                       </div>
                     )}
                   </div>
+                  )}
+                  </>
                   )}
 
                   {/* Add row button moved to top while editing */}

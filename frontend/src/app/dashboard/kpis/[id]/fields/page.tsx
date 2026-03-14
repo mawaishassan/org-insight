@@ -461,7 +461,8 @@ export default function KpiFieldsPage() {
         };
       }
       if (data.field_type === "multi_line_items") {
-        const existingConfig = (field.config as Record<string, unknown> | null) ?? {};
+        const existingField = list.find((f) => f.id === fieldId);
+        const existingConfig = (existingField?.config as Record<string, unknown> | null) ?? {};
         if (data.multi_items_api_endpoint_url) {
           body.config = {
             ...(body.config as Record<string, unknown> | undefined ?? existingConfig),
