@@ -1,15 +1,20 @@
 """KPI entry API routes (data entry + admin lock)."""
 
 from io import BytesIO
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+import csv
+import json
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
+import httpx
 
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_org_admin
-from app.core.models import User, KPIEntry, KPIField, KPIFieldValue, KPI, FieldType
+from app.core.models import User, KPIEntry, KPIField, KPIFieldValue, KPI, FieldType, Organization, TimeDimension, effective_kpi_time_dimension
 from app.entries.schemas import EntryCreate, EntrySubmit, EntryLock, EntryResponse, FieldValueResponse
 from app.entries.service import (
     get_or_create_entry,
@@ -21,6 +26,8 @@ from app.entries.service import (
     list_entries,
     list_available_kpis,
     list_entries_overview,
+    EntryValidationError,
+    _normalize_reference_value,
 )
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
@@ -81,8 +88,8 @@ async def _load_multi_items_field(db: AsyncSession, org_id: int, field_id: int) 
     return field
 
 
-def _xlsx_bytes_for_multi_items_template(field: KPIField) -> bytes:
-    """Create an empty Excel template for multi_line_items sub_fields."""
+def _xlsx_bytes_for_multi_items_template(field: KPIField, existing_items: list[dict] | None = None) -> bytes:
+    """Create an Excel template for multi_line_items sub_fields. Optionally include existing data."""
     # Import here so app can start even if optional dependency isn't installed yet.
     from openpyxl import Workbook
 
@@ -92,9 +99,17 @@ def _xlsx_bytes_for_multi_items_template(field: KPIField) -> bytes:
 
     sub_fields = list(field.sub_fields or [])
     # Header row uses sub-field keys (stable API identifiers).
-    ws.append([s.key for s in sub_fields])
-    # Empty sample row (user fills in).
-    ws.append(["" for _ in sub_fields])
+    keys = [s.key for s in sub_fields]
+    ws.append(keys)
+    items = existing_items if isinstance(existing_items, list) else []
+    if items:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ws.append([(item.get(k) if item.get(k) is not None else "") for k in keys])
+    else:
+        # Empty sample row (user fills in).
+        ws.append(["" for _ in keys])
 
     buf = BytesIO()
     wb.save(buf)
@@ -169,14 +184,28 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
     return out
 
 
+class MultiItemsRow(BaseModel):
+    index: int
+    data: dict
+
+
+class MultiItemsListResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    rows: list[MultiItemsRow]
+    sub_fields: list[dict]
+
+
 @router.get("/multi-items/template")
 async def download_multi_items_template(
     field_id: int = Query(...),
+    entry_id: int | None = Query(None, description="If provided, include existing rows for this entry/field"),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Download an empty Excel template for a multi_line_items field (any user who can edit this KPI)."""
+    """Download an Excel template for a multi_line_items field (any user who can edit this KPI)."""
     org_id = _org_id(current_user, organization_id)
     field = await _load_multi_items_field(db, org_id, field_id)
     if not field:
@@ -185,7 +214,21 @@ async def download_multi_items_template(
     if not can_edit:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
 
-    content = _xlsx_bytes_for_multi_items_template(field)
+    existing_items: list[dict] | None = None
+    if entry_id is not None:
+        entry_res = await db.execute(
+            select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+        )
+        entry = entry_res.scalar_one_or_none()
+        if entry and entry.kpi_id == field.kpi_id:
+            fv_res = await db.execute(
+                select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+            )
+            fv = fv_res.scalar_one_or_none()
+            if fv and isinstance(fv.value_json, list):
+                existing_items = fv.value_json
+
+    content = _xlsx_bytes_for_multi_items_template(field, existing_items=existing_items)
     filename = f"multi_items_{field.key}_{field.id}.xlsx"
     return StreamingResponse(
         BytesIO(content),
@@ -229,6 +272,44 @@ async def upload_multi_items_excel(
     content = await file.read()
     items = _parse_multi_items_xlsx(content, field)
 
+    # Reference consistency check for reference sub-fields (row-level errors)
+    from app.entries.service import get_reference_allowed_values, _normalize_reference_value
+    validation_errors: list[dict] = []
+    ref_sub_fields = [s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.reference]
+    allowed_cache: dict[tuple[int, str, str | None], set[str]] = {}
+    for row_idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        for sf in ref_sub_fields:
+            cfg = getattr(sf, "config", None) or {}
+            sid = cfg.get("reference_source_kpi_id")
+            skey = cfg.get("reference_source_field_key")
+            subkey = cfg.get("reference_source_sub_field_key")
+            if not sid or not skey:
+                continue
+            cache_key = (int(sid), str(skey), str(subkey) if subkey else None)
+            if cache_key not in allowed_cache:
+                allowed = await get_reference_allowed_values(
+                    db, int(sid), str(skey), org_id, source_sub_field_key=(str(subkey) if subkey else None)
+                )
+                allowed_cache[cache_key] = {_normalize_reference_value(a) for a in allowed}
+            cell = item.get(sf.key)
+            raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
+            normalized = _normalize_reference_value(raw)
+            if normalized and normalized not in allowed_cache[cache_key]:
+                validation_errors.append(
+                    {
+                        "field_key": field.key,
+                        "sub_field_key": sf.key,
+                        "row_index": row_idx,
+                        "value": raw,
+                        "row": item,
+                        "message": "Value does not exist in the referenced KPI field.",
+                    }
+                )
+    if validation_errors:
+        raise EntryValidationError(validation_errors)
+
     fv_res = await db.execute(
         select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
     )
@@ -244,6 +325,539 @@ async def upload_multi_items_excel(
     await db.commit()
 
     return {"entry_id": entry.id, "field_id": field.id, "items": fv.value_json, "append": append}
+
+
+@router.get("/multi-items/rows", response_model=MultiItemsListResponse)
+async def list_multi_items_rows(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    search: str | None = Query(None, description="Simple text search across row values"),
+    sort_by: str | None = Query(None, description="Sub-field key to sort by"),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    filters: str | None = Query(
+        None,
+        description='Optional JSON object of column filters, e.g. {"program_name": "MBA"} (case-insensitive substring).',
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List multi_line_items rows for an entry+field with search, sort, and paging."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    rows: list[dict] = fv.value_json if fv and isinstance(fv.value_json, list) else []
+
+    # Build sub_fields payload
+    sub_fields = [
+        {
+            "key": getattr(sf, "key", ""),
+            "name": getattr(sf, "name", getattr(sf, "key", "")),
+            "field_type": getattr(sf, "field_type", None).value if getattr(sf, "field_type", None) else None,
+            "is_required": getattr(sf, "is_required", False),
+        }
+        for sf in (field.sub_fields or [])
+    ]
+
+    # Filter by search
+    if search:
+        q = search.lower().strip()
+        def matches(row: dict) -> bool:
+            for v in row.values():
+                if v is None:
+                    continue
+                s = str(v).lower()
+                if q in s:
+                    return True
+            return False
+        rows = [r for r in rows if isinstance(r, dict) and matches(r)]
+
+    # Advanced column filters (JSON: key -> value, case-insensitive substring)
+    if filters:
+        try:
+            raw_filters = json.loads(filters)
+            if isinstance(raw_filters, dict):
+                def passes_filters(row: dict) -> bool:
+                    for fk, fv in raw_filters.items():
+                        if fv is None or fv == "":
+                            continue
+                        cell = row.get(fk)
+                        if cell is None:
+                            return False
+                        if str(fv).strip().lower() not in str(cell).lower():
+                            return False
+                    return True
+
+                rows = [r for r in rows if isinstance(r, dict) and passes_filters(r)]
+        except json.JSONDecodeError:
+            # Ignore invalid filters payload
+            pass
+
+    # Sort
+    if sort_by:
+        reverse = sort_dir == "desc"
+        def sort_key(row: dict):
+            v = row.get(sort_by)
+            # Try numeric, then string
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return str(v) if v is not None else ""
+        try:
+            rows = sorted(rows, key=sort_key, reverse=reverse)
+        except Exception:
+            pass
+
+    total = len(rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paged_rows = rows[start:end]
+
+    return MultiItemsListResponse(
+        total=total,
+        page=page,
+        page_size=page_size,
+        rows=[MultiItemsRow(index=start + i, data=r) for i, r in enumerate(paged_rows)],
+        sub_fields=sub_fields,
+    )
+
+
+@router.post("/multi-items/rows", response_model=MultiItemsRow)
+async def add_multi_items_row(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    row: dict = Body(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Append a new row to multi_line_items value_json for an entry+field."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if fv is None:
+        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id, value_json=[])
+        db.add(fv)
+    if not isinstance(fv.value_json, list):
+        fv.value_json = []
+    fv.value_json.append(row)
+    flag_modified(fv, "value_json")
+    await db.flush()
+    await db.commit()
+    index = len(fv.value_json) - 1
+    return MultiItemsRow(index=index, data=row)
+
+
+@router.put("/multi-items/rows/{row_index}", response_model=MultiItemsRow)
+async def update_multi_items_row(
+    row_index: int,
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    row: dict = Body(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update a single row in multi_line_items value_json."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if not fv or not isinstance(fv.value_json, list):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rows to update")
+    if row_index < 0 or row_index >= len(fv.value_json):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Row index out of range")
+    fv.value_json[row_index] = row
+    flag_modified(fv, "value_json")
+    await db.flush()
+    await db.commit()
+    return MultiItemsRow(index=row_index, data=row)
+
+
+@router.post("/multi-items/rows/{row_index}/cell", response_model=MultiItemsRow)
+async def update_multi_items_row_cell(
+    row_index: int,
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    key: str = Query(..., description="Sub-field key to update"),
+    value: str | None = Body(None, description="New value for the sub-field (stringified)"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Update a single cell in a multi_line_items row.
+
+    Intended for cases like per-row file upload where we only want to change one sub-field
+    without overwriting the rest of the row.
+    """
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if not fv or not isinstance(fv.value_json, list):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rows to update")
+    if row_index < 0 or row_index >= len(fv.value_json):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Row index out of range")
+
+    row = fv.value_json[row_index]
+    if not isinstance(row, dict):
+        row = {}
+        fv.value_json[row_index] = row
+
+    row[key] = value
+    flag_modified(fv, "value_json")  # SQLAlchemy does not track in-place JSON mutations
+    await db.flush()
+    await db.commit()
+    return MultiItemsRow(index=row_index, data=row)
+
+
+@router.delete("/multi-items/rows/{row_index}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_multi_items_row(
+    row_index: int,
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a single row in multi_line_items value_json."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if not fv or not isinstance(fv.value_json, list):
+        return
+    if row_index < 0 or row_index >= len(fv.value_json):
+        return
+    del fv.value_json[row_index]
+    flag_modified(fv, "value_json")
+    await db.flush()
+    await db.commit()
+
+
+@router.post("/multi-items/rows/bulk-delete", status_code=status.HTTP_204_NO_CONTENT)
+async def bulk_delete_multi_items_rows(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    indices: list[int] = Body(..., embed=True),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Bulk delete rows in multi_line_items value_json by index list."""
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    if not fv or not isinstance(fv.value_json, list):
+        return
+    index_set = {i for i in indices if isinstance(i, int) and i >= 0}
+    if not index_set:
+        return
+    fv.value_json = [r for idx, r in enumerate(fv.value_json) if idx not in index_set]
+    flag_modified(fv, "value_json")
+    await db.flush()
+    await db.commit()
+
+
+@router.post("/multi-items/sync-from-api")
+async def sync_multi_items_from_api(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    sync_mode: str = Query("override", description="override = replace existing; append = append rows"),
+    api_url: str | None = Query(None, description="Optional override for field config multi_items_api_endpoint_url"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """
+    Sync a multi_line_items field from its own API endpoint.
+
+    - API URL is taken from KPIField.config['multi_items_api_endpoint_url'].
+    - Request payload: { year, kpi_id, field_id, field_key, organization_id, entry_id }.
+    - Expected response:
+        {
+          "year": 2026,
+          "items": [ { ...row1 }, { ...row2 }, ... ],
+          "override_existing": true | false   # optional, defaults to true
+        }
+    - sync_mode:
+        - "override": replace existing rows with items
+        - "append": append items to existing rows
+    """
+    org_id = _org_id(current_user, organization_id)
+    # Load entry and field
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+
+    field_res = await db.execute(
+        select(KPIField)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPIField.id == field_id, KPI.organization_id == org_id)
+    )
+    field = field_res.scalar_one_or_none()
+    if not field or field.field_type != FieldType.multi_line_items or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-line field not found")
+
+    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+
+    cfg = getattr(field, "config", None) or {}
+    configured_url = (cfg.get("multi_items_api_endpoint_url") or "").strip()
+    final_api_url = (api_url or configured_url or "").strip()
+    if not final_api_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No multi_items_api_endpoint_url configured for this field")
+
+    payload = {
+        "year": entry.year,
+        "kpi_id": field.kpi_id,
+        "field_id": field.id,
+        "field_key": field.key,
+        "organization_id": org_id,
+        "entry_id": entry.id,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(final_api_url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Field API error: {e!s}",
+        )
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Field API response must be a JSON object")
+    resp_year = data.get("year")
+    items = data.get("items")
+    override_existing = data.get("override_existing", True)
+    if resp_year is not None and int(resp_year) != int(entry.year):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Year in field API response does not match entry year")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Field API response 'items' must be a list")
+
+    # Load existing rows
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    existing_rows: list[dict] = []
+    if fv and isinstance(fv.value_json, list):
+        existing_rows = fv.value_json
+
+    effective_mode = (sync_mode or "override").lower()
+    if effective_mode == "append":
+        new_rows = existing_rows + items
+    else:
+        # If override_existing is false and there is existing data, skip (similar to KPI-level behaviour)
+        if not override_existing and existing_rows:
+            return {
+                "skipped": True,
+                "reason": "Field already has rows and override_existing=false in API response.",
+                "rows_imported": 0,
+            }
+        new_rows = items
+
+    if fv is None:
+        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id, value_json=new_rows)
+        db.add(fv)
+    else:
+        fv.value_json = new_rows
+    await db.flush()
+    await db.commit()
+    return {"entry_id": entry.id, "field_id": field.id, "rows_imported": len(items)}
+
+
+@router.get("/multi-items/export")
+async def export_multi_items_csv(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    search: str | None = Query(None),
+    sort_by: str | None = Query(None),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
+    filters: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Export multi_line_items rows for an entry+field as CSV, honoring search, sort, and filters.
+    """
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    )
+    fv = fv_res.scalar_one_or_none()
+    rows: list[dict] = fv.value_json if fv and isinstance(fv.value_json, list) else []
+
+    # Filter by search
+    if search:
+        q = search.lower().strip()
+
+        def matches(row: dict) -> bool:
+            for v in row.values():
+                if v is None:
+                    continue
+                s = str(v).lower()
+                if q in s:
+                    return True
+            return False
+
+        rows = [r for r in rows if isinstance(r, dict) and matches(r)]
+
+    # Advanced filters
+    if filters:
+        try:
+            raw_filters = json.loads(filters)
+            if isinstance(raw_filters, dict):
+
+                def passes_filters(row: dict) -> bool:
+                    for fk, fv in raw_filters.items():
+                        if fv is None or fv == "":
+                            continue
+                        cell = row.get(fk)
+                        if cell is None:
+                            return False
+                        if str(fv).strip().lower() not in str(cell).lower():
+                            return False
+                    return True
+
+                rows = [r for r in rows if isinstance(r, dict) and passes_filters(r)]
+        except json.JSONDecodeError:
+            pass
+
+    # Sort
+    if sort_by:
+        reverse = sort_dir == "desc"
+
+        def sort_key(row: dict):
+            v = row.get(sort_by)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return str(v) if v is not None else ""
+
+        try:
+            rows = sorted(rows, key=sort_key, reverse=reverse)
+        except Exception:
+            pass
+
+    # Build CSV
+    sub_fields = [sf for sf in (field.sub_fields or [])]
+    headers = [getattr(sf, "key", "") for sf in sub_fields]
+    output = BytesIO()
+    writer = csv.writer(output)
+    writer.writerow(headers)
+    for r in rows:
+        writer.writerow([r.get(key, "") for key in headers])
+
+    filename = f"multi_items_{field.key}_{field.id}.csv"
+    return StreamingResponse(
+        BytesIO(output.getvalue()),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+    )
 
 
 @router.get("/overview")
@@ -346,9 +960,12 @@ async def get_entry_fields(
             "formula_expression": f.formula_expression,
             "is_required": f.is_required,
             "sort_order": f.sort_order,
+            "config": getattr(f, "config", None),
+            "carry_forward_data": getattr(f, "carry_forward_data", False),
+            "full_page_multi_items": getattr(f, "full_page_multi_items", False),
             "options": [{"value": o.value, "label": o.label} for o in (f.options or [])],
             "sub_fields": [
-                {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order}
+                {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order, "config": getattr(s, "config", None)}
                 for s in (getattr(f, "sub_fields", None) or [])
             ],
         }
@@ -386,7 +1003,9 @@ def _build_kpi_entry_xlsx(
         FieldType.number,
         FieldType.date,
         FieldType.boolean,
+        FieldType.attachment,
         FieldType.formula,
+        FieldType.reference,
     )
     scalar_fields = [f for f in fields if getattr(f, "field_type", None) in scalar_types]
     ws_scalar = wb.active
@@ -677,10 +1296,326 @@ async def import_entry_excel(
                 value_json=data.get("value_json"),
             )
         )
-    await save_entry_values(db, entry.id, current_user.id, values, kpi_id, org_id)
+    try:
+        await save_entry_values(db, entry.id, current_user.id, values, kpi_id, org_id)
+    except EntryValidationError:
+        raise  # Handled by app exception_handler; returns 400 with errors list
     await db.commit()
     await db.refresh(entry)
     return {"message": "Import successful", "entry_id": entry.id, "fields_updated": len(values)}
+
+
+@router.get("/reverse-references")
+async def get_reverse_references_for_entry(
+    kpi_id: int = Query(..., description="Parent KPI id"),
+    entry_id: int = Query(..., description="Parent KPI entry id"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    For a given parent KPI entry, return reverse-reference info for reference sub-fields in multi_line_items fields.
+    Response shape (list of tabs):
+    [
+      {
+        "child_kpi_id": int,
+        "child_kpi_name": str,
+        "values": [ { "token": str, "label": str, "count": int } ],
+        "rows": [
+          {
+            "entry_id": int,
+            "year": int,
+            "period_key": str,
+            "value_token": str,
+            "value_display": str,
+            "child_field_id": int,
+            "child_field_key": str,
+            "child_field_name": str,
+            "child_sub_field_key": str,
+            "child_sub_field_name": str,
+            "row_index": int,
+            "row": dict,
+          },
+          ...
+        ],
+        "sub_fields": [ { "key": str, "name": str } ]
+      },
+      ...
+    ]
+    """
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+
+    # Load parent entry with its field values and fields
+    parent_entry_res = await db.execute(
+        select(KPIEntry)
+        .where(
+            KPIEntry.id == entry_id,
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi_id,
+        )
+        .options(
+            selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field).selectinload(KPIField.sub_fields),
+        )
+    )
+    parent_entry = parent_entry_res.scalar_one_or_none()
+    if not parent_entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    parent_year = parent_entry.year
+    parent_period_key = (getattr(parent_entry, "period_key", None) or "").strip()[:8]
+
+    # Load parent KPI with fields for lookup by key
+    parent_kpi_res = await db.execute(
+        select(KPI).where(KPI.id == kpi_id).options(selectinload(KPI.fields))
+    )
+    parent_kpi = parent_kpi_res.scalar_one_or_none()
+    if not parent_kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+
+    # Resolve effective time dimension: KPI-level if set, else org-level (for filtering and display)
+    org_row = await db.get(Organization, org_id)
+    org_td_raw = getattr(org_row, "time_dimension", None) or "yearly"
+    try:
+        org_td = TimeDimension(org_td_raw)
+    except ValueError:
+        org_td = TimeDimension.YEARLY
+    parent_kpi_td_raw = getattr(parent_kpi, "time_dimension", None)
+    parent_kpi_td = None
+    if parent_kpi_td_raw:
+        try:
+            parent_kpi_td = TimeDimension(parent_kpi_td_raw)
+        except ValueError:
+            pass
+    effective_td = effective_kpi_time_dimension(parent_kpi_td, org_td)
+    parent_fields_by_key = {f.key: f for f in getattr(parent_kpi, "fields", []) or []}
+    parent_fv_by_field_id = {fv.field_id: fv for fv in getattr(parent_entry, "field_values", []) or []}
+
+    # Load all KPI fields in this org with sub_fields, to find reference sub-fields pointing to this KPI
+    fields_res = await db.execute(
+        select(KPIField)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPI.organization_id == org_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    all_fields = list(fields_res.scalars().all())
+
+    # Build descriptors for reference sub-fields that point to this parent KPI
+    descriptors_by_child_kpi: dict[int, list[dict]] = {}
+    for f in all_fields:
+        for sf in getattr(f, "sub_fields", []) or []:
+            if getattr(sf, "field_type", None) != FieldType.reference:
+                continue
+            cfg = getattr(sf, "config", None) or {}
+            sid = cfg.get("reference_source_kpi_id")
+            if not sid or int(sid) != kpi_id:
+                continue
+            skey = cfg.get("reference_source_field_key")
+            if not skey:
+                continue
+            parent_sub_key = cfg.get("reference_source_sub_field_key")
+            desc = {
+                "child_kpi_id": f.kpi_id,
+                "child_field_id": f.id,
+                "child_field_key": f.key,
+                "child_field_name": f.name,
+                "child_sub_field_key": sf.key,
+                "child_sub_field_name": sf.name,
+                "parent_field_key": str(skey),
+                "parent_sub_field_key": str(parent_sub_key) if parent_sub_key else None,
+            }
+            descriptors_by_child_kpi.setdefault(f.kpi_id, []).append(desc)
+
+    if not descriptors_by_child_kpi:
+        return {
+            "time_filter": {
+                "year": parent_year,
+                "period_key": parent_period_key,
+                "effective_time_dimension": effective_td.value if hasattr(effective_td, "value") else str(effective_td),
+            },
+            "tabs": [],
+        }
+
+    # Load child KPI names
+    child_kpi_ids = list(descriptors_by_child_kpi.keys())
+    kpi_res = await db.execute(select(KPI).where(KPI.id.in_(child_kpi_ids)))
+    child_kpis = {k.id: k for k in kpi_res.scalars().all()}
+
+    response_tabs: list[dict] = []
+
+    for child_kpi_id, desc_list in descriptors_by_child_kpi.items():
+        child_kpi = child_kpis.get(child_kpi_id)
+        child_kpi_name = getattr(child_kpi, "name", f"KPI #{child_kpi_id}")
+
+        # For this child KPI, compute all parent tokens that are relevant for each descriptor
+        descriptor_tokens: dict[str, dict[str, str]] = {}  # token -> {"label": str}
+        for d in desc_list:
+            p_key = d["parent_field_key"]
+            p_sub = d["parent_sub_field_key"]
+            parent_field = parent_fields_by_key.get(p_key)
+            if not parent_field:
+                continue
+            fv = parent_fv_by_field_id.get(parent_field.id)
+            if not fv:
+                continue
+            if p_sub:
+                items = fv.value_json if isinstance(fv.value_json, list) else []
+                for row in items:
+                    if not isinstance(row, dict):
+                        continue
+                    cell = row.get(p_sub)
+                    if cell is None or cell == "":
+                        continue
+                    label = (str(cell)).strip()
+                    token = _normalize_reference_value(label)
+                    if not token:
+                        continue
+                    descriptor_tokens.setdefault(token, {"label": label})
+            else:
+                # Scalar parent field: use its primary value_text/number/boolean/date
+                raw_val = None
+                if fv.value_text not in (None, ""):
+                    raw_val = fv.value_text
+                elif fv.value_number is not None:
+                    raw_val = fv.value_number
+                elif fv.value_boolean is not None:
+                    raw_val = fv.value_boolean
+                elif fv.value_date is not None:
+                    raw_val = fv.value_date.isoformat()
+                if raw_val is not None:
+                    label = (str(raw_val)).strip()
+                    token = _normalize_reference_value(label)
+                    if token:
+                        descriptor_tokens.setdefault(token, {"label": label})
+
+        if not descriptor_tokens:
+            continue
+
+        # Load entries for this child KPI in this org, filtered by parent's time dimension (same year and period)
+        child_entries_res = await db.execute(
+            select(KPIEntry)
+            .where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == child_kpi_id,
+                KPIEntry.year == parent_year,
+                KPIEntry.period_key == parent_period_key,
+            )
+            .options(selectinload(KPIEntry.field_values))
+        )
+        child_entries = list(child_entries_res.scalars().all())
+
+        # For table headers we can reuse the sub_fields of the first descriptor's field
+        first_desc = desc_list[0]
+        child_field = next((f for f in all_fields if f.id == first_desc["child_field_id"]), None)
+        sub_fields_payload = []
+        if child_field is not None:
+            for sf in getattr(child_field, "sub_fields", []) or []:
+                sub_fields_payload.append({"key": sf.key, "name": getattr(sf, "name", sf.key)})
+
+        rows_payload: list[dict] = []
+        token_counts: dict[str, int] = {t: 0 for t in descriptor_tokens.keys()}
+        tokens_set = set(descriptor_tokens.keys())
+
+        # Scan child entries for matching reference sub-field values
+        for entry in child_entries:
+            field_values = getattr(entry, "field_values", []) or []
+            for d in desc_list:
+                child_field_id = d["child_field_id"]
+                child_sub_key = d["child_sub_field_key"]
+                fv = next((x for x in field_values if x.field_id == child_field_id), None)
+                if not fv or not isinstance(fv.value_json, list):
+                    continue
+                for idx, row in enumerate(fv.value_json):
+                    if not isinstance(row, dict):
+                        continue
+                    cell = row.get(child_sub_key)
+                    if cell is None or cell == "":
+                        continue
+                    label = (str(cell)).strip()
+                    token = _normalize_reference_value(label)
+                    if token not in tokens_set:
+                        continue
+                    token_counts[token] = token_counts.get(token, 0) + 1
+                    rows_payload.append(
+                        {
+                            "entry_id": entry.id,
+                            "year": entry.year,
+                            "period_key": getattr(entry, "period_key", "") or "",
+                            "value_token": token,
+                            "value_display": label,
+                            "child_field_id": child_field_id,
+                            "child_field_key": d["child_field_key"],
+                            "child_field_name": d["child_field_name"],
+                            "child_sub_field_key": child_sub_key,
+                            "child_sub_field_name": d["child_sub_field_name"],
+                            "row_index": idx,
+                            "row": row,
+                        }
+                    )
+
+        # Only include child KPI if we found any rows
+        if not rows_payload:
+            continue
+
+        values_payload = []
+        for token, meta in descriptor_tokens.items():
+            count = token_counts.get(token, 0)
+            if count <= 0:
+                continue
+            values_payload.append(
+                {
+                    "token": token,
+                    "label": meta["label"],
+                    "count": count,
+                }
+            )
+        # Sort dropdown values by label
+        values_payload.sort(key=lambda x: x["label"])
+
+        response_tabs.append(
+            {
+                "child_kpi_id": child_kpi_id,
+                "child_kpi_name": child_kpi_name,
+                "values": values_payload,
+                "rows": rows_payload,
+                "sub_fields": sub_fields_payload,
+            }
+        )
+
+    return {
+        "time_filter": {
+            "year": parent_year,
+            "period_key": parent_period_key,
+            "effective_time_dimension": effective_td.value if hasattr(effective_td, "value") else str(effective_td),
+        },
+        "tabs": response_tabs,
+    }
+
+
+@router.get("/for-period", response_model=EntryResponse)
+async def get_or_create_entry_for_period(
+    kpi_id: int = Query(...),
+    year: int = Query(...),
+    period_key: str | None = Query(None, description="Period key: '', H1, H2, Q1-Q4, 01-12"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get entry for the given KPI/year/period; create it (with carry-forward from previous period) if missing. Requires view access."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+    pk = (period_key or "").strip()[:8]
+    entry, created = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=pk)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
+    if created:
+        await db.commit()
+    await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
+    return _entry_to_response(entry)
 
 
 @router.get("", response_model=list[EntryResponse])
@@ -718,7 +1653,10 @@ async def create_or_update_entry(
     )
     if not entry:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
-    await save_entry_values(db, entry.id, current_user.id, body.values, body.kpi_id, org_id)
+    try:
+        await save_entry_values(db, entry.id, current_user.id, body.values, body.kpi_id, org_id)
+    except EntryValidationError:
+        raise  # Handled by app exception_handler; returns 400 with errors list
     await db.commit()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
     return _entry_to_response(entry)

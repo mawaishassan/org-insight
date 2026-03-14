@@ -24,11 +24,22 @@ const FIELD_TYPES = [
   "number",
   "date",
   "boolean",
+  "attachment",
+  "reference",
   "multi_line_items",
   "formula",
 ] as const;
 
-const SUB_FIELD_TYPES = ["single_line_text", "number", "date", "boolean"] as const;
+const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "attachment"] as const;
+
+function slugifyKey(name: string): string {
+  if (!name) return "";
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
 
 const GROUP_FUNCTIONS = [
   { value: "SUM_ITEMS", label: "SUM (total)" },
@@ -55,6 +66,13 @@ const WHERE_OPERATORS = [
   { value: "op_lte", label: "less or equal (≤)" },
 ] as const;
 
+interface ReferenceConfig {
+  reference_source_kpi_id?: number;
+  reference_source_field_key?: string;
+  /** When source is a multi_line_items field, the sub-field key to use for values */
+  reference_source_sub_field_key?: string;
+}
+
 interface SubFieldDef {
   id?: number;
   field_id?: number;
@@ -63,6 +81,7 @@ interface SubFieldDef {
   field_type: string;
   is_required: boolean;
   sort_order: number;
+  config?: ReferenceConfig | null;
 }
 
 interface KpiField {
@@ -74,6 +93,9 @@ interface KpiField {
   formula_expression: string | null;
   is_required: boolean;
   sort_order: number;
+  config?: ReferenceConfig | null;
+  carry_forward_data?: boolean;
+  full_page_multi_items?: boolean;
   options: Array<{ id: number; value: string; label: string; sort_order: number }>;
   sub_fields?: SubFieldDef[];
 }
@@ -112,6 +134,7 @@ interface KpiInfo {
   entry_mode?: string;
   api_endpoint_url?: string | null;
   time_dimension?: string | null;
+  carry_forward_data?: boolean;
   organization_tags?: OrgTagRef[];
   domain_tags?: DomainTagRef[];
   category_tags?: CategoryTagRef[];
@@ -125,6 +148,9 @@ const createSchema = z.object({
   formula_expression: z.string().optional(),
   is_required: z.boolean(),
   sort_order: z.coerce.number().int().min(0),
+  carry_forward_data: z.boolean().optional(),
+  full_page_multi_items: z.boolean().optional(),
+  multi_items_api_endpoint_url: z.string().url("Must be a valid URL").optional(),
 });
 
 const updateSchema = z.object({
@@ -134,6 +160,9 @@ const updateSchema = z.object({
   formula_expression: z.string().optional(),
   is_required: z.boolean(),
   sort_order: z.coerce.number().int().min(0),
+  carry_forward_data: z.boolean().optional(),
+  full_page_multi_items: z.boolean().optional(),
+  multi_items_api_endpoint_url: z.string().url("Must be a valid URL").optional(),
 });
 
 const kpiUpdateSchema = z.object({
@@ -143,6 +172,7 @@ const kpiUpdateSchema = z.object({
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
   time_dimension: z.string().optional(),
+  carry_forward_data: z.boolean().optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
 });
 
@@ -200,6 +230,7 @@ export default function KpiFieldsPage() {
   );
   const [settingsPanel, setSettingsPanel] = useState<"order" | "time_dimension" | "entry_mode" | "domain" | "tags" | "danger_zone" | null>(null);
   const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
+  const [keyTouched, setKeyTouched] = useState(false);
 
   const token = getAccessToken();
   const router = useRouter();
@@ -228,6 +259,7 @@ export default function KpiFieldsPage() {
       entry_mode: "manual",
       api_endpoint_url: "",
       time_dimension: "",
+      carry_forward_data: false,
       organization_tag_ids: [],
     },
   });
@@ -241,10 +273,11 @@ export default function KpiFieldsPage() {
         entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
         api_endpoint_url: kpi.api_endpoint_url ?? "",
         time_dimension: kpi.time_dimension ?? "",
+        carry_forward_data: kpi.carry_forward_data ?? false,
         organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
       });
     }
-  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.organization_tags, orgIdFromUrl]);
+  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.carry_forward_data, kpi?.organization_tags, orgIdFromUrl]);
 
   useEffect(() => {
     if (!token) return;
@@ -315,7 +348,9 @@ export default function KpiFieldsPage() {
       .catch(() => setOrgCategories([]));
   }, [token, orgIdFromUrl]);
 
-  const [createSubFields, setCreateSubFields] = useState<Array<{ name: string; key: string; field_type: string; is_required: boolean; sort_order: number }>>([]);
+  type CreateSubFieldRow = { name: string; key: string; field_type: string; is_required: boolean; sort_order: number; keyTouched?: boolean; config?: ReferenceConfig };
+  const [createSubFields, setCreateSubFields] = useState<CreateSubFieldRow[]>([]);
+  const [createRefConfig, setCreateRefConfig] = useState<ReferenceConfig>({});
 
   const createForm = useForm<CreateFormData>({
     resolver: zodResolver(createSchema),
@@ -326,6 +361,9 @@ export default function KpiFieldsPage() {
       formula_expression: "",
       is_required: false,
       sort_order: list.length,
+      carry_forward_data: false,
+      full_page_multi_items: false,
+      multi_items_api_endpoint_url: "",
     },
   });
 
@@ -341,16 +379,41 @@ export default function KpiFieldsPage() {
         formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
         is_required: data.is_required,
         sort_order: data.sort_order,
+        carry_forward_data: data.carry_forward_data ?? false,
+        full_page_multi_items: data.full_page_multi_items ?? false,
         options: [],
       };
+      if (data.field_type === "reference" && createRefConfig.reference_source_kpi_id && createRefConfig.reference_source_field_key) {
+        body.config = {
+          reference_source_kpi_id: createRefConfig.reference_source_kpi_id,
+          reference_source_field_key: createRefConfig.reference_source_field_key,
+          ...(createRefConfig.reference_source_sub_field_key ? { reference_source_sub_field_key: createRefConfig.reference_source_sub_field_key } : {}),
+        };
+      }
       if (data.field_type === "multi_line_items" && createSubFields.length > 0) {
-        body.sub_fields = createSubFields.map((s, i) => ({
-          name: s.name,
-          key: s.key,
-          field_type: s.field_type,
-          is_required: s.is_required,
-          sort_order: s.sort_order ?? i,
-        }));
+        body.sub_fields = createSubFields.map((s, i) => {
+          const sub: Record<string, unknown> = {
+            name: s.name,
+            key: s.key,
+            field_type: s.field_type,
+            is_required: s.is_required,
+            sort_order: s.sort_order ?? i,
+          };
+          if (s.field_type === "reference" && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
+            sub.config = {
+              reference_source_kpi_id: s.config.reference_source_kpi_id,
+              reference_source_field_key: s.config.reference_source_field_key,
+              ...(s.config.reference_source_sub_field_key ? { reference_source_sub_field_key: s.config.reference_source_sub_field_key } : {}),
+            };
+          }
+          return sub;
+        });
+        if (data.multi_items_api_endpoint_url) {
+          body.config = {
+            ...(body.config as Record<string, unknown> | undefined ?? {}),
+            multi_items_api_endpoint_url: data.multi_items_api_endpoint_url.trim(),
+          };
+        }
       }
       await api(`/fields?${fieldsQuery()}`, {
         method: "POST",
@@ -364,8 +427,11 @@ export default function KpiFieldsPage() {
         formula_expression: "",
         is_required: false,
         sort_order: list.length + 1,
+        carry_forward_data: false,
       });
+      setKeyTouched(false);
       setCreateSubFields([]);
+      setCreateRefConfig({});
       setShowCreate(false);
       loadList();
     } catch (e) {
@@ -373,7 +439,7 @@ export default function KpiFieldsPage() {
     }
   };
 
-  const onUpdateSubmit = async (fieldId: number, data: UpdateFormData, subFields?: SubFieldDef[]) => {
+  const onUpdateSubmit = async (fieldId: number, data: UpdateFormData, subFields?: SubFieldDef[], refConfig?: ReferenceConfig) => {
     if (!token || orgId == null) return;
     setError(null);
     try {
@@ -384,15 +450,47 @@ export default function KpiFieldsPage() {
         formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
         is_required: data.is_required,
         sort_order: data.sort_order,
+        carry_forward_data: data.carry_forward_data,
+        full_page_multi_items: data.full_page_multi_items,
       };
+      if (data.field_type === "reference" && refConfig?.reference_source_kpi_id && refConfig?.reference_source_field_key) {
+        body.config = {
+          reference_source_kpi_id: refConfig.reference_source_kpi_id,
+          reference_source_field_key: refConfig.reference_source_field_key,
+          ...(refConfig.reference_source_sub_field_key ? { reference_source_sub_field_key: refConfig.reference_source_sub_field_key } : {}),
+        };
+      }
+      if (data.field_type === "multi_line_items") {
+        const existingField = list.find((f) => f.id === fieldId);
+        const existingConfig = (existingField?.config as Record<string, unknown> | null) ?? {};
+        if (data.multi_items_api_endpoint_url) {
+          body.config = {
+            ...(body.config as Record<string, unknown> | undefined ?? existingConfig),
+            multi_items_api_endpoint_url: data.multi_items_api_endpoint_url.trim(),
+          };
+        } else if (existingConfig && "multi_items_api_endpoint_url" in existingConfig) {
+          const { multi_items_api_endpoint_url, ...rest } = existingConfig;
+          body.config = rest;
+        }
+      }
       if (data.field_type === "multi_line_items" && subFields != null) {
-        body.sub_fields = subFields.map((s, i) => ({
-          name: s.name,
-          key: s.key,
-          field_type: s.field_type,
-          is_required: s.is_required,
-          sort_order: s.sort_order ?? i,
-        }));
+        body.sub_fields = subFields.map((s, i) => {
+          const sub: Record<string, unknown> = {
+            name: s.name,
+            key: s.key,
+            field_type: s.field_type,
+            is_required: s.is_required,
+            sort_order: s.sort_order ?? i,
+          };
+          if (s.field_type === "reference" && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
+            sub.config = {
+              reference_source_kpi_id: s.config.reference_source_kpi_id,
+              reference_source_field_key: s.config.reference_source_field_key,
+              ...(s.config.reference_source_sub_field_key ? { reference_source_sub_field_key: s.config.reference_source_sub_field_key } : {}),
+            };
+          }
+          return sub;
+        });
       }
       await api(`/fields/${fieldId}?${fieldsQuery()}`, {
         method: "PATCH",
@@ -479,6 +577,7 @@ export default function KpiFieldsPage() {
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
           time_dimension: data.time_dimension && data.time_dimension.trim() ? data.time_dimension.trim() : null,
+          carry_forward_data: data.carry_forward_data,
           organization_tag_ids: data.organization_tag_ids ?? [],
         }),
       });
@@ -814,6 +913,17 @@ export default function KpiFieldsPage() {
                       Leave as inherit to use the organization default.
                     </p>
                   </div>
+                  {userRole === "SUPER_ADMIN" && (
+                    <div className="form-group" style={{ marginTop: "1rem" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                        <input type="checkbox" {...kpiEditForm.register("carry_forward_data")} />
+                        Carry forward data (non-cyclic)
+                      </label>
+                      <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+                        When enabled, new time cycles will pre-fill with values from the previous period until the user changes them. History is preserved per period.
+                      </p>
+                    </div>
+                  )}
                   {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
                   <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
                     {kpiSaving ? "Saving…" : "Save"}
@@ -1139,30 +1249,135 @@ export default function KpiFieldsPage() {
 
       {showCreate && (
         <div className="card" style={{ marginBottom: "1rem" }}>
-          <h2 style={{ marginBottom: "1rem", fontSize: "1.1rem" }}>Create field</h2>
+          <h2 style={{ marginBottom: "0.75rem", fontSize: "1.1rem" }}>Create field</h2>
           <form onSubmit={createForm.handleSubmit(onCreateSubmit)}>
-            <div className="form-group">
-              <label>Name * (display label)</label>
-              <input {...createForm.register("name")} placeholder="e.g. Total students" />
-              {createForm.formState.errors.name && (
-                <p className="form-error">{createForm.formState.errors.name.message}</p>
+            {/* Row 1: Name, Key, Field type — one row on wide screens, wraps on narrow */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                gap: "0.75rem 1rem",
+                alignItems: "flex-start",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+                <label>Name *</label>
+                <input
+                  placeholder="e.g. Total students"
+                  style={{ width: "100%" }}
+                  value={createForm.watch("name") ?? ""}
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    createForm.setValue("name", name, { shouldValidate: true });
+                    if (!keyTouched) {
+                      createForm.setValue("key", slugifyKey(name), { shouldValidate: false, shouldDirty: true });
+                    }
+                  }}
+                />
+                {createForm.formState.errors.name && (
+                  <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+                    {createForm.formState.errors.name.message}
+                  </p>
+                )}
+              </div>
+              <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+                <label>Key * <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.8rem" }}>(auto from name)</span></label>
+                <input
+                  {...createForm.register("key", { onChange: () => setKeyTouched(true) })}
+                  placeholder="key_name (auto from name)"
+                  style={{ width: "100%" }}
+                />
+                {createForm.formState.errors.key && (
+                  <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+                    {createForm.formState.errors.key.message}
+                  </p>
+                )}
+              </div>
+              <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+                <label>Type *</label>
+                <select {...createForm.register("field_type")} style={{ width: "100%" }}>
+                  {FIELD_TYPES.map((t) => (
+                    <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {/* Row 2: Required, Sort order */}
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: "1rem 1.5rem",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                <input type="checkbox" {...createForm.register("is_required")} />
+                Required
+              </label>
+              {createForm.watch("field_type") === "multi_line_items" && (
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                  <span style={{ fontWeight: 500 }}>Full-page editor</span>
+                  <span
+                    style={{
+                      position: "relative",
+                      width: 40,
+                      height: 22,
+                      borderRadius: 999,
+                      background: createForm.watch("full_page_multi_items") ? "var(--accent)" : "var(--border)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      padding: 2,
+                      transition: "background 120ms ease",
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 18,
+                        height: 18,
+                        borderRadius: "50%",
+                        background: "var(--surface)",
+                        transform: createForm.watch("full_page_multi_items") ? "translateX(18px)" : "translateX(0)",
+                        transition: "transform 120ms ease",
+                        boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                      }}
+                    />
+                  </span>
+                  <input
+                    type="checkbox"
+                    {...createForm.register("full_page_multi_items")}
+                    style={{ display: "none" }}
+                    aria-label="Use full-page editor for this multi-line field"
+                  />
+                </label>
               )}
-            </div>
-            <div className="form-group">
-              <label>Key * (unique, lowercase, e.g. total_students)</label>
-              <input {...createForm.register("key")} placeholder="total_students" />
-              {createForm.formState.errors.key && (
-                <p className="form-error">{createForm.formState.errors.key.message}</p>
+              {userRole === "SUPER_ADMIN" && (
+                <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                  <input type="checkbox" {...createForm.register("carry_forward_data")} />
+                  Carry forward (non-cyclic)
+                </label>
               )}
+              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
+                <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }} />
+              </div>
             </div>
-            <div className="form-group">
-              <label>Field type *</label>
-              <select {...createForm.register("field_type")}>
-                {FIELD_TYPES.map((t) => (
-                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-                ))}
-              </select>
-            </div>
+            {createForm.watch("field_type") === "reference" && (
+              <div className="form-group">
+                <label>Reference source</label>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+                  Values for this field will be restricted to distinct values from the selected KPI field.
+                </p>
+                <ReferenceConfigUI
+                  organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                  currentKpiId={kpiId}
+                  value={createRefConfig}
+                  onChange={setCreateRefConfig}
+                />
+              </div>
+            )}
             {createForm.watch("field_type") === "formula" && (
               <div className="form-group">
                 <label>Formula</label>
@@ -1182,55 +1397,122 @@ export default function KpiFieldsPage() {
                 <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
                   Define columns so data entry uses a table instead of raw JSON.
                 </p>
-                {createSubFields.map((s, idx) => (
-                  <div key={idx} style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
-                    <input
-                      placeholder="Name"
-                      value={s.name}
-                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
-                      style={{ width: "120px" }}
-                    />
-                    <input
-                      placeholder="key"
-                      value={s.key}
-                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, key: e.target.value } : x)))}
-                      style={{ width: "100px" }}
-                    />
-                    <select
-                      value={s.field_type}
-                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
-                    >
-                      {SUB_FIELD_TYPES.map((t) => (
-                        <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (if type = reference)</th>
+                        <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                        <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {createSubFields.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                            No sub-fields yet. Click &quot;Add sub-field&quot; below.
+                          </td>
+                        </tr>
+                      ) : createSubFields.map((s, idx) => (
+                        <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <input
+                              placeholder="Display name"
+                              value={s.name}
+                              onChange={(e) => {
+                                const name = e.target.value;
+                                setCreateSubFields((prev) =>
+                                  prev.map((x, i) =>
+                                    i === idx
+                                      ? { ...x, name, key: x.keyTouched ? x.key : slugifyKey(name) }
+                                      : x
+                                  )
+                                );
+                              }}
+                              style={{ width: "100%", minWidth: "100px" }}
+                            />
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <input
+                              placeholder="key_name (auto from name)"
+                              value={s.key}
+                              onChange={(e) =>
+                                setCreateSubFields((prev) =>
+                                  prev.map((x, i) => (i === idx ? { ...x, key: e.target.value, keyTouched: true } : x))
+                                )
+                              }
+                              style={{ width: "100%", minWidth: "90px" }}
+                            />
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <select
+                              value={s.field_type}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+                              style={{ minWidth: "120px" }}
+                            >
+                              {SUB_FIELD_TYPES.map((t) => (
+                                <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                            {s.field_type === "reference" ? (
+                              <ReferenceConfigUI
+                                organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                                currentKpiId={kpiId}
+                                value={s.config ?? {}}
+                                onChange={(c) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, config: c } : x)))}
+                                labelPrefix="Source"
+                              />
+                            ) : (
+                              <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={s.is_required}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                              title="Required"
+                            />
+                            {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
+                          </td>
+                        </tr>
                       ))}
-                    </select>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.9rem" }}>
-                      <input
-                        type="checkbox"
-                        checked={s.is_required}
-                        onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
-                      />
-                      Required
-                    </label>
-                    <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => prev.filter((_, i) => i !== idx))}>Remove</button>
-                  </div>
-                ))}
-                <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length }])}>
+                    </tbody>
+                  </table>
+                </div>
+                <button type="button" className="btn btn-primary" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, keyTouched: false, config: undefined }])}>
                   Add sub-field
                 </button>
               </div>
             )}
-            <div className="form-group">
-              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <input type="checkbox" {...createForm.register("is_required")} />
-                Required
-              </label>
-            </div>
-            <div className="form-group">
-              <label>Sort order</label>
-              <input type="number" min={0} {...createForm.register("sort_order")} />
-            </div>
-            <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+            {createForm.watch("field_type") === "multi_line_items" && (
+              <>
+                <div style={{ marginTop: "-0.25rem", marginBottom: "0.5rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+                  Tip: Enable <strong>Full-page editor</strong> above for large datasets (search, paging, bulk delete, bulk upload).
+                </div>
+                <div className="form-group">
+                  <label>Multi-line API endpoint URL (optional)</label>
+                  <input
+                    type="url"
+                    placeholder="https://example.com/multi-items-api"
+                    {...createForm.register("multi_items_api_endpoint_url")}
+                    style={{ width: "100%" }}
+                  />
+                  <p style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
+                    When set, Org Admins can sync this multi-line field from API on the full-page editor.
+                  </p>
+                </div>
+              </>
+            )}
+            <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem" }}>
               <button type="submit" className="btn btn-primary" disabled={createForm.formState.isSubmitting}>
                 {createForm.formState.isSubmitting ? "Creating..." : "Create"}
               </button>
@@ -1272,10 +1554,11 @@ export default function KpiFieldsPage() {
                   <FieldEditForm
                     field={f}
                     list={list}
-                    onSave={(data, subFields) => onUpdateSubmit(f.id, data, subFields)}
+                    onSave={(data, subFields, refConfig) => onUpdateSubmit(f.id, data, subFields, refConfig)}
                     onCancel={() => setEditingId(null)}
                     organizationId={kpi?.organization_id}
                     currentKpiId={kpiId}
+                    userRole={userRole}
                   />
                 ) : (
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -1518,6 +1801,94 @@ export default function KpiFieldsPage() {
   return content;
 }
 
+/** Source KPI + source field dropdowns for reference/lookup field config. */
+function ReferenceConfigUI({
+  organizationId,
+  currentKpiId,
+  value,
+  onChange,
+  labelPrefix = "Reference source",
+}: {
+  organizationId: number | undefined;
+  currentKpiId?: number;
+  value: ReferenceConfig;
+  onChange: (c: ReferenceConfig) => void;
+  labelPrefix?: string;
+}) {
+  const [kpis, setKpis] = useState<Array<{ id: number; name: string }>>([]);
+  const [sourceFields, setSourceFields] = useState<KpiField[]>([]);
+  const token = getAccessToken();
+  useEffect(() => {
+    if (!token || organizationId == null) return;
+    api<Array<{ id: number; name: string }>>(`/kpis?${qs({ organization_id: organizationId })}`, { token })
+      .then((list) => setKpis(list))
+      .catch(() => setKpis([]));
+  }, [token, organizationId]);
+  useEffect(() => {
+    if (!token || organizationId == null || !value.reference_source_kpi_id) {
+      setSourceFields([]);
+      return;
+    }
+    api<KpiField[]>(`/fields?${qs({ kpi_id: value.reference_source_kpi_id, organization_id: organizationId })}`, { token })
+      .then((list) => setSourceFields(list))
+      .catch(() => setSourceFields([]));
+  }, [token, organizationId, value.reference_source_kpi_id]);
+  const scalarFieldTypes = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference"];
+  const sourceFieldOptions: { value: string; label: string }[] = [];
+  sourceFields.forEach((f) => {
+    if (scalarFieldTypes.includes(f.field_type)) {
+      sourceFieldOptions.push({ value: f.key, label: `${f.name} (${f.key})` });
+    }
+    if (f.field_type === "multi_line_items" && f.sub_fields?.length) {
+      f.sub_fields.forEach((s) => {
+        sourceFieldOptions.push({ value: `${f.key}|${s.key}`, label: `${f.name} → ${s.name} (${s.key})` });
+      });
+    }
+  });
+  const selectedFieldValue = value.reference_source_field_key
+    ? (value.reference_source_sub_field_key ? `${value.reference_source_field_key}|${value.reference_source_sub_field_key}` : value.reference_source_field_key)
+    : "";
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem 1rem", alignItems: "flex-end" }}>
+      <div>
+        <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>{labelPrefix}: KPI</label>
+        <select
+          value={value.reference_source_kpi_id ?? ""}
+          onChange={(e) => onChange({ reference_source_kpi_id: e.target.value ? Number(e.target.value) : undefined, reference_source_field_key: undefined, reference_source_sub_field_key: undefined })}
+          style={{ minWidth: "180px" }}
+        >
+          <option value="">— Select KPI —</option>
+          {kpis.filter((k) => k.id !== currentKpiId).map((k) => (
+            <option key={k.id} value={k.id}>{k.name}</option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>{labelPrefix}: Field</label>
+        <select
+          value={selectedFieldValue}
+          onChange={(e) => {
+            const raw = e.target.value || "";
+            if (raw.includes("|")) {
+              const [fieldKey, subKey] = raw.split("|", 2);
+              onChange({ ...value, reference_source_field_key: fieldKey, reference_source_sub_field_key: subKey || undefined });
+            } else {
+              onChange({ ...value, reference_source_field_key: raw || undefined, reference_source_sub_field_key: undefined });
+            }
+          }}
+          style={{ minWidth: "220px" }}
+          disabled={!value.reference_source_kpi_id}
+        >
+          <option value="">— Select field —</option>
+          {sourceFieldOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 interface FormulaRefKpi {
   id: number;
   name: string;
@@ -1709,17 +2080,22 @@ function FieldEditForm({
   onCancel,
   organizationId,
   currentKpiId,
+  userRole,
 }: {
   field: KpiField;
   list: KpiField[];
-  onSave: (data: UpdateFormData, subFields?: SubFieldDef[]) => void;
+  onSave: (data: UpdateFormData, subFields?: SubFieldDef[], refConfig?: ReferenceConfig) => void;
   onCancel: () => void;
   organizationId?: number;
   currentKpiId?: number;
+  userRole?: UserRole | null;
 }) {
-  const [editSubFields, setEditSubFields] = useState<SubFieldDef[]>(
-    () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0 }))
+  type EditSubFieldRow = SubFieldDef & { keyTouched?: boolean };
+  const [editKeyTouched, setEditKeyTouched] = useState(false);
+  const [editSubFields, setEditSubFields] = useState<EditSubFieldRow[]>(
+    () => (field.sub_fields ?? []).map((s) => ({ ...s, name: s.name, key: s.key, field_type: s.field_type, is_required: s.is_required ?? false, sort_order: s.sort_order ?? 0, config: s.config ?? undefined, keyTouched: false }))
   );
+  const [editRefConfig, setEditRefConfig] = useState<ReferenceConfig>(field.config ?? {});
   const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting } } = useForm<UpdateFormData>({
     resolver: zodResolver(updateSchema),
     defaultValues: {
@@ -1729,30 +2105,157 @@ function FieldEditForm({
       formula_expression: field.formula_expression ?? "",
       is_required: field.is_required,
       sort_order: field.sort_order,
+      carry_forward_data: field.carry_forward_data ?? false,
+      full_page_multi_items: field.full_page_multi_items ?? false,
+      multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
     },
   });
   const currentFieldType = watch("field_type");
 
   return (
-    <form onSubmit={handleSubmit((data) => onSave(data, currentFieldType === "multi_line_items" ? editSubFields : undefined))} style={{ width: "100%" }}>
-      <div className="form-group">
-        <label>Name *</label>
-        <input {...register("name")} />
-        {errors.name && <p className="form-error">{errors.name.message}</p>}
+    <form
+      onSubmit={handleSubmit((data) =>
+        onSave(
+          data,
+          currentFieldType === "multi_line_items"
+            ? editSubFields.map(({ keyTouched: _, ...s }) => s)
+            : undefined,
+          currentFieldType === "reference" ? editRefConfig : undefined
+        )
+      )}
+      style={{ width: "100%" }}
+    >
+      {/* Row 1: Name, Key, Type — aligned with create field layout */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+          gap: "0.75rem 1rem",
+          alignItems: "flex-start",
+          marginBottom: "0.75rem",
+        }}
+      >
+        <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+          <label>Name *</label>
+          <input
+            style={{ width: "100%" }}
+            value={watch("name") ?? ""}
+            onChange={(e) => {
+              const name = e.target.value;
+              setValue("name", name, { shouldValidate: true });
+              if (!editKeyTouched) {
+                setValue("key", slugifyKey(name), { shouldValidate: false, shouldDirty: true });
+              }
+            }}
+          />
+          {errors.name && (
+            <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+              {errors.name.message}
+            </p>
+          )}
+        </div>
+        <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+          <label>Key * <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.8rem" }}>(auto from name)</span></label>
+          <input
+            {...register("key", { onChange: () => setEditKeyTouched(true) })}
+            placeholder="key_name (auto from name)"
+            style={{ width: "100%" }}
+          />
+          {errors.key && (
+            <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+              {errors.key.message}
+            </p>
+          )}
+        </div>
+        <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+          <label>Type *</label>
+          <select {...register("field_type")} style={{ width: "100%" }}>
+            {FIELD_TYPES.map((t) => (
+              <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+            ))}
+          </select>
+        </div>
       </div>
-      <div className="form-group">
-        <label>Key *</label>
-        <input {...register("key")} />
-        {errors.key && <p className="form-error">{errors.key.message}</p>}
+      {/* Row 2: Required, Sort order */}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: "1rem 1.5rem",
+          marginBottom: "0.75rem",
+        }}
+      >
+        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+          <input type="checkbox" {...register("is_required")} />
+          Required
+        </label>
+        {userRole === "SUPER_ADMIN" && (
+          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+            <input type="checkbox" {...register("carry_forward_data")} />
+            Carry forward (non-cyclic)
+          </label>
+        )}
+        {currentFieldType === "multi_line_items" && (
+          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+            <span style={{ fontWeight: 500 }}>Full-page editor</span>
+            <span
+              style={{
+                position: "relative",
+                width: 40,
+                height: 22,
+                borderRadius: 999,
+                background: watch("full_page_multi_items") ? "var(--accent)" : "var(--border)",
+                display: "inline-flex",
+                alignItems: "center",
+                padding: 2,
+                transition: "background 120ms ease",
+              }}
+            >
+              <span
+                style={{
+                  width: 18,
+                  height: 18,
+                  borderRadius: "50%",
+                  background: "var(--surface)",
+                  transform: watch("full_page_multi_items") ? "translateX(18px)" : "translateX(0)",
+                  transition: "transform 120ms ease",
+                  boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                }}
+              />
+            </span>
+            <input
+              type="checkbox"
+              {...register("full_page_multi_items")}
+              style={{ display: "none" }}
+              aria-label="Use full-page editor for this multi-line field"
+            />
+          </label>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+          <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
+          <input
+            type="number"
+            min={0}
+            {...register("sort_order")}
+            style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }}
+          />
+        </div>
       </div>
-      <div className="form-group">
-        <label>Field type *</label>
-        <select {...register("field_type")}>
-          {FIELD_TYPES.map((t) => (
-            <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-          ))}
-        </select>
-      </div>
+      {currentFieldType === "reference" && (
+        <div className="form-group">
+          <label>Reference source</label>
+          <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+            Values for this field will be restricted to distinct values from the selected KPI field.
+          </p>
+          <ReferenceConfigUI
+            organizationId={organizationId}
+            currentKpiId={currentKpiId}
+            value={editRefConfig}
+            onChange={setEditRefConfig}
+          />
+        </div>
+      )}
       {currentFieldType === "formula" && (
         <div className="form-group">
           <label>Formula</label>
@@ -1769,54 +2272,127 @@ function FieldEditForm({
       {currentFieldType === "multi_line_items" && (
         <div className="form-group">
           <label>Sub-fields (columns for each row)</label>
-          {editSubFields.map((s, idx) => (
-            <div key={s.id ?? idx} style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
-              <input
-                placeholder="Name"
-                value={s.name}
-                onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
-                style={{ width: "120px" }}
-              />
-              <input
-                placeholder="key"
-                value={s.key}
-                onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, key: e.target.value } : x)))}
-                style={{ width: "100px" }}
-              />
-              <select
-                value={s.field_type}
-                onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
-              >
-                {SUB_FIELD_TYPES.map((t) => (
-                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+          <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+            Define columns so data entry uses a table instead of raw JSON.
+          </p>
+          <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (if type = reference)</th>
+                  <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                  <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
+                </tr>
+              </thead>
+              <tbody>
+                {editSubFields.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                      No sub-fields yet. Click &quot;Add sub-field&quot; below.
+                    </td>
+                  </tr>
+                ) : editSubFields.map((s, idx) => (
+                  <tr key={s.id ?? idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <input
+                        placeholder="Display name"
+                        value={s.name}
+                        onChange={(e) => {
+                          const name = e.target.value;
+                          setEditSubFields((prev) =>
+                            prev.map((x, i) =>
+                              i === idx ? { ...x, name, key: x.keyTouched ? x.key : slugifyKey(name) } : x
+                            )
+                          );
+                        }}
+                        style={{ width: "100%", minWidth: "100px" }}
+                      />
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <input
+                        placeholder="key_name (auto from name)"
+                        value={s.key}
+                        onChange={(e) =>
+                          setEditSubFields((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, key: e.target.value, keyTouched: true } : x))
+                          )
+                        }
+                        style={{ width: "100%", minWidth: "90px" }}
+                      />
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <select
+                        value={s.field_type}
+                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+                        style={{ minWidth: "120px" }}
+                      >
+                        {SUB_FIELD_TYPES.map((t) => (
+                          <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                      {s.field_type === "reference" ? (
+                        <ReferenceConfigUI
+                          organizationId={organizationId}
+                          currentKpiId={currentKpiId}
+                          value={s.config ?? {}}
+                          onChange={(c) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, config: c } : x)))}
+                          labelPrefix="Source"
+                        />
+                      ) : (
+                        <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
+                      )}
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={s.is_required}
+                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                        title="Required"
+                      />
+                      {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem" }}>
+                      <button type="button" className="btn" onClick={() => setEditSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
+                    </td>
+                  </tr>
                 ))}
-              </select>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.9rem" }}>
-                <input
-                  type="checkbox"
-                  checked={s.is_required}
-                  onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
-                />
-                Required
-              </label>
-              <button type="button" className="btn" onClick={() => setEditSubFields((prev) => prev.filter((_, i) => i !== idx))}>Remove</button>
-            </div>
-          ))}
-          <button type="button" className="btn" onClick={() => setEditSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length }])}>
+              </tbody>
+            </table>
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() =>
+              setEditSubFields((prev) => [
+                ...prev,
+                { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, config: undefined, keyTouched: false },
+              ])
+            }
+          >
             Add sub-field
           </button>
+          <div style={{ marginTop: "0.5rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+            Tip: Enable <strong>Full-page editor</strong> above for large datasets (search, paging, bulk delete, bulk upload).
+          </div>
+          <div className="form-group" style={{ marginTop: "0.75rem" }}>
+            <label>Multi-line API endpoint URL (optional)</label>
+            <input
+              type="url"
+              placeholder="https://example.com/multi-items-api"
+              {...register("multi_items_api_endpoint_url")}
+              style={{ width: "100%" }}
+            />
+            <p style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
+              When set, Org Admins can sync this multi-line field from API on the full-page editor.
+            </p>
+          </div>
         </div>
       )}
-      <div className="form-group">
-        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <input type="checkbox" {...register("is_required")} />
-          Required
-        </label>
-      </div>
-      <div className="form-group">
-        <label>Sort order</label>
-        <input type="number" min={0} {...register("sort_order")} />
-      </div>
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
         <button type="submit" className="btn btn-primary" disabled={isSubmitting}>{isSubmitting ? "Saving..." : "Save"}</button>
         <button type="button" className="btn" onClick={onCancel}>Cancel</button>

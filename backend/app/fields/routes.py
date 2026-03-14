@@ -2,10 +2,13 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, distinct
+from pydantic import BaseModel
 
 from app.core.database import get_db
-from app.auth.dependencies import require_org_admin
-from app.core.models import User
+from app.auth.dependencies import require_org_admin, get_current_user, require_tenant
+from app.core.models import User, KPIField, KPIFieldValue, KPI, KPIEntry
+from app.core.models import FieldType
 from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldResponse, KPIFieldOptionResponse, KPIFieldSubFieldResponse, KPIFieldChildDataSummary
 from app.fields.service import create_field, get_field, list_fields, update_field, delete_field, get_field_child_data_summary
 
@@ -32,9 +35,32 @@ def _field_to_response(f):
         is_required=f.is_required,
         sort_order=f.sort_order,
         config=f.config,
+        carry_forward_data=getattr(f, "carry_forward_data", False),
+        full_page_multi_items=getattr(f, "full_page_multi_items", False),
         options=[KPIFieldOptionResponse.model_validate(o) for o in (f.options or [])],
         sub_fields=[KPIFieldSubFieldResponse.model_validate(s) for s in (getattr(f, "sub_fields", None) or [])],
     )
+
+
+class ReferenceAllowedValuesResponse(BaseModel):
+    values: list[str]
+
+
+@router.get("/reference-allowed-values", response_model=ReferenceAllowedValuesResponse)
+async def get_reference_allowed_values(
+    source_kpi_id: int = Query(..., description="KPI id of the source field"),
+    source_field_key: str = Query(..., description="Field key of the source field"),
+    source_sub_field_key: str | None = Query(None, description="Sub-field key when source is multi_line_items"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: User = Depends(require_tenant),
+):
+    """Return distinct values from a source KPI field (or multi_line_items sub-field) for reference/lookup dropdown."""
+    org_id = _org_id(current_user, organization_id)
+    from app.entries.service import get_reference_allowed_values as get_allowed
+    values = await get_allowed(db, source_kpi_id, source_field_key, org_id, source_sub_field_key)
+    return ReferenceAllowedValuesResponse(values=values)
 
 
 @router.get("", response_model=list[KPIFieldResponse])

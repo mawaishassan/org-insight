@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, distinct
 from sqlalchemy.orm import selectinload
 
 from app.core.models import (
@@ -16,8 +16,18 @@ from app.core.models import (
     TimeDimension,
     effective_kpi_time_dimension,
     period_key_sort_order,
+    KPIOrganizationTag,
+    OrganizationTag,
 )
 from app.core.models import FieldType
+
+
+class EntryValidationError(Exception):
+    """Raised when entry values fail validation (e.g. reference field value not in allowed list)."""
+
+    def __init__(self, errors: list[dict]):
+        self.errors = errors  # list of {"field_key": str, "sub_field_key": str|None, "row_index": int|None, "value": str, "message": str}
+        super().__init__(f"Validation failed: {len(errors)} error(s)")
 
 # Type for multi_line_items data passed to formula evaluator
 MultiLineItemsData = dict[str, list[dict]]
@@ -30,6 +40,109 @@ async def _resolve_org_and_kpi(db: AsyncSession, kpi_id: int) -> int | None:
     result = await db.execute(select(KPI.organization_id).where(KPI.id == kpi_id))
     row = result.one_or_none()
     return row[0] if row else None
+
+
+async def get_reference_allowed_values(
+    db: AsyncSession,
+    source_kpi_id: int,
+    source_field_key: str,
+    org_id: int,
+    source_sub_field_key: str | None = None,
+) -> list[str]:
+    """Return distinct values from a source KPI field (or multi_line_items sub-field) for reference. Same org only."""
+    result = await db.execute(
+        select(KPIField)
+        .join(KPI, KPIField.kpi_id == KPI.id)
+        .where(
+            KPIField.kpi_id == source_kpi_id,
+            KPIField.key == source_field_key,
+            KPI.organization_id == org_id,
+        )
+    )
+    source_field = result.scalar_one_or_none()
+    if not source_field:
+        return []
+    subq = select(KPIEntry.id).where(KPIEntry.organization_id == org_id)
+
+    if source_field.field_type == FieldType.multi_line_items and source_sub_field_key:
+        # Collect distinct values from value_json[*][source_sub_field_key] across all entries
+        rows = await db.execute(
+            select(KPIFieldValue.value_json).where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_json.isnot(None),
+            )
+        )
+        values_set: set[str] = set()
+        for (value_json,) in rows.all():
+            if not isinstance(value_json, list):
+                continue
+            for row in value_json:
+                if not isinstance(row, dict):
+                    continue
+                cell = row.get(source_sub_field_key)
+                if cell is None or cell == "":
+                    continue
+                s = str(cell).strip()
+                if s.lower() in ("true", "false"):
+                    s = s.lower()
+                values_set.add(s)
+        return sorted(values_set)
+    if source_field.field_type == FieldType.number:
+        rows = await db.execute(
+            select(distinct(KPIFieldValue.value_number))
+            .where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_number.isnot(None),
+            )
+        )
+        values = [str(r[0]) for r in rows.all() if r[0] is not None]
+    elif source_field.field_type == FieldType.boolean:
+        rows = await db.execute(
+            select(distinct(KPIFieldValue.value_boolean))
+            .where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_boolean.isnot(None),
+            )
+        )
+        values = [str(r[0]).lower() for r in rows.all() if r[0] is not None]
+    elif source_field.field_type == FieldType.date:
+        rows = await db.execute(
+            select(distinct(KPIFieldValue.value_date))
+            .where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_date.isnot(None),
+            )
+        )
+        values = []
+        for r in rows.all():
+            if r[0] is not None:
+                values.append(r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0]))
+    else:
+        rows = await db.execute(
+            select(distinct(KPIFieldValue.value_text))
+            .where(
+                KPIFieldValue.field_id == source_field.id,
+                KPIFieldValue.entry_id.in_(subq),
+                KPIFieldValue.value_text.isnot(None),
+                KPIFieldValue.value_text != "",
+            )
+        )
+        values = [r[0] for r in rows.all() if r[0]]
+    return sorted(set(values))
+
+
+def _normalize_reference_value(val: str | None) -> str:
+    """Normalize a value for comparison with allowed reference values (strip, lowercase for bool)."""
+    if val is None:
+        return ""
+    s = (val if isinstance(val, str) else str(val)).strip()
+    if s.lower() in ("true", "false"):
+        return s.lower()
+    return s
 
 
 async def _get_entry(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry | None:
@@ -46,6 +159,73 @@ async def _get_entry(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry |
 async def _get_entry_admin(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry | None:
     """Alias for consistency; same as _get_entry (org-scoped)."""
     return await _get_entry(db, entry_id, org_id)
+
+
+async def _copy_carry_forward_from_previous(
+    db: AsyncSession, org_id: int, kpi_id: int, new_entry: KPIEntry, year: int, period_key: str
+) -> None:
+    """If KPI or any field has carry_forward_data, copy values from the most recent previous period's entry."""
+    kpi_res = await db.execute(
+        select(KPI)
+        .where(KPI.id == kpi_id, KPI.organization_id == org_id)
+        .options(selectinload(KPI.fields))
+    )
+    kpi = kpi_res.scalar_one_or_none()
+    if not kpi:
+        return
+    org = await db.get(Organization, org_id)
+    if not org:
+        return
+    org_td_raw = getattr(org, "time_dimension", None) or "yearly"
+    kpi_td_raw = getattr(kpi, "time_dimension", None)
+    try:
+        org_td = TimeDimension(org_td_raw)
+    except ValueError:
+        org_td = TimeDimension.YEARLY
+    kpi_td = None
+    if kpi_td_raw:
+        try:
+            kpi_td = TimeDimension(kpi_td_raw)
+        except ValueError:
+            pass
+    dimension = effective_kpi_time_dimension(kpi_td, org_td)
+    kpi_carry = getattr(kpi, "carry_forward_data", False) or False
+    carry_field_ids = set()
+    for f in kpi.fields or []:
+        if f.field_type == FieldType.formula:
+            continue
+        if kpi_carry or getattr(f, "carry_forward_data", False):
+            carry_field_ids.add(f.id)
+    if not carry_field_ids:
+        return
+    prev = _previous_period(year, period_key, dimension)
+    while prev:
+        pyear, ppk = prev
+        prev_res = await db.execute(
+            select(KPIEntry)
+            .where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == kpi_id,
+                KPIEntry.year == pyear,
+                KPIEntry.period_key == ppk,
+            )
+            .options(selectinload(KPIEntry.field_values))
+        )
+        prev_entry = prev_res.scalar_one_or_none()
+        if prev_entry and prev_entry.field_values:
+            for fv in prev_entry.field_values:
+                if fv.field_id not in carry_field_ids:
+                    continue
+                new_fv = KPIFieldValue(entry_id=new_entry.id, field_id=fv.field_id)
+                new_fv.value_text = fv.value_text
+                new_fv.value_number = fv.value_number
+                new_fv.value_boolean = fv.value_boolean
+                new_fv.value_date = fv.value_date
+                new_fv.value_json = fv.value_json
+                db.add(new_fv)
+            await db.flush()
+            return
+        prev = _previous_period(pyear, ppk, dimension)
 
 
 async def get_or_create_entry(
@@ -77,6 +257,7 @@ async def get_or_create_entry(
     )
     db.add(entry)
     await db.flush()
+    await _copy_carry_forward_from_previous(db, org_id, kpi_id, entry, year, pk)
     return entry, True
 
 
@@ -176,6 +357,61 @@ async def save_entry_values(
     if not kpi:
         return None
     key_to_field = {f.key: f for f in kpi.fields}
+    validation_errors: list[dict] = []
+
+    # Reference field validation (scalar and inside multi_line_items)
+    for v in values:
+        f = next((x for x in kpi.fields if x.id == v.field_id), None)
+        if not f:
+            continue
+        if f.field_type == FieldType.reference:
+            config = getattr(f, "config", None) or {}
+            sid = config.get("reference_source_kpi_id")
+            skey = config.get("reference_source_field_key")
+            sub_key = config.get("reference_source_sub_field_key")
+            if sid and skey:
+                allowed = await get_reference_allowed_values(db, int(sid), str(skey), org_id, source_sub_field_key=sub_key)
+                allowed_normalized = {_normalize_reference_value(a) for a in allowed}
+                raw = (v.value_text or "").strip()
+                normalized = _normalize_reference_value(v.value_text)
+                if raw and normalized not in allowed_normalized:
+                    validation_errors.append({
+                        "field_key": f.key,
+                        "sub_field_key": None,
+                        "row_index": None,
+                        "value": v.value_text or "",
+                        "message": "Value must be one of the referenced field's values.",
+                    })
+        elif f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
+            for sub in getattr(f, "sub_fields", []) or []:
+                if getattr(sub, "field_type", None) != FieldType.reference:
+                    continue
+                config = getattr(sub, "config", None) or {}
+                sid = config.get("reference_source_kpi_id")
+                skey = config.get("reference_source_field_key")
+                sub_key = config.get("reference_source_sub_field_key")
+                if not sid or not skey:
+                    continue
+                allowed = await get_reference_allowed_values(db, int(sid), str(skey), org_id, source_sub_field_key=sub_key)
+                allowed_normalized = {_normalize_reference_value(a) for a in allowed}
+                for row_idx, row in enumerate(v.value_json):
+                    if not isinstance(row, dict):
+                        continue
+                    cell = row.get(sub.key)
+                    raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
+                    normalized = _normalize_reference_value(raw)
+                    if normalized and normalized not in allowed_normalized:
+                        validation_errors.append({
+                            "field_key": f.key,
+                            "sub_field_key": sub.key,
+                            "row_index": row_idx,
+                            "value": raw,
+                            "message": "Value must be one of the referenced field's values.",
+                        })
+
+    if validation_errors:
+        raise EntryValidationError(validation_errors)
+
     value_by_key: dict[str, float | int] = {}
     multi_line_items_data: MultiLineItemsData = {}
     for v in values:
@@ -505,6 +741,21 @@ def _expected_period_keys(dimension: TimeDimension) -> list[str]:
     return [""]
 
 
+def _previous_period(year: int, period_key: str, dimension: TimeDimension) -> tuple[int, str] | None:
+    """Return (year_prev, period_key_prev) for the period before (year, period_key), or None if no previous (e.g. yearly 2020)."""
+    pk = (period_key or "").strip()
+    keys = _expected_period_keys(dimension)
+    try:
+        idx = keys.index(pk) if pk in keys else (keys.index("") if "" in keys else 0)
+    except ValueError:
+        idx = 0
+    if idx > 0:
+        return year, keys[idx - 1]
+    if year <= 2000:  # arbitrary lower bound
+        return None
+    return year - 1, keys[-1] if keys else ""
+
+
 def _period_display(period_key: str) -> str:
     """Human-readable label for period_key."""
     if not period_key or not period_key.strip():
@@ -602,6 +853,18 @@ async def list_entries_overview(
         pk = getattr(e, "period_key", "") or ""
         entry_by_kpi_period[(e.kpi_id, pk)] = e
 
+    tag_names_by_kpi: dict[int, list[str]] = {kid: [] for kid in kpi_ids}
+    if kpi_ids:
+        tag_res = await db.execute(
+            select(KPIOrganizationTag.kpi_id, OrganizationTag.name)
+            .join(OrganizationTag, OrganizationTag.id == KPIOrganizationTag.organization_tag_id)
+            .where(KPIOrganizationTag.kpi_id.in_(kpi_ids))
+        )
+        for row in tag_res.all():
+            kpi_id, name = row[0], (row[1] or "").strip()
+            if name and name not in tag_names_by_kpi.get(kpi_id, []):
+                tag_names_by_kpi.setdefault(kpi_id, []).append(name)
+
     result = []
     for kpi in kpis:
         kpi_td_raw = getattr(kpi, "time_dimension", None)
@@ -656,10 +919,13 @@ async def list_entries_overview(
         item = {
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,
+            "kpi_description": getattr(kpi, "description", None) or None,
+            "entry_mode": getattr(kpi, "entry_mode", None) or "manual",
             "kpi_year": year,  # context year (data scope), not KPI-level year
             "org_time_dimension": org_td.value,
             "kpi_time_dimension": kpi_td_raw,
             "effective_time_dimension": effective_td.value,
+            "organization_tag_names": tag_names_by_kpi.get(kpi.id, []),
             "entries": periods_out,
             "assigned_user_names": assigned_by_kpi.get(kpi.id, []),
             "assigned_users": assigned_users_detail_by_kpi.get(kpi.id, []),

@@ -8,6 +8,7 @@ yarn-debug.log*
 yarn-error.log*
 frontend/.next/
 frontend/.next/cache/
+node_modules/
 
 
 # ---------- Python (Backend) ----------
@@ -56,3 +57,13 @@ backend/app/entries/__pycache__/*.pyc
 backend/alembic/__pycache__/*.pyc
 backend/alembic/versions/__pycache__/*.pyc
 
+backend/app/entries/__pycache__/*.pyc
+
+backend/app/__pycache__/
+backend/app/chat/__pycache__/
+backend/app/core/__pycache__/
+
+package-lock.json
+package.json
+backend/uploads/
+backend/app/storage/__pycache__/*.pyc

@@ -120,6 +120,7 @@ def _kpi_to_response(k):
         entry_mode=getattr(k, "entry_mode", None) or "manual",
         api_endpoint_url=getattr(k, "api_endpoint_url", None),
         time_dimension=getattr(k, "time_dimension", None),
+        carry_forward_data=getattr(k, "carry_forward_data", False),
         card_display_field_ids=getattr(k, "card_display_field_ids", None) or None,
         fields_count=fields_count,
         domain_tags=domain_tags,
@@ -568,8 +569,13 @@ async def list_kpi_files(
     q = select(KpiFile).where(KpiFile.kpi_id == kpi_id, KpiFile.organization_id == org_id)
     if year is not None:
         q = q.where(KpiFile.year == year)
+    # When entry_id is provided, return files specifically tied to that entry (row- or entry-level).
+    # When entry_id is not provided, only return KPI-level attachments (entry_id IS NULL) so
+    # row-level uploads (like multi-line sub-field attachments) are not shown in the KPI-level list.
     if entry_id is not None:
         q = q.where(KpiFile.entry_id == entry_id)
+    else:
+        q = q.where(KpiFile.entry_id.is_(None))
     q = q.order_by(KpiFile.created_at.desc())
     result = await db.execute(q)
     files = result.scalars().all()

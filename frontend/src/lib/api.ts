@@ -36,7 +36,10 @@ export async function api<T>(
       return new Promise(() => {}) as Promise<T>;
     }
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(Array.isArray(err.detail) ? err.detail.map((e: { msg: string }) => e.msg).join(", ") : err.detail || res.statusText);
+    const message = Array.isArray(err.detail) ? err.detail.map((e: { msg: string }) => e.msg).join(", ") : (err.detail || res.statusText);
+    const error = new Error(typeof message === "string" ? message : "Request failed") as Error & { errors?: unknown[] };
+    if (Array.isArray(err.errors)) error.errors = err.errors;
+    throw error;
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;

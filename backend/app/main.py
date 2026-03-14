@@ -2,8 +2,10 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
+from app.entries.service import EntryValidationError
 from app.auth.routes import router as auth_router
 from app.organizations.routes import router as org_router
 from app.users.routes import router as users_router
@@ -43,6 +45,15 @@ app.include_router(fields_router, prefix="/api")
 app.include_router(entries_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+
+
+@app.exception_handler(EntryValidationError)
+async def entry_validation_exception_handler(_request, exc: EntryValidationError):
+    """Return 400 with structured errors for reference validation failures."""
+    return JSONResponse(
+        status_code=400,
+        content={"detail": "Validation failed", "errors": exc.errors},
+    )
 
 
 @app.get("/health")

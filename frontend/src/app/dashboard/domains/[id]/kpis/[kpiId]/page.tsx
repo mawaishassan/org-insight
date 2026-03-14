@@ -2,10 +2,16 @@
 
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
+
+interface ReferenceConfig {
+  reference_source_kpi_id?: number;
+  reference_source_field_key?: string;
+  reference_source_sub_field_key?: string;
+}
 
 interface SubFieldDef {
   id: number;
@@ -15,6 +21,7 @@ interface SubFieldDef {
   field_type: string;
   is_required: boolean;
   sort_order: number;
+  config?: ReferenceConfig | null;
 }
 
 interface FieldDef {
@@ -24,6 +31,7 @@ interface FieldDef {
   field_type: string;
   is_required: boolean;
   formula_expression?: string | null;
+  config?: ReferenceConfig | null;
   sub_fields?: SubFieldDef[];
 }
 
@@ -121,6 +129,7 @@ function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
 export default function DomainKpiDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
+  const router = useRouter();
   const domainId = params.id != null ? Number(params.id) : undefined;
   const isEntriesRoute = domainId === undefined;
   const kpiId = Number(params.kpiId);
@@ -154,6 +163,7 @@ export default function DomainKpiDetailPage() {
   const [fetchingFromApi, setFetchingFromApi] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [bulkMethod, setBulkMethod] = useState<"upload" | "api">("upload");
+  const [bulkUploadError, setBulkUploadError] = useState<string | null>(null);
   const [submitLoading, setSubmitLoading] = useState(false);
   const [exportExcelLoading, setExportExcelLoading] = useState(false);
   const [importExcelLoading, setImportExcelLoading] = useState(false);
@@ -167,6 +177,34 @@ export default function DomainKpiDetailPage() {
   const [kpiTimeDimension, setKpiTimeDimension] = useState<string | null>(null);
   const [orgTimeDimension, setOrgTimeDimension] = useState<string | null>(null);
   const [allEntriesForPeriodBar, setAllEntriesForPeriodBar] = useState<EntryRow[]>([]);
+  /** Reference allowed values: key = `${sourceKpiId}-${sourceFieldKey}` */
+  const [refAllowedValues, setRefAllowedValues] = useState<Record<string, string[]>>({});
+  /** Reverse references: child KPIs that reference this KPI via multi_line_items reference sub-fields */
+  const [reverseRefTabs, setReverseRefTabs] = useState<
+    Array<{
+      child_kpi_id: number;
+      child_kpi_name: string;
+      values: Array<{ token: string; label: string; count: number }>;
+      rows: Array<{
+        entry_id: number;
+        year: number;
+        period_key: string;
+        value_token: string;
+        value_display: string;
+        child_field_id: number;
+        child_field_key: string;
+        child_field_name: string;
+        child_sub_field_key: string;
+        child_sub_field_name: string;
+        row_index: number;
+        row: Record<string, unknown>;
+      }>;
+      sub_fields: Array<{ key: string; name: string }>;
+    }>
+  >([]);
+  const [reverseRefActiveKpiId, setReverseRefActiveKpiId] = useState<number | null>(null);
+  const [reverseRefSelectedTokenByKpi, setReverseRefSelectedTokenByKpi] = useState<Record<number, string>>({});
+  const [reverseRefTimeFilter, setReverseRefTimeFilter] = useState<{ year: number; period_key: string; effective_time_dimension: string } | null>(null);
 
   type FormCell = { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
@@ -188,6 +226,10 @@ export default function DomainKpiDetailPage() {
   const multiLineFields = useMemo(
     () => fields.filter((f) => f.field_type === "multi_line_items"),
     [fields]
+  );
+  const inlineMultiLineFields = useMemo(
+    () => multiLineFields.filter((f) => !(f as any).full_page_multi_items),
+    [multiLineFields]
   );
 
   const formulaBoxes = useMemo(() => {
@@ -254,7 +296,23 @@ export default function DomainKpiDetailPage() {
       setAllEntriesForPeriodBar(entriesList);
       const pk = periodKeyFromUrl ?? "";
       const match = entriesList.find((e) => (e.period_key ?? "") === pk);
-      setEntry(match ?? entriesList[0] ?? null);
+      if (match) {
+        setEntry(match);
+      } else if (effectiveOrgId != null) {
+        // No entry for this period: get-or-create so carry-forward from previous period is shown
+        try {
+          const forPeriod = await api<EntryRow>(
+            `/entries/for-period?${qs({ kpi_id: kpiId, year, period_key: pk, organization_id: effectiveOrgId })}`,
+            { token }
+          );
+          setAllEntriesForPeriodBar((prev) => [...prev, forPeriod]);
+          setEntry(forPeriod);
+        } catch {
+          setEntry(entriesList[0] ?? null);
+        }
+      } else {
+        setEntry(entriesList[0] ?? null);
+      }
     } else {
       setEntry(entriesList[0] ?? null);
     }
@@ -285,6 +343,97 @@ export default function DomainKpiDetailPage() {
     setError(null);
     loadData().catch((e) => setError(e instanceof Error ? e.message : "Failed to load")).finally(() => setLoading(false));
   }, [token, kpiId, year, effectiveOrgId, periodKeyFromUrl, isEntriesRoute]);
+
+  // Load reverse-reference info (child KPIs that reference this KPI via multi_line_items reference sub-fields)
+  useEffect(() => {
+    if (!token || !entry?.id || effectiveOrgId == null) {
+      setReverseRefTabs([]);
+      setReverseRefActiveKpiId(null);
+      setReverseRefSelectedTokenByKpi({});
+      setReverseRefTimeFilter(null);
+      return;
+    }
+    api<
+      {
+        time_filter: { year: number; period_key: string; effective_time_dimension: string };
+        tabs: Array<{
+          child_kpi_id: number;
+          child_kpi_name: string;
+          values: Array<{ token: string; label: string; count: number }>;
+          rows: Array<{
+            entry_id: number;
+            year: number;
+            period_key: string;
+            value_token: string;
+            value_display: string;
+            child_field_id: number;
+            child_field_key: string;
+            child_field_name: string;
+            child_sub_field_key: string;
+            child_sub_field_name: string;
+            row_index: number;
+            row: Record<string, unknown>;
+          }>;
+          sub_fields: Array<{ key: string; name: string }>;
+        }>;
+      }
+    >(`/entries/reverse-references?${qs({ kpi_id: kpiId, entry_id: entry.id, organization_id: effectiveOrgId })}`, { token })
+      .then((res) => {
+        const tabs = res?.tabs ?? [];
+        setReverseRefTimeFilter(res?.time_filter ?? null);
+        setReverseRefTabs(tabs);
+        if (tabs.length > 0) {
+          setReverseRefActiveKpiId((prev) => prev && tabs.some((t) => t.child_kpi_id === prev) ? prev : tabs[0].child_kpi_id);
+          const initialSelected: Record<number, string> = {};
+          tabs.forEach((t) => {
+            if (t.values.length > 0) initialSelected[t.child_kpi_id] = t.values[0].token;
+          });
+          setReverseRefSelectedTokenByKpi(initialSelected);
+        } else {
+          setReverseRefActiveKpiId(null);
+          setReverseRefSelectedTokenByKpi({});
+        }
+      })
+      .catch(() => {
+        setReverseRefTabs([]);
+        setReverseRefActiveKpiId(null);
+        setReverseRefSelectedTokenByKpi({});
+        setReverseRefTimeFilter(null);
+      });
+  }, [token, kpiId, entry?.id, effectiveOrgId]);
+
+  useEffect(() => {
+    if (!token || effectiveOrgId == null || fields.length === 0) return;
+    const keys: Array<{ k: string; sid: number; skey: string; subKey?: string }> = [];
+    fields.forEach((f) => {
+      if (f.field_type === "reference" && f.config?.reference_source_kpi_id && f.config?.reference_source_field_key) {
+        keys.push({
+          k: `${f.config.reference_source_kpi_id}-${f.config.reference_source_field_key}${f.config.reference_source_sub_field_key ? `-${f.config.reference_source_sub_field_key}` : ""}`,
+          sid: f.config.reference_source_kpi_id,
+          skey: f.config.reference_source_field_key,
+          subKey: f.config.reference_source_sub_field_key,
+        });
+      }
+      (f.sub_fields ?? []).forEach((s) => {
+        if (s.field_type === "reference" && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
+          keys.push({
+            k: `${s.config.reference_source_kpi_id}-${s.config.reference_source_field_key}${s.config.reference_source_sub_field_key ? `-${s.config.reference_source_sub_field_key}` : ""}`,
+            sid: s.config.reference_source_kpi_id,
+            skey: s.config.reference_source_field_key,
+            subKey: s.config.reference_source_sub_field_key,
+          });
+        }
+      });
+    });
+    const uniq = Array.from(new Map(keys.map((x) => [x.k, x])).values());
+    uniq.forEach(({ k, sid, skey, subKey }) => {
+      const params = new URLSearchParams({ source_kpi_id: String(sid), source_field_key: skey, organization_id: String(effectiveOrgId) });
+      if (subKey) params.set("source_sub_field_key", subKey);
+      api<{ values: string[] }>(`/fields/reference-allowed-values?${params}`, { token })
+        .then((r) => setRefAllowedValues((prev) => ({ ...prev, [k]: r.values })))
+        .catch(() => setRefAllowedValues((prev) => ({ ...prev, [k]: [] })));
+    });
+  }, [token, effectiveOrgId, fields]);
 
   const buildFormValuesFromEntry = (e: EntryRow | null): Record<number, FormCell> => {
     const out: Record<number, FormCell> = {};
@@ -361,7 +510,16 @@ export default function DomainKpiDetailPage() {
       setIsEditing(false);
       toast.success("Entry saved successfully");
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Save failed");
+      const errWithList = err as Error & { errors?: Array<{ field_key?: string; sub_field_key?: string; row_index?: number; value?: string; message?: string }> };
+      if (Array.isArray(errWithList.errors) && errWithList.errors.length > 0) {
+        const lines = errWithList.errors.map((e) => {
+          const loc = e.sub_field_key != null ? `Field "${e.field_key}", row ${(e.row_index ?? 0) + 1}, "${e.sub_field_key}"` : `Field "${e.field_key}"`;
+          return `${loc}: value "${e.value ?? ""}" ${e.message ?? "not allowed"}`;
+        });
+        setSaveError(`Validation failed:\n${lines.join("\n")}`);
+      } else {
+        setSaveError(err instanceof Error ? err.message : "Save failed");
+      }
       toast.error(err instanceof Error ? err.message : "Save failed");
     } finally {
       setSaving(false);
@@ -464,6 +622,43 @@ export default function DomainKpiDetailPage() {
 
   return (
     <div>
+      {bulkUploadError && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 1000,
+            background: "var(--error, #c00)",
+            color: "var(--on-error, #fff)",
+            padding: "0.75rem 1rem",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: "0.75rem",
+            boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
+          }}
+        >
+          <div style={{ whiteSpace: "pre-line", fontSize: "0.9rem" }}>{bulkUploadError}</div>
+          <button
+            type="button"
+            onClick={() => setBulkUploadError(null)}
+            style={{
+              border: "none",
+              background: "transparent",
+              color: "inherit",
+              fontSize: "1.1rem",
+              cursor: "pointer",
+              padding: "0 0.25rem",
+              lineHeight: 1,
+            }}
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
+        </div>
+      )}
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
       {saveError && <p className="form-error" style={{ marginBottom: "1rem" }}>{saveError}</p>}
 
@@ -861,6 +1056,17 @@ export default function DomainKpiDetailPage() {
                           });
                           if (!res.ok) {
                             const err = await res.json().catch(() => ({}));
+                            const validationErrors = Array.isArray(err.errors) ? err.errors as Array<{ field_key?: string; sub_field_key?: string; row_index?: number; value?: string; message?: string }> : [];
+                            if (validationErrors.length > 0) {
+                              const lines = validationErrors.map((e) => {
+                                const loc = e.sub_field_key != null ? `Field "${e.field_key}", row ${(e.row_index ?? 0) + 1}, "${e.sub_field_key}"` : `Field "${e.field_key}"`;
+                                return `${loc}: value "${e.value ?? ""}" ${e.message ?? "not allowed"}`;
+                              });
+                              const msg = `Validation failed:\n${lines.join("\n")}`;
+                              setError(msg);
+                              toast.error("Validation failed – see message below");
+                              return;
+                            }
                             throw new Error(err.detail ?? res.statusText);
                           }
                           await loadData();
@@ -1058,7 +1264,7 @@ export default function DomainKpiDetailPage() {
         )}
       </div>
 
-      {/* Section 3: Tabs – Field details (scalar + formula), then one tab per multi_line_items */}
+      {/* Section 3: Tabs – Field details (scalar + formula), then one tab per multi_line_items (inline-only) */}
       <div className="card">
         <div
           style={{
@@ -1095,7 +1301,17 @@ export default function DomainKpiDetailPage() {
               style={{
                 ...(activeTab === f.id ? { background: "var(--accent)", color: "var(--on-muted)" } : {}),
               }}
-              onClick={() => setActiveTab(f.id)}
+              onClick={() => {
+                if ((f as any).full_page_multi_items && isEntriesRoute && effectiveOrgId != null) {
+                  const params = new URLSearchParams({
+                    organization_id: String(effectiveOrgId),
+                    ...(periodKeyFromUrl ? { period_key: periodKeyFromUrl } : {}),
+                  });
+                  router.push(`/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${params.toString()}`);
+                  return;
+                }
+                setActiveTab(f.id);
+              }}
             >
               {f.name}
             </button>
@@ -1140,6 +1356,46 @@ export default function DomainKpiDetailPage() {
                         </div>
                       );
                     }
+                    if (f.field_type === "attachment") {
+                      const valUrl = val?.value_text ?? "";
+                      return (
+                        <div key={f.id} style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                          <label style={{ fontWeight: 500 }}>{f.name}{f.is_required ? " *" : ""}</label>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                            <input
+                              type="url"
+                              value={valUrl}
+                              onChange={(e) => updateField(f.id, "value_text", e.target.value)}
+                              placeholder="https://example.com/file.pdf"
+                              style={{ flex: "1 1 260px", minWidth: 180, padding: "0.5rem", border: "1px solid var(--border)", borderRadius: 6 }}
+                            />
+                            {kpiFiles.length > 0 && (
+                              <select
+                                value=""
+                                onChange={(e) => {
+                                  const fileId = Number(e.target.value || "0");
+                                  const file = kpiFiles.find((x) => x.id === fileId);
+                                  if (!file || !file.download_url) return;
+                                  // Store the API URL (without /api prefix) or full URL, depending on how backend expects it
+                                  updateField(f.id, "value_text", file.download_url);
+                                }}
+                                style={{ padding: "0.45rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+                              >
+                                <option value="">Select attachment…</option>
+                                {kpiFiles.map((file) => (
+                                  <option key={file.id} value={file.id}>
+                                    {file.original_filename}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                          <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.15rem 0 0" }}>
+                            Stores the URL of the selected attachment. You can also paste any URL manually.
+                          </p>
+                        </div>
+                      );
+                    }
                     if (f.field_type === "number") {
                       return (
                         <div key={f.id} style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
@@ -1180,6 +1436,27 @@ export default function DomainKpiDetailPage() {
                         </div>
                       );
                     }
+                    if (f.field_type === "reference") {
+                      const refKey = f.config?.reference_source_kpi_id && f.config?.reference_source_field_key
+                        ? `${f.config.reference_source_kpi_id}-${f.config.reference_source_field_key}${f.config.reference_source_sub_field_key ? `-${f.config.reference_source_sub_field_key}` : ""}`
+                        : "";
+                      const options = refAllowedValues[refKey] ?? [];
+                      return (
+                        <div key={f.id} style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                          <label style={{ fontWeight: 500 }}>{f.name}{f.is_required ? " *" : ""}</label>
+                          <select
+                            value={val?.value_text ?? ""}
+                            onChange={(e) => updateField(f.id, "value_text", e.target.value || undefined)}
+                            style={{ padding: "0.5rem", border: "1px solid var(--border)", borderRadius: 6, maxWidth: 320 }}
+                          >
+                            <option value="">— Select —</option>
+                            {options.map((opt) => (
+                              <option key={opt} value={opt}>{opt}</option>
+                            ))}
+                          </select>
+                        </div>
+                      );
+                    }
                     return null;
                   })}
               </div>
@@ -1211,7 +1488,7 @@ export default function DomainKpiDetailPage() {
           </div>
         )}
 
-        {multiLineFields.map((f) => {
+          {inlineMultiLineFields.map((f) => {
           if (activeTab !== f.id) return null;
           const v = valuesByFieldId.get(f.id);
           const formRows = isEditing ? (formValues[f.id]?.value_json ?? []) : [];
@@ -1219,6 +1496,7 @@ export default function DomainKpiDetailPage() {
           const subFields = f.sub_fields ?? [];
           const setRows = (next: Record<string, unknown>[]) => updateField(f.id, "value_json", next);
           const fieldQuery = `?field_id=${f.id}&organization_id=${effectiveOrgId}`;
+          const templateQuery = entry ? `?field_id=${f.id}&entry_id=${entry.id}&organization_id=${effectiveOrgId}` : fieldQuery;
           const appendUpload = uploadOption === "append";
           const uploadQuery = entry ? `?entry_id=${entry.id}&field_id=${f.id}&organization_id=${effectiveOrgId}&append=${appendUpload}` : "";
           return (
@@ -1227,6 +1505,29 @@ export default function DomainKpiDetailPage() {
                 <p style={{ color: "var(--muted)" }}>No sub-fields defined.</p>
               ) : (
                 <>
+                  {isEditing && (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                        <button type="button" className="btn btn-primary" disabled={saving || isLocked} onClick={handleSave}>
+                          {saving ? "Saving…" : "Save"}
+                        </button>
+                        <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
+                          Rows are in <strong>draft</strong> until you click Save.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={isLocked}
+                        onClick={() => setRows([...rows, Object.fromEntries(subFields.map((s) => [s.key, undefined]))])}
+                      >
+                        Add row
+                      </button>
+                    </div>
+                  )}
+
+                  {canEditKpi && (
+                  <>
                   <div style={{ marginBottom: "0.75rem", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                     <button
                       type="button"
@@ -1326,7 +1627,7 @@ export default function DomainKpiDetailPage() {
                             type="button"
                             className="btn"
                             onClick={async () => {
-                              const url = getApiUrl(`/entries/multi-items/template${fieldQuery}`);
+                              const url = getApiUrl(`/entries/multi-items/template${templateQuery}`);
                               const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
                               if (!res.ok) return;
                               const blob = await res.blob();
@@ -1374,8 +1675,40 @@ export default function DomainKpiDetailPage() {
                                     await loadData();
                                     toast.success("Excel uploaded successfully");
                                   } else {
-                                    setSaveError("Excel upload failed");
-                                    toast.error("Excel upload failed");
+                                    const err = await res.json().catch(() => ({}));
+                                    const validationErrors = Array.isArray(err.errors)
+                                      ? (err.errors as Array<{
+                                          field_key?: string;
+                                          sub_field_key?: string;
+                                          row_index?: number;
+                                          value?: string;
+                                          message?: string;
+                                          row?: unknown;
+                                        }>)
+                                      : [];
+                                    if (validationErrors.length > 0) {
+                                      const first = validationErrors[0];
+                                      const loc =
+                                        first.sub_field_key != null
+                                          ? `Field "${first.field_key}", row ${(first.row_index ?? 0) + 1}, "${first.sub_field_key}"`
+                                          : `Field "${first.field_key}"`;
+                                      const details =
+                                        first.row != null
+                                          ? ` | row: ${
+                                              typeof first.row === "string"
+                                                ? first.row
+                                                : JSON.stringify(first.row)
+                                            }`
+                                          : "";
+                                      const msg = `Consistency check failed:\n${loc}: value "${first.value ?? ""}" ${
+                                        first.message ?? "not allowed"
+                                      }${details}`;
+                                      setBulkUploadError(msg);
+                                      window.scrollTo({ top: 0, behavior: "smooth" });
+                                    } else {
+                                      setBulkUploadError("Excel upload failed");
+                                      window.scrollTo({ top: 0, behavior: "smooth" });
+                                    }
                                   }
                                 } finally {
                                   setUploadingFieldId(null);
@@ -1441,18 +1774,10 @@ export default function DomainKpiDetailPage() {
                     )}
                   </div>
                   )}
-
-                  {isEditing && (
-                    <div style={{ marginBottom: "0.75rem" }}>
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => setRows([...rows, Object.fromEntries(subFields.map((s) => [s.key, undefined]))])}
-                      >
-                        Add row
-                      </button>
-                    </div>
+                  </>
                   )}
+
+                  {/* Add row button moved to top while editing */}
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                     <thead>
                       <tr>
@@ -1520,6 +1845,94 @@ export default function DomainKpiDetailPage() {
                                         setRows(next);
                                       }}
                                     />
+                                  ) : s.field_type === "reference" ? (
+                                    (() => {
+                                      const refKey = s.config?.reference_source_kpi_id && s.config?.reference_source_field_key
+                                        ? `${s.config.reference_source_kpi_id}-${s.config.reference_source_field_key}${s.config.reference_source_sub_field_key ? `-${s.config.reference_source_sub_field_key}` : ""}`
+                                        : "";
+                                      const options = refAllowedValues[refKey] ?? [];
+                                      const cellVal = row[s.key];
+                                      const strVal = typeof cellVal === "string" ? cellVal : String(cellVal ?? "");
+                                      return (
+                                        <select
+                                          value={strVal}
+                                          onChange={(e) => {
+                                            const next = [...rows];
+                                            next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value || undefined };
+                                            setRows(next);
+                                          }}
+                                          style={{ width: "100%", minWidth: 100, padding: "0.35rem" }}
+                                        >
+                                          <option value="">—</option>
+                                          {options.map((opt) => (
+                                            <option key={opt} value={opt}>{opt}</option>
+                                          ))}
+                                        </select>
+                                      );
+                                    })()
+                                  ) : s.field_type === "attachment" ? (
+                                    (() => {
+                                      const cellVal = row[s.key];
+                                      const valUrl = typeof cellVal === "string" ? cellVal : String(cellVal ?? "");
+                                      return (
+                                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                                          <input
+                                            type="url"
+                                            value={valUrl}
+                                            onChange={(e) => {
+                                              const next = [...rows];
+                                              next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value };
+                                              setRows(next);
+                                            }}
+                                            placeholder="https://example.com/file.pdf"
+                                            style={{ flex: "1 1 160px", minWidth: 140, padding: "0.35rem" }}
+                                          />
+                                          <label
+                                            className="btn"
+                                            style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
+                                          >
+                                            Upload file
+                                            <input
+                                              type="file"
+                                              style={{ display: "none" }}
+                                              onChange={async (e) => {
+                                                const file = e.target.files?.[0];
+                                                e.target.value = "";
+                                                if (!file || !entry || !token) return;
+                                                try {
+                                                  const form = new FormData();
+                                                  form.append("files", file);
+                                                  form.append("entry_id", String(entry.id));
+                                                  form.append("year", String(year));
+                                                  const url = getApiUrl(`/kpis/${kpiId}/files`);
+                                                  const res = await fetch(url, {
+                                                    method: "POST",
+                                                    headers: { Authorization: `Bearer ${token}` },
+                                                    body: form,
+                                                  });
+                                                  if (!res.ok) {
+                                                    toast.error("File upload failed");
+                                                    return;
+                                                  }
+                                                  const uploaded = (await res.json()) as KpiFileItem[];
+                                                  const latest = uploaded[0];
+                                                  if (!latest || !latest.download_url) {
+                                                    toast.error("File upload failed");
+                                                    return;
+                                                  }
+                                                  const next = [...rows];
+                                                  next[rowIdx] = { ...next[rowIdx], [s.key]: latest.download_url };
+                                                  setRows(next);
+                                                  toast.success("File uploaded");
+                                                } catch {
+                                                  toast.error("File upload failed");
+                                                }
+                                              }}
+                                            />
+                                          </label>
+                                        </div>
+                                      );
+                                    })()
                                   ) : (
                                     (() => {
                                       const cellVal = row[s.key];
@@ -1564,6 +1977,116 @@ export default function DomainKpiDetailPage() {
           );
         })}
       </div>
+
+      {/* Section 4: Reverse-reference tabs – child KPIs that reference this KPI via multi_line_items */}
+      {reverseRefTabs.length > 0 && (
+        <div className="card" style={{ marginTop: "1.5rem" }}>
+          <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid var(--border)" }}>
+            <strong>Related records (referencing KPIs)</strong>
+            <p style={{ margin: "0.25rem 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+              These KPIs reference this record via reference sub-fields in multi-line items. Data is read-only here.
+            </p>
+            {reverseRefTimeFilter && (
+              <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", color: "var(--text-secondary)" }}>
+                Filtered by time dimension: <strong>{reverseRefTimeFilter.year}</strong>
+                {reverseRefTimeFilter.period_key ? ` · ${reverseRefTimeFilter.period_key}` : ""}
+                <span style={{ color: "var(--muted)", fontWeight: "normal" }}>
+                  {" "}({reverseRefTimeFilter.effective_time_dimension.replace(/_/g, " ")})
+                </span>
+              </p>
+            )}
+          </div>
+          <div style={{ padding: "0.75rem 1rem" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
+              {reverseRefTabs.map((tab) => (
+                <button
+                  key={tab.child_kpi_id}
+                  type="button"
+                  className="btn"
+                  style={reverseRefActiveKpiId === tab.child_kpi_id ? { background: "var(--accent)", color: "var(--on-muted)" } : {}}
+                  onClick={() => setReverseRefActiveKpiId(tab.child_kpi_id)}
+                >
+                  {tab.child_kpi_name}
+                </button>
+              ))}
+            </div>
+            {reverseRefTabs.map((tab) => {
+              if (reverseRefActiveKpiId !== tab.child_kpi_id) return null;
+              const selectedToken = reverseRefSelectedTokenByKpi[tab.child_kpi_id] ?? (tab.values[0]?.token ?? "");
+              const rowsForToken = tab.rows.filter((r) => r.value_token === selectedToken);
+              const selectedMeta = tab.values.find((v) => v.token === selectedToken);
+              return (
+                <div key={tab.child_kpi_id}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.75rem", flexWrap: "wrap" }}>
+                    <label style={{ fontSize: "0.9rem", fontWeight: 500 }}>Select value</label>
+                    <select
+                      value={selectedToken}
+                      onChange={(e) =>
+                        setReverseRefSelectedTokenByKpi((prev) => ({ ...prev, [tab.child_kpi_id]: e.target.value }))
+                      }
+                      style={{
+                        minWidth: 200,
+                        padding: "0.4rem 0.5rem",
+                        borderRadius: 6,
+                        border: "1px solid var(--border)",
+                        fontSize: "0.9rem",
+                      }}
+                    >
+                      {tab.values.map((v) => (
+                        <option key={v.token} value={v.token}>
+                          {v.label} ({v.count})
+                        </option>
+                      ))}
+                    </select>
+                    {selectedMeta && (
+                      <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
+                        Showing {rowsForToken.length} row(s) referencing this value.
+                      </span>
+                    )}
+                  </div>
+                  {rowsForToken.length === 0 ? (
+                    <p style={{ fontSize: "0.9rem", color: "var(--muted)" }}>No related rows for the selected value.</p>
+                  ) : (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.9rem" }}>
+                        <thead>
+                          <tr>
+                            <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Year</th>
+                            <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Period</th>
+                            {tab.sub_fields.map((sf) => (
+                              <th
+                                key={sf.key}
+                                style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}
+                              >
+                                {sf.name}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rowsForToken.map((row) => (
+                            <tr key={`${row.entry_id}-${row.row_index}`}>
+                              <td style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>{row.year}</td>
+                              <td style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                {row.period_key || "—"}
+                              </td>
+                              {tab.sub_fields.map((sf) => (
+                                <td key={sf.key} style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                  {String((row.row as Record<string, unknown>)[sf.key] ?? "")}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
         </>
       )}

@@ -13,10 +13,33 @@ const TIME_DIMENSION_LABELS: Record<string, string> = {
   monthly: "Monthly",
 };
 
+/** Tag-based card accent colors (border-left + subtle bg) for org_admin cards. Same tag(s) = same color. */
+const CARD_TAG_COLORS = [
+  { border: "#6366f1", bg: "rgba(99, 102, 241, 0.06)" },
+  { border: "#059669", bg: "rgba(5, 150, 105, 0.06)" },
+  { border: "#dc2626", bg: "rgba(220, 38, 38, 0.06)" },
+  { border: "#d97706", bg: "rgba(217, 119, 6, 0.06)" },
+  { border: "#7c3aed", bg: "rgba(124, 58, 237, 0.06)" },
+  { border: "#0d9488", bg: "rgba(13, 148, 136, 0.06)" },
+  { border: "#2563eb", bg: "rgba(37, 99, 235, 0.06)" },
+  { border: "#4f46e5", bg: "rgba(79, 70, 229, 0.06)" },
+];
+function getCardColorForTags(tagNames: string[]): { border: string; bg: string } {
+  if (tagNames.length === 0) return { border: "var(--border, #e5e7eb)", bg: "transparent" };
+  let n = 0;
+  for (let i = 0; i < tagNames.length; i++) {
+    for (let j = 0; j < (tagNames[i] ?? "").length; j++) n += (tagNames[i].charCodeAt(j) ?? 0);
+  }
+  return CARD_TAG_COLORS[Math.abs(n) % CARD_TAG_COLORS.length];
+}
+
 export interface OverviewItem {
   kpi_id: number;
   kpi_name: string;
   kpi_year: number;
+  kpi_description?: string | null;
+  entry_mode?: string | null;
+  organization_tag_names?: string[];
   assigned_user_names?: string[];
   assigned_users?: Array<{ display_name: string; email: string | null; permission?: string }>;
   current_user_permission?: "data_entry" | "view";
@@ -81,6 +104,8 @@ export interface KpiCardsGridProps {
   onFilteredCountChange?: (count: number) => void;
   /** When true, show only KPIs where current user has data_entry permission (for "Only assigned to me" toggle) */
   assignedToMeOnly?: boolean;
+  /** "org_admin" = card layout for org admin entries page (name, description, last updated; top row: time dimension + entry method) */
+  cardLayout?: "default" | "org_admin";
 }
 
 export function KpiCardsGrid({
@@ -95,6 +120,7 @@ export function KpiCardsGrid({
   emptyMessage,
   onFilteredCountChange,
   assignedToMeOnly = false,
+  cardLayout = "default",
 }: KpiCardsGridProps) {
   const token = getAccessToken();
   const [overview, setOverview] = useState<OverviewItem[]>([]);
@@ -211,6 +237,208 @@ export function KpiCardsGrid({
           })();
         const reminderEmails = assignedUsers.map((u) => u.email).filter(Boolean).join(", ");
         const isViewOnly = item?.current_user_permission === "view";
+        const entryModeLabel = (item?.entry_mode ?? "manual") === "api" ? "API" : "Manual";
+        const timeDimensionLabel = item?.effective_time_dimension
+          ? (TIME_DIMENSION_LABELS[item.effective_time_dimension] ?? item.effective_time_dimension)
+          : null;
+
+        if (cardLayout === "org_admin") {
+          const tagNames = item?.organization_tag_names ?? [];
+          const cardColor = getCardColorForTags(tagNames);
+          const SECTION_TOP_HEIGHT = "2.25rem";
+          const SECTION_TAGS_HEIGHT = "1.75rem";
+          const SECTION_NAME_HEIGHT = "2.75rem";
+          const SECTION_DESC_HEIGHT = "3.75rem";
+          const SECTION_FOOTER_HEIGHT = "2.25rem";
+          return (
+            <Link
+              key={kpi.id}
+              href={detailHref(kpi.id)}
+              style={{
+                textDecoration: "none",
+                color: "inherit",
+                display: "flex",
+                flexDirection: "column",
+                height: "100%",
+                minHeight: 200,
+                borderLeftWidth: 4,
+                borderLeftStyle: "solid",
+                borderLeftColor: cardColor.border,
+                background: cardColor.bg,
+                borderRadius: 8,
+                ...(noAssigned ? { boxShadow: "0 0 0 2px var(--warning, #b8860b)" } : {}),
+              }}
+              className="card"
+            >
+              {/* Section: Top row — time dimension (left), data entry method (right) */}
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  height: SECTION_TOP_HEIGHT,
+                  minHeight: SECTION_TOP_HEIGHT,
+                  paddingBottom: "0.5rem",
+                  borderBottom: "1px solid var(--border, #e5e7eb)",
+                  flexShrink: 0,
+                }}
+              >
+                <span style={{ fontSize: "0.8rem", color: "var(--muted)", fontWeight: 500 }}>
+                  {timeDimensionLabel ?? "—"}
+                </span>
+                <span
+                  style={{
+                    fontSize: "0.75rem",
+                    fontWeight: 600,
+                    padding: "0.2rem 0.5rem",
+                    borderRadius: 6,
+                    background: "var(--accent-muted, #e8e8e8)",
+                    color: "var(--text)",
+                  }}
+                >
+                  {entryModeLabel}
+                </span>
+              </div>
+              {/* Section: KPI name — fixed height, max 2 lines */}
+              <div
+                style={{
+                  minHeight: SECTION_NAME_HEIGHT,
+                  height: SECTION_NAME_HEIGHT,
+                  display: "flex",
+                  alignItems: "flex-start",
+                  paddingTop: "0.5rem",
+                  paddingBottom: "0.5rem",
+                  borderBottom: "1px solid var(--border, #e5e7eb)",
+                  flexShrink: 0,
+                }}
+              >
+                <h3
+                  style={{
+                    fontSize: "1.05rem",
+                    fontWeight: 600,
+                    margin: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    display: "-webkit-box",
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: "vertical",
+                    lineHeight: 1.3,
+                  }}
+                  title={kpi.name}
+                >
+                  {kpi.name || "—"}
+                </h3>
+              </div>
+              {/* Section: Description — fixed height, max 3 lines, empty space if none */}
+              <div
+                style={{
+                  minHeight: SECTION_DESC_HEIGHT,
+                  height: SECTION_DESC_HEIGHT,
+                  paddingTop: "0.5rem",
+                  paddingBottom: "0.5rem",
+                  borderBottom: "1px solid var(--border, #e5e7eb)",
+                  flexShrink: 0,
+                }}
+              >
+                <p
+                  style={{
+                    fontSize: "0.875rem",
+                    color: "var(--muted)",
+                    margin: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    display: "-webkit-box",
+                    WebkitLineClamp: 3,
+                    WebkitBoxOrient: "vertical",
+                    lineHeight: 1.35,
+                  }}
+                >
+                  {(item?.kpi_description ?? "").trim() || " "}
+                </p>
+              </div>
+              {/* Section: Tags — one line below description, ellipsis + hover for full text */}
+              <div
+                style={{
+                  minHeight: SECTION_TAGS_HEIGHT,
+                  height: SECTION_TAGS_HEIGHT,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.35rem",
+                  paddingTop: "0.35rem",
+                  paddingBottom: "0.35rem",
+                  borderBottom: "1px solid var(--border, #e5e7eb)",
+                  flexShrink: 0,
+                  overflow: "hidden",
+                }}
+              >
+                {tagNames.length > 0 ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.35rem",
+                      minWidth: 0,
+                      overflow: "hidden",
+                    }}
+                  >
+                    {tagNames.slice(0, 5).map((tag) => (
+                      <span
+                        key={tag}
+                        title={tag}
+                        style={{
+                          fontSize: "0.7rem",
+                          padding: "0.15rem 0.4rem",
+                          borderRadius: 999,
+                          background: "var(--accent-muted, #eef2ff)",
+                          color: "var(--accent, #4f46e5)",
+                          fontWeight: 500,
+                          maxWidth: "100%",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          flexShrink: 1,
+                          minWidth: 0,
+                        }}
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>—</span>
+                )}
+              </div>
+              {/* Section: Last updated — fixed height */}
+              <div
+                style={{
+                  minHeight: SECTION_FOOTER_HEIGHT,
+                  height: SECTION_FOOTER_HEIGHT,
+                  display: "flex",
+                  alignItems: "center",
+                  paddingTop: "0.4rem",
+                  flexShrink: 0,
+                  fontSize: "0.8rem",
+                  color: "var(--muted)",
+                }}
+              >
+                {hasEntry && (item?.entry?.last_updated_at || item?.entry?.entered_by_user_name) ? (
+                  <span>
+                    Last updated: {lastUpdatedFormatted || ""}
+                    {item?.entry?.entered_by_user_name
+                      ? (lastUpdatedFormatted ? " by " : "") + item.entry.entered_by_user_name
+                      : ""}
+                  </span>
+                ) : assignedCount > 0 ? (
+                  <span>Assigned: {item!.assigned_user_names!.join(", ")}</span>
+                ) : (
+                  <span style={{ color: "var(--warning, #b8860b)", fontWeight: 500 }}>
+                    No data entry user assigned.
+                  </span>
+                )}
+              </div>
+            </Link>
+          );
+        }
 
         return (
           <Link

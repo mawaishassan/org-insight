@@ -41,8 +41,10 @@ class FieldType(str, enum.Enum):
     number = "number"
     date = "date"
     boolean = "boolean"
+    attachment = "attachment"  # URL to an attachment (this KPI or other KPIs)
     multi_line_items = "multi_line_items"
     formula = "formula"
+    reference = "reference"  # Reference/Lookup: values from another KPI field
 
 
 class TimeDimension(str, enum.Enum):
@@ -331,6 +333,7 @@ class KPI(Base):
     entry_mode = Column(String(20), nullable=False, default="manual", server_default="manual")
     api_endpoint_url = Column(String(2048), nullable=True)  # URL we call (GET or POST with year) to get entry payload
     time_dimension = Column(String(32), nullable=True)  # None = inherit org; else yearly, half_yearly, quarterly, monthly
+    carry_forward_data = Column(Boolean, default=False, nullable=False, server_default="0")  # Non-cyclic: copy from previous period when new
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -362,6 +365,9 @@ class KPIField(Base):
     is_required = Column(Boolean, default=False)
     sort_order = Column(Integer, default=0)
     config = Column(JSON, nullable=True)
+    carry_forward_data = Column(Boolean, default=False, nullable=False, server_default="0")  # Non-cyclic: copy from previous period when new
+    # When true for multi_line_items fields, data entry uses a dedicated full-page UI instead of inline rows.
+    full_page_multi_items = Column(Boolean, default=False, nullable=False, server_default="0")
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -403,9 +409,10 @@ class KPIFieldSubField(Base):
     )
     name = Column(String(255), nullable=False)
     key = Column(String(100), nullable=False, index=True)
-    field_type = Column(Enum(FieldType), nullable=False)  # single_line_text, number, date, boolean only
+    field_type = Column(Enum(FieldType), nullable=False)  # single_line_text, number, date, boolean, reference
     is_required = Column(Boolean, default=False)
     sort_order = Column(Integer, default=0)
+    config = Column(JSON, nullable=True)  # For reference: {"reference_source_kpi_id": int, "reference_source_field_key": str}
 
     field = relationship("KPIField", back_populates="sub_fields")
 
