@@ -41,6 +41,7 @@ export interface OverviewItem {
   entry_mode?: string | null;
   organization_tag_names?: string[];
   assigned_user_names?: string[];
+  assigned_role_names?: string[];
   assigned_users?: Array<{ display_name: string; email: string | null; permission?: string }>;
   current_user_permission?: "data_entry" | "view";
   org_time_dimension?: string;
@@ -127,10 +128,14 @@ export function KpiCardsGrid({
   const [kpis, setKpis] = useState<KpiRow[]>([]);
   const [loadingOverview, setLoadingOverview] = useState(true);
   const [loadingKpis, setLoadingKpis] = useState(!!domainId && !kpisOverride);
+  /** When overview is empty on org_admin entries page, fallback list from GET /entries/available-kpis so org admin still sees all KPIs. */
+  const [availableKpisFallback, setAvailableKpisFallback] = useState<KpiRow[]>([]);
+  const [loadingFallback, setLoadingFallback] = useState(false);
 
   const loadOverview = () => {
     if (!token || !organizationId) return;
     setLoadingOverview(true);
+    setAvailableKpisFallback([]);
     const query = `?${qs({ year, organization_id: organizationId })}`;
     api<OverviewItem[]>(`/entries/overview${query}`, { token })
       .then(setOverview)
@@ -152,11 +157,33 @@ export function KpiCardsGrid({
       .finally(() => setLoadingKpis(false));
   }, [token, organizationId, domainId, kpisOverride]);
 
+  // Org admin entries page: when overview is empty, fetch available-kpis so we still show all KPIs
+  useEffect(() => {
+    if (
+      !token ||
+      !organizationId ||
+      cardLayout !== "org_admin" ||
+      domainId != null ||
+      kpisOverride !== undefined ||
+      loadingOverview ||
+      overview.length > 0
+    ) {
+      if (overview.length > 0) setAvailableKpisFallback([]);
+      return;
+    }
+    setLoadingFallback(true);
+    api<KpiRow[]>(`/entries/available-kpis?${qs({ organization_id: organizationId })}`, { token })
+      .then((list) => setAvailableKpisFallback(Array.isArray(list) ? list : []))
+      .catch(() => setAvailableKpisFallback([]))
+      .finally(() => setLoadingFallback(false));
+  }, [token, organizationId, cardLayout, domainId, kpisOverride, loadingOverview, overview.length]);
+
   const listToShow = useMemo(() => {
     if (kpisOverride !== undefined) return kpisOverride;
     if (domainId != null) return kpis;
-    return overview.map((o) => ({ id: o.kpi_id, name: o.kpi_name }));
-  }, [domainId, kpisOverride, kpis, overview]);
+    if (overview.length > 0) return overview.map((o) => ({ id: o.kpi_id, name: o.kpi_name }));
+    return availableKpisFallback;
+  }, [domainId, kpisOverride, kpis, overview, availableKpisFallback]);
 
   const overviewByKpiId = useMemo(() => {
     const map = new Map<number, OverviewItem>();
@@ -167,7 +194,7 @@ export function KpiCardsGrid({
   const getStatus = (k: KpiRow): "submitted" | "draft" | "not_entered" | "no_user_assigned" => {
     const item = overviewByKpiId.get(k.id);
     const hasEntry = item?.entry != null;
-    const assignedCount = item?.assigned_user_names?.length ?? 0;
+    const assignedCount = (item?.assigned_role_names?.length ?? 0) || (item?.assigned_user_names?.length ?? 0);
     const noAssigned = assignedCount === 0;
     if (hasEntry && !item!.entry!.is_draft && item!.entry!.submitted_at != null) return "submitted";
     if (hasEntry && item!.entry!.is_draft) return "draft";
@@ -202,7 +229,11 @@ export function KpiCardsGrid({
     onFilteredCountChange?.(filteredKpis.length);
   }, [filteredKpis.length, onFilteredCountChange]);
 
-  const loading = parentLoading ?? (loadingOverview || (!!domainId && !kpisOverride && loadingKpis));
+  const loading =
+    parentLoading ??
+    (loadingOverview ||
+      loadingFallback ||
+      (!!domainId && !kpisOverride && loadingKpis));
   const error = parentError;
 
   const detailHref = (kpiId: number) =>
@@ -226,9 +257,12 @@ export function KpiCardsGrid({
         const hasEntry = entry != null;
         const status = !hasEntry ? "not_entered" : entry.is_locked ? "locked" : entry.is_draft ? "draft" : "submitted";
         const preview = hasEntry && entry.preview ? entry.preview : [];
-        const assignedCount = item?.assigned_user_names?.length ?? 0;
-        const assignedUsers = item?.assigned_users ?? [];
-        const noAssigned = assignedCount === 0;
+    const assignedUserCount = item?.assigned_user_names?.length ?? 0;
+    const assignedRoleCount = item?.assigned_role_names?.length ?? 0;
+    const assignedCount = assignedRoleCount || assignedUserCount;
+    const assignedUsers = item?.assigned_users ?? [];
+    const noAssigned = assignedCount === 0;
+    const assignedDisplay = (item?.assigned_role_names?.length ? item.assigned_role_names.join(", ") : null) ?? (item?.assigned_user_names?.length ? item.assigned_user_names.join(", ") : "");
         const lastUpdatedFormatted =
           item?.entry?.last_updated_at &&
           (() => {
@@ -429,7 +463,7 @@ export function KpiCardsGrid({
                       : ""}
                   </span>
                 ) : assignedCount > 0 ? (
-                  <span>Assigned: {item!.assigned_user_names!.join(", ")}</span>
+                  <span>Assigned: {assignedDisplay}</span>
                 ) : (
                   <span style={{ color: "var(--warning, #b8860b)", fontWeight: 500 }}>
                     No data entry user assigned.
@@ -574,7 +608,7 @@ export function KpiCardsGrid({
                 <p style={{ fontSize: "0.8rem", margin: "0.5rem 0 0 0", color: "var(--muted)" }}>
                   {assignedCount > 0 ? (
                     <>
-                      Data has not been uploaded by {item!.assigned_user_names!.join(", ")}.
+                      Data has not been uploaded by {assignedDisplay}.
                       {reminderEmails ? (
                         <>
                           {" "}
@@ -611,7 +645,7 @@ export function KpiCardsGrid({
               ) : (
                 <>
                   {assignedCount > 0 ? (
-                    <p style={{ margin: 0 }}>Assigned for data entry: {item!.assigned_user_names!.join(", ")}</p>
+                    <p style={{ margin: 0 }}>Assigned for data entry: {assignedDisplay}</p>
                   ) : (
                     <p style={{ margin: 0, color: "var(--warning, #b8860b)", fontWeight: 500 }}>No data entry user assigned.</p>
                   )}

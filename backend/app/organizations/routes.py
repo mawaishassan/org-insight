@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.models import User, OrganizationStorageConfig
 from app.auth.dependencies import require_super_admin, get_current_user, require_org_admin_for_org
+from app.users.schemas import UserResponse
 from app.organizations.schemas import (
     OrganizationCreate,
     OrganizationUpdate,
@@ -18,6 +19,10 @@ from app.organizations.schemas import (
     StorageConfigResponse,
     STORAGE_TYPES,
     mask_storage_params,
+    OrganizationRoleCreate,
+    OrganizationRoleUpdate,
+    OrganizationRoleResponse,
+    RoleUsersPut,
 )
 from app.organizations.service import (
     create_organization,
@@ -27,6 +32,13 @@ from app.organizations.service import (
     update_organization,
     get_organization_filter_options,
     create_export_api_token,
+    list_roles,
+    get_role,
+    create_role,
+    update_role,
+    delete_role,
+    list_users_in_role,
+    set_users_in_role,
 )
 from app.storage.service import get_config as get_storage_config
 
@@ -260,3 +272,141 @@ async def update_org_storage_config(
         created_at=config.created_at.isoformat() + "Z" if config.created_at else None,
         updated_at=config.updated_at.isoformat() + "Z" if config.updated_at else None,
     )
+
+
+# --- Organization roles (Org Admin: create roles, assign users) ---
+
+
+@router.get("/{org_id}/roles", response_model=list[OrganizationRoleResponse])
+async def list_org_roles(
+    org_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin_for_org),
+):
+    """List all custom roles for the organization. Org Admin (for this org) or Super Admin."""
+    org = await get_organization(db, org_id)
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    roles = await list_roles(db, org_id)
+    return [
+        OrganizationRoleResponse(
+            id=r.id,
+            organization_id=r.organization_id,
+            name=r.name,
+            description=r.description,
+            created_at=r.created_at.isoformat() + "Z" if r.created_at else None,
+            updated_at=r.updated_at.isoformat() + "Z" if r.updated_at else None,
+        )
+        for r in roles
+    ]
+
+
+@router.post("/{org_id}/roles", response_model=OrganizationRoleResponse, status_code=status.HTTP_201_CREATED)
+async def create_org_role(
+    org_id: int,
+    body: OrganizationRoleCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin_for_org),
+):
+    """Create a custom role. Org Admin or Super Admin."""
+    org = await get_organization(db, org_id)
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    role = await create_role(db, org_id, name=body.name, description=body.description)
+    await db.commit()
+    await db.refresh(role)
+    return OrganizationRoleResponse(
+        id=role.id,
+        organization_id=role.organization_id,
+        name=role.name,
+        description=role.description,
+        created_at=role.created_at.isoformat() + "Z" if role.created_at else None,
+        updated_at=role.updated_at.isoformat() + "Z" if role.updated_at else None,
+    )
+
+
+@router.get("/{org_id}/roles/{role_id}", response_model=OrganizationRoleResponse)
+async def get_org_role(
+    org_id: int,
+    role_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin_for_org),
+):
+    """Get a role by id. Org Admin or Super Admin."""
+    role = await get_role(db, role_id, org_id)
+    if not role:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    return OrganizationRoleResponse(
+        id=role.id,
+        organization_id=role.organization_id,
+        name=role.name,
+        description=role.description,
+        created_at=role.created_at.isoformat() + "Z" if role.created_at else None,
+        updated_at=role.updated_at.isoformat() + "Z" if role.updated_at else None,
+    )
+
+
+@router.patch("/{org_id}/roles/{role_id}", response_model=OrganizationRoleResponse)
+async def update_org_role(
+    org_id: int,
+    role_id: int,
+    body: OrganizationRoleUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin_for_org),
+):
+    """Update role name/description. Org Admin or Super Admin."""
+    role = await update_role(db, role_id, org_id, name=body.name, description=body.description)
+    if not role:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    await db.commit()
+    await db.refresh(role)
+    return OrganizationRoleResponse(
+        id=role.id,
+        organization_id=role.organization_id,
+        name=role.name,
+        description=role.description,
+        created_at=role.created_at.isoformat() + "Z" if role.created_at else None,
+        updated_at=role.updated_at.isoformat() + "Z" if role.updated_at else None,
+    )
+
+
+@router.delete("/{org_id}/roles/{role_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_org_role(
+    org_id: int,
+    role_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin_for_org),
+):
+    """Delete role and remove all user assignments to it. Org Admin or Super Admin."""
+    deleted = await delete_role(db, role_id, org_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    await db.commit()
+
+
+@router.get("/{org_id}/roles/{role_id}/users", response_model=list[UserResponse])
+async def list_role_users(
+    org_id: int,
+    role_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin_for_org),
+):
+    """List users assigned to this role. Org Admin or Super Admin."""
+    users = await list_users_in_role(db, role_id, org_id)
+    return [UserResponse.model_validate(u) for u in users]
+
+
+@router.put("/{org_id}/roles/{role_id}/users", status_code=status.HTTP_200_OK)
+async def set_role_users(
+    org_id: int,
+    role_id: int,
+    body: RoleUsersPut,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin_for_org),
+):
+    """Replace users in this role. Only users belonging to the organization are added. Org Admin or Super Admin."""
+    ok = await set_users_in_role(db, role_id, org_id, body.user_ids)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    await db.commit()
+    return {"message": "Users updated"}

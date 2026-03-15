@@ -7,7 +7,14 @@ import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 import { toast } from "react-toastify";
 
-type SubField = { key: string; name: string; field_type?: string | null; is_required?: boolean };
+type SubField = {
+  key: string;
+  name: string;
+  field_type?: string | null;
+  is_required?: boolean;
+  can_view?: boolean;
+  can_edit?: boolean;
+};
 
 interface FieldSummary {
   id: number;
@@ -202,7 +209,7 @@ export default function MultiItemRowDetail() {
             token,
           }
         );
-        toast.success("Row added");
+        toast.success("Row added successfully");
       } else {
         await api<MultiItemsRow>(
           `/entries/multi-items/rows/${rowIndex}?${new URLSearchParams({
@@ -216,15 +223,17 @@ export default function MultiItemRowDetail() {
             token,
           }
         );
-        toast.success("Row updated");
+        toast.success("Row updated successfully");
       }
       const backParams = new URLSearchParams({
         organization_id: String(effectiveOrgId ?? ""),
         ...(periodKey ? { period_key: periodKey } : {}),
       });
+      backParams.set(isNew ? "row_added" : "row_updated", "1");
       router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}?${backParams.toString()}`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Save failed");
+      return;
     } finally {
       setSaving(false);
     }
@@ -305,6 +314,24 @@ export default function MultiItemRowDetail() {
               {subFields.map((sf) => {
                 const key = sf.key;
                 const val = editData[key];
+                const canEdit = sf.can_edit !== false;
+                const displayVal =
+                  sf.field_type === "boolean"
+                    ? Boolean(val) ? "Yes" : "No"
+                    : sf.field_type === "date"
+                      ? (typeof val === "string" && val ? val : "—")
+                      : val != null && String(val).trim() !== "" ? String(val) : "—";
+                if (!canEdit) {
+                  return (
+                    <div key={key} className="form-group">
+                      <label>
+                        {sf.name}
+                        {sf.is_required ? " *" : ""}
+                      </label>
+                      <div style={{ padding: "0.35rem 0", color: "var(--muted)" }}>{displayVal}</div>
+                    </div>
+                  );
+                }
                 if (sf.field_type === "number") {
                   return (
                     <div key={key} className="form-group">

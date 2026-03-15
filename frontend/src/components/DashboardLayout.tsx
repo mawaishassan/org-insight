@@ -12,6 +12,7 @@ import {
   canManageOrgs,
   canManageUsers,
   canManageDomains,
+  canManageKpis,
   canEnterData,
   canViewReports,
   canUseChat,
@@ -368,6 +369,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const orgTabFromUrl = selectedOrgId ? searchParams.get("tab") : null;
   const orgTabLabel = orgTabFromUrl && tabLabel[orgTabFromUrl] ? tabLabel[orgTabFromUrl] : null;
   const onDataExport = pathname.match(/^\/dashboard\/organizations\/\d+\/data-export\/?$/);
+  const onAccessControl = pathname.match(/^\/dashboard\/organizations\/\d+\/access\/?$/);
 
   /** Organization "home" = overview (cards) at /dashboard/organizations/[id] with no tab. */
   const orgHomeHref = (id: number) => `/dashboard/organizations/${id}`;
@@ -392,6 +394,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       if (onDataExport) {
         breadcrumbs.push({ label: "Settings", href: `/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage` });
         breadcrumbs.push({ label: "API export", href: `/dashboard/organizations/${selectedOrgId}?tab=settings&sub=api_export` });
+      } else if (onAccessControl) {
+        breadcrumbs.push({ label: "Access control", href: `/dashboard/organizations/${selectedOrgId}/access` });
       } else if (orgTabLabel) {
         const subHref = orgTabFromUrl === "settings" ? `/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage` : `/dashboard/organizations/${selectedOrgId}?tab=${orgTabFromUrl}`;
         breadcrumbs.push({ label: orgTabLabel, href: subHref });
@@ -598,6 +602,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     Reports
                   </Link>
                   <Link
+                    href={`/dashboard/organizations/${selectedOrgId}/access`}
+                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Access control
+                  </Link>
+                  <Link
                     href={`/dashboard/chat?organization_id=${selectedOrgId}`}
                     style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
                     onClick={() => setMenuOpen(false)}
@@ -661,6 +672,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       {label}
                     </Link>
                   ))}
+                  {canManageKpis(role) && (selectedOrgId ?? orgId) != null && (
+                    <Link
+                      href={`/dashboard/organizations/${selectedOrgId ?? orgId}/access`}
+                      style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      Access control
+                    </Link>
+                  )}
                   {!isSuperAdmin && canManageDomains(role) && (
                     <Link
                       href="/dashboard/domains"

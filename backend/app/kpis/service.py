@@ -12,6 +12,11 @@ from app.core.models import (
     KPI,
     User,
     KPIAssignment,
+    KpiRoleAssignment,
+    KpiFieldAccess,
+    KpiFieldAccessByRole,
+    KpiMultiLineRowAccess,
+    OrganizationRole,
     Domain,
     Category,
     KPIDomain,
@@ -167,6 +172,7 @@ async def list_kpis(
             selectinload(KPI.category_tags).selectinload(KPICategory.category).selectinload(Category.domain),
             selectinload(KPI.organization_tags).selectinload(KPIOrganizationTag.tag),
             selectinload(KPI.assignments).selectinload(KPIAssignment.user),
+            selectinload(KPI.role_assignments).selectinload(KpiRoleAssignment.organization_role),
         )
     result = await db.execute(q)
     return list(result.unique().scalars().all())
@@ -517,6 +523,368 @@ async def replace_kpi_assignments(
         db.add(KPIAssignment(kpi_id=kpi_id, user_id=uid, assignment_type=p))
     await db.flush()
     return True
+
+
+async def list_kpi_role_assignments(
+    db: AsyncSession, kpi_id: int, org_id: int
+) -> list[tuple[OrganizationRole, str]]:
+    """List (role, permission) assigned to this KPI. Permission is 'data_entry' or 'view'."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return []
+    result = await db.execute(
+        select(OrganizationRole, KpiRoleAssignment)
+        .join(KpiRoleAssignment, KpiRoleAssignment.organization_role_id == OrganizationRole.id)
+        .where(KpiRoleAssignment.kpi_id == kpi_id, OrganizationRole.organization_id == org_id)
+        .order_by(OrganizationRole.name)
+    )
+    out = []
+    for row in result.all():
+        perm = getattr(row[1], "assignment_type", None) or "data_entry"
+        perm = perm.value if hasattr(perm, "value") else str(perm)
+        out.append((row[0], perm))
+    return out
+
+
+async def replace_kpi_role_assignments(
+    db: AsyncSession,
+    kpi_id: int,
+    assignments: list[tuple[int, str]],
+    org_id: int,
+) -> bool:
+    """Replace all role assignments for this KPI. assignments: list of (role_id, permission)."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return False
+    for role_id, _ in assignments:
+        result = await db.execute(
+            select(OrganizationRole).where(
+                OrganizationRole.id == role_id,
+                OrganizationRole.organization_id == org_id,
+            )
+        )
+        if result.scalar_one_or_none() is None:
+            return False
+    await db.execute(delete(KpiRoleAssignment).where(KpiRoleAssignment.kpi_id == kpi_id))
+    for role_id, perm in assignments:
+        p = (perm or "data_entry").strip().lower() if isinstance(perm, str) else "data_entry"
+        if p not in ("data_entry", "view"):
+            p = "data_entry"
+        db.add(KpiRoleAssignment(kpi_id=kpi_id, organization_role_id=role_id, assignment_type=p))
+    await db.flush()
+    return True
+
+
+async def get_field_access_for_user(
+    db: AsyncSession, kpi_id: int, user_id: int, org_id: int
+) -> list[dict]:
+    """List field-level access for a user on a KPI. Returns list of { field_id, sub_field_id, access_type }."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return []
+    result = await db.execute(
+        select(KpiFieldAccess.field_id, KpiFieldAccess.sub_field_id, KpiFieldAccess.access_type).where(
+            KpiFieldAccess.kpi_id == kpi_id,
+            KpiFieldAccess.user_id == user_id,
+        )
+    )
+    out = []
+    for r in result.all():
+        at = r[2].value if hasattr(r[2], "value") else str(r[2] or "data_entry")
+        out.append({"field_id": r[0], "sub_field_id": r[1], "access_type": at})
+    return out
+
+
+async def replace_field_access(
+    db: AsyncSession,
+    kpi_id: int,
+    user_id: int,
+    org_id: int,
+    accesses: list[tuple[int, int | None, str]],
+) -> bool:
+    """Replace all field-level access for a user on a KPI. accesses: list of (field_id, sub_field_id|None, access_type)."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return False
+    result = await db.execute(select(User).where(User.id == user_id, User.organization_id == org_id))
+    if result.scalar_one_or_none() is None:
+        return False
+    # Load fields and sub_fields for validation
+    fields_res = await db.execute(
+        select(KPIField).where(KPIField.kpi_id == kpi_id).options(selectinload(KPIField.sub_fields))
+    )
+    fields_list = list(fields_res.scalars().all())
+    field_ids = {f.id for f in fields_list}
+    sub_by_field: dict[int, set[int | None]] = {}
+    for f in fields_list:
+        sub_by_field[f.id] = {None}
+        for s in getattr(f, "sub_fields", None) or []:
+            sub_by_field[f.id].add(s.id)
+    for field_id, sub_field_id, _ in accesses:
+        if field_id not in field_ids:
+            return False
+        if sub_field_id is not None and sub_field_id not in (sub_by_field.get(field_id) or set()):
+            return False
+    await db.execute(
+        delete(KpiFieldAccess).where(KpiFieldAccess.kpi_id == kpi_id, KpiFieldAccess.user_id == user_id)
+    )
+    for field_id, sub_field_id, access_type in accesses:
+        at = (access_type or "data_entry").strip().lower()
+        if at not in ("data_entry", "view"):
+            at = "data_entry"
+        db.add(KpiFieldAccess(kpi_id=kpi_id, user_id=user_id, field_id=field_id, sub_field_id=sub_field_id, access_type=at))
+    await db.flush()
+    return True
+
+
+async def get_field_access_for_role(
+    db: AsyncSession, kpi_id: int, role_id: int, org_id: int
+) -> list[dict]:
+    """List field-level access for a role on a KPI. Returns list of { field_id, sub_field_id, access_type }."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return []
+    role_res = await db.execute(
+        select(OrganizationRole).where(
+            OrganizationRole.id == role_id,
+            OrganizationRole.organization_id == org_id,
+        )
+    )
+    if role_res.scalar_one_or_none() is None:
+        return []
+    result = await db.execute(
+        select(
+            KpiFieldAccessByRole.field_id,
+            KpiFieldAccessByRole.sub_field_id,
+            KpiFieldAccessByRole.access_type,
+        ).where(
+            KpiFieldAccessByRole.kpi_id == kpi_id,
+            KpiFieldAccessByRole.organization_role_id == role_id,
+        )
+    )
+    out = []
+    for r in result.all():
+        at = r[2].value if hasattr(r[2], "value") else str(r[2] or "data_entry")
+        out.append({"field_id": r[0], "sub_field_id": r[1], "access_type": at})
+    return out
+
+
+async def replace_field_access_for_role(
+    db: AsyncSession,
+    kpi_id: int,
+    role_id: int,
+    org_id: int,
+    accesses: list[tuple[int, int | None, str]],
+) -> bool:
+    """Replace all field-level access for a role on a KPI. accesses: list of (field_id, sub_field_id|None, access_type)."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return False
+    role_res = await db.execute(
+        select(OrganizationRole).where(
+            OrganizationRole.id == role_id,
+            OrganizationRole.organization_id == org_id,
+        )
+    )
+    if role_res.scalar_one_or_none() is None:
+        return False
+    fields_res = await db.execute(
+        select(KPIField).where(KPIField.kpi_id == kpi_id).options(selectinload(KPIField.sub_fields))
+    )
+    fields_list = list(fields_res.scalars().all())
+    field_ids = {f.id for f in fields_list}
+    sub_by_field: dict[int, set[int | None]] = {}
+    for f in fields_list:
+        sub_by_field[f.id] = {None}
+        for s in getattr(f, "sub_fields", None) or []:
+            sub_by_field[f.id].add(s.id)
+    for field_id, sub_field_id, _ in accesses:
+        if field_id not in field_ids:
+            return False
+        if sub_field_id is not None and sub_field_id not in (sub_by_field.get(field_id) or set()):
+            return False
+    await db.execute(
+        delete(KpiFieldAccessByRole).where(
+            KpiFieldAccessByRole.kpi_id == kpi_id,
+            KpiFieldAccessByRole.organization_role_id == role_id,
+        )
+    )
+    for field_id, sub_field_id, access_type in accesses:
+        at = (access_type or "data_entry").strip().lower()
+        if at not in ("data_entry", "view"):
+            at = "data_entry"
+        db.add(
+            KpiFieldAccessByRole(
+                kpi_id=kpi_id,
+                organization_role_id=role_id,
+                field_id=field_id,
+                sub_field_id=sub_field_id,
+                access_type=at,
+            )
+        )
+    await db.flush()
+    return True
+
+
+async def get_row_access_for_user(
+    db: AsyncSession, user_id: int, entry_id: int, field_id: int
+) -> list[dict]:
+    """List record-level access for a user on an entry+field (multi_line_items). Returns list of {row_index, can_edit, can_delete}."""
+    result = await db.execute(
+        select(
+            KpiMultiLineRowAccess.row_index,
+            KpiMultiLineRowAccess.can_edit,
+            KpiMultiLineRowAccess.can_delete,
+        ).where(
+            KpiMultiLineRowAccess.user_id == user_id,
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    return [
+        {"row_index": r[0], "can_edit": r[1], "can_delete": r[2]}
+        for r in result.all()
+    ]
+
+
+def _normalized_field_type_for_row(f) -> str:
+    """Return field type as lowercase string (used by replace_row_access)."""
+    ft = getattr(f, "field_type", None)
+    if hasattr(ft, "value"):
+        return (ft.value or "single_line_text").lower()
+    return (str(ft) if ft else "single_line_text").lower()
+
+
+async def replace_row_access(
+    db: AsyncSession,
+    user_id: int,
+    entry_id: int,
+    field_id: int,
+    org_id: int,
+    rows: list[tuple[int, bool, bool]],
+) -> bool:
+    """Replace record-level access for a user on an entry+field. rows: list of (row_index, can_edit, can_delete)."""
+    # Validate entry belongs to org and field is multi_line_items on same KPI
+    entry_res = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.id == entry_id,
+            KPIEntry.organization_id == org_id,
+        )
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return False
+    field_res = await db.execute(
+        select(KPIField)
+        .where(KPIField.id == field_id, KPIField.kpi_id == entry.kpi_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    field = field_res.scalar_one_or_none()
+    if not field or _normalized_field_type_for_row(field) != "multi_line_items":
+        return False
+    user_res = await db.execute(select(User).where(User.id == user_id, User.organization_id == org_id))
+    if user_res.scalar_one_or_none() is None:
+        return False
+    await db.execute(
+        delete(KpiMultiLineRowAccess).where(
+            KpiMultiLineRowAccess.user_id == user_id,
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    for row_index, can_edit, can_delete in rows:
+        db.add(
+            KpiMultiLineRowAccess(
+                user_id=user_id,
+                entry_id=entry_id,
+                field_id=field_id,
+                row_index=row_index,
+                can_edit=can_edit,
+                can_delete=can_delete,
+            )
+        )
+    await db.flush()
+    return True
+
+
+async def get_row_access_by_entry(
+    db: AsyncSession, entry_id: int, field_id: int, org_id: int
+) -> list[dict]:
+    """
+    Return row-level access grouped by row for an entry+field (multi_line_items).
+    For use in org admin UI: list actual rows and which users have access to each.
+    Returns list of { row_index, preview, users: [ { user_id, full_name, username, can_edit, can_delete } ] }.
+    """
+    entry_res = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.id == entry_id,
+            KPIEntry.organization_id == org_id,
+        )
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return []
+    field_res = await db.execute(
+        select(KPIField)
+        .where(KPIField.id == field_id, KPIField.kpi_id == entry.kpi_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    field = field_res.scalar_one_or_none()
+    if not field or _normalized_field_type_for_row(field) != "multi_line_items":
+        return []
+    fv_res = await db.execute(
+        select(KPIFieldValue.value_json).where(
+            KPIFieldValue.entry_id == entry_id,
+            KPIFieldValue.field_id == field_id,
+        )
+    )
+    fv_row = fv_res.one_or_none()
+    value_json = fv_row[0] if fv_row and fv_row[0] is not None else []
+    if not isinstance(value_json, list):
+        value_json = []
+    sub_keys = [getattr(s, "key", "") for s in (field.sub_fields or []) if getattr(s, "key", None)][:3]
+    row_previews: list[str] = []
+    for i, row in enumerate(value_json):
+        if not isinstance(row, dict):
+            row_previews.append("")
+            continue
+        parts = [str(row.get(k, ""))[:30] for k in sub_keys if row.get(k) not in (None, "")]
+        row_previews.append(" | ".join(parts) if parts else "")
+
+    result = await db.execute(
+        select(
+            KpiMultiLineRowAccess.row_index,
+            KpiMultiLineRowAccess.can_edit,
+            KpiMultiLineRowAccess.can_delete,
+            User.id,
+            User.full_name,
+            User.username,
+        )
+        .join(User, User.id == KpiMultiLineRowAccess.user_id)
+        .where(
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    by_row: dict[int, list[dict]] = {}
+    for r in result.all():
+        ri, can_edit, can_delete, uid, full_name, username = r
+        by_row.setdefault(ri, []).append({
+            "user_id": uid,
+            "full_name": full_name,
+            "username": username or "",
+            "can_edit": can_edit,
+            "can_delete": can_delete,
+        })
+    out = []
+    for row_index in range(len(value_json)):
+        preview = row_previews[row_index] if row_index < len(row_previews) else ""
+        out.append({
+            "row_index": row_index,
+            "preview": preview,
+            "users": by_row.get(row_index, []),
+        })
+    return out
 
 
 def _normalized_field_type(f) -> str:

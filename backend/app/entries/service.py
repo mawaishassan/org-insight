@@ -11,7 +11,13 @@ from app.core.models import (
     KPIField,
     KPI,
     KPIAssignment,
+    KpiRoleAssignment,
+    KpiFieldAccess,
+    KpiFieldAccessByRole,
+    KpiMultiLineRowAccess,
     User,
+    UserOrganizationRole,
+    OrganizationRole,
     Organization,
     TimeDimension,
     effective_kpi_time_dimension,
@@ -269,31 +275,66 @@ def _assignment_type_value(a) -> str:
     return t.value if hasattr(t, "value") else str(t)
 
 
-async def user_can_view_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool:
-    """Check if user can view KPI (org/super admin or has any assignment: view or data_entry)."""
+async def user_can_view_kpi(
+    db: AsyncSession, user_id: int, kpi_id: int, org_id: int | None = None
+) -> bool:
+    """Check if user can view KPI (org/super admin, direct user assignment, or role assignment with view/data_entry).
+    Org admin has access to all KPIs in their organization; super admin to all KPIs.
+    When org_id is provided (e.g. from request), org admin is allowed if KPI belongs to that org (even if user.organization_id is unset)."""
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         return False
-    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+    if user.role.value == "SUPER_ADMIN":
         return True
+    if user.role.value == "ORG_ADMIN":
+        kpi_res = await db.execute(select(KPI.organization_id).where(KPI.id == kpi_id))
+        kpi_org = kpi_res.scalar_one_or_none()
+        if kpi_org is None:
+            return False
+        effective_org = org_id if org_id is not None else getattr(user, "organization_id", None)
+        return effective_org is not None and kpi_org == effective_org
+    # Direct user assignment
     result = await db.execute(
         select(KPIAssignment).where(
             KPIAssignment.user_id == user_id,
             KPIAssignment.kpi_id == kpi_id,
         )
     )
+    if result.scalar_one_or_none() is not None:
+        return True
+    # Role assignment: user in a role that is assigned to this KPI (view or data_entry)
+    result = await db.execute(
+        select(KpiRoleAssignment)
+        .join(UserOrganizationRole, UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id)
+        .where(
+            UserOrganizationRole.user_id == user_id,
+            KpiRoleAssignment.kpi_id == kpi_id,
+        )
+    )
     return result.scalar_one_or_none() is not None
 
 
-async def user_can_edit_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool:
-    """Check if user can edit KPI (org/super admin or has data_entry assignment)."""
+async def user_can_edit_kpi(
+    db: AsyncSession, user_id: int, kpi_id: int, org_id: int | None = None
+) -> bool:
+    """Check if user can edit KPI (org/super admin, direct user assignment with data_entry, or role with data_entry).
+    Org admin can edit all KPIs in their organization; super admin all KPIs.
+    When org_id is provided, org admin is allowed if KPI belongs to that org."""
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         return False
-    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+    if user.role.value == "SUPER_ADMIN":
         return True
+    if user.role.value == "ORG_ADMIN":
+        kpi_res = await db.execute(select(KPI.organization_id).where(KPI.id == kpi_id))
+        kpi_org = kpi_res.scalar_one_or_none()
+        if kpi_org is None:
+            return False
+        effective_org = org_id if org_id is not None else getattr(user, "organization_id", None)
+        return effective_org is not None and kpi_org == effective_org
+    # Direct user assignment
     result = await db.execute(
         select(KPIAssignment).where(
             KPIAssignment.user_id == user_id,
@@ -301,9 +342,252 @@ async def user_can_edit_kpi(db: AsyncSession, user_id: int, kpi_id: int) -> bool
         )
     )
     row = result.scalar_one_or_none()
-    if not row:
+    if row and _assignment_type_value(row) == "data_entry":
+        return True
+    # Role assignment: user in a role assigned to this KPI with data_entry
+    result = await db.execute(
+        select(KpiRoleAssignment)
+        .join(UserOrganizationRole, UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id)
+        .where(
+            UserOrganizationRole.user_id == user_id,
+            KpiRoleAssignment.kpi_id == kpi_id,
+            KpiRoleAssignment.assignment_type == "data_entry",
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
+def _merge_access_type(current: str | None, incoming: str) -> str:
+    """Merge access: data_entry > view. Return the stronger of current and incoming."""
+    if not current:
+        return incoming
+    if incoming == "data_entry":
+        return "data_entry"
+    return current
+
+
+async def get_user_field_access_for_kpi(
+    db: AsyncSession, user_id: int, kpi_id: int
+) -> dict[tuple[int, int | None], str] | None:
+    """
+    Get field-level access for user on KPI (user direct + role-based with KPI-level inheritance).
+    Returns None if no field-level rows exist (use KPI-level assignment for all fields).
+    Otherwise returns map (field_id, sub_field_id) -> "view" | "data_entry".
+    By default role's field-level access inherits KPI-level; explicit KpiFieldAccessByRole overrides.
+    Org admin and super admin always get full access (return None so callers use KPI-level = full).
+    """
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if user and user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return None  # Full access to all KPIs and subfields; callers use KPI-level permission
+    out: dict[tuple[int, int | None], str] = {}
+    # User's direct field access
+    result = await db.execute(
+        select(KpiFieldAccess.field_id, KpiFieldAccess.sub_field_id, KpiFieldAccess.access_type).where(
+            KpiFieldAccess.user_id == user_id,
+            KpiFieldAccess.kpi_id == kpi_id,
+        )
+    )
+    for r in result.all():
+        perm = r[2].value if hasattr(r[2], "value") else str(r[2] or "data_entry")
+        out[(r[0], r[1])] = perm
+    # User's roles that are assigned to this KPI (with KPI-level permission)
+    role_assignments_res = await db.execute(
+        select(KpiRoleAssignment.organization_role_id, KpiRoleAssignment.assignment_type)
+        .join(UserOrganizationRole, UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id)
+        .where(
+            UserOrganizationRole.user_id == user_id,
+            KpiRoleAssignment.kpi_id == kpi_id,
+        )
+    )
+    role_kpi_perms: list[tuple[int, str]] = [
+        (row[0], row[1].value if hasattr(row[1], "value") else str(row[1] or "data_entry"))
+        for row in role_assignments_res.all()
+    ]
+    if not role_kpi_perms:
+        if not out:
+            return None
+        return out
+    role_ids = [r[0] for r in role_kpi_perms]
+    # Explicit field-level by role
+    role_access_res = await db.execute(
+        select(
+            KpiFieldAccessByRole.organization_role_id,
+            KpiFieldAccessByRole.field_id,
+            KpiFieldAccessByRole.sub_field_id,
+            KpiFieldAccessByRole.access_type,
+        ).where(
+            KpiFieldAccessByRole.kpi_id == kpi_id,
+            KpiFieldAccessByRole.organization_role_id.in_(role_ids),
+        )
+    )
+    role_perm_by_key: dict[tuple[int, int, int | None], str] = {}
+    for r in role_access_res.all():
+        perm = r[3].value if hasattr(r[3], "value") else str(r[3] or "data_entry")
+        role_perm_by_key[(r[0], r[1], r[2])] = perm
+    # Load all fields and subfields for this KPI to apply inherited KPI-level
+    fields_res = await db.execute(
+        select(KPIField.id, KPIField.field_type).where(KPIField.kpi_id == kpi_id).options(selectinload(KPIField.sub_fields))
+    )
+    for f in fields_res.scalars().all():
+        sub_fields = getattr(f, "sub_fields", None) or []
+        is_multi = getattr(f, "field_type", None) == FieldType.multi_line_items
+        if is_multi and sub_fields:
+            for s in sub_fields:
+                key = (f.id, s.id)
+                for rid, kpi_perm in role_kpi_perms:
+                    explicit = role_perm_by_key.get((rid, f.id, s.id))
+                    val = explicit if explicit else kpi_perm
+                    out[key] = _merge_access_type(out.get(key), val)
+            key_whole = (f.id, None)
+            for rid, kpi_perm in role_kpi_perms:
+                explicit = role_perm_by_key.get((rid, f.id, None))
+                val = explicit if explicit else kpi_perm
+                out[key_whole] = _merge_access_type(out.get(key_whole), val)
+        else:
+            key = (f.id, None)
+            for rid, kpi_perm in role_kpi_perms:
+                explicit = role_perm_by_key.get((rid, f.id, None))
+                val = explicit if explicit else kpi_perm
+                out[key] = _merge_access_type(out.get(key), val)
+    if not out:
+        return None
+    return out
+
+
+async def user_can_view_field(
+    db: AsyncSession, user_id: int, kpi_id: int, field_id: int, sub_field_id: int | None = None
+) -> bool:
+    """True if user can view this field (or sub_field). Org/super admin: True. Else field-level or KPI-level."""
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if not user:
         return False
-    return _assignment_type_value(row) == "data_entry"
+    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return True
+    access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
+    if access_map is None:
+        return await user_can_view_kpi(db, user_id, kpi_id)
+    perm = access_map.get((field_id, sub_field_id)) or access_map.get((field_id, None))
+    return perm in ("view", "data_entry")
+
+
+async def user_can_edit_field(
+    db: AsyncSession, user_id: int, kpi_id: int, field_id: int, sub_field_id: int | None = None
+) -> bool:
+    """True if user can edit this field (or sub_field)."""
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if not user:
+        return False
+    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return True
+    access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
+    if access_map is None:
+        return await user_can_edit_kpi(db, user_id, kpi_id)
+    perm = access_map.get((field_id, sub_field_id)) or access_map.get((field_id, None))
+    return perm == "data_entry"
+
+
+def _user_can_edit_sub_field(access_map: dict | None, field_id: int, sub_field_id: int | None) -> bool:
+    """Given access_map from get_user_field_access_for_kpi, return True if user can edit (field_id, sub_field_id)."""
+    if access_map is None:
+        return False
+    perm = access_map.get((field_id, sub_field_id)) or access_map.get((field_id, None))
+    return perm == "data_entry"
+
+
+async def user_can_edit_multi_line_field(
+    db: AsyncSession, user_id: int, kpi_id: int, field: "KPIField"
+) -> bool:
+    """True if user can edit this multi_line_items field (whole-field or at least one sub_field)."""
+    if await user_can_edit_field(db, user_id, kpi_id, field.id, None):
+        return True
+    for sub in getattr(field, "sub_fields", None) or []:
+        if await user_can_edit_field(db, user_id, kpi_id, field.id, getattr(sub, "id", None)):
+            return True
+    return False
+
+
+async def user_can_edit_row(
+    db: AsyncSession, user_id: int, entry_id: int, field_id: int, row_index: int
+) -> bool:
+    """True if user can edit this specific row. When row_level_user_access_enabled is False, all rows follow role/field access; when True, row-level user access is enforced."""
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if not user:
+        return False
+    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return True
+    # Load field to check row_level_user_access_enabled
+    entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return False
+    field_res = await db.execute(
+        select(KPIField)
+        .where(KPIField.id == field_id, KPIField.kpi_id == entry.kpi_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    field = field_res.scalar_one_or_none()
+    if field and not getattr(field, "row_level_user_access_enabled", False):
+        # Row-level user access not enabled: all rows follow role/field access
+        if field.field_type == FieldType.multi_line_items:
+            return await user_can_edit_multi_line_field(db, user_id, entry.kpi_id, field)
+        return await user_can_edit_field(db, user_id, entry.kpi_id, field_id, None)
+    # Row-level user access enabled: check KpiMultiLineRowAccess
+    row_res = await db.execute(
+        select(KpiMultiLineRowAccess).where(
+            KpiMultiLineRowAccess.user_id == user_id,
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    row_rules = row_res.scalars().all()
+    if not row_rules:
+        if field and field.field_type == FieldType.multi_line_items:
+            return await user_can_edit_multi_line_field(db, user_id, entry.kpi_id, field)
+        return await user_can_edit_field(db, user_id, entry.kpi_id, field_id, None)
+    for r in row_rules:
+        if r.row_index == row_index and r.can_edit:
+            return True
+    return False
+
+
+async def user_can_delete_row(
+    db: AsyncSession, user_id: int, entry_id: int, field_id: int, row_index: int
+) -> bool:
+    """True if user can delete this specific row. When row_level_user_access_enabled is False, all rows follow role/field access; when True, row-level user access is enforced."""
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if not user:
+        return False
+    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return True
+    entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return False
+    field_res = await db.execute(
+        select(KPIField).where(KPIField.id == field_id, KPIField.kpi_id == entry.kpi_id)
+    )
+    field = field_res.scalar_one_or_none()
+    if field and not getattr(field, "row_level_user_access_enabled", False):
+        return await user_can_edit_field(db, user_id, entry.kpi_id, field_id, None)
+    row_res = await db.execute(
+        select(KpiMultiLineRowAccess).where(
+            KpiMultiLineRowAccess.user_id == user_id,
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    row_rules = row_res.scalars().all()
+    if not row_rules:
+        return await user_can_edit_field(db, user_id, entry.kpi_id, field_id, None)
+    for r in row_rules:
+        if r.row_index == row_index and r.can_delete:
+            return True
+    return False
 
 
 async def _load_other_kpi_values(
@@ -358,6 +642,9 @@ async def save_entry_values(
         return None
     key_to_field = {f.key: f for f in kpi.fields}
     validation_errors: list[dict] = []
+
+    # Field-level access for merging multi_line_items by editable columns
+    access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
 
     # Reference field validation (scalar and inside multi_line_items)
     for v in values:
@@ -440,7 +727,32 @@ async def save_entry_values(
             db.add(fv)
         fv.value_text = v.value_text
         fv.value_number = v.value_number
-        fv.value_json = v.value_json
+        if f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
+            if access_map is None:
+                # No field-level ACL (e.g. org/super admin): accept full value
+                fv.value_json = v.value_json
+            else:
+                # Merge by column: only update cells for sub_fields the user can edit; keep rest from existing
+                existing_list = fv.value_json if isinstance(fv.value_json, list) else []
+                merged_rows: list[dict] = []
+                sub_fields = getattr(f, "sub_fields", None) or []
+                for i, inc_row in enumerate(v.value_json):
+                    inc_row = inc_row if isinstance(inc_row, dict) else {}
+                    exist_row = existing_list[i] if i < len(existing_list) and isinstance(existing_list[i], dict) else {}
+                    new_row: dict = {}
+                    for sub in sub_fields:
+                        sub_id = getattr(sub, "id", None)
+                        sub_key = getattr(sub, "key", None)
+                        if sub_key is None:
+                            continue
+                        if _user_can_edit_sub_field(access_map, f.id, sub_id):
+                            new_row[sub_key] = inc_row.get(sub_key)
+                        else:
+                            new_row[sub_key] = exist_row.get(sub_key)
+                    merged_rows.append(new_row)
+                fv.value_json = merged_rows
+        else:
+            fv.value_json = v.value_json
         fv.value_boolean = v.value_boolean
         if v.value_date is not None:
             if isinstance(v.value_date, datetime):
@@ -680,11 +992,24 @@ async def get_entries_for_kpis(
         display = (full_name or "").strip() or username or ""
         if display and kpi_id in missing_ids:
             assignees_by_kpi.setdefault(kpi_id, []).append(display)
+    role_names_by_kpi: dict[int, list[str]] = {kid: [] for kid in missing_ids}
+    if missing_ids:
+        role_assign_q = (
+            select(KpiRoleAssignment.kpi_id, OrganizationRole.name)
+            .join(OrganizationRole, OrganizationRole.id == KpiRoleAssignment.organization_role_id)
+            .where(KpiRoleAssignment.kpi_id.in_(missing_ids))
+        )
+        role_assign_res = await db.execute(role_assign_q)
+        for row in role_assign_res.all():
+            kpi_id, role_name = row[0], (row[1] or "").strip()
+            if role_name and kpi_id in missing_ids:
+                role_names_by_kpi.setdefault(kpi_id, []).append(role_name)
     missing_kpis = [
         {
             "kpi_id": kid,
             "kpi_name": kpis.get(kid).name if kpis.get(kid) else "",
             "assigned_user_names": assignees_by_kpi.get(kid, []),
+            "assigned_role_names": role_names_by_kpi.get(kid, []),
         }
         for kid in missing_ids
     ]
@@ -865,6 +1190,34 @@ async def list_entries_overview(
             if name and name not in tag_names_by_kpi.get(kpi_id, []):
                 tag_names_by_kpi.setdefault(kpi_id, []).append(name)
 
+    assigned_role_names_by_kpi: dict[int, list[str]] = {kid: [] for kid in kpi_ids}
+    if kpi_ids:
+        role_assign_res = await db.execute(
+            select(KpiRoleAssignment.kpi_id, OrganizationRole.name)
+            .join(OrganizationRole, OrganizationRole.id == KpiRoleAssignment.organization_role_id)
+            .where(KpiRoleAssignment.kpi_id.in_(kpi_ids))
+        )
+        for row in role_assign_res.all():
+            kpi_id, role_name = row[0], (row[1] or "").strip()
+            if role_name and kpi_id in kpi_ids and role_name not in assigned_role_names_by_kpi.get(kpi_id, []):
+                assigned_role_names_by_kpi.setdefault(kpi_id, []).append(role_name)
+        # Set current_user_permission from role assignment when not set by direct assignment
+        role_perm_res = await db.execute(
+            select(KpiRoleAssignment.kpi_id, KpiRoleAssignment.assignment_type)
+            .join(UserOrganizationRole, UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id)
+            .where(
+                UserOrganizationRole.user_id == user_id,
+                KpiRoleAssignment.kpi_id.in_(kpi_ids),
+            )
+        )
+        for row in role_perm_res.all():
+            kid, atype = row[0], row[1]
+            if kid not in current_user_permission_by_kpi:
+                perm = atype.value if hasattr(atype, "value") else str(atype or "data_entry")
+                if perm not in ("data_entry", "view"):
+                    perm = "data_entry"
+                current_user_permission_by_kpi[kid] = perm
+
     result = []
     for kpi in kpis:
         kpi_td_raw = getattr(kpi, "time_dimension", None)
@@ -928,6 +1281,7 @@ async def list_entries_overview(
             "organization_tag_names": tag_names_by_kpi.get(kpi.id, []),
             "entries": periods_out,
             "assigned_user_names": assigned_by_kpi.get(kpi.id, []),
+            "assigned_role_names": assigned_role_names_by_kpi.get(kpi.id, []),
             "assigned_users": assigned_users_detail_by_kpi.get(kpi.id, []),
             "current_user_permission": current_user_permission_by_kpi.get(kpi.id) or "data_entry",
             "entry": None,

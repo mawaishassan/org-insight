@@ -5,10 +5,20 @@ import secrets
 from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, exists
+from sqlalchemy import select, func, exists, delete
 
-from app.core.models import Organization, User, Domain, KPI, Category, OrganizationTag, ExportAPIToken
-from app.core.models import UserRole
+from app.core.models import (
+    Organization,
+    User,
+    Domain,
+    KPI,
+    Category,
+    OrganizationTag,
+    ExportAPIToken,
+    OrganizationRole,
+    UserOrganizationRole,
+    UserRole,
+)
 
 
 async def get_organization_filter_options(db: AsyncSession) -> dict:
@@ -157,3 +167,99 @@ async def create_export_api_token(
     db.add(record)
     await db.flush()
     return token, expires_at
+
+
+# --- Organization roles (Org Admin) ---
+
+
+async def list_roles(db: AsyncSession, organization_id: int) -> list[OrganizationRole]:
+    """List all roles for an organization."""
+    result = await db.execute(
+        select(OrganizationRole).where(OrganizationRole.organization_id == organization_id).order_by(OrganizationRole.name)
+    )
+    return list(result.scalars().all())
+
+
+async def get_role(db: AsyncSession, role_id: int, organization_id: int) -> OrganizationRole | None:
+    """Get role by id if it belongs to the organization."""
+    result = await db.execute(
+        select(OrganizationRole).where(
+            OrganizationRole.id == role_id,
+            OrganizationRole.organization_id == organization_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_role(
+    db: AsyncSession, organization_id: int, name: str, description: str | None = None
+) -> OrganizationRole:
+    """Create a role in the organization."""
+    role = OrganizationRole(organization_id=organization_id, name=name, description=description)
+    db.add(role)
+    await db.flush()
+    return role
+
+
+async def update_role(
+    db: AsyncSession, role_id: int, organization_id: int, name: str | None = None, description: str | None = None
+) -> OrganizationRole | None:
+    """Update role name/description."""
+    role = await get_role(db, role_id, organization_id)
+    if not role:
+        return None
+    if name is not None:
+        role.name = name
+    if description is not None:
+        role.description = description
+    await db.flush()
+    return role
+
+
+async def delete_role(db: AsyncSession, role_id: int, organization_id: int) -> bool:
+    """Delete role and its user assignments. Returns True if deleted."""
+    role = await get_role(db, role_id, organization_id)
+    if not role:
+        return False
+    await db.execute(delete(UserOrganizationRole).where(UserOrganizationRole.organization_role_id == role_id))
+    await db.delete(role)
+    await db.flush()
+    return True
+
+
+async def list_users_in_role(db: AsyncSession, role_id: int, organization_id: int) -> list[User]:
+    """List users assigned to this role (role must belong to org)."""
+    role = await get_role(db, role_id, organization_id)
+    if not role:
+        return []
+    result = await db.execute(
+        select(User)
+        .join(UserOrganizationRole, UserOrganizationRole.user_id == User.id)
+        .where(
+            UserOrganizationRole.organization_role_id == role_id,
+            User.organization_id == organization_id,
+        )
+    )
+    return list(result.scalars().unique().all())
+
+
+async def set_users_in_role(
+    db: AsyncSession, role_id: int, organization_id: int, user_ids: list[int]
+) -> bool:
+    """Replace users in role with the given list. Only users in the org are added. Returns True if role exists."""
+    role = await get_role(db, role_id, organization_id)
+    if not role:
+        return False
+    # Only allow user_ids that belong to this org
+    if user_ids:
+        users_result = await db.execute(
+            select(User.id).where(User.id.in_(user_ids), User.organization_id == organization_id)
+        )
+        allowed_ids = [r[0] for r in users_result.all()]
+    else:
+        allowed_ids = []
+    await db.execute(delete(UserOrganizationRole).where(UserOrganizationRole.organization_role_id == role_id))
+    for uid in allowed_ids:
+        db.add(UserOrganizationRole(user_id=uid, organization_role_id=role_id))
+    await db.flush()
+    return True
