@@ -114,6 +114,7 @@ class Organization(Base):
     kpis = relationship("KPI", back_populates="organization", lazy="selectin")
     kpi_entries = relationship("KPIEntry", back_populates="organization", lazy="selectin")
     tags = relationship("OrganizationTag", back_populates="organization", lazy="selectin", order_by="OrganizationTag.name")
+    roles = relationship("OrganizationRole", back_populates="organization", lazy="selectin", order_by="OrganizationRole.name")
     report_templates = relationship("ReportTemplate", back_populates="organization", lazy="selectin")
     export_api_tokens = relationship("ExportAPIToken", back_populates="organization", lazy="selectin")
     kpi_files = relationship("KpiFile", back_populates="organization", lazy="selectin")
@@ -164,6 +165,52 @@ class ExportAPIToken(Base):
 
     organization = relationship("Organization", back_populates="export_api_tokens")
     created_by = relationship("User", back_populates="export_api_tokens")
+
+
+class OrganizationRole(Base):
+    """Custom role within an organization (e.g. Finance, Department Head). Org admins create roles and assign users."""
+
+    __tablename__ = "organization_roles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    __table_args__ = (UniqueConstraint("organization_id", "name", name="uq_org_role_name"),)
+
+    organization = relationship("Organization", back_populates="roles")
+    user_roles = relationship("UserOrganizationRole", back_populates="role", lazy="selectin")
+    kpi_field_access_by_role = relationship(
+        "KpiFieldAccessByRole", back_populates="organization_role", lazy="selectin"
+    )
+    kpi_role_assignments = relationship(
+        "KpiRoleAssignment", back_populates="organization_role", lazy="selectin"
+    )
+
+
+class UserOrganizationRole(Base):
+    """User assigned to an organization role (many-to-many)."""
+
+    __tablename__ = "user_organization_roles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_role_id = Column(
+        Integer, ForeignKey("organization_roles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at = Column(DateTime, default=utc_now)
+
+    __table_args__ = (UniqueConstraint("user_id", "organization_role_id", name="uq_user_org_role"),)
+
+    user = relationship("User", back_populates="user_organization_roles")
+    role = relationship("OrganizationRole", back_populates="user_roles")
 
 
 class OrganizationTag(Base):
@@ -224,6 +271,13 @@ class User(Base):
 
     organization = relationship("Organization", back_populates="users")
     kpi_assignments = relationship("KPIAssignment", back_populates="user", lazy="selectin")
+    kpi_field_access = relationship("KpiFieldAccess", back_populates="user", lazy="selectin")
+    user_organization_roles = relationship(
+        "UserOrganizationRole", back_populates="user", lazy="selectin"
+    )
+    kpi_multi_line_row_access = relationship(
+        "KpiMultiLineRowAccess", back_populates="user", lazy="selectin"
+    )
     kpi_entries = relationship("KPIEntry", back_populates="user", lazy="selectin")
     kpi_files = relationship("KpiFile", back_populates="uploaded_by", lazy="selectin")
     report_access_permissions = relationship(
@@ -344,6 +398,9 @@ class KPI(Base):
     organization_tags = relationship("KPIOrganizationTag", back_populates="kpi", lazy="selectin")
     fields = relationship("KPIField", back_populates="kpi", lazy="selectin", order_by="KPIField.sort_order")
     assignments = relationship("KPIAssignment", back_populates="kpi", lazy="selectin")
+    role_assignments = relationship("KpiRoleAssignment", back_populates="kpi", lazy="selectin")
+    field_access = relationship("KpiFieldAccess", back_populates="kpi", lazy="selectin")
+    field_access_by_role = relationship("KpiFieldAccessByRole", back_populates="kpi", lazy="selectin")
     entries = relationship("KPIEntry", back_populates="kpi", lazy="selectin")
     kpi_files = relationship("KpiFile", back_populates="kpi", lazy="selectin")
     report_template_kpis = relationship("ReportTemplateKPI", back_populates="kpi", lazy="selectin")
@@ -368,6 +425,8 @@ class KPIField(Base):
     carry_forward_data = Column(Boolean, default=False, nullable=False, server_default="0")  # Non-cyclic: copy from previous period when new
     # When true for multi_line_items fields, data entry uses a dedicated full-page UI instead of inline rows.
     full_page_multi_items = Column(Boolean, default=False, nullable=False, server_default="0")
+    # When true for multi_line_items, row-level user access (KpiMultiLineRowAccess) is enforced; when false, all rows follow role/field access.
+    row_level_user_access_enabled = Column(Boolean, default=False, nullable=False, server_default="0")
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -377,6 +436,13 @@ class KPIField(Base):
         "KPIFieldSubField", back_populates="field", lazy="selectin", order_by="KPIFieldSubField.sort_order"
     )
     values = relationship("KPIFieldValue", back_populates="field", lazy="selectin")
+    field_access = relationship("KpiFieldAccess", back_populates="field", lazy="selectin")
+    field_access_by_role = relationship(
+        "KpiFieldAccessByRole", back_populates="field", lazy="selectin"
+    )
+    row_access = relationship(
+        "KpiMultiLineRowAccess", back_populates="field", lazy="selectin"
+    )
     report_template_fields = relationship(
         "ReportTemplateField", back_populates="kpi_field", lazy="selectin"
     )
@@ -415,6 +481,10 @@ class KPIFieldSubField(Base):
     config = Column(JSON, nullable=True)  # For reference: {"reference_source_kpi_id": int, "reference_source_field_key": str}
 
     field = relationship("KPIField", back_populates="sub_fields")
+    field_access = relationship("KpiFieldAccess", back_populates="sub_field", lazy="selectin")
+    field_access_by_role = relationship(
+        "KpiFieldAccessByRole", back_populates="sub_field", lazy="selectin"
+    )
 
 
 class KPIAssignmentType(str, enum.Enum):
@@ -445,6 +515,133 @@ class KPIAssignment(Base):
 
     user = relationship("User", back_populates="kpi_assignments")
     kpi = relationship("KPI", back_populates="assignments")
+
+
+class KpiRoleAssignment(Base):
+    """Assignment of KPI to role: view or data_entry at KPI level. Users get access via their roles."""
+
+    __tablename__ = "kpi_role_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    kpi_id = Column(
+        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_role_id = Column(
+        Integer, ForeignKey("organization_roles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assignment_type = Column(
+        String(20), nullable=False, default=KPIAssignmentType.data_entry.value, server_default="data_entry"
+    )
+    created_at = Column(DateTime, default=utc_now)
+
+    __table_args__ = (UniqueConstraint("kpi_id", "organization_role_id", name="uq_kpi_role"),)
+
+    kpi = relationship("KPI", back_populates="role_assignments")
+    organization_role = relationship("OrganizationRole", back_populates="kpi_role_assignments")
+
+
+class KpiFieldAccess(Base):
+    """Field-level access for a user on a KPI: view or data_entry per field (and optionally per sub_field for multi_line_items)."""
+
+    __tablename__ = "kpi_field_access"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kpi_id = Column(
+        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    field_id = Column(
+        Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sub_field_id = Column(
+        Integer, ForeignKey("kpi_field_sub_fields.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    access_type = Column(
+        String(20), nullable=False, default=KPIAssignmentType.data_entry.value, server_default="data_entry"
+    )
+    created_at = Column(DateTime, default=utc_now)
+
+    # Uniqueness: partial unique indexes in migration (whole-field and per-sub_field)
+
+    user = relationship("User", back_populates="kpi_field_access")
+    kpi = relationship("KPI", back_populates="field_access")
+    field = relationship("KPIField", back_populates="field_access")
+    sub_field = relationship("KPIFieldSubField", back_populates="field_access")
+
+
+class KpiFieldAccessByRole(Base):
+    """Field-level access for a role on a KPI: view or data_entry per field (and optionally per sub_field for multi_line_items)."""
+
+    __tablename__ = "kpi_field_access_by_role"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_role_id = Column(
+        Integer,
+        ForeignKey("organization_roles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kpi_id = Column(
+        Integer,
+        ForeignKey("kpis.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    field_id = Column(
+        Integer,
+        ForeignKey("kpi_fields.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sub_field_id = Column(
+        Integer,
+        ForeignKey("kpi_field_sub_fields.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    access_type = Column(
+        String(20), nullable=False, default=KPIAssignmentType.data_entry.value, server_default="data_entry"
+    )
+    created_at = Column(DateTime, default=utc_now)
+
+    organization_role = relationship("OrganizationRole", back_populates="kpi_field_access_by_role")
+    kpi = relationship("KPI", back_populates="field_access_by_role")
+    field = relationship("KPIField", back_populates="field_access_by_role")
+    sub_field = relationship("KPIFieldSubField", back_populates="field_access_by_role")
+
+
+class KpiMultiLineRowAccess(Base):
+    """Record-level access for multi_line_items: which rows a user can edit/delete within an entry+field."""
+
+    __tablename__ = "kpi_multi_line_row_access"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    entry_id = Column(
+        Integer, ForeignKey("kpi_entries.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    field_id = Column(
+        Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    row_index = Column(Integer, nullable=False)
+    can_edit = Column(Boolean, default=True, nullable=False)
+    can_delete = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "entry_id", "field_id", "row_index",
+            name="uq_kpi_multi_line_row_access_user_entry_field_row",
+        ),
+    )
+
+    user = relationship("User", back_populates="kpi_multi_line_row_access")
+    entry = relationship("KPIEntry", back_populates="row_access")
+    field = relationship("KPIField", back_populates="row_access")
 
 
 class KPIEntry(Base):
@@ -480,6 +677,9 @@ class KPIEntry(Base):
     kpi = relationship("KPI", back_populates="entries")
     user = relationship("User", back_populates="kpi_entries")
     field_values = relationship("KPIFieldValue", back_populates="entry", lazy="selectin")
+    row_access = relationship(
+        "KpiMultiLineRowAccess", back_populates="entry", lazy="selectin"
+    )
     kpi_files = relationship("KpiFile", back_populates="entry", lazy="selectin")
 
 

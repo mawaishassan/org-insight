@@ -12,6 +12,8 @@ type SubField = { key: string; name: string; field_type?: string | null; is_requ
 interface MultiItemsRow {
   index: number;
   data: Record<string, unknown>;
+  can_edit?: boolean;
+  can_delete?: boolean;
 }
 
 interface MultiItemsListResponse {
@@ -34,6 +36,14 @@ interface FieldSummary {
 
 interface KpiInfo {
   name: string;
+}
+
+interface RowAccessUser {
+  user_id: number;
+  full_name: string | null;
+  username: string;
+  can_edit: boolean;
+  can_delete: boolean;
 }
 
 export default function FullPageMultiItems() {
@@ -80,6 +90,15 @@ export default function FullPageMultiItems() {
   const [columnsPopupSearch, setColumnsPopupSearch] = useState("");
   const [columnsPopupDraft, setColumnsPopupDraft] = useState<string[]>([]);
   const [canEditKpi, setCanEditKpi] = useState<boolean>(true);
+  const [userRole, setUserRole] = useState<string | null>(null);
+  const [rowAccessModal, setRowAccessModal] = useState<{ rowIndex: number; preview: string } | null>(null);
+  const [rowAccessUsers, setRowAccessUsers] = useState<RowAccessUser[]>([]);
+  const [rowAccessAssignments, setRowAccessAssignments] = useState<{ id: number; full_name: string | null; username: string }[]>([]);
+  const [rowAccessAddUserId, setRowAccessAddUserId] = useState<number | null>(null);
+  const [rowAccessAddAccess, setRowAccessAddAccess] = useState<"edit" | "edit_delete">("edit_delete");
+  const [rowAccessSaving, setRowAccessSaving] = useState(false);
+
+  const canManageRowAccess = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
 
   const effectiveOrgId = useMemo(
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
@@ -96,8 +115,12 @@ export default function FullPageMultiItems() {
 
   useEffect(() => {
     if (!token) return;
-    api<{ organization_id: number | null }>("/auth/me", { token })
-      .then((me) => setMeOrgId(me.organization_id ?? null))
+    api<{ organization_id: number | null; role?: string | { value?: string } }>("/auth/me", { token })
+      .then((me) => {
+        setMeOrgId(me.organization_id ?? null);
+        const r = me.role;
+        setUserRole(typeof r === "string" ? r : r?.value ?? null);
+      })
       .catch(() => setMeOrgId(null));
   }, [token]);
 
@@ -180,6 +203,22 @@ export default function FullPageMultiItems() {
     if (!entryId) return;
     loadRows().catch(() => undefined);
   }, [entryId, page, pageSize, search, sortBy, sortDir, filters]);
+
+  // Toast when returning from row edit page with success param
+  useEffect(() => {
+    const params = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
+    const added = params.get("row_added");
+    const updated = params.get("row_updated");
+    if (added === "1") {
+      toast.success("Row added successfully");
+      params.delete("row_added");
+      if (typeof window !== "undefined") window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
+    } else if (updated === "1") {
+      toast.success("Row updated successfully");
+      params.delete("row_updated");
+      if (typeof window !== "undefined") window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
+    }
+  }, []);
 
   // Default sort by first column when sub_fields become available
   useEffect(() => {
@@ -293,6 +332,122 @@ export default function FullPageMultiItems() {
   };
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  const openRowAccessModal = (row: MultiItemsRow) => {
+    if (!token || !entryId || !fieldId || !kpiId || effectiveOrgId == null) return;
+    const preview = subFields
+      .slice(0, 3)
+      .map((sf) => row.data[sf.key])
+      .filter((v) => v != null && String(v).trim() !== "")
+      .join(" | ");
+    setRowAccessModal({ rowIndex: row.index, preview: preview.slice(0, 80) });
+    setRowAccessUsers([]);
+    setRowAccessAddUserId(null);
+    Promise.all([
+      api<{ row_index: number; users: RowAccessUser[] }[]>(
+        `/kpis/${kpiId}/row-access-by-entry?${new URLSearchParams({
+          entry_id: String(entryId),
+          field_id: String(fieldId),
+          organization_id: String(effectiveOrgId),
+        }).toString()}`,
+        { token }
+      ),
+      api<{ id: number; full_name: string | null; username: string }[]>(
+        `/kpis/${kpiId}/assignments?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`,
+        { token }
+      ),
+    ])
+      .then(([rowsData, assignmentsData]) => {
+        const rowData = Array.isArray(rowsData) ? rowsData.find((r) => r.row_index === row.index) : null;
+        setRowAccessUsers(rowData?.users ?? []);
+        setRowAccessAssignments(Array.isArray(assignmentsData) ? assignmentsData : []);
+        setRowAccessAddUserId(assignmentsData?.[0]?.id ?? null);
+      })
+      .catch(() => {
+        setRowAccessAssignments([]);
+      });
+  };
+
+  const refetchRowAccessUsers = () => {
+    if (!rowAccessModal || !token || !entryId || !fieldId || !kpiId || effectiveOrgId == null) return;
+    api<{ row_index: number; users: RowAccessUser[] }[]>(
+      `/kpis/${kpiId}/row-access-by-entry?${new URLSearchParams({
+        entry_id: String(entryId),
+        field_id: String(fieldId),
+        organization_id: String(effectiveOrgId),
+      }).toString()}`,
+      { token }
+    )
+      .then((rowsData) => {
+        const rowData = Array.isArray(rowsData) ? rowsData.find((r) => r.row_index === rowAccessModal.rowIndex) : null;
+        setRowAccessUsers(rowData?.users ?? []);
+      })
+      .catch(() => {});
+  };
+
+  const removeUserFromRow = async (userId: number) => {
+    if (!rowAccessModal || !token || !kpiId || !entryId || !fieldId || effectiveOrgId == null) return;
+    try {
+      const existing = await api<{ row_index: number; can_edit: boolean; can_delete: boolean }[]>(
+        `/kpis/${kpiId}/row-access?${new URLSearchParams({
+          user_id: String(userId),
+          entry_id: String(entryId),
+          field_id: String(fieldId),
+          organization_id: String(effectiveOrgId),
+        }).toString()}`,
+        { token }
+      );
+      const rowsToSend = existing
+        .filter((r) => r.row_index !== rowAccessModal.rowIndex)
+        .map((r) => ({ row_index: r.row_index, can_edit: r.can_edit, can_delete: r.can_delete }));
+      await api(`/kpis/${kpiId}/row-access?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`, {
+        method: "PUT",
+        body: JSON.stringify({ user_id: userId, entry_id: entryId, field_id: fieldId, rows: rowsToSend }),
+        token,
+      });
+      toast.success("User removed from row");
+      refetchRowAccessUsers();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to remove");
+    }
+  };
+
+  const saveAddUserToRow = async () => {
+    if (!rowAccessModal || rowAccessAddUserId == null || !token || !kpiId || !entryId || !fieldId || effectiveOrgId == null) return;
+    setRowAccessSaving(true);
+    try {
+      const existing = await api<{ row_index: number; can_edit: boolean; can_delete: boolean }[]>(
+        `/kpis/${kpiId}/row-access?${new URLSearchParams({
+          user_id: String(rowAccessAddUserId),
+          entry_id: String(entryId),
+          field_id: String(fieldId),
+          organization_id: String(effectiveOrgId),
+        }).toString()}`,
+        { token }
+      );
+      const can_edit = true;
+      const can_delete = rowAccessAddAccess === "edit_delete";
+      const merged = (Array.isArray(existing) ? existing : []).filter((r) => r.row_index !== rowAccessModal.rowIndex);
+      merged.push({ row_index: rowAccessModal.rowIndex, can_edit, can_delete });
+      merged.sort((a, b) => a.row_index - b.row_index);
+      await api(`/kpis/${kpiId}/row-access?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          user_id: rowAccessAddUserId,
+          entry_id: entryId,
+          field_id: fieldId,
+          rows: merged.map((r) => ({ row_index: r.row_index, can_edit: r.can_edit, can_delete: r.can_delete })),
+        }),
+        token,
+      });
+      toast.success("User access added to row");
+      setRowAccessModal(null);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setRowAccessSaving(false);
+    }
+  };
 
   return (
     <div style={{ padding: "0.75rem 1rem 1rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
@@ -1040,8 +1195,8 @@ export default function FullPageMultiItems() {
                     </th>
                   );
                 })}
-                {canEditKpi && (
-                  <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", width: 88, textAlign: "right" }}>
+                {(canEditKpi || canManageRowAccess) && (
+                  <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", width: canManageRowAccess ? 140 : 88, textAlign: "right" }}>
                     Actions
                   </th>
                 )}
@@ -1050,11 +1205,12 @@ export default function FullPageMultiItems() {
             <tbody>
               {rows.map((row) => (
                 <tr key={row.index}>
-                  {canEditKpi && (
-                    <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                {canEditKpi && (
+                  <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
                       <input
                         type="checkbox"
                         checked={selectedIndices.includes(row.index)}
+                        disabled={row.can_delete === false}
                         onChange={(e) => {
                           setSelectedIndices((prev) =>
                             e.target.checked ? [...new Set([...prev, row.index])] : prev.filter((i) => i !== row.index)
@@ -1072,10 +1228,10 @@ export default function FullPageMultiItems() {
                       style={{
                         padding: "0.35rem 0.5rem",
                         borderBottom: "1px solid var(--border)",
-                        cursor: canEditKpi ? "pointer" : "default",
+                        cursor: canEditKpi && row.can_edit !== false ? "pointer" : "default",
                       }}
                       onClick={() => {
-                        if (canEditKpi) startEdit(row);
+                        if (canEditKpi && row.can_edit !== false) startEdit(row);
                       }}
                     >
                       {(() => {
@@ -1120,9 +1276,48 @@ export default function FullPageMultiItems() {
                       })()}
                     </td>
                   ))}
-                  {canEditKpi && (
+                  {(canEditKpi || canManageRowAccess) && (
                     <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "right", whiteSpace: "nowrap" }}>
                       <div style={{ display: "inline-flex", gap: "0.25rem", alignItems: "center", justifyContent: "flex-end" }}>
+                        {canManageRowAccess && (
+                        <button
+                          type="button"
+                          title="Row access"
+                          aria-label="Row access"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openRowAccessModal(row);
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            width: 32,
+                            height: 32,
+                            padding: 0,
+                            border: "1px solid var(--border)",
+                            borderRadius: 6,
+                            background: "var(--bg-subtle, #f5f5f5)",
+                            color: "var(--text)",
+                            cursor: "pointer",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "var(--accent-muted, #e8e8e8)";
+                            e.currentTarget.style.borderColor = "var(--accent)";
+                            e.currentTarget.style.color = "var(--accent)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "var(--bg-subtle, #f5f5f5)";
+                            e.currentTarget.style.borderColor = "var(--border)";
+                            e.currentTarget.style.color = "var(--text)";
+                          }}
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                          </svg>
+                        </button>
+                        )}
+                        {row.can_edit !== false && canEditKpi && (
                         <button
                           type="button"
                           title="Edit row"
@@ -1160,6 +1355,8 @@ export default function FullPageMultiItems() {
                             <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                           </svg>
                         </button>
+                        )}
+                        {row.can_delete !== false && canEditKpi && (
                         <button
                           type="button"
                           title="Delete row"
@@ -1197,6 +1394,7 @@ export default function FullPageMultiItems() {
                             <line x1="14" y1="11" x2="14" y2="17" />
                           </svg>
                         </button>
+                        )}
                       </div>
                     </td>
                   )}
@@ -1303,6 +1501,99 @@ export default function FullPageMultiItems() {
           </div>
         )}
       </div>
+
+      {rowAccessModal && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+          onClick={() => setRowAccessModal(null)}
+        >
+          <div
+            className="card"
+            style={{ width: "90%", maxWidth: 440, padding: "1.25rem", maxHeight: "85vh", overflow: "auto" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ margin: "0 0 0.5rem 0" }}>Row access</h3>
+            <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "1rem" }}>
+              Record #{rowAccessModal.rowIndex + 1}{rowAccessModal.preview ? ` — ${rowAccessModal.preview}${rowAccessModal.preview.length >= 80 ? "…" : ""}` : ""}
+            </p>
+            <p style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
+              Assign which users can edit or delete this row.
+            </p>
+            <div style={{ marginBottom: "1rem" }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+                {rowAccessUsers.map((u) => (
+                  <span
+                    key={u.user_id}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "0.25rem",
+                      padding: "0.2rem 0.5rem",
+                      borderRadius: 6,
+                      background: "var(--bg-subtle)",
+                      fontSize: "0.8rem",
+                    }}
+                  >
+                    {u.full_name || u.username} ({u.can_delete ? "Edit+Delete" : "Edit"})
+                    <button
+                      type="button"
+                      onClick={() => removeUserFromRow(u.user_id)}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        cursor: "pointer",
+                        padding: "0 0.15rem",
+                        color: "var(--muted)",
+                        fontSize: "1rem",
+                        lineHeight: 1,
+                      }}
+                      aria-label="Remove user from row"
+                      title="Remove from row"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.25rem" }}>Add user</label>
+              <select
+                value={rowAccessAddUserId ?? ""}
+                onChange={(e) => setRowAccessAddUserId(e.target.value ? Number(e.target.value) : null)}
+                style={{ width: "100%", padding: "0.5rem 0.75rem", borderRadius: 8, border: "1px solid var(--border)", marginBottom: "0.5rem" }}
+              >
+                <option value="">— Select user —</option>
+                {rowAccessAssignments.map((a) => (
+                  <option key={a.id} value={a.id}>{a.full_name || a.username}</option>
+                ))}
+              </select>
+              <select
+                value={rowAccessAddAccess}
+                onChange={(e) => setRowAccessAddAccess(e.target.value as "edit" | "edit_delete")}
+                style={{ width: "100%", padding: "0.5rem 0.75rem", borderRadius: 8, border: "1px solid var(--border)" }}
+              >
+                <option value="edit">Edit only</option>
+                <option value="edit_delete">Edit + Delete</option>
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <button type="button" className="btn btn-primary" disabled={rowAccessSaving || rowAccessAddUserId == null} onClick={saveAddUserToRow}>
+                {rowAccessSaving ? "Saving…" : "Add and save"}
+              </button>
+              <button type="button" className="btn" onClick={() => setRowAccessModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

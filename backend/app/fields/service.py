@@ -106,6 +106,8 @@ async def update_field(
         field.carry_forward_data = data.carry_forward_data
     if data.full_page_multi_items is not None:
         field.full_page_multi_items = data.full_page_multi_items
+    if getattr(data, "row_level_user_access_enabled", None) is not None:
+        field.row_level_user_access_enabled = data.row_level_user_access_enabled
     if data.options is not None:
         await db.execute(delete(KPIFieldOption).where(KPIFieldOption.field_id == field_id))
         for i, opt in enumerate(data.options):

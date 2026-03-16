@@ -20,6 +20,12 @@ from app.entries.service import (
     get_or_create_entry,
     user_can_edit_kpi,
     user_can_view_kpi,
+    get_user_field_access_for_kpi,
+    user_can_view_field,
+    user_can_edit_field,
+    user_can_edit_multi_line_field,
+    user_can_edit_row,
+    user_can_delete_row,
     save_entry_values,
     submit_entry,
     lock_entry,
@@ -187,6 +193,8 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
 class MultiItemsRow(BaseModel):
     index: int
     data: dict
+    can_edit: bool = True
+    can_delete: bool = True
 
 
 class MultiItemsListResponse(BaseModel):
@@ -360,18 +368,28 @@ async def list_multi_items_rows(
         select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
     )
     fv = fv_res.scalar_one_or_none()
-    rows: list[dict] = fv.value_json if fv and isinstance(fv.value_json, list) else []
-
-    # Build sub_fields payload
-    sub_fields = [
-        {
-            "key": getattr(sf, "key", ""),
-            "name": getattr(sf, "name", getattr(sf, "key", "")),
-            "field_type": getattr(sf, "field_type", None).value if getattr(sf, "field_type", None) else None,
-            "is_required": getattr(sf, "is_required", False),
-        }
-        for sf in (field.sub_fields or [])
+    raw_rows: list[dict] = fv.value_json if fv and isinstance(fv.value_json, list) else []
+    # Keep (original_index, row_data) so edit/delete use index in original value_json, not filtered/sorted position
+    rows: list[tuple[int, dict]] = [
+        (i, r if isinstance(r, dict) else {})
+        for i, r in enumerate(raw_rows)
     ]
+
+    # Restrict to sub_fields (columns) the user can view
+    viewable_keys: set[str] = set()
+    sub_fields_payload: list[dict] = []
+    for sf in (field.sub_fields or []):
+        sf_key = getattr(sf, "key", "")
+        if await user_can_view_field(db, current_user.id, entry.kpi_id, field.id, getattr(sf, "id", None)):
+            viewable_keys.add(sf_key)
+            sub_fields_payload.append({
+                "key": sf_key,
+                "name": getattr(sf, "name", sf_key),
+                "field_type": getattr(sf, "field_type", None).value if getattr(sf, "field_type", None) else None,
+                "is_required": getattr(sf, "is_required", False),
+            })
+    # Filter row data to viewable columns only (keep original index)
+    rows = [(i, {k: v for k, v in r.items() if k in viewable_keys}) for i, r in rows]
 
     # Filter by search
     if search:
@@ -384,7 +402,7 @@ async def list_multi_items_rows(
                 if q in s:
                     return True
             return False
-        rows = [r for r in rows if isinstance(r, dict) and matches(r)]
+        rows = [(i, r) for i, r in rows if matches(r)]
 
     # Advanced column filters (JSON: key -> value, case-insensitive substring)
     if filters:
@@ -402,12 +420,12 @@ async def list_multi_items_rows(
                             return False
                     return True
 
-                rows = [r for r in rows if isinstance(r, dict) and passes_filters(r)]
+                rows = [(i, r) for i, r in rows if passes_filters(r)]
         except json.JSONDecodeError:
             # Ignore invalid filters payload
             pass
 
-    # Sort
+    # Sort (by row data; original index is preserved in the tuple)
     if sort_by:
         reverse = sort_dir == "desc"
         def sort_key(row: dict):
@@ -418,7 +436,7 @@ async def list_multi_items_rows(
             except (TypeError, ValueError):
                 return str(v) if v is not None else ""
         try:
-            rows = sorted(rows, key=sort_key, reverse=reverse)
+            rows = sorted(rows, key=lambda ir: sort_key(ir[1]), reverse=reverse)
         except Exception:
             pass
 
@@ -427,12 +445,19 @@ async def list_multi_items_rows(
     end = start + page_size
     paged_rows = rows[start:end]
 
+    # Per-row permissions for current user (edit/delete)
+    out_rows: list[MultiItemsRow] = []
+    for orig_index, r in paged_rows:
+        can_edit = await user_can_edit_row(db, current_user.id, entry.id, field.id, orig_index)
+        can_delete = await user_can_delete_row(db, current_user.id, entry.id, field.id, orig_index)
+        out_rows.append(MultiItemsRow(index=orig_index, data=r, can_edit=can_edit, can_delete=can_delete))
+
     return MultiItemsListResponse(
         total=total,
         page=page,
         page_size=page_size,
-        rows=[MultiItemsRow(index=start + i, data=r) for i, r in enumerate(paged_rows)],
-        sub_fields=sub_fields,
+        rows=out_rows,
+        sub_fields=sub_fields_payload,
     )
 
 
@@ -498,9 +523,9 @@ async def update_multi_items_row(
     field = await _load_multi_items_field(db, org_id, field_id)
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
-    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    can_edit = await user_can_edit_row(db, current_user.id, entry.id, field.id, row_index)
     if not can_edit:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this row")
 
     fv_res = await db.execute(
         select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
@@ -510,11 +535,22 @@ async def update_multi_items_row(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rows to update")
     if row_index < 0 or row_index >= len(fv.value_json):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Row index out of range")
-    fv.value_json[row_index] = row
+    # Merge row: only update cells for sub_fields the user can edit
+    existing_row = fv.value_json[row_index]
+    if not isinstance(existing_row, dict):
+        existing_row = {}
+    key_to_sub = {getattr(s, "key", None): s for s in (field.sub_fields or []) if getattr(s, "key", None)}
+    for col_key, col_value in row.items():
+        sub = key_to_sub.get(col_key)
+        if sub is None:
+            continue
+        if await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, getattr(sub, "id", None)):
+            existing_row[col_key] = col_value
+    fv.value_json[row_index] = existing_row
     flag_modified(fv, "value_json")
     await db.flush()
     await db.commit()
-    return MultiItemsRow(index=row_index, data=row)
+    return MultiItemsRow(index=row_index, data=fv.value_json[row_index])
 
 
 @router.post("/multi-items/rows/{row_index}/cell", response_model=MultiItemsRow)
@@ -544,9 +580,15 @@ async def update_multi_items_row_cell(
     field = await _load_multi_items_field(db, org_id, field_id)
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
-    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
+    can_edit = await user_can_edit_row(db, current_user.id, entry.id, field.id, row_index)
     if not can_edit:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this row")
+    sub = next((s for s in (field.sub_fields or []) if getattr(s, "key", None) == key), None)
+    if not sub:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sub-field not found")
+    can_edit_cell = await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, getattr(sub, "id", None))
+    if not can_edit_cell:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this column")
 
     fv_res = await db.execute(
         select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
@@ -589,9 +631,9 @@ async def delete_multi_items_row(
     field = await _load_multi_items_field(db, org_id, field_id)
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
-    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
-    if not can_edit:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+    can_delete = await user_can_delete_row(db, current_user.id, entry.id, field.id, row_index)
+    if not can_delete:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to delete this row")
 
     fv_res = await db.execute(
         select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
@@ -627,9 +669,6 @@ async def bulk_delete_multi_items_rows(
     field = await _load_multi_items_field(db, org_id, field_id)
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
-    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
-    if not can_edit:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
 
     fv_res = await db.execute(
         select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
@@ -637,7 +676,14 @@ async def bulk_delete_multi_items_rows(
     fv = fv_res.scalar_one_or_none()
     if not fv or not isinstance(fv.value_json, list):
         return
-    index_set = {i for i in indices if isinstance(i, int) and i >= 0}
+    raw_index_set = {i for i in indices if isinstance(i, int) and i >= 0}
+    if not raw_index_set:
+        return
+    # Only delete rows the user is allowed to delete (record-level or field-level)
+    index_set = set()
+    for idx in raw_index_set:
+        if idx < len(fv.value_json) and await user_can_delete_row(db, current_user.id, entry.id, field.id, idx):
+            index_set.add(idx)
     if not index_set:
         return
     fv.value_json = [r for idx, r in enumerate(fv.value_json) if idx not in index_set]
@@ -893,12 +939,17 @@ async def get_kpi_api_info(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return entry_mode, api_endpoint_url, and can_edit for a KPI the current user can view (view or data_entry)."""
+    """Return entry_mode, api_endpoint_url, and can_edit for a KPI the current user can view (view or data_entry).
+    When field-level access is used, can_edit is True if user can edit at least one field."""
     org_id = _org_id(current_user, organization_id)
     can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
     if not can_view:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not assigned to this KPI")
-    can_edit = await user_can_edit_kpi(db, current_user.id, kpi_id)
+    field_access = await get_user_field_access_for_kpi(db, current_user.id, kpi_id)
+    if field_access is None:
+        can_edit = await user_can_edit_kpi(db, current_user.id, kpi_id)
+    else:
+        can_edit = any(perm == "data_entry" for perm in field_access.values())
     res = await db.execute(select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id))
     kpi = res.scalar_one_or_none()
     if not kpi:
@@ -944,14 +995,71 @@ async def get_entry_fields(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List fields for a KPI the current user can view or enter data for (USER: assigned with view or data_entry)."""
+    """List fields for a KPI the current user can view or enter data for.
+    Only returns fields the user has at least view access to. Each field (and sub_field) includes can_view and can_edit."""
     org_id = _org_id(current_user, organization_id)
-    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
-    if not can_view:
+    can_view_kpi = await user_can_view_kpi(db, current_user.id, kpi_id, org_id=org_id)
+    if not can_view_kpi:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not assigned to this KPI")
     fields = await list_kpi_fields_service(db, kpi_id, org_id)
-    return [
-        {
+    field_access = await get_user_field_access_for_kpi(db, current_user.id, kpi_id)
+
+    if field_access is None:
+        can_edit_kpi = await user_can_edit_kpi(db, current_user.id, kpi_id, org_id=org_id)
+        return [
+            {
+                "id": f.id,
+                "kpi_id": f.kpi_id,
+                "name": f.name,
+                "key": f.key,
+                "field_type": f.field_type.value,
+                "formula_expression": f.formula_expression,
+                "is_required": f.is_required,
+                "sort_order": f.sort_order,
+                "config": getattr(f, "config", None),
+                "carry_forward_data": getattr(f, "carry_forward_data", False),
+                "full_page_multi_items": getattr(f, "full_page_multi_items", False),
+                "row_level_user_access_enabled": getattr(f, "row_level_user_access_enabled", False),
+                "can_view": True,
+                "can_edit": can_edit_kpi,
+                "options": [{"value": o.value, "label": o.label} for o in (f.options or [])],
+                "sub_fields": [
+                    {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order, "config": getattr(s, "config", None), "can_view": True, "can_edit": can_edit_kpi}
+                    for s in (getattr(f, "sub_fields", None) or [])
+                ],
+            }
+            for f in fields
+        ]
+
+    out = []
+    for f in fields:
+        sub_fields_list = getattr(f, "sub_fields", None) or []
+        whole_perm = field_access.get((f.id, None))
+        if whole_perm:
+            can_view_f = whole_perm in ("view", "data_entry")
+            can_edit_f = whole_perm == "data_entry"
+        else:
+            can_view_f = any(field_access.get((f.id, s.id)) in ("view", "data_entry") for s in sub_fields_list)
+            can_edit_f = any(field_access.get((f.id, s.id)) == "data_entry" for s in sub_fields_list)
+        if not can_view_f and not can_edit_f:
+            continue
+        sub_payload = []
+        for s in sub_fields_list:
+            sub_perm = field_access.get((f.id, s.id)) or whole_perm
+            if not sub_perm:
+                continue
+            sub_payload.append({
+                "id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key,
+                "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order,
+                "config": getattr(s, "config", None),
+                "can_view": sub_perm in ("view", "data_entry"),
+                "can_edit": sub_perm == "data_entry",
+            })
+        if f.field_type == FieldType.multi_line_items and not whole_perm and not sub_payload:
+            continue
+        if f.field_type != FieldType.multi_line_items and not whole_perm:
+            continue
+        out.append({
             "id": f.id,
             "kpi_id": f.kpi_id,
             "name": f.name,
@@ -963,14 +1071,16 @@ async def get_entry_fields(
             "config": getattr(f, "config", None),
             "carry_forward_data": getattr(f, "carry_forward_data", False),
             "full_page_multi_items": getattr(f, "full_page_multi_items", False),
+            "row_level_user_access_enabled": getattr(f, "row_level_user_access_enabled", False),
+            "can_view": whole_perm in ("view", "data_entry") if whole_perm else bool(sub_payload),
+            "can_edit": whole_perm == "data_entry" if whole_perm else any(sp.get("can_edit") for sp in sub_payload),
             "options": [{"value": o.value, "label": o.label} for o in (f.options or [])],
-            "sub_fields": [
-                {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order, "config": getattr(s, "config", None)}
-                for s in (getattr(f, "sub_fields", None) or [])
-            ],
-        }
-        for f in fields
-    ]
+            "sub_fields": sub_payload if sub_payload else [
+                {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order, "config": getattr(s, "config", None), "can_view": True, "can_edit": whole_perm == "data_entry"}
+                for s in sub_fields_list
+            ] if whole_perm else [],
+        })
+    return out
 
 
 def _excel_sheet_name(name: str, max_len: int = 31) -> str:
@@ -1643,18 +1753,36 @@ async def create_or_update_entry(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Create or get entry and save values (draft). User must be assigned to KPI."""
+    """Create or get entry and save values (draft). User must have view access; only values for fields they can edit are saved."""
     org_id = _org_id(current_user, organization_id)
-    can = await user_can_edit_kpi(db, current_user.id, body.kpi_id)
-    if not can:
+    can_view = await user_can_view_kpi(db, current_user.id, body.kpi_id)
+    if not can_view:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not assigned to this KPI")
+    # Load KPI with fields and sub_fields so we can allow multi_line_items when user has subfield-level edit
+    kpi_res = await db.execute(
+        select(KPI)
+        .where(KPI.id == body.kpi_id)
+        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+    )
+    kpi = kpi_res.scalar_one_or_none()
+    allowed_values = []
+    for v in body.values:
+        field = next((x for x in (kpi.fields or []) if x.id == v.field_id), None) if kpi else None
+        if field and getattr(field, "field_type", None) == FieldType.multi_line_items:
+            can_edit = await user_can_edit_multi_line_field(db, current_user.id, body.kpi_id, field)
+        else:
+            can_edit = await user_can_edit_field(db, current_user.id, body.kpi_id, v.field_id, None)
+        if can_edit:
+            allowed_values.append(v)
+    if not allowed_values and body.values:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission to edit any of the provided fields")
     entry, _ = await get_or_create_entry(
         db, current_user.id, org_id, body.kpi_id, body.year, period_key=body.period_key or ""
     )
     if not entry:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
     try:
-        await save_entry_values(db, entry.id, current_user.id, body.values, body.kpi_id, org_id)
+        await save_entry_values(db, entry.id, current_user.id, allowed_values, body.kpi_id, org_id)
     except EntryValidationError:
         raise  # Handled by app exception_handler; returns 400 with errors list
     await db.commit()
@@ -1669,14 +1797,16 @@ async def submit_entry_route(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Submit entry (no longer draft). User must have data_entry permission."""
+    """Submit entry (no longer draft). User must have data_entry on KPI or on at least one field."""
     org_id = _org_id(current_user, organization_id)
     ent = await db.execute(select(KPIEntry).where(KPIEntry.id == body.entry_id, KPIEntry.organization_id == org_id))
     entry_row = ent.scalar_one_or_none()
     if not entry_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
-    can_edit = await user_can_edit_kpi(db, current_user.id, entry_row.kpi_id)
-    if not can_edit:
+    can_edit_kpi = await user_can_edit_kpi(db, current_user.id, entry_row.kpi_id)
+    field_access = await get_user_field_access_for_kpi(db, current_user.id, entry_row.kpi_id)
+    can_edit_any = can_edit_kpi or (field_access is not None and any(p == "data_entry" for p in field_access.values()))
+    if not can_edit_any:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
     entry = await submit_entry(db, body.entry_id, current_user.id, org_id)
     if not entry:

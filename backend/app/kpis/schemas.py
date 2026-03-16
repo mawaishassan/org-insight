@@ -43,6 +43,70 @@ class KPIReplaceAssignmentsBody(BaseModel):
     )
 
 
+class KpiRoleAssignmentItem(BaseModel):
+    """One role assignment at KPI level: role and permission (view or data_entry)."""
+
+    role_id: int = Field(..., description="Organization role ID (same org as KPI)")
+    permission: str = Field(default="data_entry", description="data_entry (can edit) or view (read-only)")
+
+
+class KpiReplaceRoleAssignmentsBody(BaseModel):
+    """Replace all role assignments for a KPI."""
+
+    assignments: list[KpiRoleAssignmentItem] = Field(
+        default_factory=list,
+        description="List of {role_id, permission}; permission is 'data_entry' or 'view'",
+    )
+
+
+class KPIFieldAccessItem(BaseModel):
+    """One field-level access: field (and optional sub_field) with view or data_entry."""
+
+    field_id: int = Field(..., description="KPI field ID")
+    sub_field_id: int | None = Field(None, description="For multi_line_items: sub-field ID; omit for whole field")
+    access_type: str = Field(default="data_entry", description="view or data_entry")
+
+
+class KPIReplaceFieldAccessBody(BaseModel):
+    """Replace field-level access for a user on a KPI."""
+
+    user_id: int = Field(..., description="User in same organization")
+    accesses: list[KPIFieldAccessItem] = Field(
+        default_factory=list,
+        description="List of field (and optional sub_field) with access_type view or data_entry",
+    )
+
+
+class KPIReplaceFieldAccessByRoleBody(BaseModel):
+    """Replace field-level access for a role on a KPI (multi-line column access)."""
+
+    role_id: int = Field(..., description="Organization role ID (same org as KPI)")
+    accesses: list[KPIFieldAccessItem] = Field(
+        default_factory=list,
+        description="List of field (and optional sub_field) with access_type view or data_entry",
+    )
+
+
+class KpiRowAccessItem(BaseModel):
+    """One record-level access: row index with can_edit and can_delete."""
+
+    row_index: int = Field(..., ge=0, description="Zero-based row index in multi_line_items value_json")
+    can_edit: bool = Field(True, description="User can edit this row")
+    can_delete: bool = Field(True, description="User can delete this row")
+
+
+class KPIReplaceRowAccessBody(BaseModel):
+    """Replace record-level access for a user on an entry+field (multi_line_items)."""
+
+    user_id: int = Field(..., description="User in same organization")
+    entry_id: int = Field(..., description="KPI entry (year/period)")
+    field_id: int = Field(..., description="Multi-line items field ID")
+    rows: list[KpiRowAccessItem] = Field(
+        default_factory=list,
+        description="List of row_index with can_edit/can_delete. Empty = no row-level restriction (use field-level).",
+    )
+
+
 class KPIUpdate(BaseModel):
     """Update KPI (optionally replace domain/category/org tags, card display fields)."""
 
@@ -91,6 +155,14 @@ class AssignedUserRef(BaseModel):
     permission: str = Field(default="data_entry", description="data_entry (can edit) or view (read-only)")
 
 
+class AssignedRoleRef(BaseModel):
+    """Role assigned to KPI with permission (data_entry or view)."""
+
+    id: int
+    name: str
+    permission: str = Field(default="data_entry", description="data_entry (can edit) or view (read-only)")
+
+
 class UsedInReportRef(BaseModel):
     """Report template that includes this KPI."""
 
@@ -119,6 +191,7 @@ class KPIResponse(BaseModel):
     category_tags: list[CategoryTagRef] = []
     organization_tags: list[OrganizationTagRef] = []
     assigned_users: list[AssignedUserRef] = []
+    assigned_roles: list[AssignedRoleRef] = []
     used_in_reports: list[UsedInReportRef] = []
 
     class Config:

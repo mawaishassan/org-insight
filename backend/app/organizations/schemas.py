@@ -107,3 +107,40 @@ class StorageConfigResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# --- Organization roles (Org Admin: create roles, assign users) ---
+
+
+class OrganizationRoleCreate(BaseModel):
+    """Create a custom role in the organization."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str | None = None
+
+
+class OrganizationRoleUpdate(BaseModel):
+    """Update role name/description."""
+
+    name: str | None = Field(None, min_length=1, max_length=255)
+    description: str | None = None
+
+
+class OrganizationRoleResponse(BaseModel):
+    """Role in API response."""
+
+    id: int
+    organization_id: int
+    name: str
+    description: str | None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class RoleUsersPut(BaseModel):
+    """Set users in a role (replace existing)."""
+
+    user_ids: list[int] = Field(default_factory=list, description="User IDs to assign to this role (must belong to org)")

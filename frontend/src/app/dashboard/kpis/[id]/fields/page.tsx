@@ -64,6 +64,10 @@ const WHERE_OPERATORS = [
   { value: "op_gte", label: "greater or equal (≥)" },
   { value: "op_lt", label: "less than (<)" },
   { value: "op_lte", label: "less or equal (≤)" },
+  { value: "op_contains", label: "contains" },
+  { value: "op_not_contains", label: "does not contain" },
+  { value: "op_starts_with", label: "starts with" },
+  { value: "op_ends_with", label: "ends with" },
 ] as const;
 
 interface ReferenceConfig {
@@ -150,7 +154,7 @@ const createSchema = z.object({
   sort_order: z.coerce.number().int().min(0),
   carry_forward_data: z.boolean().optional(),
   full_page_multi_items: z.boolean().optional(),
-  multi_items_api_endpoint_url: z.string().url("Must be a valid URL").optional(),
+  multi_items_api_endpoint_url: z.union([z.literal(""), z.string().url("Must be a valid URL")]).optional(),
 });
 
 const updateSchema = z.object({
@@ -162,7 +166,7 @@ const updateSchema = z.object({
   sort_order: z.coerce.number().int().min(0),
   carry_forward_data: z.boolean().optional(),
   full_page_multi_items: z.boolean().optional(),
-  multi_items_api_endpoint_url: z.string().url("Must be a valid URL").optional(),
+  multi_items_api_endpoint_url: z.union([z.literal(""), z.string().url("Must be a valid URL")]).optional(),
 });
 
 const kpiUpdateSchema = z.object({
@@ -231,6 +235,8 @@ export default function KpiFieldsPage() {
   const [settingsPanel, setSettingsPanel] = useState<"order" | "time_dimension" | "entry_mode" | "domain" | "tags" | "danger_zone" | null>(null);
   const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
   const [keyTouched, setKeyTouched] = useState(false);
+  /** For super admin without org in URL: org resolved from KPI by id so create/update field works. */
+  const [kpiOrgId, setKpiOrgId] = useState<number | null>(null);
 
   const token = getAccessToken();
   const router = useRouter();
@@ -286,7 +292,16 @@ export default function KpiFieldsPage() {
       .catch(() => setUserRole(null));
   }, [token]);
 
-  const orgId = kpi?.organization_id;
+  // Super admin without org in URL: resolve org from KPI by id so create/update field and loadList work
+  useEffect(() => {
+    if (!token || !kpiId || userRole !== "SUPER_ADMIN") return;
+    if (orgIdFromUrl != null) return;
+    api<{ organization_id: number }>(`/kpis/${kpiId}`, { token })
+      .then((data) => setKpiOrgId(data.organization_id))
+      .catch(() => setKpiOrgId(null));
+  }, [token, kpiId, userRole, orgIdFromUrl]);
+
+  const orgId = kpi?.organization_id ?? kpiOrgId ?? orgIdFromUrl ?? null;
   const fieldsQuery = (o?: number) => {
     const id = o ?? orgId;
     return id != null ? `kpi_id=${kpiId}&organization_id=${id}` : `kpi_id=${kpiId}`;
@@ -319,6 +334,12 @@ export default function KpiFieldsPage() {
   useEffect(() => {
     loadKpi();
   }, [kpiId, orgIdFromUrl]);
+
+  // When super admin resolved org via kpiOrgId but loadKpi failed, still load fields list
+  useEffect(() => {
+    if (!token || !kpiId || kpiOrgId == null || kpi != null) return;
+    loadList(kpiOrgId);
+  }, [token, kpiId, kpiOrgId, kpi]);
 
   useEffect(() => {
     if (!token || orgIdFromUrl == null) return;
@@ -368,7 +389,15 @@ export default function KpiFieldsPage() {
   });
 
   const onCreateSubmit = async (data: CreateFormData) => {
-    if (!token || !kpiId || orgId == null) return;
+    if (!token || !kpiId) {
+      setError("Session or KPI missing. Please refresh.");
+      return;
+    }
+    if (orgId == null) {
+      toast.error("Organization context is still loading. Please wait a moment and try again.");
+      setError("Organization context is loading.");
+      return;
+    }
     setError(null);
     try {
       const body: Record<string, unknown> = {
@@ -434,8 +463,11 @@ export default function KpiFieldsPage() {
       setCreateRefConfig({});
       setShowCreate(false);
       loadList();
+      toast.success("Field created");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Create failed");
+      const msg = e instanceof Error ? e.message : "Create failed";
+      setError(msg);
+      toast.error(msg);
     }
   };
 
@@ -1250,7 +1282,15 @@ export default function KpiFieldsPage() {
       {showCreate && (
         <div className="card" style={{ marginBottom: "1rem" }}>
           <h2 style={{ marginBottom: "0.75rem", fontSize: "1.1rem" }}>Create field</h2>
-          <form onSubmit={createForm.handleSubmit(onCreateSubmit)}>
+          <form
+            onSubmit={createForm.handleSubmit(onCreateSubmit, (errors) => {
+              const first = Object.entries(errors)[0];
+              if (first) {
+                const msg = typeof first[1]?.message === "string" ? first[1].message : "Please fix the form errors.";
+                toast.error(msg);
+              }
+            })}
+          >
             {/* Row 1: Name, Key, Field type — one row on wide screens, wraps on narrow */}
             <div
               style={{
@@ -1563,18 +1603,31 @@ export default function KpiFieldsPage() {
                 ) : (
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
                     <div>
-                      <strong>{f.name}</strong>
+                      <strong
+                        style={{
+                          cursor: f.field_type === "multi_line_items" ? "pointer" : "default",
+                          textDecoration: f.field_type === "multi_line_items" ? "underline" : "none",
+                        }}
+                        onClick={() => {
+                          if (f.field_type !== "multi_line_items") return;
+                          const orgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
+                          const year = new Date().getFullYear();
+                          if (!orgId) return;
+                          router.push(
+                            `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
+                              organization_id: orgId,
+                            })}`
+                          );
+                        }}
+                      >
+                        {f.name}
+                      </strong>
                       <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>({f.key})</span>
                       <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}> - {f.field_type.replace(/_/g, " ")}</span>
                       {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
                       {f.field_type === "formula" && f.formula_expression && (
                         <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
                           Formula: {f.formula_expression}
-                        </span>
-                      )}
-                      {f.field_type === "multi_line_items" && f.sub_fields && f.sub_fields.length > 0 && (
-                        <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
-                          Sub-fields: {f.sub_fields.map((s) => s.name).join(", ")}
                         </span>
                       )}
                     </div>
@@ -1946,7 +1999,9 @@ function FormulaBuilder({
     if (!refField) return;
     if (isConditionalWhere) {
       const op = refWhereOp;
-      const val = refWhereValue.trim() === "" ? "0" : refWhereValue;
+      const raw = refWhereValue.trim();
+      const isNumeric = raw !== "" && !Number.isNaN(Number(raw));
+      const val = isNumeric ? raw : `'${raw.replace(/'/g, "\\'")}'`;
       // When conditional is checked, always use the _WHERE variant (map COUNT_ITEMS -> COUNT_ITEMS_WHERE etc.)
       const whereFn = refGroupFn.endsWith("_WHERE") ? refGroupFn : refGroupFn + "_WHERE";
       if (whereFn === "COUNT_ITEMS_WHERE") {
@@ -2022,8 +2077,14 @@ function FormulaBuilder({
                   </select>
                 </div>
                 <div>
-                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value (number)</label>
-                  <input type="number" step="any" value={refWhereValue} onChange={(e) => setRefWhereValue(e.target.value)} style={{ width: "80px" }} placeholder="0" />
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value</label>
+                  <input
+                    type="text"
+                    value={refWhereValue}
+                    onChange={(e) => setRefWhereValue(e.target.value)}
+                    style={{ width: "120px" }}
+                    placeholder="e.g. 100 or A"
+                  />
                 </div>
               </>
             )}

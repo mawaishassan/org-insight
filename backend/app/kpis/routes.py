@@ -21,11 +21,19 @@ from app.kpis.schemas import (
     KPIApiContractField,
     KPIAssignUserBody,
     KPIReplaceAssignmentsBody,
+    KpiRoleAssignmentItem,
+    KpiReplaceRoleAssignmentsBody,
     KPIAssignmentItem,
+    KPIReplaceFieldAccessBody,
+    KPIReplaceFieldAccessByRoleBody,
+    KPIFieldAccessItem,
+    KPIReplaceRowAccessBody,
+    KpiRowAccessItem,
     DomainTagRef,
     CategoryTagRef,
     OrganizationTagRef,
     AssignedUserRef,
+    AssignedRoleRef,
     UsedInReportRef,
     KpiFileResponse,
 )
@@ -48,6 +56,15 @@ from app.kpis.service import (
     assign_user_to_kpi,
     unassign_user_from_kpi,
     replace_kpi_assignments,
+    list_kpi_role_assignments,
+    replace_kpi_role_assignments,
+    get_field_access_for_user,
+    replace_field_access,
+    get_field_access_for_role,
+    replace_field_access_for_role,
+    get_row_access_for_user,
+    replace_row_access,
+    get_row_access_by_entry,
     sync_kpi_entry_from_api,
 )
 from app.users.schemas import UserResponse
@@ -97,6 +114,17 @@ def _kpi_to_response(k):
             assigned_users.append(
                 AssignedUserRef(id=u.id, username=u.username, full_name=u.full_name, permission=perm)
             )
+    assigned_roles = []
+    for kra in getattr(k, "role_assignments", []) or []:
+        role = getattr(kra, "organization_role", None)
+        if role is not None:
+            perm = getattr(kra, "assignment_type", None) or "data_entry"
+            perm = perm.value if hasattr(perm, "value") else str(perm)
+            if perm not in ("data_entry", "view"):
+                perm = "data_entry"
+            assigned_roles.append(
+                AssignedRoleRef(id=role.id, name=role.name, permission=perm)
+            )
     fields_count = len(getattr(k, "fields", []) or [])
     used_in_reports = []
     for rtk in getattr(k, "report_template_kpis", []) or []:
@@ -127,6 +155,7 @@ def _kpi_to_response(k):
         category_tags=category_tags,
         organization_tags=organization_tags,
         assigned_users=assigned_users,
+        assigned_roles=assigned_roles,
         used_in_reports=used_in_reports,
     )
 
@@ -419,6 +448,164 @@ async def unassign_user_from_kpi_route(
     ok = await unassign_user_from_kpi(db, kpi_id, user_id, org_id)
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    await db.commit()
+
+
+@router.get("/{kpi_id}/assignments-by-role")
+async def list_kpi_assignments_by_role_route(
+    kpi_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List roles assigned to this KPI with permission (data_entry or view)."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    pairs = await list_kpi_role_assignments(db, kpi_id, org_id)
+    return [
+        {"id": r.id, "name": r.name, "description": getattr(r, "description", None), "permission": perm}
+        for r, perm in pairs
+    ]
+
+
+@router.put("/{kpi_id}/assignments-by-role", status_code=status.HTTP_200_OK)
+async def replace_kpi_assignments_by_role_route(
+    kpi_id: int,
+    body: KpiReplaceRoleAssignmentsBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Replace all role assignments for this KPI (each with permission: data_entry or view)."""
+    org_id = _org_id(current_user, organization_id)
+    assignments = [(a.role_id, a.permission) for a in body.assignments]
+    ok = await replace_kpi_role_assignments(db, kpi_id, assignments, org_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI or role not found")
+    await db.commit()
+
+
+@router.get("/{kpi_id}/field-access")
+async def get_kpi_field_access_route(
+    kpi_id: int,
+    user_id: int = Query(..., description="User to get field access for"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List field-level access for a user on this KPI. Org admin or anyone who can view this KPI may call."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    items = await get_field_access_for_user(db, kpi_id, user_id, org_id)
+    return [{"field_id": i["field_id"], "sub_field_id": i["sub_field_id"], "access_type": i["access_type"]} for i in items]
+
+
+@router.put("/{kpi_id}/field-access", status_code=status.HTTP_200_OK)
+async def replace_kpi_field_access_route(
+    kpi_id: int,
+    body: KPIReplaceFieldAccessBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Replace field-level access for a user on this KPI. When set, user only sees/edits these fields (and sub_fields)."""
+    org_id = _org_id(current_user, organization_id)
+    accesses = [(a.field_id, a.sub_field_id, a.access_type) for a in body.accesses]
+    ok = await replace_field_access(db, kpi_id, body.user_id, org_id, accesses)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI or user not found")
+    await db.commit()
+
+
+@router.get("/{kpi_id}/field-access-by-role")
+async def get_kpi_field_access_by_role_route(
+    kpi_id: int,
+    role_id: int = Query(..., description="Organization role to get field access for"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """List field-level access for a role on this KPI (multi-line column access). Org admin only."""
+    org_id = _org_id(current_user, organization_id)
+    items = await get_field_access_for_role(db, kpi_id, role_id, org_id)
+    return [{"field_id": i["field_id"], "sub_field_id": i["sub_field_id"], "access_type": i["access_type"]} for i in items]
+
+
+@router.put("/{kpi_id}/field-access-by-role", status_code=status.HTTP_200_OK)
+async def replace_kpi_field_access_by_role_route(
+    kpi_id: int,
+    body: KPIReplaceFieldAccessByRoleBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Replace field-level access for a role on this KPI. Used for column-level access on multi-line fields. Org admin only."""
+    org_id = _org_id(current_user, organization_id)
+    accesses = [(a.field_id, a.sub_field_id, a.access_type) for a in body.accesses]
+    ok = await replace_field_access_for_role(db, kpi_id, body.role_id, org_id, accesses)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI or role not found")
+    await db.commit()
+
+
+@router.get("/{kpi_id}/row-access-by-entry")
+async def get_kpi_row_access_by_entry_route(
+    kpi_id: int,
+    entry_id: int = Query(..., description="Entry (year/period)"),
+    field_id: int = Query(..., description="Multi-line items field ID"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """List row-level access grouped by row for an entry+field. Returns actual rows with preview and users assigned to each."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    items = await get_row_access_by_entry(db, entry_id, field_id, org_id)
+    return items
+
+
+@router.get("/{kpi_id}/row-access")
+async def get_kpi_row_access_route(
+    kpi_id: int,
+    user_id: int = Query(..., description="User to get row access for"),
+    entry_id: int = Query(..., description="Entry (year/period)"),
+    field_id: int = Query(..., description="Multi-line items field ID"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """List record-level access for a user on an entry+field (multi_line_items)."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    items = await get_row_access_for_user(db, user_id, entry_id, field_id)
+    return [{"row_index": i["row_index"], "can_edit": i["can_edit"], "can_delete": i["can_delete"]} for i in items]
+
+
+@router.put("/{kpi_id}/row-access", status_code=status.HTTP_200_OK)
+async def replace_kpi_row_access_route(
+    kpi_id: int,
+    body: KPIReplaceRowAccessBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Replace record-level access for a user on an entry+field (multi_line_items)."""
+    org_id = _org_id(current_user, organization_id)
+    rows = [(r.row_index, r.can_edit, r.can_delete) for r in body.rows]
+    ok = await replace_row_access(db, body.user_id, body.entry_id, body.field_id, org_id, rows)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="KPI, entry, field (multi_line_items), or user not found",
+        )
     await db.commit()
 
 

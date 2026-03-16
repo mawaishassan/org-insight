@@ -81,6 +81,7 @@ class KPIFieldUpdate(BaseModel):
     config: dict[str, Any] | None = None
     carry_forward_data: bool | None = None
     full_page_multi_items: bool | None = None
+    row_level_user_access_enabled: bool | None = None
     options: list[KPIFieldOptionCreate] | None = None
     sub_fields: list[KPIFieldSubFieldCreate] | None = Field(None, description="For multi_line_items: replace column definitions")
 
@@ -111,6 +112,7 @@ class KPIFieldResponse(BaseModel):
     config: dict[str, Any] | None = None
     carry_forward_data: bool = False
     full_page_multi_items: bool = False
+    row_level_user_access_enabled: bool = False
     options: list[KPIFieldOptionResponse] = []
     sub_fields: list[KPIFieldSubFieldResponse] = []
 

@@ -65,24 +65,51 @@ def _items_values(data: MultiLineItemsData, field_key: str, sub_key: str) -> lis
     return out
 
 
-def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value: float) -> bool:
-    """True if row[filter_sub_key] op filter_value (numeric comparison)."""
+def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value: Any) -> bool:
+    """True if row[filter_sub_key] op filter_value.
+
+    Supports both numeric and text comparisons:
+    - Numeric: eq, neq, gt, gte, lt, lte (existing behavior)
+    - Text: eq, neq, contains, not_contains, starts_with, ends_with
+    """
     cell = row.get(filter_sub_key)
+    # Treat None specially: only neq passes
+    if cell is None:
+        return op == "neq"
+
+    # Try numeric comparison first
     n = _to_num(cell)
-    if n is None:
-        return op == "neq"  # null != value
+    fv_num = _to_num(filter_value)
+    if n is not None and fv_num is not None and op in {"eq", "neq", "gt", "gte", "lt", "lte"}:
+        if op == "eq":
+            return n == fv_num
+        if op == "neq":
+            return n != fv_num
+        if op == "gt":
+            return n > fv_num
+        if op == "gte":
+            return n >= fv_num
+        if op == "lt":
+            return n < fv_num
+        if op == "lte":
+            return n <= fv_num
+        return False
+
+    # Fallback to string comparison for text operators
+    cell_str = str(cell)
+    fv_str = str(filter_value)
     if op == "eq":
-        return n == filter_value
+        return cell_str == fv_str
     if op == "neq":
-        return n != filter_value
-    if op == "gt":
-        return n > filter_value
-    if op == "gte":
-        return n >= filter_value
-    if op == "lt":
-        return n < filter_value
-    if op == "lte":
-        return n <= filter_value
+        return cell_str != fv_str
+    if op == "contains":
+        return fv_str in cell_str
+    if op == "not_contains":
+        return fv_str not in cell_str
+    if op == "starts_with":
+        return cell_str.startswith(fv_str)
+    if op == "ends_with":
+        return cell_str.endswith(fv_str)
     return False
 
 
@@ -92,7 +119,7 @@ def _items_values_where(
     value_sub_key: str,
     filter_sub_key: str,
     op: str,
-    filter_value: float,
+    filter_value: Any,
 ) -> list[float]:
     """Get numeric values for value_sub_key over rows where filter_sub_key op filter_value."""
     rows = data.get(field_key) if isinstance(data, dict) else []
@@ -114,7 +141,7 @@ def _rows_where(
     field_key: str,
     filter_sub_key: str,
     op: str,
-    filter_value: float,
+    filter_value: Any,
 ) -> list[dict[str, Any]]:
     """Get rows where filter_sub_key op filter_value."""
     rows = data.get(field_key) if isinstance(data, dict) else []
@@ -176,29 +203,29 @@ def _make_evaluator(
         return max(vals) if vals else 0.0
 
     def sum_items_where(
-        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
+        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: Any
     ) -> float:
         return sum(_items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value))
 
     def avg_items_where(
-        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
+        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: Any
     ) -> float:
         vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
         return sum(vals) / len(vals) if vals else 0.0
 
     def count_items_where(
-        field_key: str, filter_sub_key: str, op: str, filter_value: float
+        field_key: str, filter_sub_key: str, op: str, filter_value: Any
     ) -> float:
         return float(len(_rows_where(items_data, field_key, filter_sub_key, op, filter_value)))
 
     def min_items_where(
-        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
+        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: Any
     ) -> float:
         vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
         return min(vals) if vals else 0.0
 
     def max_items_where(
-        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: float
+        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: Any
     ) -> float:
         vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
         return max(vals) if vals else 0.0
