@@ -53,6 +53,10 @@ const WHERE_OPERATORS = [
   { value: "op_gte", label: "greater or equal (≥)" },
   { value: "op_lt", label: "less than (<)" },
   { value: "op_lte", label: "less or equal (≤)" },
+  { value: "op_contains", label: "contains" },
+  { value: "op_not_contains", label: "does not contain" },
+  { value: "op_starts_with", label: "starts with" },
+  { value: "op_ends_with", label: "ends with" },
 ] as const;
 
 type TabId = "overview" | "domains" | "kpis" | "reports" | "settings";
@@ -656,7 +660,7 @@ function OrganizationOverviewCards({
         </svg>
       ),
       lines: ["User assignments, field & column rights, record-level access for multi-line items."],
-      href: `/dashboard/organizations/${orgId}/access`,
+      href: `/dashboard/access`,
     },
     {
       id: "chat",
@@ -3164,7 +3168,9 @@ function FormulaBuilder({
     if (!refField) return;
     if (isConditionalWhere) {
       const op = refWhereOp;
-      const val = refWhereValue.trim() === "" ? "0" : refWhereValue;
+      const raw = refWhereValue.trim();
+      const isNumeric = raw !== "" && !Number.isNaN(Number(raw));
+      const val = isNumeric ? raw : `'${raw.replace(/'/g, "\\'")}'`;
       // When conditional is checked, always use the _WHERE variant (map COUNT_ITEMS -> COUNT_ITEMS_WHERE etc.)
       const whereFn = refGroupFn.endsWith("_WHERE") ? refGroupFn : refGroupFn + "_WHERE";
       if (whereFn === "COUNT_ITEMS_WHERE") {
@@ -3236,8 +3242,14 @@ function FormulaBuilder({
                   </select>
                 </div>
                 <div>
-                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value (number)</label>
-                  <input type="number" step="any" value={refWhereValue} onChange={(e) => setRefWhereValue(e.target.value)} style={{ width: "80px" }} placeholder="0" />
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value</label>
+                  <input
+                    type="text"
+                    value={refWhereValue}
+                    onChange={(e) => setRefWhereValue(e.target.value)}
+                    style={{ width: "120px" }}
+                    placeholder="e.g. 100 or A"
+                  />
                 </div>
               </>
             )}

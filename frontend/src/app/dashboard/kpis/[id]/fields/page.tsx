@@ -64,6 +64,10 @@ const WHERE_OPERATORS = [
   { value: "op_gte", label: "greater or equal (≥)" },
   { value: "op_lt", label: "less than (<)" },
   { value: "op_lte", label: "less or equal (≤)" },
+  { value: "op_contains", label: "contains" },
+  { value: "op_not_contains", label: "does not contain" },
+  { value: "op_starts_with", label: "starts with" },
+  { value: "op_ends_with", label: "ends with" },
 ] as const;
 
 interface ReferenceConfig {
@@ -1599,18 +1603,31 @@ export default function KpiFieldsPage() {
                 ) : (
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
                     <div>
-                      <strong>{f.name}</strong>
+                      <strong
+                        style={{
+                          cursor: f.field_type === "multi_line_items" ? "pointer" : "default",
+                          textDecoration: f.field_type === "multi_line_items" ? "underline" : "none",
+                        }}
+                        onClick={() => {
+                          if (f.field_type !== "multi_line_items") return;
+                          const orgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
+                          const year = new Date().getFullYear();
+                          if (!orgId) return;
+                          router.push(
+                            `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
+                              organization_id: orgId,
+                            })}`
+                          );
+                        }}
+                      >
+                        {f.name}
+                      </strong>
                       <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>({f.key})</span>
                       <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}> - {f.field_type.replace(/_/g, " ")}</span>
                       {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
                       {f.field_type === "formula" && f.formula_expression && (
                         <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
                           Formula: {f.formula_expression}
-                        </span>
-                      )}
-                      {f.field_type === "multi_line_items" && f.sub_fields && f.sub_fields.length > 0 && (
-                        <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
-                          Sub-fields: {f.sub_fields.map((s) => s.name).join(", ")}
                         </span>
                       )}
                     </div>
@@ -1982,7 +1999,9 @@ function FormulaBuilder({
     if (!refField) return;
     if (isConditionalWhere) {
       const op = refWhereOp;
-      const val = refWhereValue.trim() === "" ? "0" : refWhereValue;
+      const raw = refWhereValue.trim();
+      const isNumeric = raw !== "" && !Number.isNaN(Number(raw));
+      const val = isNumeric ? raw : `'${raw.replace(/'/g, "\\'")}'`;
       // When conditional is checked, always use the _WHERE variant (map COUNT_ITEMS -> COUNT_ITEMS_WHERE etc.)
       const whereFn = refGroupFn.endsWith("_WHERE") ? refGroupFn : refGroupFn + "_WHERE";
       if (whereFn === "COUNT_ITEMS_WHERE") {
@@ -2058,8 +2077,14 @@ function FormulaBuilder({
                   </select>
                 </div>
                 <div>
-                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value (number)</label>
-                  <input type="number" step="any" value={refWhereValue} onChange={(e) => setRefWhereValue(e.target.value)} style={{ width: "80px" }} placeholder="0" />
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value</label>
+                  <input
+                    type="text"
+                    value={refWhereValue}
+                    onChange={(e) => setRefWhereValue(e.target.value)}
+                    style={{ width: "120px" }}
+                    placeholder="e.g. 100 or A"
+                  />
                 </div>
               </>
             )}

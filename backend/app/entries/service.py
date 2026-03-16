@@ -278,9 +278,14 @@ def _assignment_type_value(a) -> str:
 async def user_can_view_kpi(
     db: AsyncSession, user_id: int, kpi_id: int, org_id: int | None = None
 ) -> bool:
-    """Check if user can view KPI (org/super admin, direct user assignment, or role assignment with view/data_entry).
-    Org admin has access to all KPIs in their organization; super admin to all KPIs.
-    When org_id is provided (e.g. from request), org admin is allowed if KPI belongs to that org (even if user.organization_id is unset)."""
+    """Check if user can view KPI.
+
+    - SUPER_ADMIN: full access.
+    - ORG_ADMIN: full access within their organization (ignores assignments).
+    - Other users: no implicit access; visibility is based on organization roles:
+        * KPI-level role assignments (KpiRoleAssignment) with view/data_entry, OR
+        * Field-level role access (KpiFieldAccessByRole) that grants at least view to any field.
+    """
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -294,33 +299,39 @@ async def user_can_view_kpi(
             return False
         effective_org = org_id if org_id is not None else getattr(user, "organization_id", None)
         return effective_org is not None and kpi_org == effective_org
-    # Direct user assignment
-    result = await db.execute(
-        select(KPIAssignment).where(
-            KPIAssignment.user_id == user_id,
-            KPIAssignment.kpi_id == kpi_id,
-        )
-    )
-    if result.scalar_one_or_none() is not None:
-        return True
-    # Role assignment: user in a role that is assigned to this KPI (view or data_entry)
-    result = await db.execute(
+    # Non-admins: derive visibility from role-based KPI/field access only
+    # 1) Any KPI-level role assignment for this user?
+    kpi_role_res = await db.execute(
         select(KpiRoleAssignment)
-        .join(UserOrganizationRole, UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id)
+        .join(
+            UserOrganizationRole,
+            UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+        )
         .where(
             UserOrganizationRole.user_id == user_id,
             KpiRoleAssignment.kpi_id == kpi_id,
         )
     )
-    return result.scalar_one_or_none() is not None
+    if kpi_role_res.scalar_one_or_none() is not None:
+        return True
+    # 2) Any field-level role access that grants at least view for any field?
+    access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
+    if not access_map:
+        return False
+    return any(perm in ("view", "data_entry") for perm in access_map.values())
 
 
 async def user_can_edit_kpi(
     db: AsyncSession, user_id: int, kpi_id: int, org_id: int | None = None
 ) -> bool:
-    """Check if user can edit KPI (org/super admin, direct user assignment with data_entry, or role with data_entry).
-    Org admin can edit all KPIs in their organization; super admin all KPIs.
-    When org_id is provided, org admin is allowed if KPI belongs to that org."""
+    """Check if user can edit KPI.
+
+    - SUPER_ADMIN: full access.
+    - ORG_ADMIN: full access within their organization (ignores assignments).
+    - Other users: no implicit access; edit permission is based on organization roles:
+        * KPI-level role assignments with data_entry, OR
+        * Field-level role access (via roles) that grants data_entry to at least one field.
+    """
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -334,27 +345,27 @@ async def user_can_edit_kpi(
             return False
         effective_org = org_id if org_id is not None else getattr(user, "organization_id", None)
         return effective_org is not None and kpi_org == effective_org
-    # Direct user assignment
-    result = await db.execute(
-        select(KPIAssignment).where(
-            KPIAssignment.user_id == user_id,
-            KPIAssignment.kpi_id == kpi_id,
-        )
-    )
-    row = result.scalar_one_or_none()
-    if row and _assignment_type_value(row) == "data_entry":
-        return True
-    # Role assignment: user in a role assigned to this KPI with data_entry
-    result = await db.execute(
+    # Non-admins: derive edit permission from role-based KPI/field access only
+    # 1) KPI-level role assignment with data_entry?
+    kpi_role_res = await db.execute(
         select(KpiRoleAssignment)
-        .join(UserOrganizationRole, UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id)
+        .join(
+            UserOrganizationRole,
+            UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+        )
         .where(
             UserOrganizationRole.user_id == user_id,
             KpiRoleAssignment.kpi_id == kpi_id,
             KpiRoleAssignment.assignment_type == "data_entry",
         )
     )
-    return result.scalar_one_or_none() is not None
+    if kpi_role_res.scalar_one_or_none() is not None:
+        return True
+    # 2) Any field-level role access that grants data_entry?
+    access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
+    if not access_map:
+        return False
+    return any(perm == "data_entry" for perm in access_map.values())
 
 
 def _merge_access_type(current: str | None, incoming: str) -> str:
@@ -380,17 +391,8 @@ async def get_user_field_access_for_kpi(
     user = user_res.scalar_one_or_none()
     if user and user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
         return None  # Full access to all KPIs and subfields; callers use KPI-level permission
+    # Effective field access is based purely on organization roles (no direct user field overrides).
     out: dict[tuple[int, int | None], str] = {}
-    # User's direct field access
-    result = await db.execute(
-        select(KpiFieldAccess.field_id, KpiFieldAccess.sub_field_id, KpiFieldAccess.access_type).where(
-            KpiFieldAccess.user_id == user_id,
-            KpiFieldAccess.kpi_id == kpi_id,
-        )
-    )
-    for r in result.all():
-        perm = r[2].value if hasattr(r[2], "value") else str(r[2] or "data_entry")
-        out[(r[0], r[1])] = perm
     # User's roles that are assigned to this KPI (with KPI-level permission)
     role_assignments_res = await db.execute(
         select(KpiRoleAssignment.organization_role_id, KpiRoleAssignment.assignment_type)
@@ -400,16 +402,21 @@ async def get_user_field_access_for_kpi(
             KpiRoleAssignment.kpi_id == kpi_id,
         )
     )
-    role_kpi_perms: list[tuple[int, str]] = [
-        (row[0], row[1].value if hasattr(row[1], "value") else str(row[1] or "data_entry"))
-        for row in role_assignments_res.all()
-    ]
-    if not role_kpi_perms:
-        if not out:
-            return None
-        return out
-    role_ids = [r[0] for r in role_kpi_perms]
-    # Explicit field-level by role
+    role_kpi_perms: list[tuple[int, str]] = []
+    for row in role_assignments_res.all():
+        perm = row[1].value if hasattr(row[1], "value") else str(row[1] or "data_entry")
+        p = perm.strip().lower()
+        if p not in ("view", "data_entry"):
+            p = "data_entry"
+        role_kpi_perms.append((row[0], p))
+    # All roles the user belongs to (for explicit field-level KpiFieldAccessByRole)
+    user_roles_res = await db.execute(
+        select(UserOrganizationRole.organization_role_id).where(
+            UserOrganizationRole.user_id == user_id
+        )
+    )
+    user_role_ids = [row[0] for row in user_roles_res.all()]
+    # Explicit field-level by role (for any role the user belongs to)
     role_access_res = await db.execute(
         select(
             KpiFieldAccessByRole.organization_role_id,
@@ -418,38 +425,66 @@ async def get_user_field_access_for_kpi(
             KpiFieldAccessByRole.access_type,
         ).where(
             KpiFieldAccessByRole.kpi_id == kpi_id,
-            KpiFieldAccessByRole.organization_role_id.in_(role_ids),
+            KpiFieldAccessByRole.organization_role_id.in_(user_role_ids),
         )
     )
     role_perm_by_key: dict[tuple[int, int, int | None], str] = {}
     for r in role_access_res.all():
         perm = r[3].value if hasattr(r[3], "value") else str(r[3] or "data_entry")
-        role_perm_by_key[(r[0], r[1], r[2])] = perm
-    # Load all fields and subfields for this KPI to apply inherited KPI-level
+        p = perm.strip().lower()
+        if p not in ("view", "data_entry"):
+            p = "data_entry"
+        role_perm_by_key[(r[0], r[1], r[2])] = p
+    # Load all fields and subfields for this KPI to apply inherited KPI-level where applicable
     fields_res = await db.execute(
-        select(KPIField.id, KPIField.field_type).where(KPIField.kpi_id == kpi_id).options(selectinload(KPIField.sub_fields))
+        select(KPIField)
+        .where(KPIField.kpi_id == kpi_id)
+        .options(selectinload(KPIField.sub_fields))
     )
-    for f in fields_res.scalars().all():
-        sub_fields = getattr(f, "sub_fields", None) or []
-        is_multi = getattr(f, "field_type", None) == FieldType.multi_line_items
-        if is_multi and sub_fields:
-            for s in sub_fields:
-                key = (f.id, s.id)
+    fields = list(fields_res.scalars().all())
+    if role_kpi_perms:
+        # Helper to choose most restrictive between KPI-level and field-level for same role+field
+        def _most_restrictive(kpi_perm: str | None, field_perm: str | None) -> str | None:
+            if not kpi_perm and not field_perm:
+                return None
+            if kpi_perm and not field_perm:
+                return kpi_perm
+            if field_perm and not kpi_perm:
+                return field_perm
+            # both present: most restrictive → view < data_entry
+            if kpi_perm == "view" or field_perm == "view":
+                return "view"
+            return "data_entry"
+
+        for f in fields:
+            sub_fields = getattr(f, "sub_fields", None) or []
+            is_multi = getattr(f, "field_type", None) == FieldType.multi_line_items
+            if is_multi and sub_fields:
+                for s in sub_fields:
+                    key = (f.id, s.id)
+                    for rid, kpi_perm in role_kpi_perms:
+                        explicit = role_perm_by_key.get((rid, f.id, s.id))
+                        merged = _most_restrictive(kpi_perm, explicit)
+                        if merged:
+                            out[key] = _merge_access_type(out.get(key), merged)
+                key_whole = (f.id, None)
                 for rid, kpi_perm in role_kpi_perms:
-                    explicit = role_perm_by_key.get((rid, f.id, s.id))
-                    val = explicit if explicit else kpi_perm
-                    out[key] = _merge_access_type(out.get(key), val)
-            key_whole = (f.id, None)
-            for rid, kpi_perm in role_kpi_perms:
-                explicit = role_perm_by_key.get((rid, f.id, None))
-                val = explicit if explicit else kpi_perm
-                out[key_whole] = _merge_access_type(out.get(key_whole), val)
-        else:
-            key = (f.id, None)
-            for rid, kpi_perm in role_kpi_perms:
-                explicit = role_perm_by_key.get((rid, f.id, None))
-                val = explicit if explicit else kpi_perm
-                out[key] = _merge_access_type(out.get(key), val)
+                    explicit = role_perm_by_key.get((rid, f.id, None))
+                    merged = _most_restrictive(kpi_perm, explicit)
+                    if merged:
+                        out[key_whole] = _merge_access_type(out.get(key_whole), merged)
+            else:
+                key = (f.id, None)
+                for rid, kpi_perm in role_kpi_perms:
+                    explicit = role_perm_by_key.get((rid, f.id, None))
+                    merged = _most_restrictive(kpi_perm, explicit)
+                    if merged:
+                        out[key] = _merge_access_type(out.get(key), merged)
+    # Apply any explicit field-level role permissions even when there is no KPI-level role assignment
+    if role_perm_by_key:
+        for (_rid, field_id, sub_field_id), perm in role_perm_by_key.items():
+            key = (field_id, sub_field_id)
+            out[key] = _merge_access_type(out.get(key), perm)
     if not out:
         return None
     return out
@@ -843,7 +878,11 @@ async def lock_entry(
 
 
 async def list_available_kpis(db: AsyncSession, user_id: int, org_id: int) -> list[KPI]:
-    """Return KPIs the user can enter data for (assigned KPIs for USER, all org KPIs for ORG_ADMIN/SUPER_ADMIN)."""
+    """Return KPIs the user can enter data for.
+
+    - ORG_ADMIN / SUPER_ADMIN: all KPIs in the organization.
+    - Other users: no implicit access; KPIs are visible if any organization role for the user
+      grants either KPI-level access (KpiRoleAssignment) OR field-level access (KpiFieldAccessByRole)."""
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -852,11 +891,47 @@ async def list_available_kpis(db: AsyncSession, user_id: int, org_id: int) -> li
         q = select(KPI).where(KPI.organization_id == org_id).order_by(KPI.sort_order, KPI.name)
         res = await db.execute(q)
         return list(res.scalars().all())
-    # USER: only assigned KPIs
+    # Non-admins: derive visible KPIs from organization roles
+    # 1) KPI-level role assignments
+    kpi_from_roles_res = await db.execute(
+        select(KpiRoleAssignment.kpi_id)
+        .join(
+            UserOrganizationRole,
+            UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+        )
+        .join(KPI, KPI.id == KpiRoleAssignment.kpi_id)
+        .where(
+            UserOrganizationRole.user_id == user_id,
+            KPI.organization_id == org_id,
+        )
+    )
+    kpi_ids_from_roles = {row[0] for row in kpi_from_roles_res.all()}
+    # 2) Field-level role access (KpiFieldAccessByRole)
+    user_roles_res = await db.execute(
+        select(UserOrganizationRole.organization_role_id).where(
+            UserOrganizationRole.user_id == user_id
+        )
+    )
+    user_role_ids = [row[0] for row in user_roles_res.all()]
+    if user_role_ids:
+        field_based_res = await db.execute(
+            select(KpiFieldAccessByRole.kpi_id)
+            .join(KPI, KPI.id == KpiFieldAccessByRole.kpi_id)
+            .where(
+                KpiFieldAccessByRole.organization_role_id.in_(user_role_ids),
+                KPI.organization_id == org_id,
+            )
+        )
+        for row in field_based_res.all():
+            kpi_ids_from_roles.add(row[0])
+    if not kpi_ids_from_roles:
+        return []
     q = (
         select(KPI)
-        .join(KPIAssignment, KPIAssignment.kpi_id == KPI.id)
-        .where(KPIAssignment.user_id == user_id)
+        .where(
+            KPI.organization_id == org_id,
+            KPI.id.in_(kpi_ids_from_roles),
+        )
         .order_by(KPI.sort_order, KPI.name)
     )
     res = await db.execute(q)

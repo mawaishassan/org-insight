@@ -161,7 +161,7 @@ export default function DomainKpiDetailPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"scalar" | number>("scalar");
+  const [activeTab, setActiveTab] = useState<"scalar" | "security" | number>("scalar");
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   /** When editing: list of { user_id, permission } for PUT assignments (legacy user assignments) */
   const [editAssignments, setEditAssignments] = useState<{ user_id: number; permission: string }[]>([]);
@@ -169,6 +169,8 @@ export default function DomainKpiDetailPage() {
   const [assignedRoles, setAssignedRoles] = useState<Array<{ id: number; name: string; description?: string | null; permission: string }>>([]);
   /** When editing: list of { role_id, permission } for PUT assignments-by-role. */
   const [editRoleAssignments, setEditRoleAssignments] = useState<{ role_id: number; permission: string }[]>([]);
+  /** Saving flag for KPI-level role assignments when edited inline. */
+  const [savingRoleAssignments, setSavingRoleAssignments] = useState(false);
   const [uploadingFieldId, setUploadingFieldId] = useState<number | null>(null);
   const [uploadOption, setUploadOption] = useState<"append" | "override" | null>(null);
   const [syncOption, setSyncOption] = useState<"append" | "override" | null>(null);
@@ -238,6 +240,15 @@ export default function DomainKpiDetailPage() {
   const [columnAccessByRole, setColumnAccessByRole] = useState<Record<number, Array<{ field_id: number; sub_field_id: number | null; access_type: string }>>>({});
   const [columnAccessByRoleLoading, setColumnAccessByRoleLoading] = useState(false);
   const [columnAccessByRoleSavingRoleId, setColumnAccessByRoleSavingRoleId] = useState<number | null>(null);
+  /** Scalar field access popup state: which field is being edited, search text, selected role and permission. */
+  const [scalarAccessTargetFieldId, setScalarAccessTargetFieldId] = useState<number | null>(null);
+  const [scalarAccessSearch, setScalarAccessSearch] = useState<string>("");
+  const [scalarAccessRoleId, setScalarAccessRoleId] = useState<number | null>(null);
+  const [scalarAccessPermission, setScalarAccessPermission] = useState<"view" | "data_entry">("data_entry");
+  /** UI state: when set, show Add-role controls for this (field_id, sub_field_id) in column access table. */
+  const [columnAccessAddTarget, setColumnAccessAddTarget] = useState<{ fieldId: number; subFieldId: number } | null>(null);
+  const [columnAccessAddRoleId, setColumnAccessAddRoleId] = useState<number | null>(null);
+  const [columnAccessAddPermission, setColumnAccessAddPermission] = useState<"view" | "data_entry">("data_entry");
 
   type FormCell = { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
@@ -245,6 +256,7 @@ export default function DomainKpiDetailPage() {
   const token = getAccessToken();
   const effectiveOrgId = organizationIdFromUrl ?? meOrgId ?? kpiOrgId ?? entry?.organization_id ?? undefined;
   const canManageColumnAccess = (meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN") && effectiveOrgId != null;
+  const canSeeSecurityTab = meRole === "ORG_ADMIN";
 
   const valuesByFieldId = useMemo(() => {
     const map = new Map<number, FieldValueResp>();
@@ -475,9 +487,18 @@ export default function DomainKpiDetailPage() {
       .catch(() => setOrgRoles([]));
   }, [token, effectiveOrgId, canManageColumnAccess]);
 
-  // Load field access by role when scalar tab active or column-access panel expanded (org admin)
+  // Prevent non-org-admins from landing on Security tab
   useEffect(() => {
-    const shouldLoad = canManageColumnAccess && (columnAccessFieldId != null || activeTab === "scalar");
+    if (activeTab === "security" && !canSeeSecurityTab) {
+      setActiveTab("scalar");
+    }
+  }, [activeTab, canSeeSecurityTab]);
+
+  // Load field access by role when scalar or security tab active, or when a multi-line column panel is expanded (org admin)
+  useEffect(() => {
+    const shouldLoad =
+      canManageColumnAccess &&
+      (columnAccessFieldId != null || activeTab === "scalar" || activeTab === "security");
     if (!token || !kpiId || effectiveOrgId == null || !shouldLoad) {
       if (!shouldLoad) setColumnAccessByRole({});
       return;
@@ -621,6 +642,54 @@ export default function DomainKpiDetailPage() {
     setIsEditing(true);
     setEditRoleAssignments(assignedRoles.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })));
     setSaveError(null);
+  };
+
+  const saveRoleAssignments = async (next: { role_id: number; permission: string }[]) => {
+    if (!token || effectiveOrgId == null || !kpiId) return;
+    setSavingRoleAssignments(true);
+    try {
+      const saveQuery = qs({ organization_id: effectiveOrgId });
+      await api(`/kpis/${kpiId}/assignments-by-role?${saveQuery}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          assignments: next.map((a) => ({
+            role_id: a.role_id,
+            permission: a.permission || "data_entry",
+          })),
+        }),
+        token,
+      });
+      // Keep local assignedRoles in sync for view mode
+      setAssignedRoles(
+        next.map((a) => {
+          const role = orgRoles.find((r) => r.id === a.role_id);
+          return {
+            id: a.role_id,
+            name: role?.name ?? `Role #${a.role_id}`,
+            description: role?.description ?? null,
+            permission: a.permission || "data_entry",
+          };
+        }),
+      );
+      toast.success("KPI role assignments updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update KPI roles");
+    } finally {
+      setSavingRoleAssignments(false);
+    }
+  };
+
+  const updateRoleAssignments = (
+    updater: (prev: { role_id: number; permission: string }[]) => {
+      role_id: number;
+      permission: string;
+    }[],
+  ) => {
+    setEditRoleAssignments((prev) => {
+      const next = updater(prev);
+      void saveRoleAssignments(next);
+      return next;
+    });
   };
 
   const updateField = (fieldId: number, key: keyof FormCell, value: string | number | boolean | Record<string, unknown>[] | undefined) => {
@@ -1004,8 +1073,10 @@ export default function DomainKpiDetailPage() {
                             value={a.permission || "data_entry"}
                             onChange={(e) => {
                               const perm = e.target.value;
-                              setEditRoleAssignments((prev) =>
-                                prev.map((x) => (x.role_id === a.role_id ? { ...x, permission: perm } : x))
+                              updateRoleAssignments((prev) =>
+                                prev.map((x) =>
+                                  x.role_id === a.role_id ? { ...x, permission: perm } : x,
+                                ),
                               );
                             }}
                             style={{ padding: "0.1rem 0.2rem", fontSize: "0.75rem", border: "none", background: "transparent" }}
@@ -1015,7 +1086,11 @@ export default function DomainKpiDetailPage() {
                           </select>
                           <button
                             type="button"
-                            onClick={() => setEditRoleAssignments((prev) => prev.filter((x) => x.role_id !== a.role_id))}
+                            onClick={() =>
+                              updateRoleAssignments((prev) =>
+                                prev.filter((x) => x.role_id !== a.role_id),
+                              )
+                            }
                             style={{ padding: 0, border: "none", background: "none", cursor: "pointer", fontSize: "0.9rem", lineHeight: 1 }}
                             aria-label="Remove"
                           >
@@ -1030,7 +1105,11 @@ export default function DomainKpiDetailPage() {
                         onChange={(e) => {
                           const v = e.target.value;
                           if (v) {
-                            setEditRoleAssignments((prev) => [...prev, { role_id: Number(v), permission: "data_entry" }]);
+                            const roleId = Number(v);
+                            updateRoleAssignments((prev) => [
+                              ...prev,
+                              { role_id: roleId, permission: "data_entry" },
+                            ]);
                             e.target.value = "";
                           }
                         }}
@@ -1439,7 +1518,7 @@ export default function DomainKpiDetailPage() {
         )}
       </div>
 
-      {/* Section 3: Tabs – Field details (scalar + formula), then one tab per multi_line_items (inline-only) */}
+      {/* Section 3: Tabs – Scalar fields, Security, then one tab per multi_line_items (inline-only) */}
       <div className="card">
         <div
           style={{
@@ -1466,7 +1545,7 @@ export default function DomainKpiDetailPage() {
             }}
             onClick={() => setActiveTab("scalar")}
           >
-            Field details
+            Scalar Fields
           </button>
           {multiLineFields
             .filter((f) => (f as any).full_page_multi_items || (f.sub_fields?.length ?? 0) > 0)
@@ -1478,11 +1557,62 @@ export default function DomainKpiDetailPage() {
               style={{
                 ...(activeTab === f.id ? { background: "var(--accent)", color: "var(--on-muted)" } : {}),
               }}
-              onClick={() => setActiveTab(f.id)}
+              onClick={() => {
+                const isFullPage = Boolean((f as any).full_page_multi_items);
+                if (isFullPage && effectiveOrgId != null) {
+                  const fullPageUrl = `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${new URLSearchParams({
+                    organization_id: String(effectiveOrgId),
+                    ...(periodKeyFromUrl ? { period_key: periodKeyFromUrl } : {}),
+                  }).toString()}`;
+                  router.push(fullPageUrl);
+                  return;
+                }
+                setActiveTab(f.id);
+              }}
             >
               {f.name}
             </button>
           ))}
+          {canSeeSecurityTab && (
+            <button
+              type="button"
+              className="btn"
+              style={{
+                marginLeft: "auto",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.45rem",
+                ...(activeTab === "security" ? { background: "var(--accent)", color: "var(--on-muted)" } : {}),
+              }}
+              onClick={() => setActiveTab("security")}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                aria-hidden="true"
+                focusable="false"
+                style={{ opacity: activeTab === "security" ? 1 : 0.85 }}
+              >
+                <path
+                  d="M12 2l7 4v6c0 5-3.5 9.5-7 10-3.5-.5-7-5-7-10V6l7-4z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M9.5 12.5l1.8 1.8L15 10.6"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span>Security</span>
+            </button>
+          )}
         </div>
 
         {activeTab === "scalar" && (
@@ -1684,15 +1814,13 @@ export default function DomainKpiDetailPage() {
               </div>
             )}
 
-            {/* Access by role (scalar fields) – org admin only */}
-            {canManageColumnAccess && (scalarFieldsEdit.length > 0 || scalarFieldsViewOnly.length > 0) && orgRoles.length > 0 && (
-              <div style={{ marginTop: "1.5rem" }}>
-                <h3 style={{ fontSize: "1rem", fontWeight: 600, margin: "0 0 0.75rem", color: "var(--text)", borderBottom: "1px solid var(--border)", paddingBottom: "0.35rem" }}>
-                  Access by role (scalar fields)
-                </h3>
-                <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0 0 0.5rem" }}>
-                  Override KPI-level access per field. Inherit uses the role’s KPI-level view/edit.
-                </p>
+          </div>
+        )}
+
+        {activeTab === "security" && canSeeSecurityTab && canManageColumnAccess && (
+          <div style={{ padding: "0.5rem 0.25rem" }}>
+            {(scalarFieldsEdit.length > 0 || scalarFieldsViewOnly.length > 0) && orgRoles.length > 0 && (
+              <div style={{ marginBottom: "1.5rem" }}>
                 {columnAccessByRoleLoading ? (
                   <p style={{ color: "var(--muted)" }}>Loading…</p>
                 ) : (
@@ -1700,64 +1828,738 @@ export default function DomainKpiDetailPage() {
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
                       <thead>
                         <tr>
-                          <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Field</th>
-                          {orgRoles.map((r) => (
-                            <th key={r.id} style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{r.name}</th>
-                          ))}
+                          <th
+                            style={{
+                              textAlign: "left",
+                              padding: "0.5rem",
+                              borderBottom: "1px solid var(--border)",
+                              width: "30%",
+                            }}
+                          >
+                            Field
+                          </th>
+                          <th
+                            style={{
+                              textAlign: "left",
+                              padding: "0.5rem",
+                              borderBottom: "1px solid var(--border)",
+                            }}
+                          >
+                            Access by role
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
                         {[...scalarFieldsEdit, ...scalarFieldsViewOnly].map((f) => (
                           <tr key={f.id}>
                             <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{f.name}</td>
-                            {orgRoles.map((role) => {
-                              const list = columnAccessByRole[role.id] ?? [];
-                              const row = list.find((r) => r.field_id === f.id && r.sub_field_id == null);
-                              const value = row?.access_type ?? "inherit";
-                              const saving = columnAccessByRoleSavingRoleId === role.id;
-                              return (
-                                <td key={role.id} style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                            <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  flexWrap: "wrap",
+                                  gap: "0.35rem",
+                                  alignItems: "center",
+                                }}
+                              >
+                                {orgRoles.map((role) => {
+                                  const list = columnAccessByRole[role.id] ?? [];
+                                  const row = list.find((r) => r.field_id === f.id && r.sub_field_id == null);
+                                  if (!row) return null;
+                                  const saving = columnAccessByRoleSavingRoleId === role.id;
+                                  const label = row.access_type === "data_entry" ? "Edit" : "View";
+                                  return (
+                                    <span
+                                      key={role.id}
+                                      style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        gap: "0.25rem",
+                                        padding: "0.15rem 0.4rem",
+                                        borderRadius: 12,
+                                        background: "var(--border)",
+                                        fontSize: "0.8rem",
+                                      }}
+                                    >
+                                      <span>{role.name}</span>
+                                      <span style={{ fontWeight: 600 }}>{label}</span>
+                                      <button
+                                        type="button"
+                                        disabled={saving}
+                                        onClick={async () => {
+                                          const prevList = columnAccessByRole[role.id] ?? [];
+                                          const updated = prevList.filter(
+                                            (r) => !(r.field_id === f.id && r.sub_field_id == null)
+                                          );
+                                          setColumnAccessByRole((prev) => ({ ...prev, [role.id]: updated }));
+                                          setColumnAccessByRoleSavingRoleId(role.id);
+                                          try {
+                                            const accesses = updated.filter(
+                                              (r) => r.access_type === "view" || r.access_type === "data_entry"
+                                            );
+                                            await api(
+                                              `/kpis/${kpiId}/field-access-by-role?${qs({
+                                                organization_id: effectiveOrgId,
+                                              })}`,
+                                              {
+                                                method: "PUT",
+                                                body: JSON.stringify({ role_id: role.id, accesses }),
+                                                token,
+                                              }
+                                            );
+                                            toast.success("Access updated");
+                                          } catch (err) {
+                                            toast.error(err instanceof Error ? err.message : "Failed to save");
+                                            setColumnAccessByRole((prev) => ({ ...prev, [role.id]: prevList }));
+                                          } finally {
+                                            setColumnAccessByRoleSavingRoleId(null);
+                                          }
+                                        }}
+                                        style={{
+                                          border: "none",
+                                          background: "transparent",
+                                          cursor: "pointer",
+                                          fontSize: "0.85rem",
+                                        }}
+                                        aria-label={`Remove access for ${role.name}`}
+                                      >
+                                        ×
+                                      </button>
+                                    </span>
+                                  );
+                                })}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (scalarAccessTargetFieldId === f.id) {
+                                      setScalarAccessTargetFieldId(null);
+                                      setScalarAccessSearch("");
+                                      setScalarAccessRoleId(null);
+                                    } else {
+                                      setScalarAccessTargetFieldId(f.id);
+                                      setScalarAccessSearch("");
+                                      setScalarAccessRoleId(null);
+                                      setScalarAccessPermission("data_entry");
+                                    }
+                                  }}
+                                  style={{
+                                    padding: "0.25rem 0.5rem",
+                                    fontSize: "0.8rem",
+                                    borderRadius: 6,
+                                    border: "1px solid var(--border)",
+                                    background: "var(--surface)",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  {scalarAccessTargetFieldId === f.id ? "Cancel" : "Add rights"}
+                                </button>
+                              </div>
+                              {scalarAccessTargetFieldId === f.id && (
+                                <div
+                                  style={{
+                                    marginTop: "0.35rem",
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: "0.35rem",
+                                    alignItems: "center",
+                                  }}
+                                >
+                                  <input
+                                    type="text"
+                                    placeholder="Search role…"
+                                    value={scalarAccessSearch}
+                                    onChange={(e) => setScalarAccessSearch(e.target.value)}
+                                    style={{
+                                      padding: "0.3rem 0.45rem",
+                                      borderRadius: 6,
+                                      border: "1px solid var(--border)",
+                                      fontSize: "0.8rem",
+                                      minWidth: 160,
+                                    }}
+                                  />
                                   <select
-                                    value={value}
-                                    disabled={saving}
-                                    onChange={async (e) => {
-                                      const v = e.target.value as "inherit" | "view" | "data_entry";
-                                      const prevList = columnAccessByRole[role.id] ?? [];
+                                    value={scalarAccessRoleId ?? ""}
+                                    onChange={(e) => {
+                                      const v = e.target.value;
+                                      setScalarAccessRoleId(v ? Number(v) : null);
+                                    }}
+                                    style={{
+                                      padding: "0.3rem 0.45rem",
+                                      borderRadius: 6,
+                                      border: "1px solid var(--border)",
+                                      fontSize: "0.8rem",
+                                    }}
+                                  >
+                                    <option value="">Select role…</option>
+                                    {orgRoles
+                                      .filter((role) => {
+                                        const name = (role.name || "").toLowerCase();
+                                        const q = scalarAccessSearch.trim().toLowerCase();
+                                        if (q && !name.includes(q)) return false;
+                                        const list = columnAccessByRole[role.id] ?? [];
+                                        return !list.some(
+                                          (r) =>
+                                            r.field_id === f.id &&
+                                            r.sub_field_id == null &&
+                                            (r.access_type === "view" || r.access_type === "data_entry")
+                                        );
+                                      })
+                                      .map((role) => (
+                                        <option key={role.id} value={role.id}>
+                                          {role.name}
+                                        </option>
+                                      ))}
+                                  </select>
+                                  <select
+                                    value={scalarAccessPermission}
+                                    onChange={(e) =>
+                                      setScalarAccessPermission(
+                                        e.target.value === "view" ? "view" : "data_entry"
+                                      )
+                                    }
+                                    style={{
+                                      padding: "0.3rem 0.45rem",
+                                      borderRadius: 6,
+                                      border: "1px solid var(--border)",
+                                      fontSize: "0.8rem",
+                                    }}
+                                  >
+                                    <option value="data_entry">Edit</option>
+                                    <option value="view">View</option>
+                                  </select>
+                                  <button
+                                    type="button"
+                                    disabled={
+                                      scalarAccessRoleId == null ||
+                                      columnAccessByRoleSavingRoleId === scalarAccessRoleId
+                                    }
+                                    onClick={async () => {
+                                      if (scalarAccessRoleId == null) return;
+                                      const roleId = scalarAccessRoleId;
+                                      const prevList = columnAccessByRole[roleId] ?? [];
                                       const updated = prevList
-                                        .filter((r) => !(r.field_id === f.id && r.sub_field_id == null))
-                                        .concat(v === "view" || v === "data_entry" ? [{ field_id: f.id, sub_field_id: null, access_type: v }] : []);
-                                      setColumnAccessByRole((prev) => ({ ...prev, [role.id]: updated }));
-                                      setColumnAccessByRoleSavingRoleId(role.id);
+                                        .filter(
+                                          (r) => !(r.field_id === f.id && r.sub_field_id == null)
+                                        )
+                                        .concat([
+                                          {
+                                            field_id: f.id,
+                                            sub_field_id: null,
+                                            access_type: scalarAccessPermission,
+                                          },
+                                        ]);
+                                      setColumnAccessByRole((prev) => ({
+                                        ...prev,
+                                        [roleId]: updated,
+                                      }));
+                                      setColumnAccessByRoleSavingRoleId(roleId);
                                       try {
-                                        const accesses = updated.filter((r) => r.access_type === "view" || r.access_type === "data_entry");
-                                        await api(`/kpis/${kpiId}/field-access-by-role?${qs({ organization_id: effectiveOrgId })}`, {
-                                          method: "PUT",
-                                          body: JSON.stringify({ role_id: role.id, accesses }),
-                                          token,
-                                        });
+                                        const accesses = updated.filter(
+                                          (r) =>
+                                            r.access_type === "view" ||
+                                            r.access_type === "data_entry"
+                                        );
+                                        await api(
+                                          `/kpis/${kpiId}/field-access-by-role?${qs({
+                                            organization_id: effectiveOrgId,
+                                          })}`,
+                                          {
+                                            method: "PUT",
+                                            body: JSON.stringify({
+                                              role_id: roleId,
+                                              accesses,
+                                            }),
+                                            token,
+                                          }
+                                        );
                                         toast.success("Access updated");
+                                        setScalarAccessTargetFieldId(null);
+                                        setScalarAccessRoleId(null);
+                                        setScalarAccessSearch("");
                                       } catch (err) {
-                                        toast.error(err instanceof Error ? err.message : "Failed to save");
-                                        setColumnAccessByRole((prev) => ({ ...prev, [role.id]: prevList }));
+                                        toast.error(
+                                          err instanceof Error ? err.message : "Failed to save"
+                                        );
+                                        setColumnAccessByRole((prev) => ({
+                                          ...prev,
+                                          [roleId]: prevList,
+                                        }));
                                       } finally {
                                         setColumnAccessByRoleSavingRoleId(null);
                                       }
                                     }}
-                                    style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", minWidth: 90 }}
+                                    style={{
+                                      padding: "0.3rem 0.7rem",
+                                      borderRadius: 6,
+                                      border: "1px solid var(--border)",
+                                      background: "var(--primary)",
+                                      color: "var(--on-muted)",
+                                      fontSize: "0.8rem",
+                                      cursor: "pointer",
+                                    }}
                                   >
-                                    <option value="inherit">Inherit</option>
-                                    <option value="view">View</option>
-                                    <option value="data_entry">Edit</option>
-                                  </select>
-                                </td>
-                              );
-                            })}
+                                    Add
+                                  </button>
+                                </div>
+                              )}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Multi-line fields security (row-level toggle + collapse to show columns) */}
+            {multiLineFields.length > 0 && orgRoles.length > 0 && (
+              <div>
+                {multiLineFields.map((f) => {
+                  const subFields = f.sub_fields ?? [];
+                  if (subFields.length === 0) return null;
+                  return (
+                    <div
+                      key={f.id}
+                      style={{
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        padding: "0.6rem 0.75rem",
+                        marginBottom: "0.6rem",
+                        background: "var(--bg-subtle, #f9fafb)",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setColumnAccessFieldId((prev) => (prev === f.id ? null : f.id))
+                          }
+                          style={{
+                            padding: "0.25rem 0.45rem",
+                            border: "1px solid var(--border)",
+                            borderRadius: 6,
+                            background: "var(--surface)",
+                            fontSize: "0.8rem",
+                            cursor: "pointer",
+                            minWidth: 28,
+                          }}
+                          title={columnAccessFieldId === f.id ? "Collapse" : "Expand"}
+                        >
+                          {columnAccessFieldId === f.id ? "▲" : "▼"}
+                        </button>
+                        <span style={{ fontWeight: 600 }}>{f.name}</span>
+                        <span
+                          style={{
+                            fontSize: "0.8rem",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          {subFields.length} column{subFields.length !== 1 ? "s" : ""}
+                        </span>
+                      </div>
+                      {/* Row-based user-level access for this multi-line field */}
+                      <div style={{ marginTop: "0.5rem" }}>
+                        <label
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "0.5rem",
+                            cursor: "pointer",
+                            fontSize: "0.85rem",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={(f as FieldDef).row_level_user_access_enabled ?? false}
+                            disabled={rowLevelAccessUpdatingFieldId === f.id}
+                            onChange={async () => {
+                              const next = !((f as FieldDef).row_level_user_access_enabled ?? false);
+                              setRowLevelAccessUpdatingFieldId(f.id);
+                              try {
+                                await api(`/fields/${f.id}?${qs({ organization_id: effectiveOrgId })}`, {
+                                  method: "PATCH",
+                                  body: JSON.stringify({ row_level_user_access_enabled: next }),
+                                  token,
+                                });
+                                setFields((prev) =>
+                                  prev.map((field) =>
+                                    field.id === f.id ? { ...field, row_level_user_access_enabled: next } : field
+                                  )
+                                );
+                                toast.success(
+                                  next ? "Row-based user access enabled" : "Row-based user access disabled"
+                                );
+                              } catch (err) {
+                                toast.error(err instanceof Error ? err.message : "Failed to update");
+                              } finally {
+                                setRowLevelAccessUpdatingFieldId(null);
+                              }
+                            }}
+                          />
+                          <span>Row-based user-level access</span>
+                        </label>
+                        <p
+                          style={{
+                            fontSize: "0.8rem",
+                            color: "var(--muted)",
+                            margin: "0.25rem 0 0 1.5rem",
+                          }}
+                        >
+                          When enabled, rows are restricted by user-level row access; when disabled, all rows
+                          follow role/field access.
+                        </p>
+                      </div>
+
+                      {columnAccessFieldId === f.id && (
+                        <div
+                          className="card"
+                          style={{ padding: "0.6rem", marginTop: "0.5rem", overflowX: "auto" }}
+                        >
+                          {columnAccessByRoleLoading ? (
+                            <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+                          ) : orgRoles.length === 0 ? (
+                            <p style={{ color: "var(--muted)", margin: 0 }}>
+                              No roles. Create roles and assign users in Full access control.
+                            </p>
+                          ) : (
+                            <table
+                              style={{
+                                width: "100%",
+                                borderCollapse: "collapse",
+                                fontSize: "0.85rem",
+                              }}
+                            >
+                              <thead>
+                                <tr>
+                                  <th
+                                    style={{
+                                      textAlign: "left",
+                                      padding: "0.5rem",
+                                      borderBottom: "1px solid var(--border)",
+                                      width: "30%",
+                                    }}
+                                  >
+                                    Column
+                                  </th>
+                                  <th
+                                    style={{
+                                      textAlign: "left",
+                                      padding: "0.5rem",
+                                      borderBottom: "1px solid var(--border)",
+                                    }}
+                                  >
+                                    Access by role
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {subFields.map((s) => {
+                                  const isAdding =
+                                    columnAccessAddTarget != null &&
+                                    columnAccessAddTarget.fieldId === f.id &&
+                                    columnAccessAddTarget.subFieldId === s.id;
+                                  return (
+                                    <tr key={s.id}>
+                                      <td
+                                        style={{
+                                          padding: "0.5rem",
+                                          borderBottom: "1px solid var(--border)",
+                                        }}
+                                      >
+                                        {s.name}
+                                      </td>
+                                      <td
+                                        style={{
+                                          padding: "0.5rem",
+                                          borderBottom: "1px solid var(--border)",
+                                        }}
+                                      >
+                                        <div
+                                          style={{
+                                            display: "flex",
+                                            flexWrap: "wrap",
+                                            gap: "0.35rem",
+                                            alignItems: "center",
+                                          }}
+                                        >
+                                          {orgRoles.map((role) => {
+                                            const list = columnAccessByRole[role.id] ?? [];
+                                            const row = list.find(
+                                              (r) => r.field_id === f.id && r.sub_field_id === s.id
+                                            );
+                                            if (!row) return null;
+                                            const saving =
+                                              columnAccessByRoleSavingRoleId === role.id;
+                                            const label =
+                                              row.access_type === "data_entry" ? "Edit" : "View";
+                                            return (
+                                              <span
+                                                key={role.id}
+                                                style={{
+                                                  display: "inline-flex",
+                                                  alignItems: "center",
+                                                  gap: "0.25rem",
+                                                  padding: "0.15rem 0.4rem",
+                                                  borderRadius: 12,
+                                                  background: "var(--border)",
+                                                  fontSize: "0.8rem",
+                                                }}
+                                              >
+                                                <span>{role.name}</span>
+                                                <span style={{ fontWeight: 600 }}>{label}</span>
+                                                <button
+                                                  type="button"
+                                                  disabled={saving}
+                                                  onClick={async () => {
+                                                    const prevList = columnAccessByRole[role.id] ?? [];
+                                                    const updated = prevList.filter(
+                                                      (r) =>
+                                                        !(
+                                                          r.field_id === f.id &&
+                                                          r.sub_field_id === s.id
+                                                        )
+                                                    );
+                                                    setColumnAccessByRole((prev) => ({
+                                                      ...prev,
+                                                      [role.id]: updated,
+                                                    }));
+                                                    setColumnAccessByRoleSavingRoleId(role.id);
+                                                    try {
+                                                      const accesses = updated.filter(
+                                                        (r) =>
+                                                          r.access_type === "view" ||
+                                                          r.access_type === "data_entry"
+                                                      );
+                                                      await api(
+                                                        `/kpis/${kpiId}/field-access-by-role?${qs({
+                                                          organization_id: effectiveOrgId,
+                                                        })}`,
+                                                        {
+                                                          method: "PUT",
+                                                          body: JSON.stringify({
+                                                            role_id: role.id,
+                                                            accesses,
+                                                          }),
+                                                          token,
+                                                        }
+                                                      );
+                                                      toast.success("Column access updated");
+                                                    } catch (err) {
+                                                      toast.error(
+                                                        err instanceof Error
+                                                          ? err.message
+                                                          : "Failed to save"
+                                                      );
+                                                      setColumnAccessByRole((prev) => ({
+                                                        ...prev,
+                                                        [role.id]: prevList,
+                                                      }));
+                                                    } finally {
+                                                      setColumnAccessByRoleSavingRoleId(null);
+                                                    }
+                                                  }}
+                                                  style={{
+                                                    border: "none",
+                                                    background: "transparent",
+                                                    cursor: "pointer",
+                                                    fontSize: "0.85rem",
+                                                  }}
+                                                  aria-label={`Remove access for ${role.name}`}
+                                                >
+                                                  ×
+                                                </button>
+                                              </span>
+                                            );
+                                          })}
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              if (isAdding) {
+                                                setColumnAccessAddTarget(null);
+                                                setColumnAccessAddRoleId(null);
+                                              } else {
+                                                setColumnAccessAddTarget({
+                                                  fieldId: f.id,
+                                                  subFieldId: s.id,
+                                                });
+                                                setColumnAccessAddRoleId(null);
+                                                setColumnAccessAddPermission("data_entry");
+                                              }
+                                            }}
+                                            style={{
+                                              padding: "0.25rem 0.5rem",
+                                              fontSize: "0.8rem",
+                                              borderRadius: 6,
+                                              border: "1px solid var(--border)",
+                                              background: "var(--surface)",
+                                              cursor: "pointer",
+                                            }}
+                                          >
+                                            {isAdding ? "Cancel" : "Add"}
+                                          </button>
+                                        </div>
+                                        {isAdding && (
+                                          <div
+                                            style={{
+                                              marginTop: "0.35rem",
+                                              display: "flex",
+                                              flexWrap: "wrap",
+                                              gap: "0.35rem",
+                                              alignItems: "center",
+                                            }}
+                                          >
+                                            <select
+                                              value={columnAccessAddRoleId ?? ""}
+                                              onChange={(e) => {
+                                                const v = e.target.value;
+                                                setColumnAccessAddRoleId(v ? Number(v) : null);
+                                              }}
+                                              style={{
+                                                padding: "0.3rem 0.45rem",
+                                                borderRadius: 6,
+                                                border: "1px solid var(--border)",
+                                                fontSize: "0.8rem",
+                                              }}
+                                            >
+                                              <option value="">Select role…</option>
+                                              {orgRoles
+                                                .filter((role) => {
+                                                  const list = columnAccessByRole[role.id] ?? [];
+                                                  return !list.some(
+                                                    (r) =>
+                                                      r.field_id === f.id &&
+                                                      r.sub_field_id === s.id &&
+                                                      (r.access_type === "view" ||
+                                                        r.access_type === "data_entry")
+                                                  );
+                                                })
+                                                .map((role) => (
+                                                  <option key={role.id} value={role.id}>
+                                                    {role.name}
+                                                  </option>
+                                                ))}
+                                            </select>
+                                            <select
+                                              value={columnAccessAddPermission}
+                                              onChange={(e) =>
+                                                setColumnAccessAddPermission(
+                                                  e.target.value === "view"
+                                                    ? "view"
+                                                    : "data_entry"
+                                                )
+                                              }
+                                              style={{
+                                                padding: "0.3rem 0.45rem",
+                                                borderRadius: 6,
+                                                border: "1px solid var(--border)",
+                                                fontSize: "0.8rem",
+                                              }}
+                                            >
+                                              <option value="data_entry">Edit</option>
+                                              <option value="view">View</option>
+                                            </select>
+                                            <button
+                                              type="button"
+                                              disabled={
+                                                columnAccessAddRoleId == null ||
+                                                columnAccessByRoleSavingRoleId ===
+                                                  columnAccessAddRoleId
+                                              }
+                                              onClick={async () => {
+                                                if (columnAccessAddRoleId == null) return;
+                                                const roleId = columnAccessAddRoleId;
+                                                const prevList =
+                                                  columnAccessByRole[roleId] ?? [];
+                                                const updated = prevList
+                                                  .filter(
+                                                    (r) =>
+                                                      !(
+                                                        r.field_id === f.id &&
+                                                        r.sub_field_id === s.id
+                                                      )
+                                                  )
+                                                  .concat([
+                                                    {
+                                                      field_id: f.id,
+                                                      sub_field_id: s.id,
+                                                      access_type: columnAccessAddPermission,
+                                                    },
+                                                  ]);
+                                                setColumnAccessByRole((prev) => ({
+                                                  ...prev,
+                                                  [roleId]: updated,
+                                                }));
+                                                setColumnAccessByRoleSavingRoleId(roleId);
+                                                try {
+                                                  const accesses = updated.filter(
+                                                    (r) =>
+                                                      r.access_type === "view" ||
+                                                      r.access_type === "data_entry"
+                                                  );
+                                                  await api(
+                                                    `/kpis/${kpiId}/field-access-by-role?${qs({
+                                                      organization_id: effectiveOrgId,
+                                                    })}`,
+                                                    {
+                                                      method: "PUT",
+                                                      body: JSON.stringify({
+                                                        role_id: roleId,
+                                                        accesses,
+                                                      }),
+                                                      token,
+                                                    }
+                                                  );
+                                                  toast.success("Column access updated");
+                                                  setColumnAccessAddTarget(null);
+                                                  setColumnAccessAddRoleId(null);
+                                                } catch (err) {
+                                                  toast.error(
+                                                    err instanceof Error
+                                                      ? err.message
+                                                      : "Failed to save"
+                                                  );
+                                                  setColumnAccessByRole((prev) => ({
+                                                    ...prev,
+                                                    [roleId]: prevList,
+                                                  }));
+                                                } finally {
+                                                  setColumnAccessByRoleSavingRoleId(null);
+                                                }
+                                              }}
+                                              style={{
+                                                padding: "0.3rem 0.7rem",
+                                                borderRadius: 6,
+                                                border: "1px solid var(--border)",
+                                                background: "var(--primary)",
+                                                color: "var(--on-muted)",
+                                                fontSize: "0.8rem",
+                                                cursor: "pointer",
+                                              }}
+                                            >
+                                              Add
+                                            </button>
+                                          </div>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -2055,42 +2857,9 @@ export default function DomainKpiDetailPage() {
                   </>
                   )}
 
-                  {/* Row-based user-level access — org admin only */}
-                  {canManageColumnAccess && effectiveOrgId != null && (
-                    <div style={{ marginTop: "1rem", marginBottom: "0.5rem" }}>
-                      <label style={{ display: "inline-flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
-                        <input
-                          type="checkbox"
-                          checked={(f as FieldDef).row_level_user_access_enabled ?? false}
-                          disabled={rowLevelAccessUpdatingFieldId === f.id}
-                          onChange={async () => {
-                            const next = !((f as FieldDef).row_level_user_access_enabled ?? false);
-                            setRowLevelAccessUpdatingFieldId(f.id);
-                            try {
-                              await api(`/fields/${f.id}?${qs({ organization_id: effectiveOrgId })}`, {
-                                method: "PATCH",
-                                body: JSON.stringify({ row_level_user_access_enabled: next }),
-                                token,
-                              });
-                              setFields((prev) => prev.map((field) => (field.id === f.id ? { ...field, row_level_user_access_enabled: next } : field)));
-                              toast.success(next ? "Row-based user access enabled" : "Row-based user access disabled");
-                            } catch (err) {
-                              toast.error(err instanceof Error ? err.message : "Failed to update");
-                            } finally {
-                              setRowLevelAccessUpdatingFieldId(null);
-                            }
-                          }}
-                        />
-                        <span>Row-based user-level access</span>
-                      </label>
-                      <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.25rem 0 0 1.5rem" }}>
-                        When enabled, rows are restricted by user-level row access; when disabled, all rows follow role/field access.
-                      </p>
-                    </div>
-                  )}
 
                   {/* Column (subfield) access — org admin only */}
-                  {canManageColumnAccess && effectiveOrgId != null && (
+                  {false && (
                     <div style={{ marginTop: "1rem", marginBottom: "1rem" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
                         <button
@@ -2129,62 +2898,258 @@ export default function DomainKpiDetailPage() {
                             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
                               <thead>
                                 <tr>
-                                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Subfield</th>
-                                  {orgRoles.map((role) => (
-                                    <th key={role.id} style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)", minWidth: 100 }}>
-                                      {role.name}
-                                    </th>
-                                  ))}
+                                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)", width: "30%" }}>Subfield</th>
+                                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Access by role</th>
                                 </tr>
                               </thead>
                               <tbody>
-                                {subFields.map((s) => (
-                                  <tr key={s.id}>
-                                    <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{s.name}</td>
-                                    {orgRoles.map((role) => {
-                                      const list = columnAccessByRole[role.id] ?? [];
-                                      const row = list.find((r) => r.field_id === f.id && r.sub_field_id === s.id);
-                                      const value = row?.access_type ?? "";
-                                      const saving = columnAccessByRoleSavingRoleId === role.id;
-                                      return (
-                                        <td key={role.id} style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                          <select
-                                            value={value}
-                                            disabled={saving}
-                                            onChange={async (e) => {
-                                              const v = e.target.value;
-                                              const prevList = columnAccessByRole[role.id] ?? [];
-                                              const updated = prevList
-                                                .filter((r) => !(r.field_id === f.id && r.sub_field_id === s.id))
-                                                .concat(v === "view" || v === "data_entry" ? [{ field_id: f.id, sub_field_id: s.id, access_type: v }] : []);
-                                              setColumnAccessByRole((prev) => ({ ...prev, [role.id]: updated }));
-                                              setColumnAccessByRoleSavingRoleId(role.id);
-                                              try {
-                                                const accesses = updated.filter((r) => r.access_type === "view" || r.access_type === "data_entry");
-                                                await api(`/kpis/${kpiId}/field-access-by-role?${qs({ organization_id: effectiveOrgId })}`, {
-                                                  method: "PUT",
-                                                  body: JSON.stringify({ role_id: role.id, accesses }),
-                                                  token,
-                                                });
-                                                toast.success("Column access updated");
-                                              } catch (err) {
-                                                toast.error(err instanceof Error ? err.message : "Failed to save");
-                                                setColumnAccessByRole((prev) => ({ ...prev, [role.id]: prevList }));
-                                              } finally {
-                                                setColumnAccessByRoleSavingRoleId(null);
+                                {subFields.map((s) => {
+                                  const isAdding =
+                                    columnAccessAddTarget != null &&
+                                    columnAccessAddTarget.fieldId === f.id &&
+                                    columnAccessAddTarget.subFieldId === s.id;
+                                  return (
+                                    <tr key={s.id}>
+                                      <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{s.name}</td>
+                                      <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+                                          {orgRoles.map((role) => {
+                                            const list = columnAccessByRole[role.id] ?? [];
+                                            const row = list.find((r) => r.field_id === f.id && r.sub_field_id === s.id);
+                                            if (!row) return null;
+                                            const saving = columnAccessByRoleSavingRoleId === role.id;
+                                            const label = row.access_type === "data_entry" ? "Edit" : "View";
+                                            return (
+                                              <span
+                                                key={role.id}
+                                                style={{
+                                                  display: "inline-flex",
+                                                  alignItems: "center",
+                                                  gap: "0.25rem",
+                                                  padding: "0.15rem 0.4rem",
+                                                  borderRadius: 12,
+                                                  background: "var(--border)",
+                                                  fontSize: "0.8rem",
+                                                }}
+                                              >
+                                                <span>{role.name}</span>
+                                                <span style={{ fontWeight: 600 }}>{label}</span>
+                                                <button
+                                                  type="button"
+                                                  disabled={saving}
+                                                  onClick={async () => {
+                                                    const prevList = columnAccessByRole[role.id] ?? [];
+                                                    const updated = prevList.filter(
+                                                      (r) => !(r.field_id === f.id && r.sub_field_id === s.id)
+                                                    );
+                                                    setColumnAccessByRole((prev) => ({ ...prev, [role.id]: updated }));
+                                                    setColumnAccessByRoleSavingRoleId(role.id);
+                                                    try {
+                                                      const accesses = updated.filter(
+                                                        (r) => r.access_type === "view" || r.access_type === "data_entry"
+                                                      );
+                                                      await api(
+                                                        `/kpis/${kpiId}/field-access-by-role?${qs({
+                                                          organization_id: effectiveOrgId,
+                                                        })}`,
+                                                        {
+                                                          method: "PUT",
+                                                          body: JSON.stringify({ role_id: role.id, accesses }),
+                                                          token,
+                                                        }
+                                                      );
+                                                      toast.success("Column access updated");
+                                                    } catch (err) {
+                                                      toast.error(
+                                                        err instanceof Error ? err.message : "Failed to save"
+                                                      );
+                                                      setColumnAccessByRole((prev) => ({
+                                                        ...prev,
+                                                        [role.id]: prevList,
+                                                      }));
+                                                    } finally {
+                                                      setColumnAccessByRoleSavingRoleId(null);
+                                                    }
+                                                  }}
+                                                  style={{
+                                                    border: "none",
+                                                    background: "transparent",
+                                                    cursor: "pointer",
+                                                    fontSize: "0.85rem",
+                                                  }}
+                                                  aria-label={`Remove access for ${role.name}`}
+                                                >
+                                                  ×
+                                                </button>
+                                              </span>
+                                            );
+                                          })}
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              if (isAdding) {
+                                                setColumnAccessAddTarget(null);
+                                                setColumnAccessAddRoleId(null);
+                                              } else {
+                                                setColumnAccessAddTarget({ fieldId: f.id, subFieldId: s.id });
+                                                setColumnAccessAddRoleId(null);
+                                                setColumnAccessAddPermission("data_entry");
                                               }
                                             }}
-                                            style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", minWidth: 90 }}
+                                            style={{
+                                              padding: "0.25rem 0.5rem",
+                                              fontSize: "0.8rem",
+                                              borderRadius: 6,
+                                              border: "1px solid var(--border)",
+                                              background: "var(--surface)",
+                                              cursor: "pointer",
+                                            }}
                                           >
-                                            <option value="">None</option>
-                                            <option value="view">View</option>
-                                            <option value="data_entry">Edit</option>
-                                          </select>
-                                        </td>
-                                      );
-                                    })}
-                                  </tr>
-                                ))}
+                                            {isAdding ? "Cancel" : "Add"}
+                                          </button>
+                                        </div>
+                                        {isAdding && (
+                                          <div
+                                            style={{
+                                              marginTop: "0.35rem",
+                                              display: "flex",
+                                              flexWrap: "wrap",
+                                              gap: "0.35rem",
+                                              alignItems: "center",
+                                            }}
+                                          >
+                                            <select
+                                              value={columnAccessAddRoleId ?? ""}
+                                              onChange={(e) => {
+                                                const v = e.target.value;
+                                                setColumnAccessAddRoleId(v ? Number(v) : null);
+                                              }}
+                                              style={{
+                                                padding: "0.3rem 0.45rem",
+                                                borderRadius: 6,
+                                                border: "1px solid var(--border)",
+                                                fontSize: "0.8rem",
+                                              }}
+                                            >
+                                              <option value="">Select role…</option>
+                                              {orgRoles
+                                                .filter((role) => {
+                                                  const list = columnAccessByRole[role.id] ?? [];
+                                                  return !list.some(
+                                                    (r) =>
+                                                      r.field_id === f.id &&
+                                                      r.sub_field_id === s.id &&
+                                                      (r.access_type === "view" ||
+                                                        r.access_type === "data_entry")
+                                                  );
+                                                })
+                                                .map((role) => (
+                                                  <option key={role.id} value={role.id}>
+                                                    {role.name}
+                                                  </option>
+                                                ))}
+                                            </select>
+                                            <select
+                                              value={columnAccessAddPermission}
+                                              onChange={(e) =>
+                                                setColumnAccessAddPermission(
+                                                  e.target.value === "view" ? "view" : "data_entry"
+                                                )
+                                              }
+                                              style={{
+                                                padding: "0.3rem 0.45rem",
+                                                borderRadius: 6,
+                                                border: "1px solid var(--border)",
+                                                fontSize: "0.8rem",
+                                              }}
+                                            >
+                                              <option value="data_entry">Edit</option>
+                                              <option value="view">View</option>
+                                            </select>
+                                            <button
+                                              type="button"
+                                              disabled={
+                                                columnAccessAddRoleId == null ||
+                                                columnAccessByRoleSavingRoleId === columnAccessAddRoleId
+                                              }
+                                              onClick={async () => {
+                                                if (columnAccessAddRoleId == null) return;
+                                                const roleId = columnAccessAddRoleId;
+                                                const prevList = columnAccessByRole[roleId] ?? [];
+                                                const updated = prevList
+                                                  .filter(
+                                                    (r) =>
+                                                      !(
+                                                        r.field_id === f.id &&
+                                                        r.sub_field_id === s.id
+                                                      )
+                                                  )
+                                                  .concat([
+                                                    {
+                                                      field_id: f.id,
+                                                      sub_field_id: s.id,
+                                                      access_type: columnAccessAddPermission,
+                                                    },
+                                                  ]);
+                                                setColumnAccessByRole((prev) => ({
+                                                  ...prev,
+                                                  [roleId]: updated,
+                                                }));
+                                                setColumnAccessByRoleSavingRoleId(roleId);
+                                                try {
+                                                  const accesses = updated.filter(
+                                                    (r) =>
+                                                      r.access_type === "view" ||
+                                                      r.access_type === "data_entry"
+                                                  );
+                                                  await api(
+                                                    `/kpis/${kpiId}/field-access-by-role?${qs({
+                                                      organization_id: effectiveOrgId,
+                                                    })}`,
+                                                    {
+                                                      method: "PUT",
+                                                      body: JSON.stringify({
+                                                        role_id: roleId,
+                                                        accesses,
+                                                      }),
+                                                      token,
+                                                    }
+                                                  );
+                                                  toast.success("Column access updated");
+                                                  setColumnAccessAddTarget(null);
+                                                  setColumnAccessAddRoleId(null);
+                                                } catch (err) {
+                                                  toast.error(
+                                                    err instanceof Error
+                                                      ? err.message
+                                                      : "Failed to save"
+                                                  );
+                                                  setColumnAccessByRole((prev) => ({
+                                                    ...prev,
+                                                    [roleId]: prevList,
+                                                  }));
+                                                } finally {
+                                                  setColumnAccessByRoleSavingRoleId(null);
+                                                }
+                                              }}
+                                              style={{
+                                                padding: "0.3rem 0.7rem",
+                                                borderRadius: 6,
+                                                border: "1px solid var(--border)",
+                                                background: "var(--primary)",
+                                                color: "var(--on-muted)",
+                                                fontSize: "0.8rem",
+                                                cursor: "pointer",
+                                              }}
+                                            >
+                                              Add
+                                            </button>
+                                          </div>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
                           )}
@@ -2405,23 +3370,10 @@ export default function DomainKpiDetailPage() {
               : null;
             return (
               <div key={f.id} style={{ overflowX: "auto" }}>
-                {fullPageUrl && (
-                  <div className="card" style={{ marginBottom: "1rem", padding: "1rem" }}>
-                    <p style={{ margin: "0 0 0.75rem", fontSize: "0.9rem", color: "var(--text-secondary)" }}>
-                      This multi-line field is managed on a dedicated page. Open it to view, add, and edit rows.
-                    </p>
-                    <Link
-                      href={fullPageUrl}
-                      className="btn btn-primary"
-                      style={{ display: "inline-flex", alignItems: "center", gap: "0.5rem" }}
-                    >
-                      View full page data entries →
-                    </Link>
-                  </div>
-                )}
+                {/* Full-page multi-line fields open directly from the tab button above. */}
 
                 {/* Row-based user-level access — org admin only (full-page multi-line) */}
-                {canManageColumnAccess && effectiveOrgId != null && (
+                {false && (
                   <div style={{ marginTop: "1rem", marginBottom: "0.5rem" }}>
                     <label style={{ display: "inline-flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
                       <input
@@ -2455,7 +3407,7 @@ export default function DomainKpiDetailPage() {
                 )}
 
                 {/* Column (subfield) access — same as inline multi-line */}
-                {canManageColumnAccess && effectiveOrgId != null && (
+                {false && (
                   <div style={{ marginTop: "1rem", marginBottom: "1rem" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
                       <button
@@ -2494,62 +3446,256 @@ export default function DomainKpiDetailPage() {
                           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
                             <thead>
                               <tr>
-                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Subfield</th>
-                                {orgRoles.map((role) => (
-                                  <th key={role.id} style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)", minWidth: 100 }}>
-                                    {role.name}
-                                  </th>
-                                ))}
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)", width: "30%" }}>Subfield</th>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Access by role</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {subFields.map((s) => (
-                                <tr key={s.id}>
-                                  <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{s.name}</td>
-                                  {orgRoles.map((role) => {
-                                    const list = columnAccessByRole[role.id] ?? [];
-                                    const row = list.find((r) => r.field_id === f.id && r.sub_field_id === s.id);
-                                    const value = row?.access_type ?? "";
-                                    const saving = columnAccessByRoleSavingRoleId === role.id;
-                                    return (
-                                      <td key={role.id} style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                        <select
-                                          value={value}
-                                          disabled={saving}
-                                          onChange={async (e) => {
-                                            const v = e.target.value;
-                                            const prevList = columnAccessByRole[role.id] ?? [];
-                                            const updated = prevList
-                                              .filter((r) => !(r.field_id === f.id && r.sub_field_id === s.id))
-                                              .concat(v === "view" || v === "data_entry" ? [{ field_id: f.id, sub_field_id: s.id, access_type: v }] : []);
-                                            setColumnAccessByRole((prev) => ({ ...prev, [role.id]: updated }));
-                                            setColumnAccessByRoleSavingRoleId(role.id);
-                                            try {
-                                              const accesses = updated.filter((r) => r.access_type === "view" || r.access_type === "data_entry");
-                                              await api(`/kpis/${kpiId}/field-access-by-role?${qs({ organization_id: effectiveOrgId })}`, {
-                                                method: "PUT",
-                                                body: JSON.stringify({ role_id: role.id, accesses }),
-                                                token,
-                                              });
-                                              toast.success("Column access updated");
-                                            } catch (err) {
-                                              toast.error(err instanceof Error ? err.message : "Failed to save");
-                                              setColumnAccessByRole((prev) => ({ ...prev, [role.id]: prevList }));
-                                            } finally {
-                                              setColumnAccessByRoleSavingRoleId(null);
+                              {subFields.map((s) => {
+                                const isAdding =
+                                  columnAccessAddTarget != null &&
+                                  columnAccessAddTarget.fieldId === f.id &&
+                                  columnAccessAddTarget.subFieldId === s.id;
+                                return (
+                                  <tr key={s.id}>
+                                    <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{s.name}</td>
+                                    <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+                                        {orgRoles.map((role) => {
+                                          const list = columnAccessByRole[role.id] ?? [];
+                                          const row = list.find((r) => r.field_id === f.id && r.sub_field_id === s.id);
+                                          if (!row) return null;
+                                          const saving = columnAccessByRoleSavingRoleId === role.id;
+                                          const label = row.access_type === "data_entry" ? "Edit" : "View";
+                                          return (
+                                            <span
+                                              key={role.id}
+                                              style={{
+                                                display: "inline-flex",
+                                                alignItems: "center",
+                                                gap: "0.25rem",
+                                                padding: "0.15rem 0.4rem",
+                                                borderRadius: 12,
+                                                background: "var(--border)",
+                                                fontSize: "0.8rem",
+                                              }}
+                                            >
+                                              <span>{role.name}</span>
+                                              <span style={{ fontWeight: 600 }}>{label}</span>
+                                              <button
+                                                type="button"
+                                                disabled={saving}
+                                                onClick={async () => {
+                                                  const prevList = columnAccessByRole[role.id] ?? [];
+                                                  const updated = prevList.filter(
+                                                    (r) => !(r.field_id === f.id && r.sub_field_id === s.id)
+                                                  );
+                                                  setColumnAccessByRole((prev) => ({ ...prev, [role.id]: updated }));
+                                                  setColumnAccessByRoleSavingRoleId(role.id);
+                                                  try {
+                                                    const accesses = updated.filter(
+                                                      (r) => r.access_type === "view" || r.access_type === "data_entry"
+                                                    );
+                                                    await api(
+                                                      `/kpis/${kpiId}/field-access-by-role?${qs({
+                                                        organization_id: effectiveOrgId,
+                                                      })}`,
+                                                      {
+                                                        method: "PUT",
+                                                        body: JSON.stringify({ role_id: role.id, accesses }),
+                                                        token,
+                                                      }
+                                                    );
+                                                    toast.success("Column access updated");
+                                                  } catch (err) {
+                                                    toast.error(
+                                                      err instanceof Error ? err.message : "Failed to save"
+                                                    );
+                                                    setColumnAccessByRole((prev) => ({
+                                                      ...prev,
+                                                      [role.id]: prevList,
+                                                    }));
+                                                  } finally {
+                                                    setColumnAccessByRoleSavingRoleId(null);
+                                                  }
+                                                }}
+                                                style={{
+                                                  border: "none",
+                                                  background: "transparent",
+                                                  cursor: "pointer",
+                                                  fontSize: "0.85rem",
+                                                }}
+                                                aria-label={`Remove access for ${role.name}`}
+                                              >
+                                                ×
+                                              </button>
+                                            </span>
+                                          );
+                                        })}
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (isAdding) {
+                                              setColumnAccessAddTarget(null);
+                                              setColumnAccessAddRoleId(null);
+                                            } else {
+                                              setColumnAccessAddTarget({ fieldId: f.id, subFieldId: s.id });
+                                              setColumnAccessAddRoleId(null);
+                                              setColumnAccessAddPermission("data_entry");
                                             }
                                           }}
-                                          style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", minWidth: 90 }}
+                                          style={{
+                                            padding: "0.25rem 0.5rem",
+                                            fontSize: "0.8rem",
+                                            borderRadius: 6,
+                                            border: "1px solid var(--border)",
+                                            background: "var(--surface)",
+                                            cursor: "pointer",
+                                          }}
                                         >
-                                          <option value="">None</option>
-                                          <option value="view">View</option>
-                                          <option value="data_entry">Edit</option>
-                                        </select>
-                                      </td>
-                                    );
-                                  })}
-                                </tr>
-                              ))}
+                                          {isAdding ? "Cancel" : "Add"}
+                                        </button>
+                                      </div>
+                                      {isAdding && (
+                                        <div
+                                          style={{
+                                            marginTop: "0.35rem",
+                                            display: "flex",
+                                            flexWrap: "wrap",
+                                            gap: "0.35rem",
+                                            alignItems: "center",
+                                          }}
+                                        >
+                                          <select
+                                            value={columnAccessAddRoleId ?? ""}
+                                            onChange={(e) => {
+                                              const v = e.target.value;
+                                              setColumnAccessAddRoleId(v ? Number(v) : null);
+                                            }}
+                                            style={{
+                                              padding: "0.3rem 0.45rem",
+                                              borderRadius: 6,
+                                              border: "1px solid var(--border)",
+                                              fontSize: "0.8rem",
+                                            }}
+                                          >
+                                            <option value="">Select role…</option>
+                                            {orgRoles
+                                              .filter((role) => {
+                                                const list = columnAccessByRole[role.id] ?? [];
+                                                return !list.some(
+                                                  (r) =>
+                                                    r.field_id === f.id &&
+                                                    r.sub_field_id === s.id &&
+                                                    (r.access_type === "view" ||
+                                                      r.access_type === "data_entry")
+                                                );
+                                              })
+                                              .map((role) => (
+                                                <option key={role.id} value={role.id}>
+                                                  {role.name}
+                                                </option>
+                                              ))}
+                                          </select>
+                                          <select
+                                            value={columnAccessAddPermission}
+                                            onChange={(e) =>
+                                              setColumnAccessAddPermission(
+                                                e.target.value === "view" ? "view" : "data_entry"
+                                              )
+                                            }
+                                            style={{
+                                              padding: "0.3rem 0.45rem",
+                                              borderRadius: 6,
+                                              border: "1px solid var(--border)",
+                                              fontSize: "0.8rem",
+                                            }}
+                                          >
+                                            <option value="data_entry">Edit</option>
+                                            <option value="view">View</option>
+                                          </select>
+                                          <button
+                                            type="button"
+                                            disabled={
+                                              columnAccessAddRoleId == null ||
+                                              columnAccessByRoleSavingRoleId === columnAccessAddRoleId
+                                            }
+                                            onClick={async () => {
+                                              if (columnAccessAddRoleId == null) return;
+                                              const roleId = columnAccessAddRoleId;
+                                              const prevList = columnAccessByRole[roleId] ?? [];
+                                              const updated = prevList
+                                                .filter(
+                                                  (r) =>
+                                                    !(
+                                                      r.field_id === f.id &&
+                                                      r.sub_field_id === s.id
+                                                    )
+                                                )
+                                                .concat([
+                                                  {
+                                                    field_id: f.id,
+                                                    sub_field_id: s.id,
+                                                    access_type: columnAccessAddPermission,
+                                                  },
+                                                ]);
+                                              setColumnAccessByRole((prev) => ({
+                                                ...prev,
+                                                [roleId]: updated,
+                                              }));
+                                              setColumnAccessByRoleSavingRoleId(roleId);
+                                              try {
+                                                const accesses = updated.filter(
+                                                  (r) =>
+                                                    r.access_type === "view" ||
+                                                    r.access_type === "data_entry"
+                                                );
+                                                await api(
+                                                  `/kpis/${kpiId}/field-access-by-role?${qs({
+                                                    organization_id: effectiveOrgId,
+                                                  })}`,
+                                                  {
+                                                    method: "PUT",
+                                                    body: JSON.stringify({
+                                                      role_id: roleId,
+                                                      accesses,
+                                                    }),
+                                                    token,
+                                                  }
+                                                );
+                                                toast.success("Column access updated");
+                                                setColumnAccessAddTarget(null);
+                                                setColumnAccessAddRoleId(null);
+                                              } catch (err) {
+                                                toast.error(
+                                                  err instanceof Error ? err.message : "Failed to save"
+                                                );
+                                                setColumnAccessByRole((prev) => ({
+                                                  ...prev,
+                                                  [roleId]: prevList,
+                                                }));
+                                              } finally {
+                                                setColumnAccessByRoleSavingRoleId(null);
+                                              }
+                                            }}
+                                            style={{
+                                              padding: "0.3rem 0.7rem",
+                                              borderRadius: 6,
+                                              border: "1px solid var(--border)",
+                                              background: "var(--primary)",
+                                              color: "var(--on-muted)",
+                                              fontSize: "0.8rem",
+                                              cursor: "pointer",
+                                            }}
+                                          >
+                                            Add
+                                          </button>
+                                        </div>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         )}

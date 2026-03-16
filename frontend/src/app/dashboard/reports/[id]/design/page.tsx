@@ -182,6 +182,10 @@ const WHERE_OPERATORS = [
   { value: "op_gte", label: "greater or equal (≥)" },
   { value: "op_lt", label: "less than (<)" },
   { value: "op_lte", label: "less or equal (≤)" },
+  { value: "op_contains", label: "contains" },
+  { value: "op_not_contains", label: "does not contain" },
+  { value: "op_starts_with", label: "starts with" },
+  { value: "op_ends_with", label: "ends with" },
 ] as const;
 
 interface FormulaRefKpi {
@@ -241,7 +245,9 @@ function ReportFormulaBuilder({
     if (!refField) return;
     if (isConditionalWhere) {
       const op = refWhereOp;
-      const val = refWhereValue.trim() === "" ? "0" : refWhereValue;
+      const raw = refWhereValue.trim();
+      const isNumeric = raw !== "" && !Number.isNaN(Number(raw));
+      const val = isNumeric ? raw : `'${raw.replace(/'/g, "\\'")}'`;
       const whereFn = refGroupFn.endsWith("_WHERE") ? refGroupFn : refGroupFn + "_WHERE";
       if (whereFn === "COUNT_ITEMS_WHERE") {
         onInsert(`COUNT_ITEMS_WHERE(${refField.key}, ${refFilterSubKey}, ${op}, ${val})`);

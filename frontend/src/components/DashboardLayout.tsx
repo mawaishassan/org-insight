@@ -356,7 +356,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
     { href: "/dashboard/chat", label: "Chat with data", show: canUseChat(role) && (!isSuperAdmin || !!selectedOrgId) },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
-    { href: "/dashboard/users", label: "Users", show: !isSuperAdmin && canManageUsers(role) },
+    { href: "/dashboard/access", label: "Access", show: !isSuperAdmin && canManageUsers(role) },
   ].filter((x) => x.show);
 
   const tabLabel: Record<string, string> = {
@@ -601,13 +601,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   >
                     Reports
                   </Link>
-                  <Link
-                    href={`/dashboard/organizations/${selectedOrgId}/access`}
-                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Access control
-                  </Link>
+                  {/* Legacy per-organization access page removed in favor of /dashboard/access */}
                   <Link
                     href={`/dashboard/chat?organization_id=${selectedOrgId}`}
                     style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
@@ -672,15 +666,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       {label}
                     </Link>
                   ))}
-                  {canManageKpis(role) && (selectedOrgId ?? orgId) != null && (
-                    <Link
-                      href={`/dashboard/organizations/${selectedOrgId ?? orgId}/access`}
-                      style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                      onClick={() => setMenuOpen(false)}
-                    >
-                      Access control
-                    </Link>
-                  )}
+                  {/* Per-organization Access control entry removed; use /dashboard/access instead */}
                   {!isSuperAdmin && canManageDomains(role) && (
                     <Link
                       href="/dashboard/domains"
