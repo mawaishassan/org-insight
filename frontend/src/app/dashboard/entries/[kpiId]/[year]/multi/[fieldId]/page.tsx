@@ -5,7 +5,7 @@ import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken, clearTokens } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
-import { toast } from "react-toastify";
+import toast from "react-hot-toast";
 
 type SubField = { key: string; name: string; field_type?: string | null; is_required?: boolean };
 
@@ -816,8 +816,18 @@ export default function FullPageMultiItems() {
                           body: form,
                         });
                         if (res.ok) {
-                          toast.success("Excel uploaded successfully");
+                          const payload = await res.json().catch(() => ({} as any));
+                          const added = Number((payload as any)?.rows_added ?? 0);
+                          const overridden = Number((payload as any)?.rows_overridden ?? 0);
+                          const modeLabel = uploadOption === "append" ? "Appended" : "Replaced";
+                          toast.success(
+                            overridden > 0
+                              ? `${modeLabel}: ${added} rows imported (overrode ${overridden} existing)`
+                              : `${modeLabel}: ${added} rows imported`
+                          );
                           await loadRows();
+                          setBulkPanelOpen(false);
+                          setUploadOption(null);
                         } else {
                           const err = await res.json().catch(() => ({} as any));
                           const validationErrors = Array.isArray((err as any).errors)

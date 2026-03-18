@@ -292,7 +292,14 @@ async def upload_multi_items_excel(
     items = _parse_multi_items_xlsx(content, field)
 
     # Reference consistency check for reference sub-fields (row-level errors)
-    from app.entries.service import get_reference_allowed_values, _normalize_reference_value
+    # Rules:
+    # - Missing/blank/"NA" values => coerce to null (do not validate)
+    # - Invalid values => return row/column error and abort upload (no partial import)
+    from app.entries.service import (
+        get_reference_allowed_values,
+        _normalize_reference_value,
+        _is_reference_empty_or_sentinel,
+    )
     validation_errors: list[dict] = []
     ref_sub_fields = [s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.reference]
     allowed_cache: dict[tuple[int, str, str | None], set[str]] = {}
@@ -315,7 +322,11 @@ async def upload_multi_items_excel(
             cell = item.get(sf.key)
             raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
             normalized = _normalize_reference_value(raw)
-            if normalized and normalized not in allowed_cache[cache_key]:
+            if _is_reference_empty_or_sentinel(normalized):
+                # Normalize empty/NA-like values to None so downstream uses nulls.
+                item[sf.key] = None
+                continue
+            if normalized not in allowed_cache[cache_key]:
                 validation_errors.append(
                     {
                         "field_key": field.key,
@@ -336,14 +347,26 @@ async def upload_multi_items_excel(
     if fv is None:
         fv = KPIFieldValue(entry_id=entry.id, field_id=field.id)
         db.add(fv)
+    prev_count = len(fv.value_json) if isinstance(fv.value_json, list) else 0
+    imported_count = len(items) if isinstance(items, list) else 0
     if append and isinstance(fv.value_json, list):
         fv.value_json = list(fv.value_json) + items
+        rows_added = imported_count
+        rows_overridden = 0
     else:
         fv.value_json = items
+        rows_added = imported_count
+        rows_overridden = prev_count
     entry.user_id = current_user.id  # track last editor (optional)
     await db.commit()
 
-    return {"entry_id": entry.id, "field_id": field.id, "items": fv.value_json, "append": append}
+    return {
+        "entry_id": entry.id,
+        "field_id": field.id,
+        "append": append,
+        "rows_added": rows_added,
+        "rows_overridden": rows_overridden,
+    }
 
 
 @router.get("/multi-items/rows", response_model=MultiItemsListResponse)
