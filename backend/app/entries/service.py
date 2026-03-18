@@ -151,6 +151,17 @@ def _normalize_reference_value(val: str | None) -> str:
     return s
 
 
+# Values that are accepted for reference fields without being in the reference list (e.g. "Not Applicable").
+_REFERENCE_EMPTY_SENTINELS = frozenset(
+    {"", "na", "n/a", "n.a.", "na.", "-", "none", "n.a", "n/a."}
+)
+
+
+def _is_reference_empty_or_sentinel(normalized: str) -> bool:
+    """True if the value should be accepted for reference validation without checking the allowed list."""
+    return not normalized or normalized.lower().strip() in _REFERENCE_EMPTY_SENTINELS
+
+
 async def _get_entry(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry | None:
     """Get entry by id and organization (one entry per org/kpi/year)."""
     result = await db.execute(
@@ -580,9 +591,8 @@ async def user_can_edit_row(
     )
     row_rules = row_res.scalars().all()
     if not row_rules:
-        if field and field.field_type == FieldType.multi_line_items:
-            return await user_can_edit_multi_line_field(db, user_id, entry.kpi_id, field)
-        return await user_can_edit_field(db, user_id, entry.kpi_id, field_id, None)
+        # Row-level access is enforced: without explicit rules, user is readonly.
+        return False
     for r in row_rules:
         if r.row_index == row_index and r.can_edit:
             return True
@@ -618,7 +628,8 @@ async def user_can_delete_row(
     )
     row_rules = row_res.scalars().all()
     if not row_rules:
-        return await user_can_edit_field(db, user_id, entry.kpi_id, field_id, None)
+        # Row-level access is enforced: without explicit rules, user is readonly.
+        return False
     for r in row_rules:
         if r.row_index == row_index and r.can_delete:
             return True
@@ -696,14 +707,11 @@ async def save_entry_values(
                 allowed_normalized = {_normalize_reference_value(a) for a in allowed}
                 raw = (v.value_text or "").strip()
                 normalized = _normalize_reference_value(v.value_text)
-                if raw and normalized not in allowed_normalized:
-                    validation_errors.append({
-                        "field_key": f.key,
-                        "sub_field_key": None,
-                        "row_index": None,
-                        "value": v.value_text or "",
-                        "message": "Value must be one of the referenced field's values.",
-                    })
+                if not _is_reference_empty_or_sentinel(normalized):
+                    # If mapping can't be resolved (no allowed values), or if the submitted value
+                    # isn't found in the resolved reference list, coerce it to null instead of failing.
+                    if not allowed_normalized or normalized not in allowed_normalized:
+                        v.value_text = None
         elif f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
             for sub in getattr(f, "sub_fields", []) or []:
                 if getattr(sub, "field_type", None) != FieldType.reference:
@@ -722,14 +730,10 @@ async def save_entry_values(
                     cell = row.get(sub.key)
                     raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
                     normalized = _normalize_reference_value(raw)
-                    if normalized and normalized not in allowed_normalized:
-                        validation_errors.append({
-                            "field_key": f.key,
-                            "sub_field_key": sub.key,
-                            "row_index": row_idx,
-                            "value": raw,
-                            "message": "Value must be one of the referenced field's values.",
-                        })
+                    if not _is_reference_empty_or_sentinel(normalized):
+                        if not allowed_normalized or normalized not in allowed_normalized:
+                            # Mark unresolved references as null for linked/mapped fields.
+                            row[sub.key] = None
 
     if validation_errors:
         raise EntryValidationError(validation_errors)

@@ -85,7 +85,7 @@ interface SubFieldDef {
   field_type: string;
   is_required: boolean;
   sort_order: number;
-  config?: ReferenceConfig | null;
+  config?: (ReferenceConfig & { ui_section?: string }) | Record<string, unknown> | null;
 }
 
 interface KpiField {
@@ -428,11 +428,28 @@ export default function KpiFieldsPage() {
             is_required: s.is_required,
             sort_order: s.sort_order ?? i,
           };
-          if (s.field_type === "reference" && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
+          const uiSection =
+            s.config && typeof s.config === "object" && "ui_section" in s.config
+              ? String((s.config as any).ui_section ?? "").trim()
+              : "";
+          const hasUiSection = uiSection.length > 0;
+          const hasRefConfig =
+            s.field_type === "reference" &&
+            s.config?.reference_source_kpi_id &&
+            s.config?.reference_source_field_key;
+
+          if (hasUiSection || hasRefConfig) {
             sub.config = {
-              reference_source_kpi_id: s.config.reference_source_kpi_id,
-              reference_source_field_key: s.config.reference_source_field_key,
-              ...(s.config.reference_source_sub_field_key ? { reference_source_sub_field_key: s.config.reference_source_sub_field_key } : {}),
+              ...(hasUiSection ? { ui_section: uiSection } : {}),
+              ...(hasRefConfig
+                ? {
+                    reference_source_kpi_id: (s.config as any).reference_source_kpi_id,
+                    reference_source_field_key: (s.config as any).reference_source_field_key,
+                    ...((s.config as any).reference_source_sub_field_key
+                      ? { reference_source_sub_field_key: (s.config as any).reference_source_sub_field_key }
+                      : {}),
+                  }
+                : {}),
             };
           }
           return sub;
@@ -514,11 +531,28 @@ export default function KpiFieldsPage() {
             is_required: s.is_required,
             sort_order: s.sort_order ?? i,
           };
-          if (s.field_type === "reference" && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
+          const uiSection =
+            s.config && typeof s.config === "object" && "ui_section" in s.config
+              ? String((s.config as any).ui_section ?? "").trim()
+              : "";
+          const hasUiSection = uiSection.length > 0;
+          const hasRefConfig =
+            s.field_type === "reference" &&
+            s.config?.reference_source_kpi_id &&
+            s.config?.reference_source_field_key;
+
+          if (hasUiSection || hasRefConfig) {
             sub.config = {
-              reference_source_kpi_id: s.config.reference_source_kpi_id,
-              reference_source_field_key: s.config.reference_source_field_key,
-              ...(s.config.reference_source_sub_field_key ? { reference_source_sub_field_key: s.config.reference_source_sub_field_key } : {}),
+              ...(hasUiSection ? { ui_section: uiSection } : {}),
+              ...(hasRefConfig
+                ? {
+                    reference_source_kpi_id: (s.config as any).reference_source_kpi_id,
+                    reference_source_field_key: (s.config as any).reference_source_field_key,
+                    ...((s.config as any).reference_source_sub_field_key
+                      ? { reference_source_sub_field_key: (s.config as any).reference_source_sub_field_key }
+                      : {}),
+                  }
+                : {}),
             };
           }
           return sub;
@@ -2344,6 +2378,7 @@ function FieldEditForm({
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (if type = reference)</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Section (UI)</th>
                   <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
                   <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
                 </tr>
@@ -2351,7 +2386,7 @@ function FieldEditForm({
               <tbody>
                 {editSubFields.length === 0 ? (
                   <tr>
-                    <td colSpan={6} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                    <td colSpan={7} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
                       No sub-fields yet. Click &quot;Add sub-field&quot; below.
                     </td>
                   </tr>
@@ -2406,6 +2441,37 @@ function FieldEditForm({
                         />
                       ) : (
                         <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
+                      )}
+                    </td>
+                    <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                      {userRole === "SUPER_ADMIN" ? (
+                        <input
+                          placeholder="e.g. Program details"
+                          value={typeof s.config === "object" && s.config && "ui_section" in s.config ? String((s.config as any).ui_section ?? "") : ""}
+                          onChange={(e) => {
+                            const section = e.target.value;
+                            setEditSubFields((prev) =>
+                              prev.map((x, i) =>
+                                i === idx
+                                  ? {
+                                      ...x,
+                                      config: {
+                                        ...(x.config ?? {}),
+                                        ui_section: section,
+                                      },
+                                    }
+                                  : x
+                              )
+                            );
+                          }}
+                          style={{ width: "100%" }}
+                        />
+                      ) : (
+                        <div style={{ padding: "0.35rem 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                          {typeof s.config === "object" && s.config && "ui_section" in s.config && (s.config as any).ui_section
+                            ? String((s.config as any).ui_section)
+                            : "—"}
+                        </div>
                       )}
                     </td>
                     <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>

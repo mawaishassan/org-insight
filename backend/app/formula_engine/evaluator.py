@@ -186,11 +186,28 @@ def _make_evaluator(
         vals = _items_values(items_data, field_key, sub_key)
         return sum(vals) / len(vals) if vals else 0.0
 
-    def count_items(field_key: str, sub_key: str | None = None) -> float:
+    def count_items(*args: Any) -> float:
+        """
+        COUNT_ITEMS supports two forms:
+        - COUNT_ITEMS(field_key) or COUNT_ITEMS(field_key, sub_key): count rows (or rows with non-null sub_key)
+        - COUNT_ITEMS(field_key, filter_sub_key, op_xx, value): alias for COUNT_ITEMS_WHERE(...)
+          (kept for backward/UX compatibility with older builders)
+        """
+        if not args:
+            return 0.0
+        field_key = str(args[0])
         rows = items_data.get(field_key) if isinstance(items_data, dict) else []
         if not isinstance(rows, list):
             return 0.0
-        if sub_key is None or sub_key == "":
+        # Alias: COUNT_ITEMS(field, filter_sub_key, op, value)
+        if len(args) == 4:
+            filter_sub_key = str(args[1])
+            op = str(args[2])
+            filter_value = args[3]
+            return float(len(_rows_where(items_data, field_key, filter_sub_key, op, filter_value)))
+        # Standard forms
+        sub_key = str(args[1]) if len(args) >= 2 and args[1] is not None else ""
+        if sub_key == "":
             return float(len(rows))
         return float(len([r for r in rows if isinstance(r, dict) and r.get(sub_key) is not None]))
 

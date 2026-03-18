@@ -128,14 +128,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, [searchParams.get("domain_id"), orgId]);
 
   useEffect(() => {
-    if (!selectedOrgId || !getAccessToken()) {
+    // Organization detail endpoint is Super Admin only; avoid triggering 403 spam for org admins.
+    if (!selectedOrgId || !getAccessToken() || user?.role?.value !== "SUPER_ADMIN") {
       setSelectedOrgName(null);
       return;
     }
     api<{ id: number; name: string }>(`/organizations/${selectedOrgId}`, { token: getAccessToken()! })
       .then((org) => setSelectedOrgName(org.name))
       .catch(() => setSelectedOrgName(null));
-  }, [selectedOrgId]);
+  }, [selectedOrgId, user?.role?.value]);
 
   useEffect(() => {
     const token = getAccessToken();

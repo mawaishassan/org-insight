@@ -97,6 +97,7 @@ export default function FullPageMultiItems() {
   const [rowAccessAddUserId, setRowAccessAddUserId] = useState<number | null>(null);
   const [rowAccessAddAccess, setRowAccessAddAccess] = useState<"edit" | "edit_delete">("edit_delete");
   const [rowAccessSaving, setRowAccessSaving] = useState(false);
+  const [rowAccessUserSearch, setRowAccessUserSearch] = useState("");
 
   const canManageRowAccess = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
 
@@ -353,15 +354,15 @@ export default function FullPageMultiItems() {
         { token }
       ),
       api<{ id: number; full_name: string | null; username: string }[]>(
-        `/kpis/${kpiId}/assignments?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`,
+        `/users?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`,
         { token }
       ),
     ])
-      .then(([rowsData, assignmentsData]) => {
+      .then(([rowsData, usersData]) => {
         const rowData = Array.isArray(rowsData) ? rowsData.find((r) => r.row_index === row.index) : null;
         setRowAccessUsers(rowData?.users ?? []);
-        setRowAccessAssignments(Array.isArray(assignmentsData) ? assignmentsData : []);
-        setRowAccessAddUserId(assignmentsData?.[0]?.id ?? null);
+        setRowAccessAssignments(Array.isArray(usersData) ? usersData : []);
+        setRowAccessAddUserId(usersData?.[0]?.id ?? null);
       })
       .catch(() => {
         setRowAccessAssignments([]);
@@ -1566,13 +1567,49 @@ export default function FullPageMultiItems() {
             </div>
             <div style={{ marginBottom: "0.75rem" }}>
               <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.25rem" }}>Add user</label>
+              <input
+                type="text"
+                placeholder="Search user by name or username"
+                value={rowAccessUserSearch}
+                onChange={(e) => setRowAccessUserSearch(e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "0.4rem 0.6rem",
+                  borderRadius: 8,
+                  border: "1px solid var(--border)",
+                  marginBottom: "0.35rem",
+                  fontSize: "0.85rem",
+                }}
+              />
+              {rowAccessAssignments.length > 0 && rowAccessUserSearch.trim() !== "" && (
+                <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: "0.25rem" }}>
+                  {rowAccessAssignments.filter((a) => {
+                    const term = rowAccessUserSearch.toLowerCase();
+                    return (
+                      (a.full_name || "").toLowerCase().includes(term) ||
+                      a.username.toLowerCase().includes(term)
+                    );
+                  }).length === 0
+                    ? "No users match this search."
+                    : ""}
+                </p>
+              )}
               <select
                 value={rowAccessAddUserId ?? ""}
                 onChange={(e) => setRowAccessAddUserId(e.target.value ? Number(e.target.value) : null)}
                 style={{ width: "100%", padding: "0.5rem 0.75rem", borderRadius: 8, border: "1px solid var(--border)", marginBottom: "0.5rem" }}
               >
                 <option value="">— Select user —</option>
-                {rowAccessAssignments.map((a) => (
+                {rowAccessAssignments
+                  .filter((a) => {
+                    if (!rowAccessUserSearch.trim()) return true;
+                    const term = rowAccessUserSearch.toLowerCase();
+                    return (
+                      (a.full_name || "").toLowerCase().includes(term) ||
+                      a.username.toLowerCase().includes(term)
+                    );
+                  })
+                  .map((a) => (
                   <option key={a.id} value={a.id}>{a.full_name || a.username}</option>
                 ))}
               </select>

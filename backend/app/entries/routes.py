@@ -14,7 +14,18 @@ import httpx
 
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_org_admin
-from app.core.models import User, KPIEntry, KPIField, KPIFieldValue, KPI, FieldType, Organization, TimeDimension, effective_kpi_time_dimension
+from app.core.models import (
+    User,
+    KPIEntry,
+    KPIField,
+    KPIFieldValue,
+    KPI,
+    FieldType,
+    Organization,
+    TimeDimension,
+    effective_kpi_time_dimension,
+    KpiMultiLineRowAccess,
+)
 from app.entries.schemas import EntryCreate, EntrySubmit, EntryLock, EntryResponse, FieldValueResponse
 from app.entries.service import (
     get_or_create_entry,
@@ -375,19 +386,46 @@ async def list_multi_items_rows(
         for i, r in enumerate(raw_rows)
     ]
 
-    # Restrict to sub_fields (columns) the user can view
+    # Restrict to sub_fields (columns) the user can view.
+    # Important: don't call permission helpers per column (slow and can time out).
     viewable_keys: set[str] = set()
     sub_fields_payload: list[dict] = []
+    is_org_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+
+    access_map = None
+    can_view_kpi = False
+    if not is_org_admin:
+        # One shot: compute user's effective field access for this KPI.
+        access_map = await get_user_field_access_for_kpi(db, current_user.id, entry.kpi_id)
+        if access_map is None:
+            # No explicit field-level access rows: rely on KPI-level visibility.
+            can_view_kpi = await user_can_view_kpi(db, current_user.id, entry.kpi_id, org_id)
+
     for sf in (field.sub_fields or []):
         sf_key = getattr(sf, "key", "")
-        if await user_can_view_field(db, current_user.id, entry.kpi_id, field.id, getattr(sf, "id", None)):
+        sf_id = getattr(sf, "id", None)
+
+        can_view = False
+        if is_org_admin:
+            can_view = True
+        elif access_map is None:
+            can_view = can_view_kpi
+        else:
+            perm = access_map.get((field.id, sf_id)) or access_map.get((field.id, None))
+            can_view = perm in ("view", "data_entry")
+
+        if can_view:
             viewable_keys.add(sf_key)
-            sub_fields_payload.append({
-                "key": sf_key,
-                "name": getattr(sf, "name", sf_key),
-                "field_type": getattr(sf, "field_type", None).value if getattr(sf, "field_type", None) else None,
-                "is_required": getattr(sf, "is_required", False),
-            })
+            ft = getattr(sf, "field_type", None)
+            sub_fields_payload.append(
+                {
+                    "key": sf_key,
+                    "name": getattr(sf, "name", sf_key),
+                    # `field_type` should be an Enum(FieldType), but some datasets/migrations may load it as a plain string.
+                    "field_type": ft.value if hasattr(ft, "value") else ft,
+                    "is_required": getattr(sf, "is_required", False),
+                }
+            )
     # Filter row data to viewable columns only (keep original index)
     rows = [(i, {k: v for k, v in r.items() if k in viewable_keys}) for i, r in rows]
 
@@ -445,12 +483,48 @@ async def list_multi_items_rows(
     end = start + page_size
     paged_rows = rows[start:end]
 
-    # Per-row permissions for current user (edit/delete)
+    # Per-row permissions for current user (edit/delete) - optimized.
+    # The current implementation called DB permission checks inside the loop (too slow).
     out_rows: list[MultiItemsRow] = []
+
+    field_row_access_enabled = bool(getattr(field, "row_level_user_access_enabled", False))
+    row_rule_map: dict[int, tuple[bool, bool]] = {}
+    has_any_row_rules = False
+
+    is_org_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+
+    # Common permissions when row-level access is disabled.
+    # When row-level access is enabled, non-admins must be readonly unless explicitly allowed per-row.
+    can_edit_common = await user_can_edit_multi_line_field(db, current_user.id, entry.kpi_id, field)
+    can_delete_common = await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, None)
+
+    if field_row_access_enabled:
+        row_rules_res = await db.execute(
+            select(KpiMultiLineRowAccess.row_index, KpiMultiLineRowAccess.can_edit, KpiMultiLineRowAccess.can_delete).where(
+                KpiMultiLineRowAccess.user_id == current_user.id,
+                KpiMultiLineRowAccess.entry_id == entry.id,
+                KpiMultiLineRowAccess.field_id == field.id,
+            )
+        )
+        row_rules = row_rules_res.all()
+        has_any_row_rules = len(row_rules) > 0
+        for row_index, can_edit, can_delete in row_rules:
+            row_rule_map[int(row_index)] = (bool(can_edit), bool(can_delete))
+
     for orig_index, r in paged_rows:
-        can_edit = await user_can_edit_row(db, current_user.id, entry.id, field.id, orig_index)
-        can_delete = await user_can_delete_row(db, current_user.id, entry.id, field.id, orig_index)
-        out_rows.append(MultiItemsRow(index=orig_index, data=r, can_edit=can_edit, can_delete=can_delete))
+        if field_row_access_enabled and not is_org_admin:
+            # Non-admins: readonly unless explicitly allowed for this row.
+            rule = row_rule_map.get(int(orig_index))
+            can_edit = rule[0] if rule else False
+            can_delete = rule[1] if rule else False
+        else:
+            # Row-level disabled, or org/super admin: use normal permissions.
+            can_edit = can_edit_common
+            can_delete = can_delete_common
+
+        out_rows.append(
+            MultiItemsRow(index=orig_index, data=r, can_edit=can_edit, can_delete=can_delete)
+        )
 
     return MultiItemsListResponse(
         total=total,

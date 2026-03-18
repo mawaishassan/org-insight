@@ -14,6 +14,8 @@ type SubField = {
   is_required?: boolean;
   can_view?: boolean;
   can_edit?: boolean;
+  sort_order?: number;
+  config?: { ui_section?: string; [key: string]: unknown } | null;
 };
 
 interface FieldSummary {
@@ -59,6 +61,7 @@ export default function MultiItemRowDetail() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refAllowedValues, setRefAllowedValues] = useState<Record<string, string[]>>({});
+  const [activeSectionTab, setActiveSectionTab] = useState<string>("");
 
   const effectiveOrgId = useMemo(
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
@@ -141,6 +144,59 @@ export default function MultiItemRowDetail() {
 
   const subFields = field?.sub_fields ?? [];
 
+  const sectionGroups = useMemo(() => {
+    const hasAnyExplicit = subFields.some((sf) => {
+      const section = (sf as any)?.config?.ui_section;
+      return typeof section === "string" && section.trim().length > 0;
+    });
+
+    const groupMap = new Map<
+      string,
+      { label: string; fields: SubField[]; order: number; isOther: boolean }
+    >();
+
+    subFields.forEach((sf, idx) => {
+      const rawSection = (sf as any)?.config?.ui_section;
+      const section = typeof rawSection === "string" ? rawSection.trim() : "";
+      const label = section.length > 0 ? section : hasAnyExplicit ? "Other" : "";
+      const isOther = label === "Other" || label === "";
+      const sortOrder = typeof (sf as any)?.sort_order === "number" ? (sf as any).sort_order : idx;
+
+      const existing = groupMap.get(label);
+      if (!existing) {
+        groupMap.set(label, { label, fields: [sf], order: sortOrder, isOther });
+      } else {
+        existing.fields.push(sf);
+        existing.order = Math.min(existing.order, sortOrder);
+      }
+    });
+
+    const groups = Array.from(groupMap.values()).sort((a, b) => a.order - b.order);
+    if (!hasAnyExplicit) {
+      return [{ label: "", fields: subFields, showHeading: false }] as const;
+    }
+
+    return groups
+      .filter((g) => g.fields.length > 0)
+      .map((g) => ({
+        label: g.isOther ? "Other" : g.label,
+        fields: g.fields,
+        showHeading: !g.isOther,
+      }));
+  }, [subFields]);
+
+  const hasSectionTabs = sectionGroups.length > 1 || (sectionGroups.length === 1 && sectionGroups[0].label !== "");
+
+  useEffect(() => {
+    if (!hasSectionTabs) {
+      setActiveSectionTab("");
+      return;
+    }
+    const labels = sectionGroups.map((g) => g.label);
+    // Keep current selection if still exists; otherwise default to first tab.
+    setActiveSectionTab((prev) => (prev && labels.includes(prev) ? prev : labels[0] || ""));
+  }, [hasSectionTabs, sectionGroups]);
+
   // Load reference allowed values for reference sub-fields (same logic as inline editor)
   useEffect(() => {
     if (!token || effectiveOrgId == null || !field || !field.sub_fields?.length) return;
@@ -183,6 +239,64 @@ export default function MultiItemRowDetail() {
   const handleChangeCell = (key: string, value: unknown) => {
     setEditData((prev) => ({ ...prev, [key]: value }));
   };
+
+  const Toggle = ({
+    checked,
+    onChange,
+    disabled,
+    label,
+  }: {
+    checked: boolean;
+    onChange: (next: boolean) => void;
+    disabled?: boolean;
+    label?: string;
+  }) => (
+    <label
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "0.6rem",
+        cursor: disabled ? "not-allowed" : "pointer",
+        userSelect: "none",
+      }}
+    >
+      <span
+        style={{
+          position: "relative",
+          width: 44,
+          height: 24,
+          borderRadius: 999,
+          background: checked ? "var(--accent)" : "var(--border)",
+          display: "inline-flex",
+          alignItems: "center",
+          padding: 2,
+          opacity: disabled ? 0.6 : 1,
+          transition: "background 140ms ease, opacity 140ms ease",
+        }}
+      >
+        <span
+          style={{
+            width: 20,
+            height: 20,
+            borderRadius: "50%",
+            background: "var(--surface)",
+            transform: checked ? "translateX(20px)" : "translateX(0)",
+            transition: "transform 140ms ease",
+            boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+          }}
+        />
+      </span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        disabled={disabled}
+        style={{ display: "none" }}
+        aria-label={label || "Toggle"}
+      />
+      {label ? <span style={{ fontSize: "0.9rem", color: "var(--text)" }}>{label}</span> : null}
+    </label>
+  );
 
   const handleSave = async () => {
     if (!token) {
@@ -252,7 +366,7 @@ export default function MultiItemRowDetail() {
   }
 
   return (
-    <div style={{ padding: "0.75rem 1rem 1rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
+    <div style={{ padding: "1rem 1.25rem 1.25rem", display: "flex", flexDirection: "column", gap: "1rem", maxWidth: 1120, margin: "0 auto" }}>
       {error && (
         <div className="card" style={{ padding: "0.75rem", color: "var(--error)" }}>
           {error}
@@ -298,10 +412,30 @@ export default function MultiItemRowDetail() {
                   }
                   return (
                     <div key={key} style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: "0.75rem", textTransform: "uppercase", color: "var(--muted)" }}>
+                      <div
+                        style={{
+                          fontSize: "0.75rem",
+                          textTransform: "uppercase",
+                          color: "var(--muted)",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                        title={sf.name}
+                      >
                         {sf.name}
                       </div>
-                      <div style={{ fontSize: "0.9rem", fontWeight: 500, color: "var(--text)" }}>
+                      <div
+                        style={{
+                          fontSize: "0.9rem",
+                          fontWeight: 500,
+                          color: "var(--text)",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                        title={display}
+                      >
                         {display}
                       </div>
                     </div>
@@ -310,8 +444,73 @@ export default function MultiItemRowDetail() {
               </div>
             )}
 
-            <div style={{ display: "grid", gap: "0.75rem", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
-              {subFields.map((sf) => {
+            {hasSectionTabs && (
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.5rem",
+                  marginBottom: "0.9rem",
+                  paddingBottom: "0.75rem",
+                  borderBottom: "1px solid var(--border)",
+                }}
+              >
+                {sectionGroups.map((g) => {
+                  const active = activeSectionTab === g.label;
+                  return (
+                    <button
+                      key={g.label}
+                      type="button"
+                      className={active ? "btn btn-primary" : "btn"}
+                      onClick={() => setActiveSectionTab(g.label)}
+                      style={{
+                        padding: "0.4rem 0.7rem",
+                        fontSize: "0.9rem",
+                        borderRadius: 999,
+                      }}
+                    >
+                      {g.label || "Fields"}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {sectionGroups
+              .filter((g) => !hasSectionTabs || activeSectionTab === g.label)
+              .map((group, groupIdx) => (
+              <div
+                key={`${group.label || "default"}:${groupIdx}`}
+                style={{
+                  marginTop: groupIdx === 0 ? 0 : "1rem",
+                  padding: "0.9rem",
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--surface)",
+                }}
+              >
+                {(() => {
+                  const compactFields = group.fields.filter((sf) => sf.field_type !== "multi_line_text");
+                  const multiLineFields = group.fields.filter((sf) => sf.field_type === "multi_line_text");
+
+                  // Place multi-line textareas into two columns, 1 textarea per column cell (balanced).
+                  const mlLeft: SubField[] = [];
+                  const mlRight: SubField[] = [];
+                  multiLineFields.forEach((sf, idx) => (idx % 2 === 0 ? mlLeft : mlRight).push(sf));
+
+                  return (
+                    <div style={{ display: "grid", gap: "1rem" }}>
+                      {compactFields.length > 0 && (
+                        <div
+                          style={{
+                            padding: "0.85rem",
+                            border: "1px solid var(--border)",
+                            borderRadius: 10,
+                            background: "var(--bg-subtle, #f9fafb)",
+                          }}
+                        >
+                          <div style={{ display: "grid", gap: "0.9rem", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+                            {compactFields.map((sf) => {
                 const key = sf.key;
                 const val = editData[key];
                 const canEdit = sf.can_edit !== false;
@@ -366,17 +565,16 @@ export default function MultiItemRowDetail() {
                 }
                 if (sf.field_type === "boolean") {
                   return (
-                    <div
-                      key={key}
-                      className="form-group"
-                      style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
-                    >
-                      <input
-                        type="checkbox"
+                    <div key={key} className="form-group">
+                      <div style={{ fontSize: "0.9rem", fontWeight: 600, marginBottom: "0.35rem" }}>
+                        {sf.name}
+                        {sf.is_required ? " *" : ""}
+                      </div>
+                      <Toggle
                         checked={Boolean(val)}
-                        onChange={(e) => handleChangeCell(key, e.target.checked)}
+                        onChange={(next) => handleChangeCell(key, next)}
+                        label={Boolean(val) ? "Yes" : "No"}
                       />
-                      <label>{sf.name}</label>
                     </div>
                   );
                 }
@@ -533,7 +731,94 @@ export default function MultiItemRowDetail() {
                   </div>
                 );
               })}
-            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {multiLineFields.length > 0 && (
+                        <div
+                          style={{
+                            padding: "0.85rem",
+                            border: "1px solid var(--border)",
+                            borderRadius: 10,
+                            background: "var(--surface)",
+                          }}
+                        >
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "1rem" }}>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
+                              {mlLeft.map((sf) => {
+                                const key = sf.key;
+                                const val = editData[key];
+                                const canEdit = sf.can_edit !== false;
+                                const displayVal = val != null && String(val).trim() !== "" ? String(val) : "—";
+                                if (!canEdit) {
+                                  return (
+                                    <div key={key} className="form-group">
+                                      <label>
+                                        {sf.name}
+                                        {sf.is_required ? " *" : ""}
+                                      </label>
+                                      <div style={{ padding: "0.35rem 0", color: "var(--muted)" }}>{displayVal}</div>
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <div key={key} className="form-group">
+                                    <label>
+                                      {sf.name}
+                                      {sf.is_required ? " *" : ""}
+                                    </label>
+                                    <textarea
+                                      rows={6}
+                                      value={typeof val === "string" ? val : val != null ? String(val) : ""}
+                                      onChange={(e) => handleChangeCell(key, e.target.value)}
+                                      style={{ width: "100%", resize: "vertical", minHeight: 160 }}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
+                              {mlRight.map((sf) => {
+                                const key = sf.key;
+                                const val = editData[key];
+                                const canEdit = sf.can_edit !== false;
+                                const displayVal = val != null && String(val).trim() !== "" ? String(val) : "—";
+                                if (!canEdit) {
+                                  return (
+                                    <div key={key} className="form-group">
+                                      <label>
+                                        {sf.name}
+                                        {sf.is_required ? " *" : ""}
+                                      </label>
+                                      <div style={{ padding: "0.35rem 0", color: "var(--muted)" }}>{displayVal}</div>
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <div key={key} className="form-group">
+                                    <label>
+                                      {sf.name}
+                                      {sf.is_required ? " *" : ""}
+                                    </label>
+                                    <textarea
+                                      rows={6}
+                                      value={typeof val === "string" ? val : val != null ? String(val) : ""}
+                                      onChange={(e) => handleChangeCell(key, e.target.value)}
+                                      style={{ width: "100%", resize: "vertical", minHeight: 160 }}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            ))}
             <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem", justifyContent: "flex-end", alignItems: "center" }}>
               {!entryId && (
                 <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Loading entry…</span>
