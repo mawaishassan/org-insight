@@ -35,6 +35,15 @@ class UserCreate(BaseModel):
     report_template_ids: list[int] = Field(default_factory=list)
 
 
+class ExternalUserCreate(BaseModel):
+    """Create an external user (Org Admin) authenticated via XML-RPC (no internal password)."""
+
+    username: str = Field(..., min_length=1, max_length=100)
+    full_name: str | None = None
+    description: str | None = None
+    is_active: bool = True
+
+
 class UserUpdate(BaseModel):
     """Update user."""
 
@@ -62,6 +71,8 @@ class UserResponse(BaseModel):
     role: UserRole
     organization_id: int | None
     is_active: bool
+    description: str | None = None
+    is_external: bool = False
 
     class Config:
         from_attributes = True

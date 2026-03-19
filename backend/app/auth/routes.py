@@ -4,9 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.auth.schemas import LoginRequest, TokenResponse, RefreshRequest, UserInResponse
-from app.auth.service import authenticate_user, create_tokens_for_user, refresh_tokens
-from app.auth.dependencies import get_current_user
+from app.auth.schemas import LoginRequest, TokenResponse, RefreshRequest, UserInResponse, ExternalAuthConfigUpdate
+from app.auth.service import (
+    authenticate_user,
+    create_tokens_for_user,
+    refresh_tokens,
+    get_external_auth_config,
+    upsert_external_auth_config,
+)
+from app.auth.dependencies import get_current_user, require_super_admin
 from app.core.models import User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -64,3 +70,26 @@ async def me(current_user: User = Depends(get_current_user)):
         organization_id=current_user.organization_id,
         is_active=current_user.is_active,
     )
+
+
+@router.get("/external-auth/login-url")
+async def get_external_login_url(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Super admin: get the external login URL + db for external user authentication."""
+    cfg = await get_external_auth_config(db)
+    if not cfg:
+        return {"login_url": None, "db": None}
+    return {"login_url": cfg.login_url, "db": cfg.db_name}
+
+
+@router.put("/external-auth/login-url")
+async def set_external_login_url(
+    body: ExternalAuthConfigUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Super admin: set the external login URL + db for external user authentication."""
+    cfg = await upsert_external_auth_config(db, body.login_url, body.db)
+    return {"login_url": cfg.login_url, "db": cfg.db_name}

@@ -5,7 +5,10 @@ from sqlalchemy import select, delete
 
 from app.core.models import User, UserRole, KPI, KPIAssignment, ReportAccessPermission
 from app.core.security import get_password_hash
-from app.users.schemas import UserCreate, UserUpdate
+from uuid import uuid4
+
+from app.users.schemas import UserCreate, UserUpdate, ExternalUserCreate
+from app.core.models import ExternalUser
 
 
 def _tenant_filter(q, org_id: int | None, super_admin: bool):
@@ -53,6 +56,35 @@ async def create_user(
                 can_export=True,
             )
         )
+    await db.flush()
+    return user
+
+
+async def create_external_user(
+    db: AsyncSession,
+    org_id: int,
+    data: ExternalUserCreate,
+) -> User:
+    """
+    Create an external user.
+
+    Note: No password is stored/validated for external logins; we still must populate `hashed_password`
+    because the column is non-nullable. We use a random dummy hash.
+    """
+    dummy_password = f"external:{uuid4().hex}"
+    user = User(
+        organization_id=org_id,
+        username=data.username,
+        email=None,
+        full_name=data.full_name,
+        hashed_password=get_password_hash(dummy_password),
+        role=UserRole.USER,
+        is_active=data.is_active,
+    )
+    db.add(user)
+    await db.flush()
+
+    db.add(ExternalUser(user_id=user.id, description=data.description))
     await db.flush()
     return user
 

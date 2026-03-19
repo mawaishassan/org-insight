@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { api, getApiUrl } from "@/lib/api";
 import type { UserRow } from "../users/shared";
 
 interface MeInfo {
@@ -59,12 +59,23 @@ export default function AccessDashboardPage() {
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserFullName, setNewUserFullName] = useState("");
   const [activeTab, setActiveTab] = useState<"roles" | "users">("roles");
+  const [newUserType, setNewUserType] = useState<"internal" | "external">("internal");
+  const [newExternalDescription, setNewExternalDescription] = useState("");
+  const [newExternalIsActive, setNewExternalIsActive] = useState(true);
   const [userRoleAddForUserId, setUserRoleAddForUserId] = useState<number | null>(null);
   const [userRoleAddRoleId, setUserRoleAddRoleId] = useState<number | null>(null);
   const [userRoleSavingRoleId, setUserRoleSavingRoleId] = useState<number | null>(null);
 
+  const [externalLoginUrl, setExternalLoginUrl] = useState<string>("");
+  const [externalDbName, setExternalDbName] = useState<string>("OBE");
+  const [externalLoginSaving, setExternalLoginSaving] = useState(false);
+  const [externalBulkOpen, setExternalBulkOpen] = useState(false);
+  const [externalBulkMode, setExternalBulkMode] = useState<"append" | "override">("append");
+  const [externalBulkUploading, setExternalBulkUploading] = useState(false);
+
   const orgId = me?.organization_id ?? null;
   const isOrgAdmin = me?.role === "ORG_ADMIN";
+  const isSuperAdmin = me?.role === "SUPER_ADMIN";
 
   // Load current user and then org/users/roles
   useEffect(() => {
@@ -102,6 +113,17 @@ export default function AccessDashboardPage() {
       })
       .finally(() => setLoading(false));
   }, [token]);
+
+  // Super admin: load the external XML-RPC login URL
+  useEffect(() => {
+    if (!token || !isSuperAdmin) return;
+    api<{ login_url: string | null; db: string | null }>("/auth/external-auth/login-url", { token })
+      .then((res) => {
+        setExternalLoginUrl(res.login_url ?? "");
+        setExternalDbName(res.db ?? "OBE");
+      })
+      .catch(() => setExternalLoginUrl(""));
+  }, [token, isSuperAdmin]);
 
   // Load users in role when "Users in role" modal opens
   useEffect(() => {
@@ -161,11 +183,89 @@ export default function AccessDashboardPage() {
     );
   }
 
-  if (!isOrgAdmin || !orgId) {
+  if (!isOrgAdmin && !isSuperAdmin) {
+    return (
+      <div style={{ padding: "2rem" }}>
+        <p className="form-error">Only organization admins (and super admin) can access this page.</p>
+        <Link href="/dashboard">Back to dashboard</Link>
+      </div>
+    );
+  }
+
+  if (isOrgAdmin && !orgId) {
     return (
       <div style={{ padding: "2rem" }}>
         <p className="form-error">Only organization admins with an organization can access this page.</p>
         <Link href="/dashboard">Back to dashboard</Link>
+      </div>
+    );
+  }
+
+  if (isSuperAdmin) {
+    return (
+      <div style={{ maxWidth: 900, margin: "0 auto", paddingBottom: "2rem" }}>
+        {error && (
+          <p className="form-error" style={{ margin: "1rem 0" }}>
+            {error}
+          </p>
+        )}
+        <section className="card" style={{ padding: "1.25rem" }}>
+          <h2 style={{ fontSize: "1.1rem", marginTop: 0 }}>External authentication</h2>
+          <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
+            Configure the external JSON-RPC login URL used to verify external users&apos; passwords.
+          </p>
+
+          <div style={{ display: "grid", gap: "0.75rem" }}>
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
+                External JSON-RPC login URL
+              </label>
+              <input
+                value={externalLoginUrl}
+                onChange={(e) => setExternalLoginUrl(e.target.value)}
+                placeholder="https://your-host/web/session/authenticate"
+                style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
+                External DB name (`db`)
+              </label>
+              <input
+                value={externalDbName}
+                onChange={(e) => setExternalDbName(e.target.value)}
+                placeholder="OBE"
+                style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+              />
+            </div>
+
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={externalLoginSaving || !externalLoginUrl.trim() || !externalDbName.trim()}
+              onClick={async () => {
+                if (!token) return;
+                try {
+                  setExternalLoginSaving(true);
+                  await api<{ login_url: string | null }>("/auth/external-auth/login-url", {
+                    method: "PUT",
+                    token,
+                    body: JSON.stringify({ login_url: externalLoginUrl.trim(), db: externalDbName.trim() }),
+                  });
+                  toast.success("External auth config saved");
+                } catch (e) {
+                  const msg = e instanceof Error ? e.message : "Failed to save external login URL";
+                  toast.error(msg);
+                } finally {
+                  setExternalLoginSaving(false);
+                }
+              }}
+            >
+              {externalLoginSaving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </section>
       </div>
     );
   }
@@ -357,12 +457,50 @@ export default function AccessDashboardPage() {
           </p>
           {showCreateUser && (
             <div className="card" style={{ padding: "0.75rem 0.9rem", marginBottom: "0.9rem" }}>
-              <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.95rem" }}>Create user</h3>
+              <div style={{ marginBottom: "0.6rem" }}>
+                <h3 style={{ margin: "0 0 0.25rem", fontSize: "0.95rem" }}>
+                  {newUserType === "internal" ? "Create user" : "Add external user"}
+                </h3>
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{
+                      fontSize: "0.85rem",
+                      background: newUserType === "internal" ? "var(--accent)" : undefined,
+                      color: newUserType === "internal" ? "var(--on-muted)" : undefined,
+                    }}
+                    onClick={() => {
+                      setNewUserType("internal");
+                      setCreateUserError(null);
+                    }}
+                  >
+                    Internal user
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{
+                      fontSize: "0.85rem",
+                      background: newUserType === "external" ? "var(--accent)" : undefined,
+                      color: newUserType === "external" ? "var(--on-muted)" : undefined,
+                    }}
+                    onClick={() => {
+                      setNewUserType("external");
+                      setCreateUserError(null);
+                    }}
+                  >
+                    External user
+                  </button>
+                </div>
+              </div>
+
               {createUserError && (
                 <p className="form-error" style={{ marginBottom: "0.5rem" }}>
                   {createUserError}
                 </p>
               )}
+
               <div
                 style={{
                   display: "grid",
@@ -381,28 +519,35 @@ export default function AccessDashboardPage() {
                     style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
                   />
                 </div>
-                <div>
-                  <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
-                    Password * (min 8 chars)
-                  </label>
-                  <input
-                    type="password"
-                    value={newUserPassword}
-                    onChange={(e) => setNewUserPassword(e.target.value)}
-                    style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
-                  />
-                </div>
-                <div>
-                  <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
-                    Email
-                  </label>
-                  <input
-                    type="email"
-                    value={newUserEmail}
-                    onChange={(e) => setNewUserEmail(e.target.value)}
-                    style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
-                  />
-                </div>
+
+                {newUserType === "internal" && (
+                  <div>
+                    <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
+                      Password * (min 8 chars)
+                    </label>
+                    <input
+                      type="password"
+                      value={newUserPassword}
+                      onChange={(e) => setNewUserPassword(e.target.value)}
+                      style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                    />
+                  </div>
+                )}
+
+                {newUserType === "internal" && (
+                  <div>
+                    <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
+                      Email
+                    </label>
+                    <input
+                      type="email"
+                      value={newUserEmail}
+                      onChange={(e) => setNewUserEmail(e.target.value)}
+                      style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                    />
+                  </div>
+                )}
+
                 <div>
                   <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
                     Full name
@@ -413,6 +558,33 @@ export default function AccessDashboardPage() {
                     style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
                   />
                 </div>
+
+                {newUserType === "external" && (
+                  <div style={{ gridColumn: "span 1" }}>
+                    <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
+                      Description
+                    </label>
+                    <textarea
+                      value={newExternalDescription}
+                      onChange={(e) => setNewExternalDescription(e.target.value)}
+                      rows={3}
+                      style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                    />
+                  </div>
+                )}
+
+                {newUserType === "external" && (
+                  <div style={{ display: "flex", alignItems: "flex-end" }}>
+                    <label style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={newExternalIsActive}
+                        onChange={(e) => setNewExternalIsActive(e.target.checked)}
+                      />
+                      Active
+                    </label>
+                  </div>
+                )}
               </div>
               <button
                 type="button"
@@ -420,30 +592,49 @@ export default function AccessDashboardPage() {
                 disabled={
                   createUserSaving ||
                   !newUserUsername.trim() ||
-                  !newUserPassword ||
-                  newUserPassword.length < 8
+                  (newUserType === "internal" &&
+                    (!newUserPassword || newUserPassword.length < 8))
                 }
                 onClick={async () => {
                   if (!token || !orgId) return;
-                  if (!newUserUsername.trim() || !newUserPassword || newUserPassword.length < 8) {
-                    setCreateUserError("Username and password (min 8 chars) are required.");
+                  if (newUserType === "internal") {
+                    if (!newUserUsername.trim() || !newUserPassword || newUserPassword.length < 8) {
+                      setCreateUserError("Username and password (min 8 chars) are required.");
+                      return;
+                    }
+                  }
+                  if (newUserType === "external" && !newUserUsername.trim()) {
+                    setCreateUserError("Username is required.");
                     return;
                   }
                   setCreateUserError(null);
                   setCreateUserSaving(true);
                   try {
-                    await api<UserRow>("/users", {
-                      method: "POST",
-                      body: JSON.stringify({
-                        username: newUserUsername.trim(),
-                        password: newUserPassword,
-                        email: newUserEmail.trim() || null,
-                        full_name: newUserFullName.trim() || null,
-                        role: "USER",
-                        organization_id: orgId,
-                      }),
-                      token,
-                    });
+                    if (newUserType === "internal") {
+                      await api<UserRow>("/users", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          username: newUserUsername.trim(),
+                          password: newUserPassword,
+                          email: newUserEmail.trim() || null,
+                          full_name: newUserFullName.trim() || null,
+                          role: "USER",
+                          organization_id: orgId,
+                        }),
+                        token,
+                      });
+                    } else {
+                      await api<UserRow>("/users/external", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          username: newUserUsername.trim(),
+                          full_name: newUserFullName.trim() || null,
+                          description: newExternalDescription.trim() || null,
+                          is_active: newExternalIsActive,
+                        }),
+                        token,
+                      });
+                    }
                     const refreshed = await api<UserRow[]>(
                       `/users?organization_id=${orgId}`,
                       { token },
@@ -455,8 +646,11 @@ export default function AccessDashboardPage() {
                     setNewUserPassword("");
                     setNewUserEmail("");
                     setNewUserFullName("");
+                    setNewExternalDescription("");
+                    setNewExternalIsActive(true);
+                    setNewUserType("internal");
                     setShowCreateUser(false);
-                    toast.success("User created");
+                    toast.success(newUserType === "internal" ? "User created" : "External user added");
                   } catch (e) {
                     const msg =
                       e instanceof Error ? e.message : "Failed to create user";
@@ -467,10 +661,155 @@ export default function AccessDashboardPage() {
                   }
                 }}
               >
-                {createUserSaving ? "Creating…" : "Create user"}
+                {createUserSaving ? "Saving…" : newUserType === "internal" ? "Create user" : "Add external user"}
               </button>
             </div>
           )}
+
+          {/* External users bulk upload */}
+          <div className="card" style={{ padding: "0.75rem 0.9rem", marginBottom: "0.9rem" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "0.5rem",
+                marginBottom: "0.5rem",
+              }}
+            >
+              <h3 style={{ margin: 0, fontSize: "0.95rem" }}>Bulk upload external users</h3>
+              <button type="button" className="btn" style={{ fontSize: "0.85rem" }} onClick={() => setExternalBulkOpen((v) => !v)}>
+                {externalBulkOpen ? "Hide" : "Bulk upload"}
+              </button>
+            </div>
+
+            {externalBulkOpen && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", alignItems: "center" }}>
+                  <label style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                    <input
+                      type="radio"
+                      name="externalBulkMode"
+                      checked={externalBulkMode === "append"}
+                      onChange={() => setExternalBulkMode("append")}
+                    />
+                    Append (create new only)
+                  </label>
+                  <label style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                    <input
+                      type="radio"
+                      name="externalBulkMode"
+                      checked={externalBulkMode === "override"}
+                      onChange={() => setExternalBulkMode("override")}
+                    />
+                    Override (update existing by username)
+                  </label>
+                </div>
+
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={async () => {
+                    if (!token || orgId == null) return;
+                    try {
+                      const url = getApiUrl(
+                        `/users/external/template?${new URLSearchParams({
+                          organization_id: String(orgId),
+                        }).toString()}`
+                      );
+                      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                      if (!res.ok) {
+                        toast.error("Template download failed");
+                        return;
+                      }
+                      const blob = await res.blob();
+                      const a = document.createElement("a");
+                      a.href = URL.createObjectURL(blob);
+                      a.download = `external_users_template_${orgId}.xlsx`;
+                      a.click();
+                      URL.revokeObjectURL(a.href);
+                    } catch {
+                      toast.error("Template download failed");
+                    }
+                  }}
+                >
+                  Download Excel template
+                </button>
+
+                <label
+                  className="btn btn-primary"
+                  style={{
+                    cursor: !externalBulkUploading ? "pointer" : "not-allowed",
+                    opacity: externalBulkUploading ? 0.7 : 1,
+                  }}
+                >
+                  {externalBulkUploading ? "Uploading…" : "Upload Excel"}
+                  <input
+                    type="file"
+                    accept=".xlsx"
+                    style={{ display: "none" }}
+                    disabled={externalBulkUploading || orgId == null}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = "";
+                      if (!file || !token || orgId == null) return;
+                      if (externalBulkMode === "override") {
+                        const ok = window.confirm(
+                          "Override mode updates existing external users (matched by username) using the file values. Continue?"
+                        );
+                        if (!ok) return;
+                      }
+                      setExternalBulkUploading(true);
+                      try {
+                        const form = new FormData();
+                        form.append("file", file);
+                        const url = getApiUrl(
+                          `/users/external/bulk-upload?${new URLSearchParams({
+                            organization_id: String(orgId),
+                            append: externalBulkMode === "append" ? "true" : "false",
+                          }).toString()}`
+                        );
+                        const res = await fetch(url, {
+                          method: "POST",
+                          headers: { Authorization: `Bearer ${token}` },
+                          body: form,
+                        });
+
+                        if (res.ok) {
+                          const payload = await res.json().catch(() => ({} as any));
+                          const added = Number((payload as any)?.rows_added ?? 0);
+                          const overridden = Number((payload as any)?.rows_overridden ?? 0);
+                          const modeLabel = externalBulkMode === "append" ? "Appended" : "Updated";
+                          toast.success(
+                            overridden > 0
+                              ? `${modeLabel}: ${added} users imported (updated ${overridden} existing)`
+                              : `${modeLabel}: ${added} users imported`
+                          );
+
+                          const refreshed = await api<UserRow[]>(`/users?organization_id=${orgId}`, { token }).catch(() => null);
+                          if (Array.isArray(refreshed)) setUsers(refreshed);
+
+                          setExternalBulkOpen(false);
+                        } else {
+                          const err = await res.json().catch(() => ({} as any));
+                          toast.error(err?.detail ?? "Bulk upload failed");
+                        }
+                      } catch (ex) {
+                        toast.error(ex instanceof Error ? ex.message : "Bulk upload failed");
+                      } finally {
+                        setExternalBulkUploading(false);
+                      }
+                    }}
+                  />
+                </label>
+
+                <div style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
+                  Expected columns: `username`, `full_name`, `description`, `is_active`
+                </div>
+              </div>
+            )}
+          </div>
+
           {users.length === 0 ? (
             <p style={{ marginTop: "0.25rem", color: "var(--muted)", fontSize: "0.9rem" }}>
               No users found for this organization.
@@ -487,7 +826,7 @@ export default function AccessDashboardPage() {
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--border)" }}>
                     <th style={{ textAlign: "left", padding: "0.5rem" }}>User</th>
-                    <th style={{ textAlign: "left", padding: "0.5rem" }}>Email</th>
+                    <th style={{ textAlign: "left", padding: "0.5rem" }}>Email / Description</th>
                     <th style={{ textAlign: "left", padding: "0.5rem" }}>Role</th>
                     <th style={{ textAlign: "left", padding: "0.5rem" }}>Status</th>
                     <th style={{ textAlign: "left", padding: "0.5rem" }}>Action</th>
@@ -501,7 +840,7 @@ export default function AccessDashboardPage() {
                         <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>{u.username}</div>
                       </td>
                       <td style={{ padding: "0.5rem", fontSize: "0.85rem", color: "var(--muted)" }}>
-                        {u.email || "—"}
+                        {u.email || u.description || "—"}
                       </td>
                       <td style={{ padding: "0.5rem" }}>
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>

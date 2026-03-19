@@ -68,6 +68,7 @@ export default function FullPageMultiItems() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [search, setSearch] = useState("");
+  const [showEditableOnly, setShowEditableOnly] = useState(false);
   const [sortBy, setSortBy] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [loading, setLoading] = useState(true);
@@ -90,7 +91,9 @@ export default function FullPageMultiItems() {
   const [columnsPopupSearch, setColumnsPopupSearch] = useState("");
   const [columnsPopupDraft, setColumnsPopupDraft] = useState<string[]>([]);
   const [canEditKpi, setCanEditKpi] = useState<boolean>(true);
+  const [kpiLevelCanEdit, setKpiLevelCanEdit] = useState<boolean>(false);
   const [userRole, setUserRole] = useState<string | null>(null);
+  const canAddRow = kpiLevelCanEdit || userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
   const [rowAccessModal, setRowAccessModal] = useState<{ rowIndex: number; preview: string } | null>(null);
   const [rowAccessUsers, setRowAccessUsers] = useState<RowAccessUser[]>([]);
   const [rowAccessAssignments, setRowAccessAssignments] = useState<{ id: number; full_name: string | null; username: string }[]>([]);
@@ -148,11 +151,12 @@ export default function FullPageMultiItems() {
       );
       setEntryId(forPeriod.id);
       // User's edit rights for this KPI (view-only users get can_edit: false)
-      const apiInfo = await api<{ can_edit?: boolean }>(
+      const apiInfo = await api<{ can_edit?: boolean; kpi_level_can_edit?: boolean }>(
         `/entries/kpi-api-info?${new URLSearchParams({ kpi_id: String(kpiId), organization_id: String(effectiveOrgId) }).toString()}`,
         { token }
-      ).catch(() => ({ can_edit: false }));
+      ).catch(() => ({ can_edit: false, kpi_level_can_edit: false }));
       setCanEditKpi(apiInfo?.can_edit !== false);
+      setKpiLevelCanEdit(apiInfo?.kpi_level_can_edit === true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load context");
     }
@@ -173,6 +177,7 @@ export default function FullPageMultiItems() {
       });
       if (search.trim()) params.set("search", search.trim());
       if (sortBy) params.set("sort_by", sortBy);
+      if (showEditableOnly) params.set("editable_only", "true");
       const activeFilters: Record<string, string> = {};
       Object.entries(filters).forEach(([k, v]) => {
         if (v && v.trim() !== "") activeFilters[k] = v.trim();
@@ -203,7 +208,7 @@ export default function FullPageMultiItems() {
   useEffect(() => {
     if (!entryId) return;
     loadRows().catch(() => undefined);
-  }, [entryId, page, pageSize, search, sortBy, sortDir, filters]);
+  }, [entryId, page, pageSize, search, sortBy, sortDir, filters, showEditableOnly]);
 
   // Toast when returning from row edit page with success param
   useEffect(() => {
@@ -472,7 +477,32 @@ export default function FullPageMultiItems() {
             }}
             style={{ flex: "1 1 220px", minWidth: 160, padding: "0.4rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
           />
-          {canEditKpi && (
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.4rem",
+                padding: "0.25rem 0.5rem",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "var(--bg)",
+                cursor: "pointer",
+                userSelect: "none",
+                whiteSpace: "nowrap",
+              }}
+              title="Show only rows you can edit and/or delete"
+            >
+              <input
+                type="checkbox"
+                checked={showEditableOnly}
+                onChange={(e) => {
+                  setPage(1);
+                  setShowEditableOnly(e.target.checked);
+                }}
+              />
+              Editable rows only
+            </label>
+          {canAddRow && (
             <>
               <button
                 type="button"
@@ -660,7 +690,7 @@ export default function FullPageMultiItems() {
       )}
 
       {/* Bulk upload panel */}
-      {canEditKpi && bulkPanelOpen && (
+      {canAddRow && bulkPanelOpen && (
         <div className="card" style={{ padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
             <span style={{ fontSize: "0.9rem", fontWeight: 600 }}>Bulk upload</span>

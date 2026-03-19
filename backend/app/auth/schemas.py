@@ -40,3 +40,9 @@ class UserInResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ExternalAuthConfigUpdate(BaseModel):
+    """Update external login URL + db used in JSON-RPC."""
+    login_url: str = Field(..., min_length=1, max_length=2048)
+    db: str = Field(..., min_length=1, max_length=255)

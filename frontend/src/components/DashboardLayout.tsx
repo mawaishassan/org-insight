@@ -129,14 +129,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     // Organization detail endpoint is Super Admin only; avoid triggering 403 spam for org admins.
-    if (!selectedOrgId || !getAccessToken() || user?.role?.value !== "SUPER_ADMIN") {
+    if (!selectedOrgId || !getAccessToken() || user?.role !== "SUPER_ADMIN") {
       setSelectedOrgName(null);
       return;
     }
     api<{ id: number; name: string }>(`/organizations/${selectedOrgId}`, { token: getAccessToken()! })
       .then((org) => setSelectedOrgName(org.name))
       .catch(() => setSelectedOrgName(null));
-  }, [selectedOrgId, user?.role?.value]);
+  }, [selectedOrgId, user?.role]);
 
   useEffect(() => {
     const token = getAccessToken();
@@ -357,7 +357,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
     { href: "/dashboard/chat", label: "Chat with data", show: canUseChat(role) && (!isSuperAdmin || !!selectedOrgId) },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
-    { href: "/dashboard/access", label: "Access", show: !isSuperAdmin && canManageUsers(role) },
+    { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },
   ].filter((x) => x.show);
 
   const tabLabel: Record<string, string> = {
