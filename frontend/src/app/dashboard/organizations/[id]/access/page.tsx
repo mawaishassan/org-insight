@@ -76,6 +76,13 @@ interface OrgRole {
   updated_at?: string | null;
 }
 
+interface MeInfo {
+  id: number;
+  username: string;
+  role: string;
+  organization_id?: number | null;
+}
+
 const EMPTY_FIELD_ACCESS: FieldAccessItem[] = [];
 
 export default function AccessControlPage() {
@@ -92,6 +99,13 @@ export default function AccessControlPage() {
   const [fields, setFields] = useState<FieldDef[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [me, setMe] = useState<MeInfo | null>(null);
+  const isSuperAdmin = me?.role === "SUPER_ADMIN";
+
+  const [externalLoginUrl, setExternalLoginUrl] = useState<string>("");
+  const [externalDbName, setExternalDbName] = useState<string>("OBE");
+  const [externalLoginSaving, setExternalLoginSaving] = useState(false);
   const [saving, setSaving] = useState(false);
   const [expandedUserId, setExpandedUserId] = useState<number | null>(null);
   const [fieldAccessByUser, setFieldAccessByUser] = useState<Record<number, FieldAccessItem[]>>({});
@@ -148,6 +162,28 @@ export default function AccessControlPage() {
       setLoading(false);
     }).catch(() => setLoading(false));
   }, [token, orgId]);
+
+  // Load current user role (for SUPER_ADMIN-only settings)
+  useEffect(() => {
+    if (!token) return;
+    api<MeInfo>("/auth/me", { token })
+      .then((m) => setMe(m))
+      .catch(() => setMe(null));
+  }, [token]);
+
+  // Super admin: load external auth config
+  useEffect(() => {
+    if (!token || !isSuperAdmin) return;
+    api<{ login_url: string | null; db: string | null }>("/auth/external-auth/login-url", { token })
+      .then((res) => {
+        setExternalLoginUrl(res.login_url ?? "");
+        setExternalDbName(res.db ?? "OBE");
+      })
+      .catch(() => {
+        setExternalLoginUrl("");
+        setExternalDbName("OBE");
+      });
+  }, [token, isSuperAdmin]);
 
   // Load users in role when "Users in role" modal opens
   useEffect(() => {
@@ -440,6 +476,65 @@ export default function AccessControlPage() {
       </p>
 
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
+
+      {isSuperAdmin && (
+        <div className="card" style={{ marginBottom: "1.5rem", padding: "1.25rem" }}>
+          <h2 style={{ fontSize: "1.2rem", marginBottom: "0.5rem" }}>External authentication</h2>
+          <p style={{ fontSize: "0.9rem", color: "var(--muted)", marginBottom: "1rem" }}>
+            Configure the external JSON-RPC URL + db name used to verify external users&apos; passwords.
+          </p>
+
+          <div style={{ display: "grid", gap: "0.75rem", marginBottom: "1rem" }}>
+            <div>
+              <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem" }}>
+                External JSON-RPC login URL
+              </label>
+              <input
+                value={externalLoginUrl}
+                onChange={(e) => setExternalLoginUrl(e.target.value)}
+                placeholder="https://external-host/web/session/authenticate"
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem" }}>
+                External DB name (`db`)
+              </label>
+              <input
+                value={externalDbName}
+                onChange={(e) => setExternalDbName(e.target.value)}
+                placeholder="OBE"
+                style={{ width: "100%", padding: "0.5rem" }}
+              />
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={externalLoginSaving || !externalLoginUrl.trim() || !externalDbName.trim()}
+            onClick={async () => {
+              if (!token) return;
+              try {
+                setExternalLoginSaving(true);
+                await api("/auth/external-auth/login-url", {
+                  method: "PUT",
+                  token,
+                  body: JSON.stringify({ login_url: externalLoginUrl.trim(), db: externalDbName.trim() }),
+                } as any);
+                toast.success("External auth config saved");
+              } catch (e) {
+                toast.error(e instanceof Error ? e.message : "Failed to save");
+              } finally {
+                setExternalLoginSaving(false);
+              }
+            }}
+          >
+            {externalLoginSaving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      )}
 
       <div className="card" style={{ marginBottom: "1.5rem", padding: "1.25rem" }}>
         <h2 style={{ fontSize: "1.2rem", marginBottom: "0.5rem" }}>Organization roles</h2>

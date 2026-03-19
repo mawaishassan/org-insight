@@ -25,6 +25,8 @@ from app.core.models import (
     TimeDimension,
     effective_kpi_time_dimension,
     KpiMultiLineRowAccess,
+    KpiRoleAssignment,
+    UserOrganizationRole,
 )
 from app.entries.schemas import EntryCreate, EntrySubmit, EntryLock, EntryResponse, FieldValueResponse
 from app.entries.service import (
@@ -383,6 +385,10 @@ async def list_multi_items_rows(
         None,
         description='Optional JSON object of column filters, e.g. {"program_name": "MBA"} (case-insensitive substring).',
     ),
+    editable_only: bool = Query(
+        False,
+        description="When true, only return rows where the current user can edit and/or delete the row.",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -501,18 +507,11 @@ async def list_multi_items_rows(
         except Exception:
             pass
 
-    total = len(rows)
-    start = (page - 1) * page_size
-    end = start + page_size
-    paged_rows = rows[start:end]
-
-    # Per-row permissions for current user (edit/delete) - optimized.
-    # The current implementation called DB permission checks inside the loop (too slow).
+    # Per-row permissions for current user (edit/delete) - used for editable_only filtering and row payload.
     out_rows: list[MultiItemsRow] = []
 
     field_row_access_enabled = bool(getattr(field, "row_level_user_access_enabled", False))
     row_rule_map: dict[int, tuple[bool, bool]] = {}
-    has_any_row_rules = False
 
     is_org_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
 
@@ -523,16 +522,37 @@ async def list_multi_items_rows(
 
     if field_row_access_enabled:
         row_rules_res = await db.execute(
-            select(KpiMultiLineRowAccess.row_index, KpiMultiLineRowAccess.can_edit, KpiMultiLineRowAccess.can_delete).where(
+            select(
+                KpiMultiLineRowAccess.row_index,
+                KpiMultiLineRowAccess.can_edit,
+                KpiMultiLineRowAccess.can_delete,
+            ).where(
                 KpiMultiLineRowAccess.user_id == current_user.id,
                 KpiMultiLineRowAccess.entry_id == entry.id,
                 KpiMultiLineRowAccess.field_id == field.id,
             )
         )
         row_rules = row_rules_res.all()
-        has_any_row_rules = len(row_rules) > 0
         for row_index, can_edit, can_delete in row_rules:
             row_rule_map[int(row_index)] = (bool(can_edit), bool(can_delete))
+
+    # Optional: filter down to only rows the user can edit/delete.
+    if editable_only:
+        if field_row_access_enabled and not is_org_admin:
+            def row_can_edit_or_delete(orig_index: int) -> bool:
+                rule = row_rule_map.get(int(orig_index))
+                return bool(rule and (rule[0] or rule[1]))
+
+            rows = [(i, r) for (i, r) in rows if row_can_edit_or_delete(i)]
+        else:
+            # Row-level access disabled (or org/super admin): permissions are identical for all rows.
+            if not (can_edit_common or can_delete_common):
+                rows = []
+
+    total = len(rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paged_rows = rows[start:end]
 
     for orig_index, r in paged_rows:
         if field_row_access_enabled and not is_org_admin:
@@ -545,9 +565,7 @@ async def list_multi_items_rows(
             can_edit = can_edit_common
             can_delete = can_delete_common
 
-        out_rows.append(
-            MultiItemsRow(index=orig_index, data=r, can_edit=can_edit, can_delete=can_delete)
-        )
+        out_rows.append(MultiItemsRow(index=orig_index, data=r, can_edit=can_edit, can_delete=can_delete))
 
     return MultiItemsListResponse(
         total=total,
@@ -1036,8 +1054,11 @@ async def get_kpi_api_info(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return entry_mode, api_endpoint_url, and can_edit for a KPI the current user can view (view or data_entry).
-    When field-level access is used, can_edit is True if user can edit at least one field."""
+    """Return KPI entry metadata + edit capabilities.
+
+    - can_edit: user can edit at least one field (field-level or KPI-level data_entry)
+    - kpi_level_can_edit: user has KPI-level data_entry right (ignores row/field-only grants)
+    """
     org_id = _org_id(current_user, organization_id)
     can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
     if not can_view:
@@ -1047,6 +1068,23 @@ async def get_kpi_api_info(
         can_edit = await user_can_edit_kpi(db, current_user.id, kpi_id)
     else:
         can_edit = any(perm == "data_entry" for perm in field_access.values())
+    if current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        kpi_level_can_edit = True
+    else:
+        kpi_level_res = await db.execute(
+            select(KpiRoleAssignment.id)
+            .join(
+                UserOrganizationRole,
+                UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+            )
+            .where(
+                UserOrganizationRole.user_id == current_user.id,
+                KpiRoleAssignment.kpi_id == kpi_id,
+                KpiRoleAssignment.assignment_type == "data_entry",
+            )
+            .limit(1)
+        )
+        kpi_level_can_edit = kpi_level_res.scalar_one_or_none() is not None
     res = await db.execute(select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id))
     kpi = res.scalar_one_or_none()
     if not kpi:
@@ -1055,6 +1093,7 @@ async def get_kpi_api_info(
         "entry_mode": getattr(kpi, "entry_mode", None) or "manual",
         "api_endpoint_url": getattr(kpi, "api_endpoint_url", None),
         "can_edit": can_edit,
+        "kpi_level_can_edit": kpi_level_can_edit,
     }
 
 

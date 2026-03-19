@@ -10,6 +10,8 @@ export interface UserRow {
   role: string;
   organization_id: number | null;
   is_active: boolean;
+  description?: string | null;
+  is_external?: boolean;
 }
 
 export interface KpiOption {

@@ -60,7 +60,14 @@ const WHERE_OPERATORS = [
 ] as const;
 
 type TabId = "overview" | "domains" | "kpis" | "reports" | "settings";
-type SettingsSubId = "storage" | "time_dimension" | "tags" | "organization" | "admin_user" | "api_export";
+type SettingsSubId =
+  | "storage"
+  | "external_auth"
+  | "time_dimension"
+  | "tags"
+  | "organization"
+  | "admin_user"
+  | "api_export";
 
 interface SubFieldDef {
   id?: number;
@@ -328,7 +335,15 @@ function ApiContractBlock({ contract }: { contract: ApiContract }) {
 }
 
 const TAB_IDS: TabId[] = ["overview", "domains", "kpis", "reports", "settings"];
-const SETTINGS_SUB_IDS: SettingsSubId[] = ["storage", "time_dimension", "tags", "organization", "admin_user", "api_export"];
+const SETTINGS_SUB_IDS: SettingsSubId[] = [
+  "storage",
+  "external_auth",
+  "time_dimension",
+  "tags",
+  "organization",
+  "admin_user",
+  "api_export",
+];
 
 export default function OrganizationDetailPage() {
   const params = useParams();
@@ -724,6 +739,7 @@ function OrganizationOverviewCards({
 
 const SETTINGS_SUB_LABELS: Record<SettingsSubId, string> = {
   storage: "Storage settings",
+  external_auth: "External authentication",
   time_dimension: "Time dimension",
   tags: "Tags settings",
   organization: "Organization",
@@ -836,6 +852,7 @@ function SettingsPage({
       </nav>
       <div className="card" style={{ padding: "1.25rem" }}>
         {settingsSub === "storage" && <StorageConfigSection orgId={orgId} token={token} />}
+        {settingsSub === "external_auth" && <ExternalAuthConfigSection token={token} />}
         {settingsSub === "time_dimension" && (
           <div>
             <h3 style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>Time dimension</h3>
@@ -1108,6 +1125,108 @@ function AdminUserSettingsSection({ orgId, token }: { orgId: number; token: stri
       ) : (
         <p style={{ color: "var(--muted)" }}>No org admin user found.</p>
       )}
+    </div>
+  );
+}
+
+interface ExternalAuthConfigResponse {
+  login_url: string | null;
+  db: string | null;
+}
+
+function ExternalAuthConfigSection({ token }: { token: string }) {
+  const [config, setConfig] = useState<ExternalAuthConfigResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const [form, setForm] = useState<{ login_url: string; db: string }>({
+    login_url: "",
+    db: "OBE",
+  });
+
+  const loadConfig = () => {
+    setLoading(true);
+    setMessage(null);
+    api<ExternalAuthConfigResponse>("/auth/external-auth/login-url", { token })
+      .then((c) => {
+        setConfig(c);
+        setForm({
+          login_url: c.login_url ?? "",
+          db: c.db ?? "OBE",
+        });
+      })
+      .catch(() => {
+        setConfig(null);
+        setForm({ login_url: "", db: "OBE" });
+      })
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setMessage(null);
+    api<ExternalAuthConfigResponse>("/auth/external-auth/login-url", {
+      method: "PUT",
+      token,
+      body: JSON.stringify({ login_url: form.login_url.trim(), db: form.db.trim() }),
+    })
+      .then((c) => {
+        setConfig(c);
+        setMessage("Saved.");
+      })
+      .catch((err) => setMessage(err instanceof Error ? err.message : "Failed to save"))
+      .finally(() => setSaving(false));
+  };
+
+  if (loading) return <p style={{ color: "var(--muted)" }}>Loading external auth config…</p>;
+
+  return (
+    <div style={{ maxWidth: "32rem" }}>
+      <h2 style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>External authentication</h2>
+      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
+        Configure the external JSON-RPC URL + DB name used to verify external users&apos; passwords.
+      </p>
+
+      <form onSubmit={handleSave}>
+        <div style={{ marginBottom: "0.75rem" }}>
+          <label style={{ display: "block", marginBottom: "0.25rem", fontWeight: 600 }}>
+            External JSON-RPC login URL
+          </label>
+          <input
+            type="text"
+            value={form.login_url}
+            onChange={(e) => setForm((p) => ({ ...p, login_url: e.target.value }))}
+            placeholder="https://lms.uet.edu.pk/web/session/authenticate"
+            style={{ width: "100%", padding: "0.5rem" }}
+          />
+        </div>
+
+        <div style={{ marginBottom: "0.75rem" }}>
+          <label style={{ display: "block", marginBottom: "0.25rem", fontWeight: 600 }}>
+            External DB name (`db`)
+          </label>
+          <input
+            type="text"
+            value={form.db}
+            onChange={(e) => setForm((p) => ({ ...p, db: e.target.value }))}
+            placeholder="OBE"
+            style={{ width: "100%", padding: "0.5rem" }}
+          />
+        </div>
+
+        {message && <p style={{ marginBottom: "0.75rem", color: "var(--success, green)" }}>{message}</p>}
+
+        <button type="submit" className="btn btn-primary" disabled={saving || !form.login_url.trim() || !form.db.trim()}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </form>
     </div>
   );
 }

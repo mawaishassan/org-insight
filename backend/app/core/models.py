@@ -285,6 +285,33 @@ class User(Base):
     )
     export_api_tokens = relationship("ExportAPIToken", back_populates="created_by", lazy="selectin")
 
+    # Optional external identity (password verification happens through an external XML-RPC service).
+    external_account = relationship("ExternalUser", back_populates="user", uselist=False, lazy="selectin")
+
+
+class ExternalAuthConfig(Base):
+    """External authentication configuration (single external login URL + db), configured by Super Admin."""
+
+    __tablename__ = "external_auth_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    login_url = Column(Text, nullable=False)
+    db_name = Column(Text, nullable=False, server_default="OBE")
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class ExternalUser(Base):
+    """Marker + metadata for users authenticated via an external XML-RPC provider."""
+
+    __tablename__ = "external_users"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+
+    user = relationship("User", back_populates="external_account", lazy="selectin")
+
 
 class Domain(Base):
     """Domain area (Academic, Finance, Research)."""
