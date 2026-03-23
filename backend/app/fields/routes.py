@@ -11,6 +11,7 @@ from app.core.models import User, KPIField, KPIFieldValue, KPI, KPIEntry
 from app.core.models import FieldType
 from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldResponse, KPIFieldOptionResponse, KPIFieldSubFieldResponse, KPIFieldChildDataSummary
 from app.fields.service import create_field, get_field, list_fields, update_field, delete_field, get_field_child_data_summary
+from app.entries.service import recompute_formula_fields_for_kpi
 
 router = APIRouter(prefix="/fields", tags=["fields"])
 
@@ -88,6 +89,8 @@ async def create_kpi_field(
     field = await create_field(db, org_id, body)
     if not field:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
+    if field.field_type == FieldType.formula and (field.formula_expression or "").strip():
+        await recompute_formula_fields_for_kpi(db, field.kpi_id, org_id)
     await db.commit()
     field = await get_field(db, field.id, org_id)
     return _field_to_response(field)
@@ -118,9 +121,22 @@ async def update_kpi_field(
 ):
     """Update KPI field."""
     org_id = _org_id(current_user, organization_id)
+    existing = await get_field(db, field_id, org_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field not found")
+    prev_field_type = existing.field_type
+    prev_formula = (existing.formula_expression or "").strip()
+
     field = await update_field(db, field_id, org_id, body)
     if not field:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field not found")
+    next_formula = (field.formula_expression or "").strip()
+    formula_definition_changed = (
+        field.field_type == FieldType.formula
+        and (prev_field_type != FieldType.formula or next_formula != prev_formula)
+    )
+    if formula_definition_changed:
+        await recompute_formula_fields_for_kpi(db, field.kpi_id, org_id)
     await db.commit()
     field = await get_field(db, field_id, org_id)
     return _field_to_response(field)
