@@ -95,21 +95,49 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
             return n <= fv_num
         return False
 
-    # Fallback to string comparison for text operators
-    cell_str = str(cell)
-    fv_str = str(filter_value)
+    # Fallback to string comparison for text operators.
+    # For reference-like cells, data may be saved as an object (id/label/value),
+    # while formulas usually use display text; compare across common textual forms.
+    cell_candidates: list[str] = []
+    if isinstance(cell, dict):
+        for k in ("label", "text", "name", "value", "id"):
+            if k in cell and cell[k] is not None:
+                cell_candidates.append(str(cell[k]).strip())
+    elif isinstance(cell, (list, tuple, set)):
+        for v in cell:
+            if v is not None:
+                cell_candidates.append(str(v).strip())
+    else:
+        cell_candidates.append(str(cell).strip())
+    fv_str = str(filter_value).strip()
+
+    def _match_text(cell_str: str) -> bool:
+        if op == "eq":
+            return cell_str == fv_str
+        if op == "neq":
+            return cell_str != fv_str
+        if op == "contains":
+            return fv_str in cell_str
+        if op == "not_contains":
+            return fv_str not in cell_str
+        if op == "starts_with":
+            return cell_str.startswith(fv_str)
+        if op == "ends_with":
+            return cell_str.endswith(fv_str)
+        return False
+
     if op == "eq":
-        return cell_str == fv_str
+        return any(_match_text(c) for c in cell_candidates)
     if op == "neq":
-        return cell_str != fv_str
+        return all(_match_text(c) for c in cell_candidates)
     if op == "contains":
-        return fv_str in cell_str
+        return any(_match_text(c) for c in cell_candidates)
     if op == "not_contains":
-        return fv_str not in cell_str
+        return all(_match_text(c) for c in cell_candidates)
     if op == "starts_with":
-        return cell_str.startswith(fv_str)
+        return any(_match_text(c) for c in cell_candidates)
     if op == "ends_with":
-        return cell_str.endswith(fv_str)
+        return any(_match_text(c) for c in cell_candidates)
     return False
 
 
@@ -398,7 +426,8 @@ def evaluate_formula(
         return None
     expression = expression.strip()
     # Allow alphanumeric, spaces, safe symbols (and quotes for string literals if needed)
-    if not re.match(r"^[\w\s+\-*/().,\"\']+$", expression):
+    # Allow ampersand in string literals (e.g. "Faculty of Architecture & Planning")
+    if not re.match(r"^[\w\s+\-*/().,\"\'&]+$", expression):
         return None
     try:
         ev = _make_evaluator(field_values, multi_line_items_data, other_kpi_values)
