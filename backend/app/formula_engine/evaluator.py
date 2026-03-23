@@ -2,7 +2,7 @@
 Secure formula evaluator.
 Supports: +, -, *, /, SUM(), AVG(), COUNT(), field references; group functions on
 multi_line_items: SUM_ITEMS(field_key, sub_key), AVG_ITEMS, COUNT_ITEMS, MIN_ITEMS, MAX_ITEMS;
-conditional group functions: SUM_ITEMS_WHERE(...), COUNT_ITEMS_WHERE(field_key, filter_sub_key, op_xx, value), etc.;
+conditional group functions: SUM_ITEMS_WHERE(...), COUNT_ITEMS_WHERE(field_key, filter_sub_key, op_xx, value, [op_and/op_or, ...]), etc.;
 and cross-KPI refs: KPI_FIELD(kpi_id, "field_key") for numeric fields from the same user's entry for another KPI (same org, same year).
 """
 
@@ -150,6 +150,92 @@ def _rows_where(
     return [r for r in rows if isinstance(r, dict) and _row_matches(r, filter_sub_key, op, filter_value)]
 
 
+def _row_matches_conditions(row: dict[str, Any], conditions: list[tuple[str, str, Any]], links: list[str]) -> bool:
+    """Evaluate multiple conditions with logical links (and/or), left-to-right."""
+    if not conditions:
+        return False
+    result = _row_matches(row, conditions[0][0], conditions[0][1], conditions[0][2])
+    for i in range(1, len(conditions)):
+        next_res = _row_matches(row, conditions[i][0], conditions[i][1], conditions[i][2])
+        link = links[i - 1] if i - 1 < len(links) else "and"
+        if link == "or":
+            result = result or next_res
+        else:
+            result = result and next_res
+    return result
+
+
+def _parse_where_args(args: tuple[Any, ...], start_idx: int) -> tuple[list[tuple[str, str, Any]], list[str]]:
+    """
+    Parse WHERE arguments into:
+      conditions: [(filter_sub_key, op, value), ...]
+      links: ["and"|"or", ...] linking condition i to i+1
+
+    Supported shape:
+      <cond1_filter_sub_key>, <cond1_op>, <cond1_value>,
+      [<logic>, <condN_filter_sub_key>, <condN_op>, <condN_value>]*
+    """
+    conditions: list[tuple[str, str, Any]] = []
+    links: list[str] = []
+
+    if len(args) < start_idx + 3:
+        return conditions, links
+
+    i = start_idx
+    conditions.append((str(args[i]), str(args[i + 1]), args[i + 2]))
+    i += 3
+
+    while i + 3 < len(args):
+        logic = str(args[i]).strip().lower()
+        if logic.startswith("op_"):
+            logic = logic.replace("op_", "", 1)
+        if logic not in ("and", "or"):
+            break
+        links.append(logic)
+        conditions.append((str(args[i + 1]), str(args[i + 2]), args[i + 3]))
+        i += 4
+
+    return conditions, links
+
+
+def _rows_where_multi(
+    data: MultiLineItemsData,
+    field_key: str,
+    args: tuple[Any, ...],
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Get rows matching one or more WHERE conditions (with and/or links)."""
+    rows = data.get(field_key) if isinstance(data, dict) else []
+    if not isinstance(rows, list):
+        return []
+    conditions, links = _parse_where_args(args, start_idx)
+    if not conditions:
+        return []
+    return [
+        r
+        for r in rows
+        if isinstance(r, dict) and _row_matches_conditions(r, conditions, links)
+    ]
+
+
+def _items_values_where_multi(
+    data: MultiLineItemsData,
+    field_key: str,
+    value_sub_key: str,
+    args: tuple[Any, ...],
+    start_idx: int,
+) -> list[float]:
+    """Get numeric values for value_sub_key over rows matching multi-condition WHERE."""
+    matched = _rows_where_multi(data, field_key, args, start_idx)
+    out: list[float] = []
+    for row in matched:
+        v = row.get(value_sub_key)
+        n = _to_num(v)
+        if n is not None:
+            out.append(n)
+    return out
+
+
 def _make_evaluator(
     field_values: dict[str, float | int],
     multi_line_items_data: MultiLineItemsData | None = None,
@@ -176,7 +262,20 @@ def _make_evaluator(
         if sk not in s.names:  # do not overwrite number field with same key
             s.names[sk] = sk
     # Operator names for conditional group functions: SUM_ITEMS_WHERE(field, val_sk, filter_sk, op_eq, 2023)
-    for op_name in ("op_eq", "op_neq", "op_gt", "op_gte", "op_lt", "op_lte"):
+    for op_name in (
+        "op_eq",
+        "op_neq",
+        "op_gt",
+        "op_gte",
+        "op_lt",
+        "op_lte",
+        "op_contains",
+        "op_not_contains",
+        "op_starts_with",
+        "op_ends_with",
+        "op_and",
+        "op_or",
+    ):
         s.names[op_name] = op_name.replace("op_", "")
 
     def sum_items(field_key: str, sub_key: str) -> float:
@@ -199,12 +298,14 @@ def _make_evaluator(
         rows = items_data.get(field_key) if isinstance(items_data, dict) else []
         if not isinstance(rows, list):
             return 0.0
-        # Alias: COUNT_ITEMS(field, filter_sub_key, op, value)
-        if len(args) == 4:
-            filter_sub_key = str(args[1])
-            op = str(args[2])
-            filter_value = args[3]
-            return float(len(_rows_where(items_data, field_key, filter_sub_key, op, filter_value)))
+        # Alias: COUNT_ITEMS(field, filter_sub_key, op, value[, op_and/op_or, filter_sub_key, op, value]...)
+        if len(args) >= 4:
+            # Multi-condition path activates when first operator looks like a comparison op.
+            first_op = str(args[2]).strip().lower()
+            if first_op.startswith("op_"):
+                first_op = first_op.replace("op_", "", 1)
+            if first_op in {"eq", "neq", "gt", "gte", "lt", "lte", "contains", "not_contains", "starts_with", "ends_with"}:
+                return float(len(_rows_where_multi(items_data, field_key, args, 1)))
         # Standard forms
         sub_key = str(args[1]) if len(args) >= 2 and args[1] is not None else ""
         if sub_key == "":
@@ -219,32 +320,23 @@ def _make_evaluator(
         vals = _items_values(items_data, field_key, sub_key)
         return max(vals) if vals else 0.0
 
-    def sum_items_where(
-        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: Any
-    ) -> float:
-        return sum(_items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value))
+    def sum_items_where(field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        vals = _items_values_where_multi(items_data, field_key, value_sub_key, where_args, 0)
+        return sum(vals)
 
-    def avg_items_where(
-        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: Any
-    ) -> float:
-        vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
+    def avg_items_where(field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        vals = _items_values_where_multi(items_data, field_key, value_sub_key, where_args, 0)
         return sum(vals) / len(vals) if vals else 0.0
 
-    def count_items_where(
-        field_key: str, filter_sub_key: str, op: str, filter_value: Any
-    ) -> float:
-        return float(len(_rows_where(items_data, field_key, filter_sub_key, op, filter_value)))
+    def count_items_where(field_key: str, *where_args: Any) -> float:
+        return float(len(_rows_where_multi(items_data, field_key, where_args, 0)))
 
-    def min_items_where(
-        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: Any
-    ) -> float:
-        vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
+    def min_items_where(field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        vals = _items_values_where_multi(items_data, field_key, value_sub_key, where_args, 0)
         return min(vals) if vals else 0.0
 
-    def max_items_where(
-        field_key: str, value_sub_key: str, filter_sub_key: str, op: str, filter_value: Any
-    ) -> float:
-        vals = _items_values_where(items_data, field_key, value_sub_key, filter_sub_key, op, filter_value)
+    def max_items_where(field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        vals = _items_values_where_multi(items_data, field_key, value_sub_key, where_args, 0)
         return max(vals) if vals else 0.0
 
     def kpi_field(kpi_id: int, field_key: str) -> float:

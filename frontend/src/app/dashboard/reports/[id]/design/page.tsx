@@ -38,6 +38,12 @@ interface SubFieldOption {
   id: number;
   key: string;
   name: string;
+  field_type?: string;
+  config?: {
+    reference_source_kpi_id?: number;
+    reference_source_field_key?: string;
+    reference_source_sub_field_key?: string;
+  } | null;
 }
 
 interface FieldOption {
@@ -208,13 +214,20 @@ function ReportFormulaBuilder({
   organizationId?: number;
   currentKpiId?: number;
 }) {
+  type WhereCondition = {
+    filterSubKey: string;
+    op: string;
+    value: string;
+    logicWithPrev: "op_and" | "op_or";
+  };
   const [refFieldId, setRefFieldId] = useState<number | "">("");
   const [refSubKey, setRefSubKey] = useState("");
   const [refGroupFn, setRefGroupFn] = useState<string>("SUM_ITEMS");
   const [useConditional, setUseConditional] = useState(false);
-  const [refFilterSubKey, setRefFilterSubKey] = useState("");
-  const [refWhereOp, setRefWhereOp] = useState<string>("op_eq");
-  const [refWhereValue, setRefWhereValue] = useState<string>("0");
+  const [whereConditions, setWhereConditions] = useState<WhereCondition[]>([
+    { filterSubKey: "", op: "op_eq", value: "0", logicWithPrev: "op_and" },
+  ]);
+  const [refAllowedValues, setRefAllowedValues] = useState<Record<string, string[]>>({});
   const [otherKpis, setOtherKpis] = useState<FormulaRefKpi[]>([]);
   const [refOtherKpiId, setRefOtherKpiId] = useState<number | "">("");
   const [refOtherFieldKey, setRefOtherFieldKey] = useState("");
@@ -228,6 +241,8 @@ function ReportFormulaBuilder({
   }, [token, organizationId, currentKpiId]);
   const refField = refFieldId === "" ? null : fields.find((f) => f.id === refFieldId);
   const subFields = refField?.field_type === "multi_line_items" ? (refField.sub_fields ?? []) : [];
+  const primaryCond = whereConditions[0];
+  const refFilterSubKey = primaryCond?.filterSubKey ?? "";
   const canInsertNumber = refField?.field_type === "number";
   const isCountItemsOnly = refGroupFn === "COUNT_ITEMS";
   const isConditionalWhere = useConditional && refField?.field_type === "multi_line_items" && !!refFilterSubKey;
@@ -240,19 +255,58 @@ function ReportFormulaBuilder({
   const selectedOtherKpi = refOtherKpiId === "" ? null : otherKpis.find((k) => k.id === refOtherKpiId);
   const otherKpiFields = selectedOtherKpi?.fields ?? [];
   const canInsertOtherKpiField = refOtherKpiId !== "" && refOtherFieldKey !== "";
+  const getRefSourceFromSubKey = (subKey: string): { cacheKey: string; sid: number; skey: string; sourceSubKey?: string } | null => {
+    const sf = subFields.find((s) => s.key === subKey);
+    if (!sf || sf.field_type !== "reference") return null;
+    const sid = sf.config?.reference_source_kpi_id;
+    const skey = sf.config?.reference_source_field_key;
+    if (!sid || !skey) return null;
+    const sourceSubKey = sf.config?.reference_source_sub_field_key;
+    const cacheKey = `${sid}-${skey}${sourceSubKey ? `-${sourceSubKey}` : ""}`;
+    return { cacheKey, sid, skey, sourceSubKey };
+  };
+
+  useEffect(() => {
+    if (!token || organizationId == null || subFields.length === 0) return;
+    const refs = whereConditions
+      .map((c) => getRefSourceFromSubKey(c.filterSubKey))
+      .filter((x): x is { cacheKey: string; sid: number; skey: string; sourceSubKey?: string } => !!x);
+    const unique = new Map<string, { sid: number; skey: string; sourceSubKey?: string }>();
+    refs.forEach((r) => {
+      if (!unique.has(r.cacheKey)) unique.set(r.cacheKey, { sid: r.sid, skey: r.skey, sourceSubKey: r.sourceSubKey });
+    });
+    unique.forEach((meta, cacheKey) => {
+      if (refAllowedValues[cacheKey]) return;
+      const params = new URLSearchParams({
+        source_kpi_id: String(meta.sid),
+        source_field_key: meta.skey,
+        organization_id: String(organizationId),
+      });
+      if (meta.sourceSubKey) params.set("source_sub_field_key", meta.sourceSubKey);
+      api<{ values: string[] }>(`/fields/reference-allowed-values?${params.toString()}`, { token })
+        .then((r) => setRefAllowedValues((prev) => ({ ...prev, [cacheKey]: r.values || [] })))
+        .catch(() => setRefAllowedValues((prev) => ({ ...prev, [cacheKey]: [] })));
+    });
+  }, [token, organizationId, subFields, whereConditions, refAllowedValues]);
 
   const handleInsertItems = () => {
     if (!refField) return;
     if (isConditionalWhere) {
-      const op = refWhereOp;
-      const raw = refWhereValue.trim();
-      const isNumeric = raw !== "" && !Number.isNaN(Number(raw));
-      const val = isNumeric ? raw : `'${raw.replace(/'/g, "\\'")}'`;
+      const condArgs: string[] = [];
+      whereConditions.forEach((c, idx) => {
+        if (!c.filterSubKey) return;
+        const raw = c.value.trim();
+        const isNumeric = raw !== "" && !Number.isNaN(Number(raw));
+        const val = isNumeric ? raw : `'${raw.replace(/'/g, "\\'")}'`;
+        if (idx > 0) condArgs.push(c.logicWithPrev);
+        condArgs.push(c.filterSubKey, c.op, val);
+      });
+      if (condArgs.length < 3) return;
       const whereFn = refGroupFn.endsWith("_WHERE") ? refGroupFn : refGroupFn + "_WHERE";
       if (whereFn === "COUNT_ITEMS_WHERE") {
-        onInsert(`COUNT_ITEMS_WHERE(${refField.key}, ${refFilterSubKey}, ${op}, ${val})`);
+        onInsert(`COUNT_ITEMS_WHERE(${refField.key}, ${condArgs.join(", ")})`);
       } else {
-        onInsert(`${whereFn}(${refField.key}, ${refSubKey}, ${refFilterSubKey}, ${op}, ${val})`);
+        onInsert(`${whereFn}(${refField.key}, ${refSubKey}, ${condArgs.join(", ")})`);
       }
       return;
     }
@@ -265,7 +319,15 @@ function ReportFormulaBuilder({
       <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "flex-end" }}>
         <div>
           <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Field</label>
-          <select value={refFieldId} onChange={(e) => { setRefFieldId(e.target.value ? Number(e.target.value) : ""); setRefSubKey(""); setRefFilterSubKey(""); }} style={{ minWidth: "160px" }}>
+          <select
+            value={refFieldId}
+            onChange={(e) => {
+              setRefFieldId(e.target.value ? Number(e.target.value) : "");
+              setRefSubKey("");
+              setWhereConditions((prev) => prev.map((c, i) => (i === 0 ? { ...c, filterSubKey: "" } : c)));
+            }}
+            style={{ minWidth: "160px" }}
+          >
             <option value="">— Select field —</option>
             {fields.map((f) => (
               <option key={f.id} value={f.id}>{f.name} ({f.key}) — {f.field_type.replace(/_/g, " ")}</option>
@@ -299,29 +361,131 @@ function ReportFormulaBuilder({
               Conditional (where)
             </label>
             {useConditional && (
-              <>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", width: "100%" }}>
+                {whereConditions.map((c, idx) => (
+                  <div key={idx} style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "flex-end" }}>
+                    {idx > 0 && (
+                      <div>
+                        <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Logical</label>
+                        <select
+                          value={c.logicWithPrev}
+                          onChange={(e) =>
+                            setWhereConditions((prev) =>
+                              prev.map((x, i) => (i === idx ? { ...x, logicWithPrev: e.target.value as "op_and" | "op_or" } : x))
+                            )
+                          }
+                          style={{ minWidth: "110px" }}
+                        >
+                          <option value="op_and">AND</option>
+                          <option value="op_or">OR</option>
+                        </select>
+                      </div>
+                    )}
+                    <div>
+                      <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Filter sub-field</label>
+                      <select
+                        value={c.filterSubKey}
+                        onChange={(e) =>
+                          setWhereConditions((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, filterSubKey: e.target.value } : x))
+                          )
+                        }
+                        style={{ minWidth: "140px" }}
+                      >
+                        <option value="">— Select —</option>
+                        {subFields.map((s) => (
+                          <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Operator</label>
+                      <select
+                        value={c.op}
+                        onChange={(e) =>
+                          setWhereConditions((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, op: e.target.value } : x))
+                          )
+                        }
+                        style={{ minWidth: "120px" }}
+                      >
+                        {WHERE_OPERATORS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value</label>
+                      {(() => {
+                        const refMeta = getRefSourceFromSubKey(c.filterSubKey);
+                        const options = refMeta ? (refAllowedValues[refMeta.cacheKey] || []) : [];
+                        if (refMeta) {
+                          const listId = `report-formula-ref-values-${idx}`;
+                          return (
+                            <>
+                              <input
+                                type="text"
+                                list={listId}
+                                value={c.value}
+                                onChange={(e) =>
+                                  setWhereConditions((prev) =>
+                                    prev.map((x, i) => (i === idx ? { ...x, value: e.target.value } : x))
+                                  )
+                                }
+                                style={{ minWidth: "180px" }}
+                                placeholder={options.length ? "Type or select value" : "No values available"}
+                              />
+                              <datalist id={listId}>
+                                {options.map((v) => (
+                                  <option key={v} value={v} />
+                                ))}
+                              </datalist>
+                            </>
+                          );
+                        }
+                        return (
+                          <input
+                            type="text"
+                            value={c.value}
+                            onChange={(e) =>
+                              setWhereConditions((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, value: e.target.value } : x))
+                              )
+                            }
+                            style={{ width: "120px" }}
+                            placeholder="e.g. 2026 or text"
+                          />
+                        );
+                      })()}
+                    </div>
+                    {whereConditions.length > 1 && (
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => setWhereConditions((prev) => prev.filter((_, i) => i !== idx))}
+                        style={{ fontSize: "0.85rem" }}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                ))}
                 <div>
-                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Filter sub-field</label>
-                  <select value={refFilterSubKey} onChange={(e) => setRefFilterSubKey(e.target.value)} style={{ minWidth: "120px" }}>
-                    <option value="">— Select —</option>
-                    {subFields.map((s) => (
-                      <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
-                    ))}
-                  </select>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() =>
+                      setWhereConditions((prev) => [
+                        ...prev,
+                        { filterSubKey: "", op: "op_eq", value: "0", logicWithPrev: "op_and" },
+                      ])
+                    }
+                    style={{ fontSize: "0.85rem" }}
+                  >
+                    + Add condition
+                  </button>
                 </div>
-                <div>
-                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Operator</label>
-                  <select value={refWhereOp} onChange={(e) => setRefWhereOp(e.target.value)} style={{ minWidth: "100px" }}>
-                    {WHERE_OPERATORS.map((o) => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value (number)</label>
-                  <input type="number" step="any" value={refWhereValue} onChange={(e) => setRefWhereValue(e.target.value)} style={{ width: "80px" }} placeholder="0" />
-                </div>
-              </>
+              </div>
             )}
           </>
         )}
