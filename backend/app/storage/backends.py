@@ -9,21 +9,36 @@ from typing import Any
 from app.core.config import get_settings
 
 
+def _resolve_local_base_path(base_path: str) -> Path:
+    """
+    Resolve local storage base path deterministically.
+
+    - Absolute paths are used as-is.
+    - Relative paths are resolved from backend root (not process CWD),
+      so uploads always land in a predictable folder.
+    """
+    p = Path(base_path)
+    if p.is_absolute():
+        return p
+    backend_root = Path(__file__).resolve().parents[2]  # .../backend
+    return (backend_root / p).resolve()
+
+
 def _local_upload(base_path: str, relative_path: str, content: bytes, _content_type: str) -> str:
-    full = Path(base_path) / relative_path
+    full = _resolve_local_base_path(base_path) / relative_path
     full.parent.mkdir(parents=True, exist_ok=True)
     full.write_bytes(content)
     return relative_path.replace("\\", "/")
 
 
 def _local_delete(base_path: str, stored_path: str) -> None:
-    full = Path(base_path) / stored_path
+    full = _resolve_local_base_path(base_path) / stored_path
     if full.is_file():
         full.unlink()
 
 
 def _local_get_stream(base_path: str, stored_path: str) -> bytes:
-    full = Path(base_path) / stored_path
+    full = _resolve_local_base_path(base_path) / stored_path
     if not full.is_file():
         raise FileNotFoundError(stored_path)
     return full.read_bytes()

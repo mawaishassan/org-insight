@@ -4,7 +4,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
 from sqlalchemy.orm import selectinload
 
-from app.core.models import KPIField, KPIFieldOption, KPIFieldSubField, KPI, KPIFieldValue, ReportTemplateField
+from app.core.models import (
+    KPIField,
+    KPIFieldOption,
+    KPIFieldSubField,
+    KPI,
+    KPIFieldValue,
+    ReportTemplateField,
+    KpiFieldAccess,
+    KpiFieldAccessByRole,
+)
 from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldOptionCreate
 
 
@@ -120,6 +129,20 @@ async def update_field(
                 )
             )
     if data.sub_fields is not None:
+        # Defensive cleanup: some DBs/environments may not cascade sub_field FK rows
+        # in access tables consistently when sub-fields are replaced.
+        await db.execute(
+            delete(KpiFieldAccess).where(
+                KpiFieldAccess.field_id == field_id,
+                KpiFieldAccess.sub_field_id.is_not(None),
+            )
+        )
+        await db.execute(
+            delete(KpiFieldAccessByRole).where(
+                KpiFieldAccessByRole.field_id == field_id,
+                KpiFieldAccessByRole.sub_field_id.is_not(None),
+            )
+        )
         await db.execute(delete(KPIFieldSubField).where(KPIFieldSubField.field_id == field_id))
         for i, sub in enumerate(data.sub_fields):
             db.add(

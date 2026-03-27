@@ -565,8 +565,11 @@ export default function KpiFieldsPage() {
       });
       setEditingId(null);
       loadList();
+      toast.success("Field updated successfully");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Update failed");
+      const msg = e instanceof Error ? e.message : "Update failed";
+      setError(msg);
+      toast.error(msg);
     }
   };
 

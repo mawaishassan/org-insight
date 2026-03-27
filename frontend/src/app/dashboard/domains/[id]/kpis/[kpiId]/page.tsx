@@ -1434,7 +1434,8 @@ export default function DomainKpiDetailPage() {
                         }
                         const created = await res.json() as KpiFileItem[];
                         setKpiFiles((prev) => [...(created ?? []), ...prev]);
-                        toast.success("Files uploaded successfully");
+                        const storageHint = `org_${effectiveOrgId}/kpi_${kpiId}/year_${year}`;
+                        toast.success(`Files uploaded successfully to ${storageHint}`);
                       } catch (err) {
                         setKpiFilesError(err instanceof Error ? err.message : "Upload failed");
                         toast.error(err instanceof Error ? err.message : "Upload failed");
@@ -3304,7 +3305,8 @@ export default function DomainKpiDetailPage() {
                                                   const next = [...rows];
                                                   next[rowIdx] = { ...next[rowIdx], [s.key]: latest.download_url };
                                                   setRows(next);
-                                                  toast.success("File uploaded");
+                                                  const storageHint = `org_${effectiveOrgId}/kpi_${kpiId}/year_${year}`;
+                                                  toast.success(`File uploaded to ${storageHint}`);
                                                 } catch {
                                                   toast.error("File upload failed");
                                                 }

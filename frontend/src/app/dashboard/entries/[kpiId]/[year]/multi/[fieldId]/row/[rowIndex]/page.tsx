@@ -617,11 +617,22 @@ export default function MultiItemRowDetail() {
                 }
                 if (sf.field_type === "attachment") {
                   const urlVal = typeof val === "string" ? val : val != null ? String(val) : "";
-                  const href = urlVal && (
-                    urlVal.startsWith("http") ? urlVal
-                    : urlVal.startsWith("/") ? urlVal
-                    : getApiUrl(urlVal)
-                  );
+                  const cleanedUrl = urlVal.trim();
+                  const href = cleanedUrl
+                    ? (
+                        cleanedUrl.startsWith("http://") || cleanedUrl.startsWith("https://")
+                          ? cleanedUrl
+                          : cleanedUrl.startsWith("/api/")
+                            ? cleanedUrl
+                            : cleanedUrl.startsWith("/kpis/")
+                              ? `/api${cleanedUrl}`
+                              : cleanedUrl.startsWith("kpis/")
+                                ? `/api/${cleanedUrl}`
+                                : cleanedUrl.startsWith("/")
+                                  ? cleanedUrl
+                                  : getApiUrl(cleanedUrl)
+                      )
+                    : "";
                   return (
                     <div key={key} className="form-group">
                       <label>
@@ -672,7 +683,9 @@ export default function MultiItemRowDetail() {
                                   return;
                                 }
                                 handleChangeCell(key, latest.download_url);
-                                toast.success("File uploaded. Click Save to store the file link in this row.");
+                                const orgPart = effectiveOrgId != null ? `org_${effectiveOrgId}/` : "";
+                                const storageHint = `${orgPart}kpi_${kpiId}/year_${year}`;
+                                toast.success(`File uploaded to ${storageHint}. Click Save to store the file link in this row.`);
                               } catch {
                                 toast.error("File upload failed");
                               }
