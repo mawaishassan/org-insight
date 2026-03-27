@@ -391,6 +391,56 @@ export default function FullPageMultiItems() {
       .catch(() => {});
   };
 
+  const getTotalRowCountForRowAccess = async (): Promise<number> => {
+    if (!token || !entryId || !fieldId || effectiveOrgId == null) return 0;
+    const res = await api<{ total: number }>(
+      `/entries/multi-items/rows?${new URLSearchParams({
+        entry_id: String(entryId),
+        field_id: String(fieldId),
+        organization_id: String(effectiveOrgId),
+        page: "1",
+        page_size: "1",
+        editable_only: "false",
+      }).toString()}`,
+      { token }
+    ).catch(() => ({ total: 0 }));
+    return Number(res?.total ?? 0) || 0;
+  };
+
+  const grantUserAllRows = async (userId: number, mode: "edit" | "edit_delete" | "revoke") => {
+    if (!token || !kpiId || !entryId || !fieldId || effectiveOrgId == null) return;
+    setRowAccessSaving(true);
+    try {
+      const totalRows = await getTotalRowCountForRowAccess();
+      const rows =
+        mode === "revoke"
+          ? []
+          : Array.from({ length: totalRows }, (_, i) => ({
+              row_index: i,
+              can_edit: true,
+              can_delete: mode === "edit_delete",
+            }));
+      await api(`/kpis/${kpiId}/row-access?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`, {
+        method: "PUT",
+        body: JSON.stringify({ user_id: userId, entry_id: entryId, field_id: fieldId, rows }),
+        token,
+      });
+      toast.success(
+        mode === "revoke"
+          ? "Row access removed for all rows"
+          : mode === "edit_delete"
+            ? "Edit + delete granted for all rows"
+            : "Edit granted for all rows"
+      );
+      // Keep modal open, but refresh users list for the current row so UI reflects changes.
+      refetchRowAccessUsers();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to update row access");
+    } finally {
+      setRowAccessSaving(false);
+    }
+  };
+
   const removeUserFromRow = async (userId: number) => {
     if (!rowAccessModal || !token || !kpiId || !entryId || !fieldId || effectiveOrgId == null) return;
     try {
@@ -1661,6 +1711,33 @@ export default function FullPageMultiItems() {
                 <option value="edit">Edit only</option>
                 <option value="edit_delete">Edit + Delete</option>
               </select>
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+              <button
+                type="button"
+                className="btn"
+                disabled={rowAccessSaving || rowAccessAddUserId == null}
+                onClick={() => rowAccessAddUserId != null && grantUserAllRows(rowAccessAddUserId, "edit")}
+              >
+                Grant all rows (edit)
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={rowAccessSaving || rowAccessAddUserId == null}
+                onClick={() => rowAccessAddUserId != null && grantUserAllRows(rowAccessAddUserId, "edit_delete")}
+              >
+                Grant all rows (edit+delete)
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ color: "var(--danger, #c00)" }}
+                disabled={rowAccessSaving || rowAccessAddUserId == null}
+                onClick={() => rowAccessAddUserId != null && grantUserAllRows(rowAccessAddUserId, "revoke")}
+              >
+                Revoke all rows
+              </button>
             </div>
             <div style={{ display: "flex", gap: "0.5rem" }}>
               <button type="button" className="btn btn-primary" disabled={rowAccessSaving || rowAccessAddUserId == null} onClick={saveAddUserToRow}>
