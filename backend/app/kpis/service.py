@@ -887,6 +887,101 @@ async def get_row_access_by_entry(
     return out
 
 
+async def get_full_row_access_users(
+    db: AsyncSession, entry_id: int, field_id: int, org_id: int
+) -> list[dict]:
+    """
+    Return users who currently have full row-level access on an entry+multi-line field.
+    "Full access" means:
+      - user has an access row for every existing row index [0..total_rows-1]
+      - and each row has can_edit=True
+      - optional can_delete=True for all rows => mode "edit_delete", else "edit"
+    """
+    entry_res = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.id == entry_id,
+            KPIEntry.organization_id == org_id,
+        )
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return []
+
+    field_res = await db.execute(
+        select(KPIField).where(KPIField.id == field_id, KPIField.kpi_id == entry.kpi_id)
+    )
+    field = field_res.scalar_one_or_none()
+    if not field or _normalized_field_type_for_row(field) != "multi_line_items":
+        return []
+
+    fv_res = await db.execute(
+        select(KPIFieldValue.value_json).where(
+            KPIFieldValue.entry_id == entry_id,
+            KPIFieldValue.field_id == field_id,
+        )
+    )
+    fv_row = fv_res.one_or_none()
+    value_json = fv_row[0] if fv_row and fv_row[0] is not None else []
+    total_rows = len(value_json) if isinstance(value_json, list) else 0
+    if total_rows <= 0:
+        return []
+
+    result = await db.execute(
+        select(
+            KpiMultiLineRowAccess.user_id,
+            KpiMultiLineRowAccess.row_index,
+            KpiMultiLineRowAccess.can_edit,
+            KpiMultiLineRowAccess.can_delete,
+            User.full_name,
+            User.username,
+        )
+        .join(User, User.id == KpiMultiLineRowAccess.user_id)
+        .where(
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+
+    by_user: dict[int, dict] = {}
+    for r in result.all():
+        uid, row_index, can_edit, can_delete, full_name, username = r
+        u = by_user.get(uid)
+        if u is None:
+            u = {
+                "user_id": int(uid),
+                "full_name": full_name,
+                "username": username or "",
+                "rows": set(),
+                "all_edit": True,
+                "all_delete": True,
+            }
+            by_user[uid] = u
+        u["rows"].add(int(row_index))
+        if not bool(can_edit):
+            u["all_edit"] = False
+        if not bool(can_delete):
+            u["all_delete"] = False
+
+    out: list[dict] = []
+    for u in by_user.values():
+        has_all_rows = len(u["rows"]) >= total_rows and all(i in u["rows"] for i in range(total_rows))
+        if not has_all_rows:
+            continue
+        if not u["all_edit"]:
+            continue
+        mode = "edit_delete" if u["all_delete"] else "edit"
+        out.append(
+            {
+                "user_id": u["user_id"],
+                "full_name": u["full_name"],
+                "username": u["username"],
+                "mode": mode,
+            }
+        )
+    out.sort(key=lambda x: ((x.get("full_name") or "").lower(), (x.get("username") or "").lower()))
+    return out
+
+
 def _normalized_field_type(f) -> str:
     """Return field type as lowercase string for consistent comparison."""
     ft = getattr(f, "field_type", None)

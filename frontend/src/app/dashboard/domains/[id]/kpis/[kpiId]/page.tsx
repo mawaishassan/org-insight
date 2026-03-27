@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
@@ -92,6 +92,13 @@ interface KpiFileItem {
   content_type: string | null;
   created_at: string;
   download_url: string | null;
+}
+
+interface FullRowAccessUser {
+  user_id: number;
+  full_name: string | null;
+  username: string;
+  mode: "edit" | "edit_delete";
 }
 
 function qs(params: Record<string, string | number | undefined>) {
@@ -231,6 +238,13 @@ export default function DomainKpiDetailPage() {
   const [columnAccessFieldId, setColumnAccessFieldId] = useState<number | null>(null);
   /** When set, we're updating row_level_user_access_enabled for this multi-line field (PATCH). */
   const [rowLevelAccessUpdatingFieldId, setRowLevelAccessUpdatingFieldId] = useState<number | null>(null);
+  /** Security tab: full-row access management (per field + entry). */
+  const [rowAccessEntryIdByField, setRowAccessEntryIdByField] = useState<Record<number, number | "">>({});
+  const [fullRowAccessByField, setFullRowAccessByField] = useState<Record<number, FullRowAccessUser[]>>({});
+  const [fullRowAccessLoadingFieldId, setFullRowAccessLoadingFieldId] = useState<number | null>(null);
+  const [fullRowAccessSavingFieldId, setFullRowAccessSavingFieldId] = useState<number | null>(null);
+  const [fullRowAccessAddUserIdByField, setFullRowAccessAddUserIdByField] = useState<Record<number, number | "">>({});
+  const [fullRowAccessAddModeByField, setFullRowAccessAddModeByField] = useState<Record<number, "edit" | "edit_delete">>({});
   /** Loaded field access per user for the column-access panel. Key = userId. */
   const [columnAccessByUser, setColumnAccessByUser] = useState<Record<number, Array<{ field_id: number; sub_field_id: number | null; access_type: string }>>>({});
   const [columnAccessLoading, setColumnAccessLoading] = useState(false);
@@ -263,6 +277,106 @@ export default function DomainKpiDetailPage() {
     (entry?.values ?? []).forEach((v) => map.set(v.field_id, v));
     return map;
   }, [entry?.values]);
+
+  const fetchFullRowAccessUsers = useCallback(
+    async (fieldId: number, entryId: number) => {
+      if (!token || !kpiId || effectiveOrgId == null) return;
+      setFullRowAccessLoadingFieldId(fieldId);
+      try {
+        const list = await api<FullRowAccessUser[]>(
+          `/kpis/${kpiId}/row-access-full-users?${qs({
+            entry_id: entryId,
+            field_id: fieldId,
+            organization_id: effectiveOrgId,
+          })}`,
+          { token }
+        );
+        setFullRowAccessByField((prev) => ({ ...prev, [fieldId]: Array.isArray(list) ? list : [] }));
+      } catch {
+        setFullRowAccessByField((prev) => ({ ...prev, [fieldId]: [] }));
+      } finally {
+        setFullRowAccessLoadingFieldId(null);
+      }
+    },
+    [token, kpiId, effectiveOrgId]
+  );
+
+  const getRowCountForEntryField = useCallback(
+    async (entryId: number, fieldId: number) => {
+      if (!token || effectiveOrgId == null) return 0;
+      const res = await api<{ total: number }>(
+        `/entries/multi-items/rows?${qs({
+          entry_id: entryId,
+          field_id: fieldId,
+          organization_id: effectiveOrgId,
+          page: 1,
+          page_size: 1,
+          editable_only: false,
+        })}`,
+        { token }
+      ).catch(() => ({ total: 0 }));
+      return Number(res?.total ?? 0) || 0;
+    },
+    [token, effectiveOrgId]
+  );
+
+  const grantAllRowsToUser = useCallback(
+    async (fieldId: number, entryId: number, userId: number, mode: "edit" | "edit_delete") => {
+      if (!token || !kpiId || effectiveOrgId == null) return;
+      setFullRowAccessSavingFieldId(fieldId);
+      try {
+        const totalRows = await getRowCountForEntryField(entryId, fieldId);
+        const rows = Array.from({ length: totalRows }, (_, i) => ({
+          row_index: i,
+          can_edit: true,
+          can_delete: mode === "edit_delete",
+        }));
+        await api(`/kpis/${kpiId}/row-access?${qs({ organization_id: effectiveOrgId })}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            user_id: userId,
+            entry_id: entryId,
+            field_id: fieldId,
+            rows,
+          }),
+          token,
+        });
+        toast.success(mode === "edit_delete" ? "Full row access granted (Edit+Delete)" : "Full row access granted (Edit)");
+        await fetchFullRowAccessUsers(fieldId, entryId);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to grant full row access");
+      } finally {
+        setFullRowAccessSavingFieldId(null);
+      }
+    },
+    [token, kpiId, effectiveOrgId, getRowCountForEntryField, fetchFullRowAccessUsers]
+  );
+
+  const revokeAllRowsForUser = useCallback(
+    async (fieldId: number, entryId: number, userId: number) => {
+      if (!token || !kpiId || effectiveOrgId == null) return;
+      setFullRowAccessSavingFieldId(fieldId);
+      try {
+        await api(`/kpis/${kpiId}/row-access?${qs({ organization_id: effectiveOrgId })}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            user_id: userId,
+            entry_id: entryId,
+            field_id: fieldId,
+            rows: [],
+          }),
+          token,
+        });
+        toast.success("Full row access removed");
+        await fetchFullRowAccessUsers(fieldId, entryId);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to remove full row access");
+      } finally {
+        setFullRowAccessSavingFieldId(null);
+      }
+    },
+    [token, kpiId, effectiveOrgId, fetchFullRowAccessUsers]
+  );
 
   const formulaFields = useMemo(() => fields.filter((f) => f.field_type === "formula"), [fields]);
   const scalarFields = useMemo(
@@ -2218,6 +2332,146 @@ export default function DomainKpiDetailPage() {
                           follow role/field access.
                         </p>
                       </div>
+                      {(f as FieldDef).row_level_user_access_enabled && (
+                        <div
+                          style={{
+                            marginTop: "0.6rem",
+                            padding: "0.6rem",
+                            border: "1px dashed var(--border)",
+                            borderRadius: 8,
+                            background: "var(--surface)",
+                          }}
+                        >
+                          <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
+                            Full row access for selected entry
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: "0.5rem", alignItems: "end" }}>
+                            <div>
+                              <label style={{ display: "block", fontSize: "0.75rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Entry</label>
+                              <select
+                                value={rowAccessEntryIdByField[f.id] ?? ""}
+                                onChange={(e) => {
+                                  const val = e.target.value ? Number(e.target.value) : "";
+                                  setRowAccessEntryIdByField((prev) => ({ ...prev, [f.id]: val }));
+                                  if (typeof val === "number" && val > 0) {
+                                    fetchFullRowAccessUsers(f.id, val);
+                                  } else {
+                                    setFullRowAccessByField((prev) => ({ ...prev, [f.id]: [] }));
+                                  }
+                                }}
+                                style={{ width: "100%", padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.8rem" }}
+                              >
+                                <option value="">Select entry</option>
+                                {(allEntriesForPeriodBar || []).map((en) => (
+                                  <option key={en.id} value={en.id}>
+                                    {en.year} {en.period_key ? `(${en.period_key})` : "(full year)"} - #{en.id}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label style={{ display: "block", fontSize: "0.75rem", color: "var(--muted)", marginBottom: "0.25rem" }}>User</label>
+                              <select
+                                value={fullRowAccessAddUserIdByField[f.id] ?? ""}
+                                onChange={(e) =>
+                                  setFullRowAccessAddUserIdByField((prev) => ({
+                                    ...prev,
+                                    [f.id]: e.target.value ? Number(e.target.value) : "",
+                                  }))
+                                }
+                                style={{ width: "100%", padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.8rem" }}
+                              >
+                                <option value="">Select user</option>
+                                {orgUsers.map((u) => (
+                                  <option key={u.id} value={u.id}>
+                                    {u.full_name || u.username}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label style={{ display: "block", fontSize: "0.75rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Mode</label>
+                              <select
+                                value={fullRowAccessAddModeByField[f.id] ?? "edit"}
+                                onChange={(e) =>
+                                  setFullRowAccessAddModeByField((prev) => ({
+                                    ...prev,
+                                    [f.id]: e.target.value === "edit_delete" ? "edit_delete" : "edit",
+                                  }))
+                                }
+                                style={{ width: "100%", padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.8rem" }}
+                              >
+                                <option value="edit">Edit</option>
+                                <option value="edit_delete">Edit + Delete</option>
+                              </select>
+                            </div>
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              disabled={
+                                fullRowAccessSavingFieldId === f.id ||
+                                !rowAccessEntryIdByField[f.id] ||
+                                !fullRowAccessAddUserIdByField[f.id]
+                              }
+                              onClick={() =>
+                                grantAllRowsToUser(
+                                  f.id,
+                                  Number(rowAccessEntryIdByField[f.id]),
+                                  Number(fullRowAccessAddUserIdByField[f.id]),
+                                  fullRowAccessAddModeByField[f.id] ?? "edit"
+                                )
+                              }
+                            >
+                              {fullRowAccessSavingFieldId === f.id ? "Saving..." : "Grant all rows"}
+                            </button>
+                          </div>
+                          <div style={{ marginTop: "0.6rem" }}>
+                            <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: "0.35rem" }}>
+                              Users with full access
+                            </div>
+                            {fullRowAccessLoadingFieldId === f.id ? (
+                              <p style={{ margin: 0, color: "var(--muted)", fontSize: "0.8rem" }}>Loading...</p>
+                            ) : (fullRowAccessByField[f.id] || []).length === 0 ? (
+                              <p style={{ margin: 0, color: "var(--muted)", fontSize: "0.8rem" }}>
+                                No users currently have full row access for the selected entry.
+                              </p>
+                            ) : (
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                                {(fullRowAccessByField[f.id] || []).map((u) => (
+                                  <span
+                                    key={u.user_id}
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: "0.35rem",
+                                      padding: "0.2rem 0.45rem",
+                                      borderRadius: 12,
+                                      background: "var(--bg-subtle)",
+                                      fontSize: "0.8rem",
+                                    }}
+                                  >
+                                    {(u.full_name || u.username)} ({u.mode === "edit_delete" ? "Edit+Delete" : "Edit"})
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        revokeAllRowsForUser(
+                                          f.id,
+                                          Number(rowAccessEntryIdByField[f.id]),
+                                          u.user_id
+                                        )
+                                      }
+                                      style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--danger, #c00)", fontSize: "0.9rem" }}
+                                      title="Remove full access"
+                                    >
+                                      ×
+                                    </button>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
 
                       {columnAccessFieldId === f.id && (
                         <div

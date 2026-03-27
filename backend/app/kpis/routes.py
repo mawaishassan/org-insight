@@ -65,6 +65,7 @@ from app.kpis.service import (
     get_row_access_for_user,
     replace_row_access,
     get_row_access_by_entry,
+    get_full_row_access_users,
     sync_kpi_entry_from_api,
 )
 from app.users.schemas import UserResponse
@@ -607,6 +608,23 @@ async def replace_kpi_row_access_route(
             detail="KPI, entry, field (multi_line_items), or user not found",
         )
     await db.commit()
+
+
+@router.get("/{kpi_id}/row-access-full-users")
+async def get_kpi_row_access_full_users_route(
+    kpi_id: int,
+    entry_id: int = Query(..., description="Entry (year/period)"),
+    field_id: int = Query(..., description="Multi-line items field ID"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """List users who currently have full access to all rows for an entry+multi-line field."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    return await get_full_row_access_users(db, entry_id, field_id, org_id)
 
 
 def _field_type_str(f) -> str:
