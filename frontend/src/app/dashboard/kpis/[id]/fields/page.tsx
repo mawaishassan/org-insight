@@ -1647,12 +1647,12 @@ export default function KpiFieldsPage() {
                         }}
                         onClick={() => {
                           if (f.field_type !== "multi_line_items") return;
-                          const orgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
+                          const resolvedOrgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
                           const year = new Date().getFullYear();
-                          if (!orgId) return;
+                          if (!resolvedOrgId) return;
                           router.push(
                             `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
-                              organization_id: orgId,
+                              organization_id: resolvedOrgId,
                             })}`
                           );
                         }}

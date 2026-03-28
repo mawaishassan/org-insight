@@ -37,6 +37,7 @@ from app.entries.service import (
     user_can_view_field,
     user_can_edit_field,
     user_can_edit_multi_line_field,
+    user_can_add_row_multi_line_field,
     user_can_edit_row,
     user_can_delete_row,
     save_entry_values,
@@ -268,7 +269,7 @@ async def upload_multi_items_excel(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Upload Excel and set/append multi_line_items value_json for an entry+field (any user who can edit this KPI)."""
+    """Upload Excel and set/append multi_line_items value_json for an entry+field (requires add_row permission)."""
     org_id = _org_id(current_user, organization_id)
 
     entry_res = await db.execute(
@@ -282,9 +283,9 @@ async def upload_multi_items_excel(
 
     field = await _load_multi_items_field(db, org_id, field_id)
     if field:
-        can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
-        if not can_edit:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+        can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
+        if not can_add:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to add rows to this field")
     if not field:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
     if field.kpi_id != entry.kpi_id:
@@ -596,9 +597,9 @@ async def add_multi_items_row(
     field = await _load_multi_items_field(db, org_id, field_id)
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
-    can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id)
-    if not can_edit:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+    can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
+    if not can_add:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to add rows to this field")
 
     fv_res = await db.execute(
         select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
@@ -1095,6 +1096,25 @@ async def get_kpi_api_info(
         "can_edit": can_edit,
         "kpi_level_can_edit": kpi_level_can_edit,
     }
+
+
+@router.get("/multi-items/add-row-info")
+async def get_multi_items_add_row_info(
+    field_id: int = Query(..., description="Multi-line items field ID"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return whether current user can add rows to the given multi-line field."""
+    org_id = _org_id(current_user, organization_id)
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    can_view = await user_can_view_kpi(db, current_user.id, field.kpi_id, org_id=org_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
+    return {"can_add_row": bool(can_add)}
 
 
 @router.post("/sync-from-api")

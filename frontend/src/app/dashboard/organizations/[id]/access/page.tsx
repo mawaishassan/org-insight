@@ -117,7 +117,7 @@ export default function AccessControlPage() {
     entryId: number;
     rowCount: number;
   } | null>(null);
-  const [entries, setEntries] = useState<{ id: number; year: number; period_key: string }[]>([]);
+  const [entries, setEntries] = useState<{ id: number; year: number; period_key?: string }[]>([]);
   const [rowAccessList, setRowAccessList] = useState<RowAccessItem[]>([]);
   const [rowAccessSaving, setRowAccessSaving] = useState(false);
   const [firstNRowsValue, setFirstNRowsValue] = useState<string>("");

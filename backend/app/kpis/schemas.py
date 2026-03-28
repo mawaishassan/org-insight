@@ -60,11 +60,11 @@ class KpiReplaceRoleAssignmentsBody(BaseModel):
 
 
 class KPIFieldAccessItem(BaseModel):
-    """One field-level access: field (and optional sub_field) with view or data_entry."""
+    """One field-level access: field (and optional sub_field) with view, add_row, or data_entry."""
 
     field_id: int = Field(..., description="KPI field ID")
     sub_field_id: int | None = Field(None, description="For multi_line_items: sub-field ID; omit for whole field")
-    access_type: str = Field(default="data_entry", description="view or data_entry")
+    access_type: str = Field(default="data_entry", description="view, add_row, or data_entry")
 
 
 class KPIReplaceFieldAccessBody(BaseModel):
@@ -73,7 +73,7 @@ class KPIReplaceFieldAccessBody(BaseModel):
     user_id: int = Field(..., description="User in same organization")
     accesses: list[KPIFieldAccessItem] = Field(
         default_factory=list,
-        description="List of field (and optional sub_field) with access_type view or data_entry",
+        description="List of field (and optional sub_field) with access_type view, add_row, or data_entry",
     )
 
 
@@ -83,8 +83,15 @@ class KPIReplaceFieldAccessByRoleBody(BaseModel):
     role_id: int = Field(..., description="Organization role ID (same org as KPI)")
     accesses: list[KPIFieldAccessItem] = Field(
         default_factory=list,
-        description="List of field (and optional sub_field) with access_type view or data_entry",
+        description="List of field (and optional sub_field) with access_type view, add_row, or data_entry",
     )
+
+
+class KPIReplaceAddRowUsersBody(BaseModel):
+    """Grant/revoke add_row permission (per multi-line field) for specific users."""
+
+    field_id: int = Field(..., description="Multi-line items field ID")
+    user_ids: list[int] = Field(default_factory=list, description="Users to grant add_row on this field")
 
 
 class KpiRowAccessItem(BaseModel):

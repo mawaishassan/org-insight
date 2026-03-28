@@ -380,12 +380,14 @@ async def user_can_edit_kpi(
 
 
 def _merge_access_type(current: str | None, incoming: str) -> str:
-    """Merge access: data_entry > view. Return the stronger of current and incoming."""
+    """
+    Merge access. Strength order: data_entry > add_row > view.
+    Return the stronger of current and incoming.
+    """
     if not current:
         return incoming
-    if incoming == "data_entry":
-        return "data_entry"
-    return current
+    order = {"view": 1, "add_row": 2, "data_entry": 3}
+    return incoming if order.get(incoming, 0) > order.get(current, 0) else current
 
 
 async def get_user_field_access_for_kpi(
@@ -394,15 +396,15 @@ async def get_user_field_access_for_kpi(
     """
     Get field-level access for user on KPI (user direct + role-based with KPI-level inheritance).
     Returns None if no field-level rows exist (use KPI-level assignment for all fields).
-    Otherwise returns map (field_id, sub_field_id) -> "view" | "data_entry".
+    Otherwise returns map (field_id, sub_field_id) -> "view" | "add_row" | "data_entry".
     By default role's field-level access inherits KPI-level; explicit KpiFieldAccessByRole overrides.
+    Direct KpiFieldAccess rows for this user are merged last (same strength rules), e.g. per-user Add Row.
     Org admin and super admin always get full access (return None so callers use KPI-level = full).
     """
     user_res = await db.execute(select(User).where(User.id == user_id))
     user = user_res.scalar_one_or_none()
     if user and user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
         return None  # Full access to all KPIs and subfields; callers use KPI-level permission
-    # Effective field access is based purely on organization roles (no direct user field overrides).
     out: dict[tuple[int, int | None], str] = {}
     # User's roles that are assigned to this KPI (with KPI-level permission)
     role_assignments_res = await db.execute(
@@ -417,7 +419,7 @@ async def get_user_field_access_for_kpi(
     for row in role_assignments_res.all():
         perm = row[1].value if hasattr(row[1], "value") else str(row[1] or "data_entry")
         p = perm.strip().lower()
-        if p not in ("view", "data_entry"):
+        if p not in ("view", "data_entry", "add_row"):
             p = "data_entry"
         role_kpi_perms.append((row[0], p))
     # All roles the user belongs to (for explicit field-level KpiFieldAccessByRole)
@@ -443,7 +445,7 @@ async def get_user_field_access_for_kpi(
     for r in role_access_res.all():
         perm = r[3].value if hasattr(r[3], "value") else str(r[3] or "data_entry")
         p = perm.strip().lower()
-        if p not in ("view", "data_entry"):
+        if p not in ("view", "data_entry", "add_row"):
             p = "data_entry"
         role_perm_by_key[(r[0], r[1], r[2])] = p
     # Load all fields and subfields for this KPI to apply inherited KPI-level where applicable
@@ -462,10 +464,11 @@ async def get_user_field_access_for_kpi(
                 return kpi_perm
             if field_perm and not kpi_perm:
                 return field_perm
-            # both present: most restrictive → view < data_entry
-            if kpi_perm == "view" or field_perm == "view":
-                return "view"
-            return "data_entry"
+            # both present: most restrictive → view < add_row < data_entry
+            order = {"view": 1, "add_row": 2, "data_entry": 3}
+            if order.get(kpi_perm or "", 0) <= order.get(field_perm or "", 0):
+                return kpi_perm
+            return field_perm
 
         for f in fields:
             sub_fields = getattr(f, "sub_fields", None) or []
@@ -496,6 +499,24 @@ async def get_user_field_access_for_kpi(
         for (_rid, field_id, sub_field_id), perm in role_perm_by_key.items():
             key = (field_id, sub_field_id)
             out[key] = _merge_access_type(out.get(key), perm)
+    # Direct per-user rows (KpiFieldAccess), e.g. Add Row from Security tab — not derivable from roles alone
+    user_direct_res = await db.execute(
+        select(
+            KpiFieldAccess.field_id,
+            KpiFieldAccess.sub_field_id,
+            KpiFieldAccess.access_type,
+        ).where(
+            KpiFieldAccess.kpi_id == kpi_id,
+            KpiFieldAccess.user_id == user_id,
+        )
+    )
+    for r in user_direct_res.all():
+        at_raw = r[2]
+        at = (at_raw.value if hasattr(at_raw, "value") else str(at_raw or "data_entry")).strip().lower()
+        if at not in ("view", "data_entry", "add_row"):
+            at = "data_entry"
+        key = (r[0], r[1])
+        out[key] = _merge_access_type(out.get(key), at)
     if not out:
         return None
     return out
@@ -515,7 +536,7 @@ async def user_can_view_field(
     if access_map is None:
         return await user_can_view_kpi(db, user_id, kpi_id)
     perm = access_map.get((field_id, sub_field_id)) or access_map.get((field_id, None))
-    return perm in ("view", "data_entry")
+    return perm in ("view", "add_row", "data_entry")
 
 
 async def user_can_edit_field(
@@ -533,6 +554,61 @@ async def user_can_edit_field(
         return await user_can_edit_kpi(db, user_id, kpi_id)
     perm = access_map.get((field_id, sub_field_id)) or access_map.get((field_id, None))
     return perm == "data_entry"
+
+
+async def user_can_add_row_multi_line_field(
+    db: AsyncSession, user_id: int, kpi_id: int, field_id: int
+) -> bool:
+    """
+    True if user can add a new row to a specific multi_line_items field.
+    This is an explicit permission separate from edit/delete.
+
+    Important: merged field access treats whole-field data_entry as stronger than add_row, so users
+    with KPI-level or whole-field edit plus an Add Row grant in Security would lose add_row in the
+    combined map. We therefore check explicit add_row rows (and role whole-field add_row) directly.
+    """
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if not user:
+        return False
+    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return True
+
+    # Per-user Add Row from Security tab (KpiFieldAccess) — independent of merged map strength order
+    direct_res = await db.execute(
+        select(KpiFieldAccess.id).where(
+            KpiFieldAccess.kpi_id == kpi_id,
+            KpiFieldAccess.user_id == user_id,
+            KpiFieldAccess.field_id == field_id,
+            KpiFieldAccess.sub_field_id.is_(None),
+            KpiFieldAccess.access_type == "add_row",
+        ).limit(1)
+    )
+    if direct_res.scalar_one_or_none() is not None:
+        return True
+
+    # Whole-field add_row on any of the user's org roles (same idea: do not rely on merge)
+    user_roles_res = await db.execute(
+        select(UserOrganizationRole.organization_role_id).where(UserOrganizationRole.user_id == user_id)
+    )
+    role_ids = [row[0] for row in user_roles_res.all()]
+    if role_ids:
+        role_add_res = await db.execute(
+            select(KpiFieldAccessByRole.id).where(
+                KpiFieldAccessByRole.kpi_id == kpi_id,
+                KpiFieldAccessByRole.organization_role_id.in_(role_ids),
+                KpiFieldAccessByRole.field_id == field_id,
+                KpiFieldAccessByRole.sub_field_id.is_(None),
+                KpiFieldAccessByRole.access_type == "add_row",
+            ).limit(1)
+        )
+        if role_add_res.scalar_one_or_none() is not None:
+            return True
+
+    access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
+    if access_map is None:
+        return False
+    return access_map.get((field_id, None)) == "add_row"
 
 
 def _user_can_edit_sub_field(access_map: dict | None, field_id: int, sub_field_id: int | None) -> bool:

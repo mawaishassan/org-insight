@@ -93,7 +93,7 @@ export default function FullPageMultiItems() {
   const [canEditKpi, setCanEditKpi] = useState<boolean>(true);
   const [kpiLevelCanEdit, setKpiLevelCanEdit] = useState<boolean>(false);
   const [userRole, setUserRole] = useState<string | null>(null);
-  const canAddRow = kpiLevelCanEdit || userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
+  const [canAddRow, setCanAddRow] = useState<boolean>(false);
   const [rowAccessModal, setRowAccessModal] = useState<{ rowIndex: number; preview: string } | null>(null);
   const [rowAccessUsers, setRowAccessUsers] = useState<RowAccessUser[]>([]);
   const [rowAccessAssignments, setRowAccessAssignments] = useState<{ id: number; full_name: string | null; username: string }[]>([]);
@@ -102,7 +102,9 @@ export default function FullPageMultiItems() {
   const [rowAccessSaving, setRowAccessSaving] = useState(false);
   const [rowAccessUserSearch, setRowAccessUserSearch] = useState("");
 
-  const canManageRowAccess = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
+  const isAdmin = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
+  const canManageRowAccess = isAdmin;
+  const canAddRowEffective = canAddRow || isAdmin;
 
   const effectiveOrgId = useMemo(
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
@@ -157,6 +159,13 @@ export default function FullPageMultiItems() {
       ).catch(() => ({ can_edit: false, kpi_level_can_edit: false }));
       setCanEditKpi(apiInfo?.can_edit !== false);
       setKpiLevelCanEdit(apiInfo?.kpi_level_can_edit === true);
+
+      // Add-row permission is field-specific (not KPI-level)
+      const addRowInfo = await api<{ can_add_row?: boolean }>(
+        `/entries/multi-items/add-row-info?${new URLSearchParams({ field_id: String(fieldId), organization_id: String(effectiveOrgId) }).toString()}`,
+        { token }
+      ).catch(() => ({ can_add_row: false }));
+      setCanAddRow(addRowInfo?.can_add_row === true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load context");
     }
@@ -502,7 +511,7 @@ export default function FullPageMultiItems() {
               />
               Editable rows only
             </label>
-          {canAddRow && (
+          {canAddRowEffective && (
             <>
               <button
                 type="button"
@@ -690,7 +699,7 @@ export default function FullPageMultiItems() {
       )}
 
       {/* Bulk upload panel */}
-      {canAddRow && bulkPanelOpen && (
+      {canAddRowEffective && bulkPanelOpen && (
         <div className="card" style={{ padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
             <span style={{ fontSize: "0.9rem", fontWeight: 600 }}>Bulk upload</span>
@@ -969,7 +978,7 @@ export default function FullPageMultiItems() {
                         { method: "POST", token }
                       );
                       if (res?.skipped) {
-                        toast.info(
+                        toast(
                           res.reason || "API sync skipped (override_existing=false and field already has data)."
                         );
                       } else {
@@ -1254,7 +1263,11 @@ export default function FullPageMultiItems() {
                         disabled={row.can_delete === false}
                         onChange={(e) => {
                           setSelectedIndices((prev) =>
-                            e.target.checked ? [...new Set([...prev, row.index])] : prev.filter((i) => i !== row.index)
+                            e.target.checked
+                              ? prev.includes(row.index)
+                                ? prev
+                                : [...prev, row.index]
+                              : prev.filter((i) => i !== row.index)
                           );
                         }}
                       />
