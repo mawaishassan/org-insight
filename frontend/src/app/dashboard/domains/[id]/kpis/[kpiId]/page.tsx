@@ -156,6 +156,7 @@ export default function DomainKpiDetailPage() {
 
   const [meOrgId, setMeOrgId] = useState<number | null>(null);
   const [meRole, setMeRole] = useState<string | null>(null);
+  const [meId, setMeId] = useState<number | null>(null);
   const [kpiName, setKpiName] = useState<string>("");
   const [fields, setFields] = useState<FieldDef[]>([]);
   const [entry, setEntry] = useState<EntryRow | null>(null);
@@ -245,6 +246,11 @@ export default function DomainKpiDetailPage() {
   const [fullRowAccessSavingFieldId, setFullRowAccessSavingFieldId] = useState<number | null>(null);
   const [fullRowAccessAddUserIdByField, setFullRowAccessAddUserIdByField] = useState<Record<number, number | "">>({});
   const [fullRowAccessAddModeByField, setFullRowAccessAddModeByField] = useState<Record<number, "edit" | "edit_delete">>({});
+  /** Security tab: add-row permission management (per multi-line field). */
+  const [addRowUsersByField, setAddRowUsersByField] = useState<Record<number, Array<{ id: number; username: string; full_name: string | null }>>>({});
+  const [addRowLoadingFieldId, setAddRowLoadingFieldId] = useState<number | null>(null);
+  const [addRowSavingFieldId, setAddRowSavingFieldId] = useState<number | null>(null);
+  const [addRowAddUserIdByField, setAddRowAddUserIdByField] = useState<Record<number, number | "">>({});
   /** Loaded field access per user for the column-access panel. Key = userId. */
   const [columnAccessByUser, setColumnAccessByUser] = useState<Record<number, Array<{ field_id: number; sub_field_id: number | null; access_type: string }>>>({});
   const [columnAccessLoading, setColumnAccessLoading] = useState(false);
@@ -311,7 +317,7 @@ export default function DomainKpiDetailPage() {
           organization_id: effectiveOrgId,
           page: 1,
           page_size: 1,
-          editable_only: false,
+          editable_only: "false",
         })}`,
         { token }
       ).catch(() => ({ total: 0 }));
@@ -376,6 +382,46 @@ export default function DomainKpiDetailPage() {
       }
     },
     [token, kpiId, effectiveOrgId, fetchFullRowAccessUsers]
+  );
+
+  const fetchAddRowUsers = useCallback(
+    async (fieldId: number) => {
+      if (!token || !kpiId || effectiveOrgId == null) return;
+      setAddRowLoadingFieldId(fieldId);
+      try {
+        const list = await api<Array<{ id: number; username: string; full_name: string | null }>>(
+          `/kpis/${kpiId}/add-row-users?${qs({ field_id: fieldId, organization_id: effectiveOrgId })}`,
+          { token }
+        );
+        setAddRowUsersByField((prev) => ({ ...prev, [fieldId]: Array.isArray(list) ? list : [] }));
+      } catch {
+        setAddRowUsersByField((prev) => ({ ...prev, [fieldId]: [] }));
+      } finally {
+        setAddRowLoadingFieldId(null);
+      }
+    },
+    [token, kpiId, effectiveOrgId]
+  );
+
+  const setAddRowUsers = useCallback(
+    async (fieldId: number, nextUserIds: number[]) => {
+      if (!token || !kpiId || effectiveOrgId == null) return;
+      setAddRowSavingFieldId(fieldId);
+      try {
+        await api(`/kpis/${kpiId}/add-row-users?${qs({ organization_id: effectiveOrgId })}`, {
+          method: "PUT",
+          body: JSON.stringify({ field_id: fieldId, user_ids: nextUserIds }),
+          token,
+        });
+        toast.success("Add Row permission updated");
+        await fetchAddRowUsers(fieldId);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to update Add Row permission");
+      } finally {
+        setAddRowSavingFieldId(null);
+      }
+    },
+    [token, kpiId, effectiveOrgId, fetchAddRowUsers]
   );
 
   const formulaFields = useMemo(() => fields.filter((f) => f.field_type === "formula"), [fields]);
@@ -446,12 +492,14 @@ export default function DomainKpiDetailPage() {
     api<{ organization_id: number | null; role?: string | { value?: string } }>("/auth/me", { token })
       .then((me) => {
         setMeOrgId(me.organization_id ?? null);
+        setMeId((me as any)?.id ?? null);
         const r = (me as { role?: string | { value?: string } }).role;
         setMeRole(typeof r === "string" ? r : r?.value ?? null);
       })
       .catch(() => {
         setMeOrgId(null);
         setMeRole(null);
+        setMeId(null);
       });
   }, [token]);
 
@@ -607,6 +655,21 @@ export default function DomainKpiDetailPage() {
       setActiveTab("scalar");
     }
   }, [activeTab, canSeeSecurityTab]);
+
+  // When Security tab opens (and fields are loaded), pre-load Add Row users for multi-line fields
+  useEffect(() => {
+    if (activeTab !== "security") return;
+    if (!token || !kpiId || effectiveOrgId == null) return;
+    if (!canManageColumnAccess) return;
+    if (!fields || fields.length === 0) return;
+    (fields.filter((f) => (f as any).field_type === "multi_line_items") as any[]).forEach((f) => {
+      const fid = Number(f.id);
+      if (!Number.isFinite(fid) || fid <= 0) return;
+      if (addRowUsersByField[fid] == null) {
+        fetchAddRowUsers(fid);
+      }
+    });
+  }, [activeTab, token, kpiId, effectiveOrgId, canManageColumnAccess, fields, addRowUsersByField, fetchAddRowUsers]);
 
   // Load field access by role when scalar or security tab active, or when a multi-line column panel is expanded (org admin)
   useEffect(() => {
@@ -2332,6 +2395,132 @@ export default function DomainKpiDetailPage() {
                           follow role/field access.
                         </p>
                       </div>
+
+                      {/* Add-row permission panel (separate from edit/delete) */}
+                      <div
+                        style={{
+                          marginTop: "0.6rem",
+                          padding: "0.6rem",
+                          border: "1px dashed var(--border)",
+                          borderRadius: 8,
+                          background: "var(--surface)",
+                        }}
+                      >
+                        <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
+                          Add Row permission (who can create new rows)
+                        </div>
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "1fr auto",
+                            gap: "0.5rem",
+                            alignItems: "end",
+                          }}
+                        >
+                          <div>
+                            <label
+                              style={{
+                                display: "block",
+                                fontSize: "0.75rem",
+                                color: "var(--muted)",
+                                marginBottom: "0.25rem",
+                              }}
+                            >
+                              User
+                            </label>
+                            <select
+                              value={addRowAddUserIdByField[f.id] ?? ""}
+                              onChange={(e) =>
+                                setAddRowAddUserIdByField((prev) => ({
+                                  ...prev,
+                                  [f.id]: e.target.value ? Number(e.target.value) : "",
+                                }))
+                              }
+                              style={{
+                                width: "100%",
+                                padding: "0.4rem 0.6rem",
+                                borderRadius: 6,
+                                border: "1px solid var(--border)",
+                                fontSize: "0.8rem",
+                              }}
+                            >
+                              <option value="">Select user</option>
+                              {orgUsers.map((u) => (
+                                <option key={u.id} value={u.id}>
+                                  {u.full_name || u.username}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={addRowSavingFieldId === f.id || !addRowAddUserIdByField[f.id]}
+                            onClick={async () => {
+                              const nextId = Number(addRowAddUserIdByField[f.id]);
+                              if (!nextId) return;
+                              const current = addRowUsersByField[f.id] ?? [];
+                              const next = Array.from(new Set([...current.map((x) => x.id), nextId]));
+                              await setAddRowUsers(f.id, next);
+                              setAddRowAddUserIdByField((prev) => ({ ...prev, [f.id]: "" }));
+                            }}
+                          >
+                            {addRowSavingFieldId === f.id ? "Saving..." : "Grant Add Row"}
+                          </button>
+                        </div>
+                        <div style={{ marginTop: "0.6rem" }}>
+                          <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: "0.35rem" }}>
+                            Users with Add Row
+                          </div>
+                          {addRowLoadingFieldId === f.id ? (
+                            <p style={{ margin: 0, color: "var(--muted)", fontSize: "0.8rem" }}>Loading...</p>
+                          ) : (addRowUsersByField[f.id] || []).length === 0 ? (
+                            <p style={{ margin: 0, color: "var(--muted)", fontSize: "0.8rem" }}>
+                              No users currently have Add Row permission for this field.
+                            </p>
+                          ) : (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                              {(addRowUsersByField[f.id] || []).map((u) => (
+                                <span
+                                  key={u.id}
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: "0.35rem",
+                                    padding: "0.2rem 0.45rem",
+                                    borderRadius: 12,
+                                    background: "var(--bg-subtle)",
+                                    fontSize: "0.8rem",
+                                  }}
+                                >
+                                  {(u.full_name || u.username)}
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const current = addRowUsersByField[f.id] ?? [];
+                                      const next = current.filter((x) => x.id !== u.id).map((x) => x.id);
+                                      await setAddRowUsers(f.id, next);
+                                    }}
+                                    style={{
+                                      border: "none",
+                                      background: "transparent",
+                                      cursor: "pointer",
+                                      color: "var(--danger, #c00)",
+                                      fontSize: "0.9rem",
+                                    }}
+                                    title="Remove Add Row"
+                                  >
+                                    ×
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ marginTop: "0.35rem", fontSize: "0.75rem", color: "var(--muted)" }}>
+                          Note: Org Admin can always add rows.
+                        </div>
+                      </div>
                       {(f as FieldDef).row_level_user_access_enabled && (
                         <div
                           style={{
@@ -2850,18 +3039,23 @@ export default function DomainKpiDetailPage() {
                           Rows are in <strong>draft</strong> until you click Save.
                         </span>
                       </div>
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={isLocked}
-                        onClick={() => setRows([...rows, Object.fromEntries(subFields.map((s) => [s.key, undefined]))])}
-                      >
-                        Add row
-                      </button>
+                      {(meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN" || (addRowUsersByField[f.id] || []).some((u) => u.id === (meId ?? -1))) && (
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={isLocked}
+                          onClick={() => setRows([...rows, Object.fromEntries(subFields.map((s) => [s.key, undefined]))])}
+                        >
+                          Add row
+                        </button>
+                      )}
                     </div>
                   )}
 
-                  {(f as FieldDef).can_edit !== false && (
+                  {(f as FieldDef).can_edit !== false &&
+                    (meRole === "ORG_ADMIN" ||
+                      meRole === "SUPER_ADMIN" ||
+                      (addRowUsersByField[f.id] || []).some((u) => u.id === (meId ?? -1))) && (
                   <>
                   <div style={{ marginBottom: "0.75rem", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                     <button

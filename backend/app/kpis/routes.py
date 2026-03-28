@@ -27,6 +27,7 @@ from app.kpis.schemas import (
     KPIReplaceFieldAccessBody,
     KPIReplaceFieldAccessByRoleBody,
     KPIFieldAccessItem,
+    KPIReplaceAddRowUsersBody,
     KPIReplaceRowAccessBody,
     KpiRowAccessItem,
     DomainTagRef,
@@ -62,6 +63,8 @@ from app.kpis.service import (
     replace_field_access,
     get_field_access_for_role,
     replace_field_access_for_role,
+    get_add_row_users_for_field,
+    replace_add_row_users_for_field,
     get_row_access_for_user,
     replace_row_access,
     get_row_access_by_entry,
@@ -550,6 +553,38 @@ async def replace_kpi_field_access_by_role_route(
     ok = await replace_field_access_for_role(db, kpi_id, body.role_id, org_id, accesses)
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI or role not found")
+    await db.commit()
+
+
+@router.get("/{kpi_id}/add-row-users")
+async def get_kpi_add_row_users_route(
+    kpi_id: int,
+    field_id: int = Query(..., description="Multi-line items field ID"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """List users who can add rows for this multi-line field. Org admin only."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    return await get_add_row_users_for_field(db, kpi_id, field_id, org_id)
+
+
+@router.put("/{kpi_id}/add-row-users", status_code=status.HTTP_200_OK)
+async def replace_kpi_add_row_users_route(
+    kpi_id: int,
+    body: KPIReplaceAddRowUsersBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Replace add_row users list for a multi-line field. Org admin only."""
+    org_id = _org_id(current_user, organization_id)
+    ok = await replace_add_row_users_for_field(db, kpi_id, body.field_id, body.user_ids, org_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI, field, or users not found")
     await db.commit()
 
 

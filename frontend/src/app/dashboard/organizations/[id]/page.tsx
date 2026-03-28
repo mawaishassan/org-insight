@@ -228,6 +228,7 @@ const fieldCreateSchema = z.object({
   key: z.string().min(1, "Key required").regex(/^[a-z0-9_]+$/, "Key: lowercase letters, numbers, underscore only"),
   field_type: z.enum(FIELD_TYPES),
   formula_expression: z.string().optional(),
+  full_page_multi_items: z.boolean().optional(),
   is_required: z.boolean(),
   sort_order: z.coerce.number().int().min(0),
 });
@@ -2721,6 +2722,7 @@ function FieldsSection({
       key: "",
       field_type: "single_line_text",
       formula_expression: "",
+      full_page_multi_items: false,
       is_required: false,
       sort_order: 0,
     },
