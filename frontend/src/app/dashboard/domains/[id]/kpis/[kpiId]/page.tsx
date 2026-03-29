@@ -6,6 +6,7 @@ import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
+import MultiReferenceInput from "@/components/MultiReferenceInput";
 
 interface ReferenceConfig {
   reference_source_kpi_id?: number;
@@ -132,6 +133,9 @@ function expectedPeriods(dimension: string): string[] {
 
 function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
   if (!v) return "—";
+  if (f.field_type === "multi_reference" && Array.isArray(v.value_json)) {
+    return (v.value_json as string[]).join(", ") || "—";
+  }
   if (v.value_text != null) return String(v.value_text);
   if (v.value_number != null) return String(v.value_number);
   if (v.value_boolean != null) return v.value_boolean ? "Yes" : "No";
@@ -270,7 +274,14 @@ export default function DomainKpiDetailPage() {
   const [columnAccessAddRoleId, setColumnAccessAddRoleId] = useState<number | null>(null);
   const [columnAccessAddPermission, setColumnAccessAddPermission] = useState<"view" | "data_entry">("data_entry");
 
-  type FormCell = { value_text?: string; value_number?: number; value_boolean?: boolean; value_date?: string; value_json?: Record<string, unknown>[] };
+  type FormCell = {
+    value_text?: string;
+    value_number?: number;
+    value_boolean?: boolean;
+    value_date?: string;
+    /** multi_line_items rows or multi_reference string[] */
+    value_json?: Record<string, unknown>[] | string[];
+  };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
 
   const token = getAccessToken();
@@ -765,7 +776,8 @@ export default function DomainKpiDetailPage() {
     if (!token || effectiveOrgId == null || fields.length === 0) return;
     const keys: Array<{ k: string; sid: number; skey: string; subKey?: string }> = [];
     fields.forEach((f) => {
-      if (f.field_type === "reference" && f.config?.reference_source_kpi_id && f.config?.reference_source_field_key) {
+      const refLike = (ft: string) => ft === "reference" || ft === "multi_reference";
+      if (refLike(f.field_type) && f.config?.reference_source_kpi_id && f.config?.reference_source_field_key) {
         keys.push({
           k: `${f.config.reference_source_kpi_id}-${f.config.reference_source_field_key}${f.config.reference_source_sub_field_key ? `-${f.config.reference_source_sub_field_key}` : ""}`,
           sid: f.config.reference_source_kpi_id,
@@ -774,7 +786,7 @@ export default function DomainKpiDetailPage() {
         });
       }
       (f.sub_fields ?? []).forEach((s) => {
-        if (s.field_type === "reference" && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
+        if (refLike(s.field_type) && s.config?.reference_source_kpi_id && s.config?.reference_source_field_key) {
           keys.push({
             k: `${s.config.reference_source_kpi_id}-${s.config.reference_source_field_key}${s.config.reference_source_sub_field_key ? `-${s.config.reference_source_sub_field_key}` : ""}`,
             sid: s.config.reference_source_kpi_id,
@@ -802,6 +814,8 @@ export default function DomainKpiDetailPage() {
       const v = valueMap.get(f.id);
       if (f.field_type === "multi_line_items") {
         out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [] };
+      } else if (f.field_type === "multi_reference") {
+        out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as string[]) : [] };
       } else {
         out[f.id] = {};
         if (v?.value_text != null) out[f.id].value_text = v.value_text;
@@ -869,7 +883,11 @@ export default function DomainKpiDetailPage() {
     });
   };
 
-  const updateField = (fieldId: number, key: keyof FormCell, value: string | number | boolean | Record<string, unknown>[] | undefined) => {
+  const updateField = (
+    fieldId: number,
+    key: keyof FormCell,
+    value: string | number | boolean | Record<string, unknown>[] | string[] | undefined
+  ) => {
     setFormValues((prev) => ({ ...prev, [fieldId]: { ...prev[fieldId], [key]: value } }));
   };
 
@@ -882,14 +900,25 @@ export default function DomainKpiDetailPage() {
         .filter((f) => f.field_type !== "formula" && (f.can_edit !== false))
         .map((f) => {
           const v = formValues[f.id] ?? {};
-          const payload: { field_id: number; value_text?: string | null; value_number?: number | null; value_boolean?: boolean | null; value_date?: string | null; value_json?: Record<string, unknown>[] | null } = {
+          const payload: {
+            field_id: number;
+            value_text?: string | null;
+            value_number?: number | null;
+            value_boolean?: boolean | null;
+            value_date?: string | null;
+            value_json?: Record<string, unknown>[] | string[] | null;
+          } = {
             field_id: f.id,
             value_text: v.value_text ?? null,
             value_number: typeof v.value_number === "number" ? v.value_number : null,
             value_boolean: v.value_boolean ?? null,
             value_date: v.value_date || null,
           };
-          if (f.field_type === "multi_line_items" && Array.isArray(v.value_json)) payload.value_json = v.value_json;
+          if (f.field_type === "multi_line_items" && Array.isArray(v.value_json)) payload.value_json = v.value_json as Record<string, unknown>[];
+          if (f.field_type === "multi_reference") {
+            payload.value_text = null;
+            payload.value_json = Array.isArray(v.value_json) ? (v.value_json as string[]) : [];
+          }
           return payload;
         });
       const saveQuery = `?${qs({ organization_id: effectiveOrgId })}`;
@@ -1933,6 +1962,19 @@ export default function DomainKpiDetailPage() {
                               <option key={opt} value={opt}>{opt}</option>
                             ))}
                           </select>
+                        </div>
+                      );
+                    }
+                    if (f.field_type === "multi_reference") {
+                      const refKey = f.config?.reference_source_kpi_id && f.config?.reference_source_field_key
+                        ? `${f.config.reference_source_kpi_id}-${f.config.reference_source_field_key}${f.config.reference_source_sub_field_key ? `-${f.config.reference_source_sub_field_key}` : ""}`
+                        : "";
+                      const options = refAllowedValues[refKey] ?? [];
+                      const arr = Array.isArray(val?.value_json) ? (val!.value_json as string[]) : [];
+                      return (
+                        <div key={f.id} style={{ display: "flex", flexDirection: "column", gap: "0.25rem", maxWidth: 480 }}>
+                          <label style={{ fontWeight: 500 }}>{f.name}{f.is_required ? " *" : ""}</label>
+                          <MultiReferenceInput options={options} value={arr} onChange={(next) => updateField(f.id, "value_json", next)} />
                         </div>
                       );
                     }
@@ -3013,8 +3055,11 @@ export default function DomainKpiDetailPage() {
           if (activeTab !== f.id) return null;
           const v = valuesByFieldId.get(f.id);
           const multiFieldCanEdit = (f as FieldDef).can_edit !== false;
-          const formRows = isEditing && multiFieldCanEdit ? (formValues[f.id]?.value_json ?? []) : [];
-          const rows = !multiFieldCanEdit
+          const formRows: Record<string, unknown>[] =
+            isEditing && multiFieldCanEdit && Array.isArray(formValues[f.id]?.value_json)
+              ? (formValues[f.id]!.value_json as Record<string, unknown>[])
+              : [];
+          const rows: Record<string, unknown>[] = !multiFieldCanEdit
             ? (Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [])
             : (isEditing ? formRows : (Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : []));
           const subFields = f.sub_fields ?? [];
@@ -3044,7 +3089,13 @@ export default function DomainKpiDetailPage() {
                           type="button"
                           className="btn"
                           disabled={isLocked}
-                          onClick={() => setRows([...rows, Object.fromEntries(subFields.map((s) => [s.key, undefined]))])}
+                          onClick={() => {
+                            const empty: Record<string, unknown> = {};
+                            for (const s of subFields) {
+                              empty[s.key] = s.field_type === "multi_reference" ? [] : undefined;
+                            }
+                            setRows([...rows, empty]);
+                          }}
                         >
                           Add row
                         </button>
@@ -3698,6 +3749,28 @@ export default function DomainKpiDetailPage() {
                                             <option key={opt} value={opt}>{opt}</option>
                                           ))}
                                         </select>
+                                      );
+                                    })()
+                                  ) : s.field_type === "multi_reference" ? (
+                                    (() => {
+                                      const refKey = s.config?.reference_source_kpi_id && s.config?.reference_source_field_key
+                                        ? `${s.config.reference_source_kpi_id}-${s.config.reference_source_field_key}${s.config.reference_source_sub_field_key ? `-${s.config.reference_source_sub_field_key}` : ""}`
+                                        : "";
+                                      const options = refAllowedValues[refKey] ?? [];
+                                      const cellVal = row[s.key];
+                                      const arr = Array.isArray(cellVal) ? (cellVal as string[]) : [];
+                                      return (
+                                        <div style={{ minWidth: 140, maxWidth: 320 }}>
+                                          <MultiReferenceInput
+                                            options={options}
+                                            value={arr}
+                                            onChange={(next) => {
+                                              const nextRows = [...rows];
+                                              nextRows[rowIdx] = { ...nextRows[rowIdx], [s.key]: next };
+                                              setRows(nextRows);
+                                            }}
+                                          />
+                                        </div>
                                       );
                                     })()
                                   ) : s.field_type === "attachment" ? (

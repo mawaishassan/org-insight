@@ -1290,6 +1290,13 @@ export default function FullPageMultiItems() {
                     >
                       {(() => {
                         const cellVal = row.data[sf.key];
+                        if (sf.field_type === "multi_reference") {
+                          const arr = Array.isArray(cellVal)
+                            ? (cellVal as unknown[]).filter((x) => x != null && String(x).trim() !== "")
+                            : [];
+                          if (arr.length === 0) return "—";
+                          return arr.map((x) => String(x)).join("; ");
+                        }
                         if (cellVal == null || String(cellVal).trim() === "") return "—";
                         const strVal = String(cellVal);
                         if (sf.field_type === "attachment") {

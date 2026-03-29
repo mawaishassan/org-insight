@@ -302,6 +302,8 @@ async def upload_multi_items_excel(
         get_reference_allowed_values,
         _normalize_reference_value,
         _is_reference_empty_or_sentinel,
+        coerce_multi_reference_raw,
+        filter_multi_reference_to_allowed,
     )
     validation_errors: list[dict] = []
     ref_sub_fields = [s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.reference]
@@ -340,6 +342,57 @@ async def upload_multi_items_excel(
                         "message": "Value does not exist in the referenced KPI field.",
                     }
                 )
+    multif_sub_fields = [
+        s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.multi_reference
+    ]
+    multif_allowed_list: dict[tuple[int, str, str | None], list[str]] = {}
+    for row_idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        for sf in multif_sub_fields:
+            cfg = getattr(sf, "config", None) or {}
+            sid = cfg.get("reference_source_kpi_id")
+            skey = cfg.get("reference_source_field_key")
+            subkey = cfg.get("reference_source_sub_field_key")
+            if not sid or not skey:
+                continue
+            cache_key = (int(sid), str(skey), str(subkey) if subkey else None)
+            if cache_key not in multif_allowed_list:
+                multif_allowed_list[cache_key] = await get_reference_allowed_values(
+                    db, int(sid), str(skey), org_id, source_sub_field_key=(str(subkey) if subkey else None)
+                )
+            allowed_list = multif_allowed_list[cache_key]
+            allowed_norm = {_normalize_reference_value(a) for a in allowed_list}
+            cell = item.get(sf.key)
+            for tok in coerce_multi_reference_raw(cell):
+                if isinstance(tok, dict):
+                    s = None
+                    for k in ("label", "text", "value", "name"):
+                        if k in tok and tok[k] is not None:
+                            s = str(tok[k])
+                            break
+                    if s is None:
+                        continue
+                else:
+                    s = str(tok) if tok is not None else ""
+                n = _normalize_reference_value(s)
+                if _is_reference_empty_or_sentinel(n):
+                    continue
+                if n not in allowed_norm:
+                    validation_errors.append(
+                        {
+                            "field_key": field.key,
+                            "sub_field_key": sf.key,
+                            "row_index": row_idx,
+                            "value": str(cell),
+                            "row": item,
+                            "message": "One or more values do not exist in the referenced KPI field.",
+                        }
+                    )
+                    break
+            else:
+                cleaned = filter_multi_reference_to_allowed(cell, allowed_list) if allowed_list else []
+                item[sf.key] = cleaned if cleaned else None
     if validation_errors:
         raise EntryValidationError(validation_errors)
 
@@ -1272,6 +1325,7 @@ def _build_kpi_entry_xlsx(
         FieldType.attachment,
         FieldType.formula,
         FieldType.reference,
+        FieldType.multi_reference,
     )
     scalar_fields = [f for f in fields if getattr(f, "field_type", None) in scalar_types]
     ws_scalar = wb.active
@@ -1282,7 +1336,10 @@ def _build_kpi_entry_xlsx(
         if fv is None:
             ws_scalar.append([f.name, ""])
             continue
-        if fv.value_text is not None:
+        ft = getattr(f, "field_type", None)
+        if ft == FieldType.multi_reference and isinstance(fv.value_json, list):
+            val = "; ".join(str(x) for x in fv.value_json)
+        elif fv.value_text is not None:
             val = fv.value_text
         elif fv.value_number is not None:
             val = fv.value_number
@@ -1310,11 +1367,20 @@ def _build_kpi_entry_xlsx(
         ws.append(keys)
         fv = value_by_field_id.get(f.id)
         rows = list(fv.value_json) if (fv and isinstance(getattr(fv, "value_json", None), list)) else []
+        key_to_sf = {s.key: s for s in sub_fields}
         for row in rows:
             if not isinstance(row, dict):
                 ws.append([""] * len(keys))
                 continue
-            ws.append([row.get(k, "") for k in keys])
+
+            def _cell_out(col_key: str):
+                raw = row.get(col_key, "")
+                sf = key_to_sf.get(col_key)
+                if sf and getattr(sf, "field_type", None) == FieldType.multi_reference and isinstance(raw, list):
+                    return "; ".join(str(x) for x in raw)
+                return raw if raw is not None else ""
+
+            ws.append([_cell_out(k) for k in keys])
 
     buf = BytesIO()
     wb.save(buf)
@@ -1376,6 +1442,8 @@ def _parse_kpi_entry_xlsx(
     """Parse uploaded Excel into field values. Returns {field_id: {value_text, value_number, value_boolean, value_date, value_json}}."""
     from openpyxl import load_workbook
 
+    from app.entries.service import coerce_multi_reference_raw
+
     wb = load_workbook(filename=BytesIO(content), data_only=True)
     result: dict[int, dict] = {}
 
@@ -1433,6 +1501,9 @@ def _parse_kpi_entry_xlsx(
                         val["value_text"] = str(raw_value)
                 else:
                     val["value_text"] = str(raw_value)
+            elif ft == FieldType.multi_reference:
+                parsed = coerce_multi_reference_raw(str(raw_value) if raw_value is not None else "")
+                val["value_json"] = parsed if parsed else None
             else:
                 val["value_text"] = str(raw_value) if raw_value is not None else None
             result[field.id] = val
@@ -1503,6 +1574,9 @@ def _parse_kpi_entry_xlsx(
                             item[key] = str(raw)
                     else:
                         item[key] = str(raw)
+                elif sf_type == FieldType.multi_reference or sf_type == "multi_reference":
+                    parsed = coerce_multi_reference_raw(str(raw) if raw is not None else "")
+                    item[key] = parsed if parsed else None
                 else:
                     item[key] = str(raw)
             if not empty:
@@ -1569,6 +1643,29 @@ async def import_entry_excel(
     await db.commit()
     await db.refresh(entry)
     return {"message": "Import successful", "entry_id": entry.id, "fields_updated": len(values)}
+
+
+def _reverse_ref_tokens_from_cell(cell) -> list[tuple[str, str]]:
+    """Return (display_label, normalized_token) pairs for reverse-reference matching."""
+    if cell is None or cell == "":
+        return []
+    out: list[tuple[str, str]] = []
+    if isinstance(cell, list):
+        for x in cell:
+            if x is None:
+                continue
+            label = str(x).strip()
+            if not label:
+                continue
+            t = _normalize_reference_value(label)
+            if t:
+                out.append((label, t))
+        return out
+    label = str(cell).strip()
+    t = _normalize_reference_value(label)
+    if t:
+        out.append((label, t))
+    return out
 
 
 @router.get("/reverse-references")
@@ -1672,7 +1769,7 @@ async def get_reverse_references_for_entry(
     descriptors_by_child_kpi: dict[int, list[dict]] = {}
     for f in all_fields:
         for sf in getattr(f, "sub_fields", []) or []:
-            if getattr(sf, "field_type", None) != FieldType.reference:
+            if getattr(sf, "field_type", None) not in (FieldType.reference, FieldType.multi_reference):
                 continue
             cfg = getattr(sf, "config", None) or {}
             sid = cfg.get("reference_source_kpi_id")
@@ -1732,29 +1829,33 @@ async def get_reverse_references_for_entry(
                     if not isinstance(row, dict):
                         continue
                     cell = row.get(p_sub)
-                    if cell is None or cell == "":
-                        continue
-                    label = (str(cell)).strip()
-                    token = _normalize_reference_value(label)
-                    if not token:
-                        continue
-                    descriptor_tokens.setdefault(token, {"label": label})
-            else:
-                # Scalar parent field: use its primary value_text/number/boolean/date
-                raw_val = None
-                if fv.value_text not in (None, ""):
-                    raw_val = fv.value_text
-                elif fv.value_number is not None:
-                    raw_val = fv.value_number
-                elif fv.value_boolean is not None:
-                    raw_val = fv.value_boolean
-                elif fv.value_date is not None:
-                    raw_val = fv.value_date.isoformat()
-                if raw_val is not None:
-                    label = (str(raw_val)).strip()
-                    token = _normalize_reference_value(label)
-                    if token:
+                    for label, token in _reverse_ref_tokens_from_cell(cell):
                         descriptor_tokens.setdefault(token, {"label": label})
+            else:
+                p_ft = getattr(parent_field, "field_type", None)
+                if p_ft == FieldType.multi_reference:
+                    arr = fv.value_json if isinstance(fv.value_json, list) else []
+                    for x in arr:
+                        label = str(x).strip() if x is not None else ""
+                        token = _normalize_reference_value(label)
+                        if token:
+                            descriptor_tokens.setdefault(token, {"label": label})
+                else:
+                    # Scalar parent field: use its primary value_text/number/boolean/date
+                    raw_val = None
+                    if fv.value_text not in (None, ""):
+                        raw_val = fv.value_text
+                    elif fv.value_number is not None:
+                        raw_val = fv.value_number
+                    elif fv.value_boolean is not None:
+                        raw_val = fv.value_boolean
+                    elif fv.value_date is not None:
+                        raw_val = fv.value_date.isoformat()
+                    if raw_val is not None:
+                        label = (str(raw_val)).strip()
+                        token = _normalize_reference_value(label)
+                        if token:
+                            descriptor_tokens.setdefault(token, {"label": label})
 
         if not descriptor_tokens:
             continue
@@ -1797,29 +1898,26 @@ async def get_reverse_references_for_entry(
                     if not isinstance(row, dict):
                         continue
                     cell = row.get(child_sub_key)
-                    if cell is None or cell == "":
-                        continue
-                    label = (str(cell)).strip()
-                    token = _normalize_reference_value(label)
-                    if token not in tokens_set:
-                        continue
-                    token_counts[token] = token_counts.get(token, 0) + 1
-                    rows_payload.append(
-                        {
-                            "entry_id": entry.id,
-                            "year": entry.year,
-                            "period_key": getattr(entry, "period_key", "") or "",
-                            "value_token": token,
-                            "value_display": label,
-                            "child_field_id": child_field_id,
-                            "child_field_key": d["child_field_key"],
-                            "child_field_name": d["child_field_name"],
-                            "child_sub_field_key": child_sub_key,
-                            "child_sub_field_name": d["child_sub_field_name"],
-                            "row_index": idx,
-                            "row": row,
-                        }
-                    )
+                    for label, token in _reverse_ref_tokens_from_cell(cell):
+                        if token not in tokens_set:
+                            continue
+                        token_counts[token] = token_counts.get(token, 0) + 1
+                        rows_payload.append(
+                            {
+                                "entry_id": entry.id,
+                                "year": entry.year,
+                                "period_key": getattr(entry, "period_key", "") or "",
+                                "value_token": token,
+                                "value_display": label,
+                                "child_field_id": child_field_id,
+                                "child_field_key": d["child_field_key"],
+                                "child_field_name": d["child_field_name"],
+                                "child_sub_field_key": child_sub_key,
+                                "child_sub_field_name": d["child_sub_field_name"],
+                                "row_index": idx,
+                                "row": row,
+                            }
+                        )
 
         # Only include child KPI if we found any rows
         if not rows_payload:

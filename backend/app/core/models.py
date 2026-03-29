@@ -45,7 +45,7 @@ class FieldType(str, enum.Enum):
     multi_line_items = "multi_line_items"
     formula = "formula"
     reference = "reference"  # Reference/Lookup: values from another KPI field
-
+    multi_reference = "multi_reference"  # Multiple lookup values from one linked KPI field (stored as JSON list)
 
 class TimeDimension(str, enum.Enum):
     """Time granularity: multi_year, yearly, half_yearly, quarterly, monthly."""
