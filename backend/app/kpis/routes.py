@@ -11,7 +11,7 @@ from sqlalchemy import select
 from app.core.database import get_db
 from app.auth.dependencies import require_org_admin, get_current_user, get_data_export_auth, DataExportAuth
 from app.core.models import User, KPI, KpiFile
-from app.entries.service import user_can_view_kpi, user_can_edit_kpi
+from app.entries.service import user_can_view_kpi, user_can_edit_kpi, parse_upsert_match_keys_json
 from app.kpis.schemas import (
     KPICreate,
     KPIUpdate,
@@ -764,15 +764,29 @@ async def sync_kpi_from_api_route(
     kpi_id: int,
     year: int = Query(..., ge=2000, le=2100),
     organization_id: int | None = Query(None),
-    force_override: bool = Query(True, description="Overwrite existing entry when API returns override_existing=false"),
-    sync_mode: str = Query("override", description="override = replace; append = append to multi_line_items"),
+    sync_mode: str = Query(
+        "override",
+        description="override = replace multi-line rows; append = append rows; upsert = merge by upsert_match_keys",
+        pattern="^(override|append|upsert)$",
+    ),
+    upsert_match_keys: str | None = Query(
+        None,
+        description="JSON: multi_line field key -> sub_field key (required for each multi-line table when sync_mode=upsert)",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Call the KPI's API endpoint to fetch entry data for the given year and apply it."""
+    """Call the KPI's API endpoint to fetch entry data for the given year and apply it. UI sync_mode wins; API override_existing is ignored."""
     org_id = _org_id(current_user, organization_id)
+    parsed = parse_upsert_match_keys_json(upsert_match_keys)
     result = await sync_kpi_entry_from_api(
-        db, kpi_id, org_id, year, current_user.id, force_override=force_override, sync_mode=sync_mode
+        db,
+        kpi_id,
+        org_id,
+        year,
+        current_user.id,
+        sync_mode=sync_mode,
+        upsert_match_keys=parsed,
     )
     if result is None:
         raise HTTPException(
