@@ -184,8 +184,11 @@ export default function DomainKpiDetailPage() {
   /** Saving flag for KPI-level role assignments when edited inline. */
   const [savingRoleAssignments, setSavingRoleAssignments] = useState(false);
   const [uploadingFieldId, setUploadingFieldId] = useState<number | null>(null);
-  const [uploadOption, setUploadOption] = useState<"append" | "override" | null>(null);
-  const [syncOption, setSyncOption] = useState<"append" | "override" | null>(null);
+  const [uploadOption, setUploadOption] = useState<"append" | "override" | "upsert" | null>(null);
+  const [upsertMatchKeyByFieldId, setUpsertMatchKeyByFieldId] = useState<Record<number, string>>({});
+  const [syncOption, setSyncOption] = useState<"append" | "override" | "upsert" | null>(null);
+  /** KPI-level API sync upsert: parent field key -> sub_field key */
+  const [kpiSyncUpsertByFieldKey, setKpiSyncUpsertByFieldKey] = useState<Record<string, string>>({});
   const [fetchingFromApi, setFetchingFromApi] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [bulkMethod, setBulkMethod] = useState<"upload" | "api">("upload");
@@ -3066,8 +3069,23 @@ export default function DomainKpiDetailPage() {
           const setRows = (next: Record<string, unknown>[]) => updateField(f.id, "value_json", next);
           const fieldQuery = `?field_id=${f.id}&organization_id=${effectiveOrgId}`;
           const templateQuery = entry ? `?field_id=${f.id}&entry_id=${entry.id}&organization_id=${effectiveOrgId}` : fieldQuery;
-          const appendUpload = uploadOption === "append";
-          const uploadQuery = entry ? `?entry_id=${entry.id}&field_id=${f.id}&organization_id=${effectiveOrgId}&append=${appendUpload}` : "";
+          const uploadQuery =
+            entry && effectiveOrgId != null
+              ? (() => {
+                  const p = new URLSearchParams({
+                    entry_id: String(entry.id),
+                    field_id: String(f.id),
+                    organization_id: String(effectiveOrgId),
+                  });
+                  if (uploadOption === "upsert") {
+                    p.set("import_mode", "upsert");
+                    p.set("match_sub_field_key", (upsertMatchKeyByFieldId[f.id] ?? "").trim());
+                  } else {
+                    p.set("import_mode", uploadOption === "append" ? "append" : "replace");
+                  }
+                  return `?${p.toString()}`;
+                })()
+              : "";
           return (
             <div key={f.id} style={{ overflowX: "auto" }}>
               {subFields.length === 0 ? (
@@ -3202,6 +3220,42 @@ export default function DomainKpiDetailPage() {
                           />
                           Override existing data (replace all)
                         </label>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                          <input
+                            type="radio"
+                            name="uploadOption"
+                            checked={uploadOption === "upsert"}
+                            onChange={() => setUploadOption("upsert")}
+                            disabled={!entry || isLocked}
+                          />
+                          Update or add (match on a column)
+                        </label>
+                        {uploadOption === "upsert" && subFields.length > 0 && (
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem", marginTop: "0.25rem" }}>
+                            <label style={{ fontSize: "0.85rem", fontWeight: 500 }}>Match column (same value updates the row; new value adds a row)</label>
+                            <select
+                              value={upsertMatchKeyByFieldId[f.id] ?? ""}
+                              onChange={(e) =>
+                                setUpsertMatchKeyByFieldId((prev) => ({ ...prev, [f.id]: e.target.value }))
+                              }
+                              style={{
+                                maxWidth: 360,
+                                padding: "0.45rem 0.6rem",
+                                borderRadius: 8,
+                                border: "1px solid var(--border)",
+                                fontSize: "0.9rem",
+                                background: "var(--surface)",
+                              }}
+                            >
+                              <option value="">— Select sub-field —</option>
+                              {subFields.map((s) => (
+                                <option key={s.key} value={s.key}>
+                                  {s.name} ({s.key})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
                         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginTop: "0.25rem" }}>
                           <button
                             type="button"
@@ -3223,8 +3277,19 @@ export default function DomainKpiDetailPage() {
                           <label
                             className="btn btn-primary"
                             style={{
-                              cursor: entry && uploadOption != null && uploadingFieldId === null ? "pointer" : "not-allowed",
-                              opacity: entry && uploadOption != null ? 1 : 0.6,
+                              cursor:
+                                entry &&
+                                uploadOption != null &&
+                                uploadingFieldId === null &&
+                                (uploadOption !== "upsert" || (upsertMatchKeyByFieldId[f.id] ?? "").trim())
+                                  ? "pointer"
+                                  : "not-allowed",
+                              opacity:
+                                entry &&
+                                uploadOption != null &&
+                                (uploadOption !== "upsert" || (upsertMatchKeyByFieldId[f.id] ?? "").trim())
+                                  ? 1
+                                  : 0.6,
                             }}
                           >
                             {uploadingFieldId === f.id ? "Uploading…" : "Upload Excel"}
@@ -3232,11 +3297,22 @@ export default function DomainKpiDetailPage() {
                               type="file"
                               accept=".xlsx"
                               style={{ display: "none" }}
-                              disabled={!entry || uploadOption == null || uploadingFieldId !== null || isLocked}
+                              disabled={
+                                !entry ||
+                                uploadOption == null ||
+                                uploadingFieldId !== null ||
+                                isLocked ||
+                                (uploadOption === "upsert" && !(upsertMatchKeyByFieldId[f.id] ?? "").trim())
+                              }
                               onChange={async (e) => {
                                 const file = e.target.files?.[0];
                                 e.target.value = "";
                                 if (!file || !entry || uploadOption == null) return;
+                                if (uploadOption === "upsert" && !(upsertMatchKeyByFieldId[f.id] ?? "").trim()) {
+                                  setBulkUploadError("Select which sub-field to use for matching.");
+                                  window.scrollTo({ top: 0, behavior: "smooth" });
+                                  return;
+                                }
                                 if (uploadOption === "override") {
                                   const periodNote = timeDimensionLabel != null ? ` Data will apply to period: ${timeDimensionLabel} (${year}).` : "";
                                   if (!window.confirm(`Are you sure you want to replace all existing data for this field?${periodNote} This cannot be undone.`)) return;
@@ -3252,8 +3328,15 @@ export default function DomainKpiDetailPage() {
                                     body: form,
                                   });
                                   if (res.ok) {
+                                    const payload = await res.json().catch(() => ({} as Record<string, unknown>));
                                     await loadData();
-                                    toast.success("Excel uploaded successfully");
+                                    if (uploadOption === "upsert") {
+                                      const u = Number(payload.rows_updated ?? 0);
+                                      const a = Number(payload.rows_added ?? 0);
+                                      toast.success(`Update or add: ${u} row(s) updated, ${a} new row(s) added`);
+                                    } else {
+                                      toast.success("Excel uploaded successfully");
+                                    }
                                   } else {
                                     const err = await res.json().catch(() => ({}));
                                     const validationErrors = Array.isArray(err.errors)
@@ -3313,10 +3396,52 @@ export default function DomainKpiDetailPage() {
                           <input type="radio" name="syncOption" checked={syncOption === "override"} onChange={() => setSyncOption("override")} />
                           Override existing data (replace all)
                         </label>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                          <input type="radio" name="syncOption" checked={syncOption === "upsert"} onChange={() => setSyncOption("upsert")} />
+                          Update or add (match on a column per multi-line table)
+                        </label>
+                        {syncOption === "upsert" &&
+                          multiLineFields.filter((mf) => (mf.sub_fields?.length ?? 0) > 0).map((mf) => (
+                            <div key={mf.id} style={{ display: "flex", flexDirection: "column", gap: "0.35rem", marginTop: "0.25rem" }}>
+                              <span style={{ fontSize: "0.85rem", fontWeight: 500 }}>
+                                Match column for <strong>{mf.name}</strong> ({mf.key})
+                              </span>
+                              <select
+                                value={kpiSyncUpsertByFieldKey[mf.key] ?? ""}
+                                onChange={(e) =>
+                                  setKpiSyncUpsertByFieldKey((prev) => ({ ...prev, [mf.key]: e.target.value }))
+                                }
+                                style={{
+                                  maxWidth: 360,
+                                  padding: "0.45rem 0.6rem",
+                                  borderRadius: 8,
+                                  border: "1px solid var(--border)",
+                                  fontSize: "0.9rem",
+                                  background: "var(--surface)",
+                                }}
+                              >
+                                <option value="">— Select sub-field —</option>
+                                {(mf.sub_fields ?? []).map((s) => (
+                                  <option key={s.key} value={s.key}>
+                                    {s.name} ({s.key})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ))}
                         <button
                           type="button"
                           className="btn btn-primary"
-                          disabled={syncOption == null || fetchingFromApi || isLocked}
+                          disabled={
+                            syncOption == null ||
+                            fetchingFromApi ||
+                            isLocked ||
+                            (syncOption === "upsert" &&
+                              multiLineFields.some(
+                                (mf) =>
+                                  (mf.sub_fields?.length ?? 0) > 0 && !(kpiSyncUpsertByFieldKey[mf.key] ?? "").trim()
+                              ))
+                          }
                           style={{ opacity: syncOption != null ? 1 : 0.6, marginTop: "0.25rem" }}
                           onClick={async () => {
                             if (syncOption == null) return;
@@ -3324,14 +3449,53 @@ export default function DomainKpiDetailPage() {
                               const periodNote = timeDimensionLabel != null ? ` Data will apply to period: ${timeDimensionLabel} (${year}).` : "";
                               if (!window.confirm(`Are you sure you want to replace all existing data?${periodNote} This cannot be undone.`)) return;
                             }
+                            if (syncOption === "upsert") {
+                              const need = multiLineFields.filter((mf) => (mf.sub_fields?.length ?? 0) > 0);
+                              for (const mf of need) {
+                                if (!(kpiSyncUpsertByFieldKey[mf.key] ?? "").trim()) {
+                                  setSaveError(`Select a match column for multi-line field "${mf.name}".`);
+                                  toast.error(`Select a match column for "${mf.name}".`);
+                                  return;
+                                }
+                              }
+                            }
                             setFetchingFromApi(true);
                             setSaveError(null);
                             setSyncFeedback(null);
                             try {
-                              const result = await api<{ fields_updated?: number }>(
-                                `/entries/sync-from-api?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId!, sync_mode: syncOption })}`,
+                              const upsertPayload: Record<string, string> = {};
+                              if (syncOption === "upsert") {
+                                for (const mf of multiLineFields) {
+                                  if ((mf.sub_fields?.length ?? 0) === 0) continue;
+                                  const mk = (kpiSyncUpsertByFieldKey[mf.key] ?? "").trim();
+                                  if (mk) upsertPayload[mf.key] = mk;
+                                }
+                              }
+                              const q =
+                                syncOption === "upsert" && Object.keys(upsertPayload).length > 0
+                                  ? qs({
+                                      kpi_id: kpiId,
+                                      year,
+                                      organization_id: effectiveOrgId!,
+                                      sync_mode: syncOption,
+                                      upsert_match_keys: JSON.stringify(upsertPayload),
+                                    })
+                                  : qs({
+                                      kpi_id: kpiId,
+                                      year,
+                                      organization_id: effectiveOrgId!,
+                                      sync_mode: syncOption,
+                                    });
+                              const result = await api<{ fields_updated?: number; skipped?: boolean; reason?: string }>(
+                                `/entries/sync-from-api?${q}`,
                                 { method: "POST", token }
                               );
+                              if (result?.skipped) {
+                                const msg = result.reason ?? "Sync was skipped.";
+                                setSaveError(msg);
+                                toast.error(msg);
+                                return;
+                              }
                               await loadData();
                               const n = result?.fields_updated ?? 0;
                               setSyncFeedback(n > 0 ? `${n} field(s) updated.` : "Sync completed; no fields updated.");

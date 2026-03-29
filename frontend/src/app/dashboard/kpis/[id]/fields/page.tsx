@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -216,7 +216,8 @@ export default function KpiFieldsPage() {
   const [kpiSaving, setKpiSaving] = useState(false);
   const [orgTimeDimension, setOrgTimeDimension] = useState<string>("yearly");
   const [syncLoading, setSyncLoading] = useState(false);
-  const [syncMode, setSyncMode] = useState<"override" | "append">("override");
+  const [syncMode, setSyncMode] = useState<"override" | "append" | "upsert">("override");
+  const [kpiSyncUpsertByFieldKey, setKpiSyncUpsertByFieldKey] = useState<Record<string, string>>({});
   const [contractOpen, setContractOpen] = useState(false);
   const [contract, setContract] = useState<Record<string, unknown> | null>(null);
   const [orgDomains, setOrgDomains] = useState<Array<{ id: number; name: string }>>([]);
@@ -241,6 +242,11 @@ export default function KpiFieldsPage() {
 
   const token = getAccessToken();
   const router = useRouter();
+
+  const multiLineFieldsForSync = useMemo(
+    () => list.filter((f) => f.field_type === "multi_line_items" && (f.sub_fields?.length ?? 0) > 0),
+    [list]
+  );
 
   useEffect(() => {
     if (tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings") {
@@ -1045,7 +1051,33 @@ export default function KpiFieldsPage() {
                               <input type="radio" name="syncMode" checked={syncMode === "append"} onChange={() => setSyncMode("append")} />
                               Append to existing (multi-line rows)
                             </label>
+                            <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                              <input type="radio" name="syncMode" checked={syncMode === "upsert"} onChange={() => setSyncMode("upsert")} />
+                              Update or add (match per multi-line table)
+                            </label>
                           </div>
+                          {syncMode === "upsert" &&
+                            multiLineFieldsForSync.map((mf) => (
+                              <div key={mf.id} className="form-group" style={{ marginBottom: "0.5rem" }}>
+                                <label style={{ fontSize: "0.9rem" }}>
+                                  Match column — {mf.name} <span style={{ color: "var(--muted)" }}>({mf.key})</span>
+                                </label>
+                                <select
+                                  value={kpiSyncUpsertByFieldKey[mf.key] ?? ""}
+                                  onChange={(e) =>
+                                    setKpiSyncUpsertByFieldKey((prev) => ({ ...prev, [mf.key]: e.target.value }))
+                                  }
+                                  style={{ display: "block", marginTop: "0.25rem", maxWidth: 400, padding: "0.4rem 0.5rem" }}
+                                >
+                                  <option value="">— Select sub-field —</option>
+                                  {(mf.sub_fields ?? []).map((s) => (
+                                    <option key={s.key} value={s.key}>
+                                      {s.name} ({s.key})
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            ))}
                           <div className="form-group" style={{ marginBottom: "0.5rem" }}>
                             <label>Year to sync</label>
                             <input type="number" min={2000} max={2100} value={syncYear} onChange={(e) => setSyncYear(Number(e.target.value) || new Date().getFullYear())} style={{ width: "6rem" }} />
@@ -1053,12 +1085,49 @@ export default function KpiFieldsPage() {
                           <button
                             type="button"
                             className="btn"
-                            disabled={syncLoading}
+                            disabled={
+                              syncLoading ||
+                              (syncMode === "upsert" &&
+                                multiLineFieldsForSync.some((mf) => !(kpiSyncUpsertByFieldKey[mf.key] ?? "").trim()))
+                            }
                             onClick={async () => {
+                              if (syncMode === "upsert") {
+                                for (const mf of multiLineFieldsForSync) {
+                                  if (!(kpiSyncUpsertByFieldKey[mf.key] ?? "").trim()) {
+                                    toast.error(`Select a match column for "${mf.name}".`);
+                                    return;
+                                  }
+                                }
+                              }
                               setSyncLoading(true);
                               try {
-                                await api(`/kpis/${kpiId}/sync-from-api?${qs({ year: syncYear, organization_id: orgIdFromUrl!, sync_mode: syncMode })}`, { method: "POST", token: token! });
+                                const upsertPayload: Record<string, string> = {};
+                                if (syncMode === "upsert") {
+                                  for (const mf of multiLineFieldsForSync) {
+                                    upsertPayload[mf.key] = (kpiSyncUpsertByFieldKey[mf.key] ?? "").trim();
+                                  }
+                                }
+                                const syncQs =
+                                  syncMode === "upsert" && Object.keys(upsertPayload).length > 0
+                                    ? qs({
+                                        year: syncYear,
+                                        organization_id: orgIdFromUrl!,
+                                        sync_mode: syncMode,
+                                        upsert_match_keys: JSON.stringify(upsertPayload),
+                                      })
+                                    : qs({ year: syncYear, organization_id: orgIdFromUrl!, sync_mode: syncMode });
+                                const res = await api<{ skipped?: boolean; reason?: string }>(
+                                  `/kpis/${kpiId}/sync-from-api?${syncQs}`,
+                                  { method: "POST", token: token! }
+                                );
+                                if (res && typeof res === "object" && "skipped" in res && (res as { skipped?: boolean }).skipped) {
+                                  toast.error((res as { reason?: string }).reason ?? "Sync skipped");
+                                  return;
+                                }
                                 loadKpi();
+                                toast.success("Sync completed");
+                              } catch (e) {
+                                toast.error(e instanceof Error ? e.message : "Sync failed");
                               } finally {
                                 setSyncLoading(false);
                               }
@@ -1066,7 +1135,7 @@ export default function KpiFieldsPage() {
                           >
                             {syncLoading ? "Syncing…" : "Sync from API now"}
                           </button>
-                          <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for the selected year from your endpoint.</p>
+                          <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for the selected year from your endpoint. Override, append, or upsert applies to multi-line tables; other fields follow override behavior.</p>
                         </div>
                       )}
                     </>

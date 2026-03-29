@@ -1,8 +1,11 @@
 """KPI entry API routes (data entry + admin lock)."""
 
+from __future__ import annotations
+
 from io import BytesIO
 import csv
 import json
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -48,6 +51,10 @@ from app.entries.service import (
     list_entries_overview,
     EntryValidationError,
     _normalize_reference_value,
+    _stringify_for_upsert_match_key,
+    _upsert_merge_multi_line_items,
+    _is_multi_items_row_effectively_empty,
+    parse_upsert_match_keys_json,
 )
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
@@ -108,6 +115,43 @@ async def _load_multi_items_field(db: AsyncSession, org_id: int, field_id: int) 
     return field
 
 
+def _serialize_multi_item_cell_for_xlsx(val: Any, field_type: FieldType | str | None) -> Any:
+    """Ensure cell values are openpyxl-safe (lists/dicts are flattened or JSON — never raw list)."""
+    if val is None:
+        return ""
+    ft = field_type.value if isinstance(field_type, FieldType) else field_type
+    if ft == FieldType.multi_reference.value or ft == "multi_reference":
+        if isinstance(val, list):
+            parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
+            return "; ".join(parts)
+        return str(val).strip() if str(val).strip() else ""
+    if isinstance(val, list):
+        parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
+        return "; ".join(parts)
+    if isinstance(val, dict):
+        return json.dumps(val, ensure_ascii=False)
+    return val
+
+
+def _serialize_multi_item_cell_for_csv(val: Any, field_type: FieldType | str | None) -> Any:
+    if val is None:
+        return ""
+    ft = field_type.value if isinstance(field_type, FieldType) else field_type
+    if ft == FieldType.multi_reference.value or ft == "multi_reference":
+        if isinstance(val, list):
+            return "; ".join(str(x).strip() for x in val if x is not None and str(x).strip() != "")
+        return val
+    if isinstance(val, list):
+        return "; ".join(str(x).strip() for x in val if x is not None and str(x).strip() != "")
+    return val
+
+
+def _resolve_multi_items_import_mode(import_mode: str | None, append_legacy: bool) -> str:
+    if import_mode:
+        return import_mode.strip().lower()
+    return "append" if append_legacy else "replace"
+
+
 def _xlsx_bytes_for_multi_items_template(field: KPIField, existing_items: list[dict] | None = None) -> bytes:
     """Create an Excel template for multi_line_items sub_fields. Optionally include existing data."""
     # Import here so app can start even if optional dependency isn't installed yet.
@@ -118,6 +162,7 @@ def _xlsx_bytes_for_multi_items_template(field: KPIField, existing_items: list[d
     ws.title = "Items"
 
     sub_fields = list(field.sub_fields or [])
+    key_to_sf = {s.key: s for s in sub_fields}
     # Header row uses sub-field keys (stable API identifiers).
     keys = [s.key for s in sub_fields]
     ws.append(keys)
@@ -126,10 +171,15 @@ def _xlsx_bytes_for_multi_items_template(field: KPIField, existing_items: list[d
         for item in items:
             if not isinstance(item, dict):
                 continue
-            ws.append([(item.get(k) if item.get(k) is not None else "") for k in keys])
-    else:
-        # Empty sample row (user fills in).
-        ws.append(["" for _ in keys])
+            row_cells = []
+            for k in keys:
+                raw = item.get(k)
+                v = raw if raw is not None else ""
+                sf = key_to_sf.get(k)
+                ft = getattr(sf, "field_type", None) if sf else None
+                row_cells.append(_serialize_multi_item_cell_for_xlsx(v, ft))
+            ws.append(row_cells)
+    # No blank data row: avoids a phantom row on every re-upload; users add rows in Excel as needed.
 
     buf = BytesIO()
     wb.save(buf)
@@ -197,9 +247,16 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
                         item[key] = str(raw)
                 else:
                     item[key] = str(raw)
+            elif sf.field_type == FieldType.multi_reference:
+                # Semicolon (or comma) separated in Excel; validated on upload.
+                item[key] = str(raw).strip() if raw is not None else ""
             else:
-                item[key] = str(raw)
-        if not empty:
+                # Text / reference / attachment: Excel often stores numeric ids as float (e.g. 42.0).
+                if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                    item[key] = _stringify_for_upsert_match_key(raw)
+                else:
+                    item[key] = str(raw) if raw is not None else ""
+        if not empty and not _is_multi_items_row_effectively_empty(item):
             out.append(item)
     return out
 
@@ -263,13 +320,22 @@ async def download_multi_items_template(
 async def upload_multi_items_excel(
     entry_id: int = Query(...),
     field_id: int = Query(...),
-    append: bool = Query(False, description="If true, append rows; otherwise replace"),
+    append: bool = Query(False, description="Deprecated: use import_mode=append instead"),
+    import_mode: str | None = Query(
+        None,
+        description="replace (default), append, or upsert (requires match_sub_field_key)",
+        pattern="^(replace|append|upsert)$",
+    ),
+    match_sub_field_key: str | None = Query(
+        None,
+        description="Sub-field key used to match rows when import_mode=upsert (same normalized value => update row)",
+    ),
     file: UploadFile = File(...),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Upload Excel and set/append multi_line_items value_json for an entry+field (requires add_row permission)."""
+    """Upload Excel and set/append/upsert multi_line_items value_json for an entry+field (requires add_row permission)."""
     org_id = _org_id(current_user, organization_id)
 
     entry_res = await db.execute(
@@ -293,6 +359,7 @@ async def upload_multi_items_excel(
 
     content = await file.read()
     items = _parse_multi_items_xlsx(content, field)
+    items = [it for it in items if isinstance(it, dict) and not _is_multi_items_row_effectively_empty(it)]
 
     # Reference consistency check for reference sub-fields (row-level errors)
     # Rules:
@@ -396,6 +463,27 @@ async def upload_multi_items_excel(
     if validation_errors:
         raise EntryValidationError(validation_errors)
 
+    items = [it for it in items if isinstance(it, dict) and not _is_multi_items_row_effectively_empty(it)]
+
+    mode = _resolve_multi_items_import_mode(import_mode, append)
+    if mode == "upsert":
+        mk = (match_sub_field_key or "").strip()
+        if not mk:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="match_sub_field_key is required when import_mode=upsert",
+            )
+        sub_by_key = {s.key: s for s in (field.sub_fields or [])}
+        if mk not in sub_by_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="match_sub_field_key must be a defined sub-field key for this multi-line field",
+            )
+        match_ft = getattr(sub_by_key[mk], "field_type", None)
+    else:
+        mk = None
+        match_ft = None
+
     fv_res = await db.execute(
         select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
     )
@@ -405,23 +493,36 @@ async def upload_multi_items_excel(
         db.add(fv)
     prev_count = len(fv.value_json) if isinstance(fv.value_json, list) else 0
     imported_count = len(items) if isinstance(items, list) else 0
-    if append and isinstance(fv.value_json, list):
-        fv.value_json = list(fv.value_json) + items
+    existing_list = list(fv.value_json) if isinstance(fv.value_json, list) else []
+
+    rows_updated = 0
+    if mode == "append":
+        fv.value_json = existing_list + items
         rows_added = imported_count
+        rows_overridden = 0
+    elif mode == "upsert":
+        merged, rows_updated, rows_added = _upsert_merge_multi_line_items(
+            existing_list, items, mk, match_ft
+        )
+        fv.value_json = merged
         rows_overridden = 0
     else:
         fv.value_json = items
         rows_added = imported_count
         rows_overridden = prev_count
     entry.user_id = current_user.id  # track last editor (optional)
+    flag_modified(fv, "value_json")
     await db.commit()
 
     return {
         "entry_id": entry.id,
         "field_id": field.id,
-        "append": append,
+        "import_mode": mode,
+        "append": mode == "append",
         "rows_added": rows_added,
+        "rows_updated": rows_updated,
         "rows_overridden": rows_overridden,
+        "match_sub_field_key": mk,
     }
 
 
@@ -866,7 +967,15 @@ async def sync_multi_items_from_api(
     entry_id: int = Query(...),
     field_id: int = Query(...),
     organization_id: int | None = Query(None),
-    sync_mode: str = Query("override", description="override = replace existing; append = append rows"),
+    sync_mode: str = Query(
+        "override",
+        description="override = replace existing; append = append rows; upsert = update by match_sub_field_key or add",
+        pattern="^(override|append|upsert)$",
+    ),
+    match_sub_field_key: str | None = Query(
+        None,
+        description="Required when sync_mode=upsert: sub-field key to match existing rows",
+    ),
     api_url: str | None = Query(None, description="Optional override for field config multi_items_api_endpoint_url"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
@@ -879,12 +988,14 @@ async def sync_multi_items_from_api(
     - Expected response:
         {
           "year": 2026,
-          "items": [ { ...row1 }, { ...row2 }, ... ],
-          "override_existing": true | false   # optional, defaults to true
+          "items": [ { ...row1 }, { ...row2 }, ... ]
         }
+    - sync_mode (query param, from UI) always wins. Any override / append / merge hints in the API body
+      (e.g. override_existing) are ignored.
     - sync_mode:
         - "override": replace existing rows with items
         - "append": append items to existing rows
+        - "upsert": rows whose match field equals an existing row (normalized) are merged; others appended
     """
     org_id = _org_id(current_user, organization_id)
     # Load entry and field
@@ -936,7 +1047,6 @@ async def sync_multi_items_from_api(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Field API response must be a JSON object")
     resp_year = data.get("year")
     items = data.get("items")
-    override_existing = data.get("override_existing", True)
     if resp_year is not None and int(resp_year) != int(entry.year):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Year in field API response does not match entry year")
     if not isinstance(items, list):
@@ -952,26 +1062,55 @@ async def sync_multi_items_from_api(
         existing_rows = fv.value_json
 
     effective_mode = (sync_mode or "override").lower()
-    if effective_mode == "append":
-        new_rows = existing_rows + items
+    item_dicts = [
+        dict(x)
+        for x in items
+        if isinstance(x, dict) and not _is_multi_items_row_effectively_empty(dict(x))
+    ]
+
+    if effective_mode == "upsert":
+        mk = (match_sub_field_key or "").strip()
+        if not mk:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="match_sub_field_key is required when sync_mode=upsert",
+            )
+        sub_by_key = {s.key: s for s in (field.sub_fields or [])}
+        if mk not in sub_by_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="match_sub_field_key must be a defined sub-field key for this multi-line field",
+            )
+        match_ft = getattr(sub_by_key[mk], "field_type", None)
+        new_rows, rows_updated, rows_added = _upsert_merge_multi_line_items(
+            existing_rows, item_dicts, mk, match_ft
+        )
+    elif effective_mode == "append":
+        new_rows = existing_rows + item_dicts
+        rows_updated = 0
+        rows_added = len(item_dicts)
     else:
-        # If override_existing is false and there is existing data, skip (similar to KPI-level behaviour)
-        if not override_existing and existing_rows:
-            return {
-                "skipped": True,
-                "reason": "Field already has rows and override_existing=false in API response.",
-                "rows_imported": 0,
-            }
-        new_rows = items
+        new_rows = item_dicts
+        rows_updated = 0
+        rows_added = len(item_dicts)
 
     if fv is None:
         fv = KPIFieldValue(entry_id=entry.id, field_id=field.id, value_json=new_rows)
         db.add(fv)
     else:
         fv.value_json = new_rows
+    flag_modified(fv, "value_json")
     await db.flush()
     await db.commit()
-    return {"entry_id": entry.id, "field_id": field.id, "rows_imported": len(items)}
+    out: dict = {
+        "entry_id": entry.id,
+        "field_id": field.id,
+        "rows_imported": len(item_dicts),
+    }
+    if effective_mode == "upsert":
+        out["rows_updated"] = rows_updated
+        out["rows_appended"] = rows_added
+    return out
 
 
 @router.get("/multi-items/export")
@@ -1061,11 +1200,20 @@ async def export_multi_items_csv(
     # Build CSV
     sub_fields = [sf for sf in (field.sub_fields or [])]
     headers = [getattr(sf, "key", "") for sf in sub_fields]
+    key_to_sf = {sf.key: sf for sf in sub_fields}
     output = BytesIO()
     writer = csv.writer(output)
     writer.writerow(headers)
     for r in rows:
-        writer.writerow([r.get(key, "") for key in headers])
+        writer.writerow(
+            [
+                _serialize_multi_item_cell_for_csv(
+                    r.get(key, "") if isinstance(r, dict) else "",
+                    getattr(key_to_sf.get(key), "field_type", None),
+                )
+                for key in headers
+            ]
+        )
 
     filename = f"multi_items_{field.key}_{field.id}.csv"
     return StreamingResponse(
@@ -1175,18 +1323,32 @@ async def entry_sync_from_api(
     kpi_id: int = Query(...),
     year: int = Query(..., ge=2000, le=2100),
     organization_id: int | None = Query(None),
-    force_override: bool = Query(True, description="If true, overwrite existing entry data when API returns override_existing=false"),
-    sync_mode: str = Query("override", description="override = replace existing; append = append API rows to multi_line_items (ignores API override_existing)"),
+    sync_mode: str = Query(
+        "override",
+        description="override = replace multi-line rows; append = append; upsert = merge by upsert_match_keys",
+        pattern="^(override|append|upsert)$",
+    ),
+    upsert_match_keys: str | None = Query(
+        None,
+        description="JSON: multi_line field key -> sub_field key (each multi-line table when sync_mode=upsert)",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fetch entry data from the KPI's API endpoint. User must be allowed to edit this KPI."""
+    """Fetch entry data from the KPI's API endpoint. User must be allowed to edit this KPI. UI sync_mode wins; API override_existing is ignored."""
     org_id = _org_id(current_user, organization_id)
     can = await user_can_edit_kpi(db, current_user.id, kpi_id)
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
+    parsed = parse_upsert_match_keys_json(upsert_match_keys)
     result = await sync_kpi_entry_from_api(
-        db, kpi_id, org_id, year, current_user.id, force_override=force_override, sync_mode=sync_mode
+        db,
+        kpi_id,
+        org_id,
+        year,
+        current_user.id,
+        sync_mode=sync_mode,
+        upsert_match_keys=parsed,
     )
     if result is None:
         raise HTTPException(

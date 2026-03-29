@@ -6,6 +6,11 @@ import Link from "next/link";
 import { getAccessToken, clearTokens } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 import toast from "react-hot-toast";
+import {
+  buildMultiItemsApiRequestExample,
+  buildMultiItemsApiResponseExamplePreferActual,
+  stringifyApiExample,
+} from "@/lib/multiItemsApiExample";
 
 type SubField = { key: string; name: string; field_type?: string | null; is_required?: boolean };
 
@@ -77,14 +82,15 @@ export default function FullPageMultiItems() {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editData, setEditData] = useState<Record<string, unknown>>({});
   const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
-  const [syncMode, setSyncMode] = useState<"override" | "append">("override");
-  const [uploadOption, setUploadOption] = useState<"append" | "override" | null>(null);
+  const [uploadOption, setUploadOption] = useState<"append" | "override" | "upsert" | null>(null);
+  const [upsertMatchSubFieldKey, setUpsertMatchSubFieldKey] = useState<string>("");
   const [uploading, setUploading] = useState(false);
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [filtersDraft, setFiltersDraft] = useState<Record<string, string>>({});
   const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
   const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | null>(null);
   const [apiUrlOverride, setApiUrlOverride] = useState<string>("");
+  const [showApiExampleJson, setShowApiExampleJson] = useState(false);
   const [showFilterPanel, setShowFilterPanel] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState<string[]>([]);
   const [showColumnsPopup, setShowColumnsPopup] = useState(false);
@@ -213,6 +219,36 @@ export default function FullPageMultiItems() {
   }, [token, kpiId, year, effectiveOrgId, fieldId, periodKey]);
 
   const subFields = field?.sub_fields ?? [];
+
+  const fieldApiResponseExampleJson = useMemo(() => {
+    const actualData = rows.slice(0, 2).map((r) => r.data);
+    return stringifyApiExample(
+      buildMultiItemsApiResponseExamplePreferActual(year, field?.sub_fields ?? [], actualData)
+    );
+  }, [year, field?.sub_fields, rows]);
+
+  const fieldApiRequestExampleJson = useMemo(() => {
+    if (effectiveOrgId == null) {
+      return stringifyApiExample({
+        year,
+        kpi_id: kpiId,
+        field_id: fieldId,
+        field_key: field?.key ?? "",
+        organization_id: "<organization_id>",
+        entry_id: entryId,
+      });
+    }
+    return stringifyApiExample(
+      buildMultiItemsApiRequestExample({
+        year,
+        kpiId,
+        fieldId,
+        fieldKey: field?.key ?? "",
+        organizationId: effectiveOrgId,
+        entryId,
+      })
+    );
+  }, [year, kpiId, fieldId, field?.key, effectiveOrgId, entryId]);
 
   useEffect(() => {
     if (!entryId) return;
@@ -736,7 +772,34 @@ export default function FullPageMultiItems() {
                   />
                   Override
                 </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    name="uploadMode"
+                    checked={uploadOption === "upsert"}
+                    onChange={() => setUploadOption("upsert")}
+                    disabled={!entryId}
+                  />
+                  Update or add
+                </label>
               </div>
+              {uploadOption === "upsert" && subFields.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", marginTop: "0.25rem" }}>
+                  <label style={{ fontSize: "0.8rem", fontWeight: 500 }}>Match on sub-field (same value → update row; new value → add row)</label>
+                  <select
+                    value={upsertMatchSubFieldKey}
+                    onChange={(e) => setUpsertMatchSubFieldKey(e.target.value)}
+                    style={{ maxWidth: 320, padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                  >
+                    <option value="">— Select column —</option>
+                    {subFields.map((sf) => (
+                      <option key={sf.key} value={sf.key}>
+                        {sf.name} ({sf.key})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
               <span style={{ fontSize: "0.85rem", fontWeight: 500 }}>Step 2 – Channel</span>
@@ -814,8 +877,11 @@ export default function FullPageMultiItems() {
                 <label
                   className="btn btn-primary"
                   style={{
-                    cursor: entryId && uploadOption != null && !uploading ? "pointer" : "not-allowed",
-                    opacity: entryId && uploadOption != null ? 1 : 0.6,
+                    cursor:
+                      entryId && uploadOption != null && !uploading && (uploadOption !== "upsert" || upsertMatchSubFieldKey.trim())
+                        ? "pointer"
+                        : "not-allowed",
+                    opacity: entryId && uploadOption != null && (uploadOption !== "upsert" || upsertMatchSubFieldKey.trim()) ? 1 : 0.6,
                   }}
                 >
                   {uploading ? "Uploading…" : "Upload Excel"}
@@ -823,11 +889,20 @@ export default function FullPageMultiItems() {
                     type="file"
                     accept=".xlsx"
                     style={{ display: "none" }}
-                    disabled={!entryId || uploadOption == null || uploading}
+                    disabled={
+                      !entryId ||
+                      uploadOption == null ||
+                      uploading ||
+                      (uploadOption === "upsert" && !upsertMatchSubFieldKey.trim())
+                    }
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
                       e.target.value = "";
                       if (!file || !token || !fieldId || !entryId || effectiveOrgId == null || uploadOption == null) return;
+                      if (uploadOption === "upsert" && !upsertMatchSubFieldKey.trim()) {
+                        toast.error("Select which sub-field to use for matching.");
+                        return;
+                      }
                       if (uploadOption === "override") {
                         if (
                           !window.confirm(
@@ -841,14 +916,18 @@ export default function FullPageMultiItems() {
                       try {
                         const form = new FormData();
                         form.append("file", file);
-                        const url = getApiUrl(
-                          `/entries/multi-items/upload?${new URLSearchParams({
-                            entry_id: String(entryId),
-                            field_id: String(fieldId),
-                            organization_id: String(effectiveOrgId),
-                            append: uploadOption === "append" ? "true" : "false",
-                          }).toString()}`
-                        );
+                        const q = new URLSearchParams({
+                          entry_id: String(entryId),
+                          field_id: String(fieldId),
+                          organization_id: String(effectiveOrgId),
+                        });
+                        if (uploadOption === "upsert") {
+                          q.set("import_mode", "upsert");
+                          q.set("match_sub_field_key", upsertMatchSubFieldKey.trim());
+                        } else {
+                          q.set("import_mode", uploadOption === "append" ? "append" : "replace");
+                        }
+                        const url = getApiUrl(`/entries/multi-items/upload?${q.toString()}`);
                         const res = await fetch(url, {
                           method: "POST",
                           headers: { Authorization: `Bearer ${token}` },
@@ -858,12 +937,19 @@ export default function FullPageMultiItems() {
                           const payload = await res.json().catch(() => ({} as any));
                           const added = Number((payload as any)?.rows_added ?? 0);
                           const overridden = Number((payload as any)?.rows_overridden ?? 0);
-                          const modeLabel = uploadOption === "append" ? "Appended" : "Replaced";
-                          toast.success(
-                            overridden > 0
-                              ? `${modeLabel}: ${added} rows imported (overrode ${overridden} existing)`
-                              : `${modeLabel}: ${added} rows imported`
-                          );
+                          const updated = Number((payload as any)?.rows_updated ?? 0);
+                          if (uploadOption === "upsert") {
+                            toast.success(
+                              `Update or add: ${updated} row(s) updated, ${added} new row(s) added`
+                            );
+                          } else {
+                            const modeLabel = uploadOption === "append" ? "Appended" : "Replaced";
+                            toast.success(
+                              overridden > 0
+                                ? `${modeLabel}: ${added} rows imported (overrode ${overridden} existing)`
+                                : `${modeLabel}: ${added} rows imported`
+                            );
+                          }
                           await loadRows();
                           setBulkPanelOpen(false);
                           setUploadOption(null);
@@ -919,15 +1005,99 @@ export default function FullPageMultiItems() {
           {/* API import */}
           {bulkChannel === "api" && (
             <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", fontSize: "0.85rem" }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
                 <label style={{ fontWeight: 500 }}>API endpoint URL</label>
-                <input
-                  type="url"
-                  placeholder="https://example.com/multi-items-api"
-                  value={apiUrlOverride}
-                  onChange={(e) => setApiUrlOverride(e.target.value)}
-                  style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                />
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                  }}
+                >
+                  <input
+                    type="url"
+                    placeholder="https://example.com/multi-items-api"
+                    value={apiUrlOverride}
+                    onChange={(e) => setApiUrlOverride(e.target.value)}
+                    style={{
+                      flex: "1 1 200px",
+                      minWidth: 0,
+                      padding: "0.35rem 0.5rem",
+                      borderRadius: 6,
+                      border: "1px solid var(--border)",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    style={{ flex: "0 0 auto", whiteSpace: "nowrap" }}
+                    disabled={
+                      !entryId ||
+                      !uploadOption ||
+                      !apiUrlOverride.trim() ||
+                      !token ||
+                      (uploadOption === "upsert" && !upsertMatchSubFieldKey.trim())
+                    }
+                    onClick={async () => {
+                      if (!token || !entryId || !fieldId || effectiveOrgId == null || !uploadOption) return;
+                      if (uploadOption === "upsert" && !upsertMatchSubFieldKey.trim()) {
+                        toast.error("Select which sub-field to use for matching.");
+                        return;
+                      }
+                      try {
+                        const params = new URLSearchParams({
+                          entry_id: String(entryId),
+                          field_id: String(fieldId),
+                          organization_id: String(effectiveOrgId),
+                          sync_mode: uploadOption,
+                          api_url: apiUrlOverride.trim(),
+                        });
+                        if (uploadOption === "upsert") {
+                          params.set("match_sub_field_key", upsertMatchSubFieldKey.trim());
+                        }
+                        const res = await api<{
+                          rows_imported?: number;
+                          rows_updated?: number;
+                          rows_appended?: number;
+                          skipped?: boolean;
+                          reason?: string;
+                        }>(`/entries/multi-items/sync-from-api?${params.toString()}`, { method: "POST", token });
+                        if (res?.skipped) {
+                          toast(res.reason || "Sync was skipped.");
+                        } else if (uploadOption === "upsert") {
+                          const u = res?.rows_updated ?? 0;
+                          const a = res?.rows_appended ?? 0;
+                          toast.success(`Update or add: ${u} row(s) updated, ${a} new row(s) added`);
+                        } else {
+                          const n = res?.rows_imported ?? 0;
+                          toast.success(
+                            n > 0
+                              ? `Imported ${n} record${n === 1 ? "" : "s"} from API.`
+                              : "API sync completed (no records imported)."
+                          );
+                        }
+                        await loadRows();
+                      } catch (e) {
+                        toast.error(e instanceof Error ? e.message : "API sync failed");
+                      }
+                    }}
+                  >
+                    Load data from API
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setShowApiExampleJson((v) => !v)}
+                  style={{
+                    alignSelf: "flex-start",
+                    fontSize: "0.8rem",
+                    padding: "0.3rem 0.65rem",
+                  }}
+                >
+                  {showApiExampleJson ? "Hide example JSON" : "Show example JSON"}
+                </button>
                 {field?.config && (field.config as any).multi_items_api_endpoint_url && (
                   <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
                     Configured URL:&nbsp;
@@ -937,67 +1107,83 @@ export default function FullPageMultiItems() {
                   </p>
                 )}
               </div>
-              <div>
-                <p style={{ margin: "0 0 0.25rem", fontWeight: 500 }}>Expected JSON format</p>
-                <pre
-                  style={{
-                    margin: 0,
-                    padding: "0.5rem 0.6rem",
-                    borderRadius: 6,
-                    background: "var(--code-bg, #f5f5f5)",
-                    overflowX: "auto",
-                    fontSize: "0.8rem",
-                  }}
-                >
-{`{
-  "year": ${year},
-  "items": [
-    { "sub_field_key_1": "...", "sub_field_key_2": "..." }
-  ],
-  "override_existing": true
-}`}
-                </pre>
-              </div>
-              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.5rem" }}>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={!entryId || !uploadOption || !apiUrlOverride.trim() || !token}
-                  onClick={async () => {
-                    if (!token || !entryId || !fieldId || effectiveOrgId == null || !uploadOption) return;
-                    try {
-                      const params = new URLSearchParams({
-                        entry_id: String(entryId),
-                        field_id: String(fieldId),
-                        organization_id: String(effectiveOrgId),
-                        sync_mode: uploadOption,
-                        api_url: apiUrlOverride.trim(),
-                      });
-                      const res = await api<{ rows_imported?: number; skipped?: boolean; reason?: string }>(
-                        `/entries/multi-items/sync-from-api?${params.toString()}`,
-                        { method: "POST", token }
-                      );
-                      if (res?.skipped) {
-                        toast(
-                          res.reason || "API sync skipped (override_existing=false and field already has data)."
-                        );
-                      } else {
-                        const n = res?.rows_imported ?? 0;
-                        toast.success(
-                          n > 0
-                            ? `Imported ${n} record${n === 1 ? "" : "s"} from API.`
-                            : "API sync completed (no records imported)."
-                        );
-                      }
-                      await loadRows();
-                    } catch (e) {
-                      toast.error(e instanceof Error ? e.message : "API sync failed");
-                    }
-                  }}
-                >
-                  Load data from API
-                </button>
-              </div>
+              {showApiExampleJson && (
+                <div>
+                  <p style={{ margin: "0 0 0.35rem", fontWeight: 500 }}>Request body (POST to your URL)</p>
+                  <p style={{ margin: "0 0 0.35rem", fontSize: "0.8rem", color: "var(--muted)" }}>
+                    The app sends this JSON. Your endpoint should respond with the expected response below.
+                  </p>
+                  <pre
+                    style={{
+                      margin: "0 0 0.75rem",
+                      padding: "0.5rem 0.6rem",
+                      borderRadius: 6,
+                      background: "var(--code-bg, #f5f5f5)",
+                      overflowX: "auto",
+                      fontSize: "0.8rem",
+                    }}
+                  >
+                    {fieldApiRequestExampleJson}
+                  </pre>
+                  {entryId == null && (
+                    <p style={{ margin: "0 0 0.75rem", fontSize: "0.8rem", color: "var(--muted)" }}>
+                      <code>entry_id</code> is set when this period&apos;s entry exists; sync is available after the entry is created.
+                    </p>
+                  )}
+                  <p style={{ margin: "0 0 0.25rem", fontWeight: 500 }}>Expected JSON response</p>
+                  <p style={{ margin: "0 0 0.35rem", fontSize: "0.8rem", color: "var(--muted)" }}>
+                    Top-level <code>year</code> should match the entry year (shown in your request). Each element of{" "}
+                    <code>items</code> uses your sub-field <strong>keys</strong> as property names.
+                    {rows.length > 0 ? (
+                      <>
+                        {" "}
+                        The example below uses <strong>actual cell values</strong> from the first two rows currently loaded
+                        on this page (one row if only one is loaded).
+                      </>
+                    ) : (
+                      <>
+                        {" "}
+                        With no rows loaded yet, the example shows <strong>demo values</strong> by column type; replace{" "}
+                        <code>reference</code> / <code>multi_reference</code> placeholders with allowed tokens from the linked
+                        source KPI.
+                      </>
+                    )}
+                  </p>
+                  {subFields.length > 0 && (
+                    <ul
+                      style={{
+                        margin: "0 0 0.5rem",
+                        paddingLeft: "1.1rem",
+                        fontSize: "0.8rem",
+                        color: "var(--muted)",
+                      }}
+                    >
+                      {subFields.map((sf) => (
+                        <li key={sf.key}>
+                          <code>{sf.key}</code>
+                          {sf.name ? ` — ${sf.name}` : ""}
+                          <span style={{ opacity: 0.85 }}> ({sf.field_type ?? "single_line_text"})</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <pre
+                    style={{
+                      margin: 0,
+                      padding: "0.5rem 0.6rem",
+                      borderRadius: 6,
+                      background: "var(--code-bg, #f5f5f5)",
+                      overflowX: "auto",
+                      fontSize: "0.8rem",
+                    }}
+                  >
+                    {fieldApiResponseExampleJson}
+                  </pre>
+                  <p style={{ margin: "0.35rem 0 0", fontSize: "0.8rem", color: "var(--muted)" }}>
+                    Append, replace, or update-or-add is chosen in Step 1 above only; the remote API cannot override that.
+                  </p>
+                </div>
+              )}
             </div>
           )}
         </div>

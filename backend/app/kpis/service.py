@@ -35,7 +35,12 @@ from app.core.models import (
     time_dimension_allowed_for_kpi,
 )
 from app.kpis.schemas import KPICreate, KPIUpdate
-from app.entries.service import get_or_create_entry, save_entry_values
+from app.entries.service import (
+    get_or_create_entry,
+    save_entry_values,
+    _upsert_merge_multi_line_items,
+    _is_multi_items_row_effectively_empty,
+)
 from app.entries.schemas import FieldValueInput
 
 
@@ -1199,13 +1204,13 @@ async def sync_kpi_entry_from_api(
     year: int,
     user_id: int,
     *,
-    force_override: bool = False,
-    sync_mode: str = "override",  # "override" = replace; "append" = for multi_line_items append rows (ignores API override_existing)
+    sync_mode: str = "override",
+    upsert_match_keys: dict[str, str] | None = None,
 ) -> dict | None:
     """
     Call the KPI's API endpoint to fetch entry data and apply it.
-    force_override: always apply even when API returns override_existing=false.
-    sync_mode: "override" = replace existing; "append" = for multi_line_items append API rows to existing (other fields still overwritten).
+    UI query sync_mode always wins; API body override_existing is ignored.
+    sync_mode: override = replace multi-line rows; append = append API rows; upsert = merge by upsert_match_keys per multi_line field.
     """
     def _log(msg: str, *args: object) -> None:
         logger.info(msg, *args)
@@ -1243,7 +1248,12 @@ async def sync_kpi_entry_from_api(
     resp_year = data.get("year")
     values_map = data.get("values")
     override_existing = data.get("override_existing", True)
-    _log("Response keys: year=%s values_keys=%s override_existing=%s", resp_year, list(values_map.keys()) if isinstance(values_map, dict) else values_map, override_existing)
+    _log(
+        "Response keys: year=%s values_keys=%s override_existing=%s (informational only; UI sync_mode controls apply)",
+        resp_year,
+        list(values_map.keys()) if isinstance(values_map, dict) else values_map,
+        override_existing,
+    )
     if resp_year is None or not isinstance(values_map, dict):
         _log("Missing year or values dict: resp_year=%s values_type=%s", resp_year, type(values_map).__name__)
         return None
@@ -1251,10 +1261,6 @@ async def sync_kpi_entry_from_api(
     if resp_year != year:
         _log("Year mismatch: response year=%s requested year=%s", resp_year, year)
         return None
-    # When user explicitly triggers sync from UI, we can force overwrite regardless of API's override_existing
-    effective_override = override_existing or force_override
-    if force_override and not override_existing:
-        _log("force_override=true: will apply data even though API returned override_existing=false")
     _log("values from API (key -> value): %s", {k: v for k, v in (values_map or {}).items()})
 
     # Load KPI with fields
@@ -1267,40 +1273,42 @@ async def sync_kpi_entry_from_api(
         return None
     _log("KPI fields (key, name, type): %s", [(f.key, f.name, _normalized_field_type(f)) for f in kpi_with_fields.fields])
 
-    # Check existing entry and override_existing
-    entry_res = await db.execute(
-        select(KPIEntry).where(
-            KPIEntry.organization_id == org_id,
-            KPIEntry.kpi_id == kpi_id,
-            KPIEntry.year == year,
-        )
-    )
-    existing_entry = entry_res.scalar_one_or_none()
-    if not effective_override and existing_entry:
-        fv_count = await db.execute(
-            select(func.count()).select_from(KPIFieldValue).where(KPIFieldValue.entry_id == existing_entry.id)
-        )
-        if (fv_count.scalar() or 0) > 0:
-            _log("Skipped: entry has data and override_existing=false (use force_override=true to overwrite)")
-            return {"skipped": True, "reason": "Entry already has data and override_existing is false. Use force_override=true to overwrite."}
+    mode = (sync_mode or "override").strip().lower()
+    if mode not in ("override", "append", "upsert"):
+        mode = "override"
+    ukeys = upsert_match_keys or {}
+    if mode == "upsert":
+        multi_parents = [f for f in kpi_with_fields.fields if _normalized_field_type(f) == "multi_line_items"]
+        for f in multi_parents:
+            mk = (ukeys.get(f.key) or "").strip()
+            if not mk:
+                _log("upsert: missing match sub-field for multi_line field key=%s", f.key)
+                return {
+                    "skipped": True,
+                    "reason": f"Upsert requires a match sub-field for each multi-line table. Missing mapping for field key '{f.key}'.",
+                }
+            subs = {s.key for s in (f.sub_fields or [])}
+            if mk not in subs:
+                _log("upsert: match key %s not a sub-field of %s", mk, f.key)
+                return {
+                    "skipped": True,
+                    "reason": f"Match key '{mk}' is not a sub-field of multi-line field '{f.key}'.",
+                }
 
     entry, _ = await get_or_create_entry(db, user_id, org_id, kpi_id, year)
     if not entry:
         _log("get_or_create_entry returned None")
         return None
     _log("Entry id=%s (created or existing)", entry.id)
-    _log("sync_mode=%s (UI choice; API override_existing ignored)", sync_mode)
+    _log("sync_mode=%s (UI)", mode)
 
-    # When append: load existing field values so we can merge for multi_line_items
     existing_value_json_by_field: dict[int, list] = {}
-    if (sync_mode or "override").lower() == "append":
-        fv_res = await db.execute(
-            select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id)
-        )
+    if mode in ("append", "upsert"):
+        fv_res = await db.execute(select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id))
         for fv in fv_res.scalars().all():
             if isinstance(fv.value_json, list):
                 existing_value_json_by_field[fv.field_id] = fv.value_json
-        _log("append mode: existing multi_line_items field_ids with data: %s", list(existing_value_json_by_field.keys()))
+        _log("%s mode: existing multi_line_items field_ids with data: %s", mode, list(existing_value_json_by_field.keys()))
 
     # Case-insensitive key lookup for API response (some APIs return "Grant_Type" vs "grant_type")
     _values_lower = {k.lower(): (k, v) for k, v in values_map.items() if isinstance(k, str)} if values_map else {}
@@ -1358,14 +1366,30 @@ async def sync_kpi_entry_from_api(
             )
             _log("    -> ADD value_date=%s", raw)
         elif ft_norm == "multi_line_items" and isinstance(raw, list):
-            if (sync_mode or "override").lower() == "append":
+            incoming = [
+                dict(r) for r in raw if isinstance(r, dict) and not _is_multi_items_row_effectively_empty(dict(r))
+            ]
+            if mode == "append":
                 existing_list = existing_value_json_by_field.get(f.id) or []
-                merged = existing_list + raw
+                merged = existing_list + incoming
                 value_inputs.append(FieldValueInput(field_id=f.id, value_json=merged))
-                _log("    -> APPEND value_json existing=%s + new=%s -> total=%s", len(existing_list), len(raw), len(merged))
+                _log(
+                    "    -> APPEND value_json existing=%s + new=%s -> total=%s",
+                    len(existing_list),
+                    len(incoming),
+                    len(merged),
+                )
+            elif mode == "upsert":
+                existing_list = list(existing_value_json_by_field.get(f.id) or [])
+                mk = (ukeys.get(f.key) or "").strip()
+                sub = next((s for s in (f.sub_fields or []) if s.key == mk), None)
+                match_ft = sub.field_type if sub else None
+                merged, ru, ra = _upsert_merge_multi_line_items(existing_list, incoming, mk, match_ft)
+                value_inputs.append(FieldValueInput(field_id=f.id, value_json=merged))
+                _log("    -> UPSERT value_json rows_updated=%s rows_added=%s total=%s", ru, ra, len(merged))
             else:
-                value_inputs.append(FieldValueInput(field_id=f.id, value_json=raw))
-                _log("    -> ADD value_json len=%s (override)", len(raw))
+                value_inputs.append(FieldValueInput(field_id=f.id, value_json=incoming))
+                _log("    -> ADD value_json len=%s (override)", len(incoming))
         else:
             value_inputs.append(FieldValueInput(field_id=f.id, value_text=str(raw) if raw is not None else None))
             _log("    -> ADD value_text=%s", (str(raw)[:80] if raw is not None else None))

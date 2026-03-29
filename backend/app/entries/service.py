@@ -1,6 +1,7 @@
 """KPI entry CRUD, submit, lock; formula evaluation for formula fields."""
 
 import json
+import math
 from datetime import datetime
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -223,6 +224,173 @@ def filter_multi_reference_to_allowed(raw: Any, allowed: list[str]) -> list[str]
                 seen.add(canon)
                 out.append(canon)
     return out
+
+
+def _stringify_for_upsert_match_key(val: Any) -> str:
+    """Make Excel / JSON scalars comparable (e.g. 42, 42.0, '42', '42.0' → same id string)."""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if isinstance(val, int) and not isinstance(val, bool):
+        return str(val)
+    if isinstance(val, float):
+        if math.isfinite(val) and val == int(val):
+            return str(int(val))
+        return str(val)
+    if isinstance(val, str):
+        t = val.strip()
+        if not t:
+            return ""
+        try:
+            f = float(t.replace(",", ""))
+            if math.isfinite(f) and f == int(f):
+                return str(int(f))
+        except ValueError:
+            pass
+        return t
+    return str(val).strip()
+
+
+def _normalize_upsert_match_value(val: Any, field_type: FieldType | str | None) -> str | None:
+    """Comparable signature for upsert matching; None => no match key (incoming row is always appended)."""
+    if val is None:
+        return None
+    ft = field_type.value if isinstance(field_type, FieldType) else (field_type or "")
+    fts = str(ft)
+
+    if fts == FieldType.boolean.value or fts == "boolean":
+        if isinstance(val, bool):
+            return "1" if val else "0"
+        s = str(val).strip().lower()
+        return "1" if s in ("1", "true", "yes", "y", "on") else "0"
+
+    if fts == FieldType.number.value or fts == "number":
+        try:
+            f = float(val)
+            if math.isfinite(f) and f == int(f):
+                return str(int(f))
+            return str(f)
+        except (TypeError, ValueError):
+            s = _stringify_for_upsert_match_key(val)
+            n = _normalize_reference_value(s)
+            return None if _is_reference_empty_or_sentinel(n) else n
+
+    if fts == FieldType.multi_reference.value or fts == "multi_reference":
+        norms: list[str] = []
+        for tok in coerce_multi_reference_raw(val):
+            if isinstance(tok, dict):
+                s = None
+                for kk in ("label", "text", "value", "name"):
+                    if kk in tok and tok[kk] is not None:
+                        s = str(tok[kk])
+                        break
+                if s is None:
+                    continue
+            else:
+                s = str(tok) if tok is not None else ""
+            n = _normalize_reference_value(s)
+            if not _is_reference_empty_or_sentinel(n):
+                norms.append(n)
+        if not norms:
+            return None
+        return "|".join(sorted(set(norms)))
+
+    if fts == FieldType.date.value or fts == "date":
+        if hasattr(val, "isoformat"):
+            try:
+                return val.isoformat()[:10]
+            except Exception:
+                pass
+        t = _stringify_for_upsert_match_key(val)
+        return t[:10] if t else None
+
+    s = _stringify_for_upsert_match_key(val)
+    n = _normalize_reference_value(s)
+    if _is_reference_empty_or_sentinel(n):
+        return None
+    if fts == FieldType.reference.value or fts == "reference":
+        return n.casefold()
+    return n
+
+
+def _upsert_merge_multi_line_items(
+    existing_rows: list,
+    incoming_rows: list[dict],
+    match_key: str,
+    match_field_type: FieldType | str | None,
+) -> tuple[list, int, int]:
+    """
+    Merge incoming rows into existing by match_key (first existing row with same normalized key wins).
+    Returns (new_rows, rows_updated, rows_added).
+    """
+    out: list = [dict(r) if isinstance(r, dict) else r for r in existing_rows]
+    rows_updated = 0
+    rows_added = 0
+    sig_to_index: dict[str, int] = {}
+    for i, row in enumerate(out):
+        if not isinstance(row, dict):
+            continue
+        sig = _normalize_upsert_match_value(row.get(match_key), match_field_type)
+        if sig is None:
+            continue
+        if sig not in sig_to_index:
+            sig_to_index[sig] = i
+
+    for inc in incoming_rows:
+        if not isinstance(inc, dict):
+            continue
+        if _is_multi_items_row_effectively_empty(inc):
+            continue
+        sig = _normalize_upsert_match_value(inc.get(match_key), match_field_type)
+        if sig is None:
+            out.append(dict(inc))
+            rows_added += 1
+            continue
+        idx = sig_to_index.get(sig)
+        if idx is not None:
+            base = out[idx]
+            if isinstance(base, dict):
+                out[idx] = {**base, **inc}
+                rows_updated += 1
+        else:
+            out.append(dict(inc))
+            rows_added += 1
+            sig_to_index[sig] = len(out) - 1
+
+    return out, rows_updated, rows_added
+
+
+def _is_multi_items_row_effectively_empty(item: dict) -> bool:
+    """True if the row has no meaningful data (skip template blank rows, whitespace-only cells)."""
+    if not item:
+        return True
+    for v in item.values():
+        if v is None:
+            continue
+        if isinstance(v, str):
+            if v.strip() != "":
+                return False
+        elif isinstance(v, list):
+            if len(v) > 0:
+                return False
+        else:
+            return False
+    return True
+
+
+def parse_upsert_match_keys_json(raw: str | None) -> dict[str, str] | None:
+    """Parse query/body JSON: parent multi_line field key -> sub_field key for KPI or entry sync upsert."""
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        d = json.loads(raw)
+        if not isinstance(d, dict):
+            return None
+        out = {str(k).strip(): str(v).strip() for k, v in d.items() if str(k).strip() and str(v).strip()}
+        return out or None
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 async def _get_entry(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry | None:
