@@ -1,8 +1,11 @@
 """KPI entry API routes (data entry + admin lock)."""
 
+from __future__ import annotations
+
 from io import BytesIO
 import csv
 import json
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -108,6 +111,37 @@ async def _load_multi_items_field(db: AsyncSession, org_id: int, field_id: int) 
     return field
 
 
+def _serialize_multi_item_cell_for_xlsx(val: Any, field_type: FieldType | str | None) -> Any:
+    """Ensure cell values are openpyxl-safe (lists/dicts are flattened or JSON — never raw list)."""
+    if val is None:
+        return ""
+    ft = field_type.value if isinstance(field_type, FieldType) else field_type
+    if ft == FieldType.multi_reference.value or ft == "multi_reference":
+        if isinstance(val, list):
+            parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
+            return "; ".join(parts)
+        return str(val).strip() if str(val).strip() else ""
+    if isinstance(val, list):
+        parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
+        return "; ".join(parts)
+    if isinstance(val, dict):
+        return json.dumps(val, ensure_ascii=False)
+    return val
+
+
+def _serialize_multi_item_cell_for_csv(val: Any, field_type: FieldType | str | None) -> Any:
+    if val is None:
+        return ""
+    ft = field_type.value if isinstance(field_type, FieldType) else field_type
+    if ft == FieldType.multi_reference.value or ft == "multi_reference":
+        if isinstance(val, list):
+            return "; ".join(str(x).strip() for x in val if x is not None and str(x).strip() != "")
+        return val
+    if isinstance(val, list):
+        return "; ".join(str(x).strip() for x in val if x is not None and str(x).strip() != "")
+    return val
+
+
 def _xlsx_bytes_for_multi_items_template(field: KPIField, existing_items: list[dict] | None = None) -> bytes:
     """Create an Excel template for multi_line_items sub_fields. Optionally include existing data."""
     # Import here so app can start even if optional dependency isn't installed yet.
@@ -118,6 +152,7 @@ def _xlsx_bytes_for_multi_items_template(field: KPIField, existing_items: list[d
     ws.title = "Items"
 
     sub_fields = list(field.sub_fields or [])
+    key_to_sf = {s.key: s for s in sub_fields}
     # Header row uses sub-field keys (stable API identifiers).
     keys = [s.key for s in sub_fields]
     ws.append(keys)
@@ -126,7 +161,14 @@ def _xlsx_bytes_for_multi_items_template(field: KPIField, existing_items: list[d
         for item in items:
             if not isinstance(item, dict):
                 continue
-            ws.append([(item.get(k) if item.get(k) is not None else "") for k in keys])
+            row_cells = []
+            for k in keys:
+                raw = item.get(k)
+                v = raw if raw is not None else ""
+                sf = key_to_sf.get(k)
+                ft = getattr(sf, "field_type", None) if sf else None
+                row_cells.append(_serialize_multi_item_cell_for_xlsx(v, ft))
+            ws.append(row_cells)
     else:
         # Empty sample row (user fills in).
         ws.append(["" for _ in keys])
@@ -197,6 +239,9 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
                         item[key] = str(raw)
                 else:
                     item[key] = str(raw)
+            elif sf.field_type == FieldType.multi_reference:
+                # Semicolon (or comma) separated in Excel; validated on upload.
+                item[key] = str(raw).strip() if raw is not None else ""
             else:
                 item[key] = str(raw)
         if not empty:
@@ -1061,11 +1106,20 @@ async def export_multi_items_csv(
     # Build CSV
     sub_fields = [sf for sf in (field.sub_fields or [])]
     headers = [getattr(sf, "key", "") for sf in sub_fields]
+    key_to_sf = {sf.key: sf for sf in sub_fields}
     output = BytesIO()
     writer = csv.writer(output)
     writer.writerow(headers)
     for r in rows:
-        writer.writerow([r.get(key, "") for key in headers])
+        writer.writerow(
+            [
+                _serialize_multi_item_cell_for_csv(
+                    r.get(key, "") if isinstance(r, dict) else "",
+                    getattr(key_to_sf.get(key), "field_type", None),
+                )
+                for key in headers
+            ]
+        )
 
     filename = f"multi_items_{field.key}_{field.id}.csv"
     return StreamingResponse(
