@@ -6,6 +6,7 @@ import Link from "next/link";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 import { toast } from "react-toastify";
+import MultiReferenceInput from "@/components/MultiReferenceInput";
 
 type SubField = {
   key: string;
@@ -197,13 +198,13 @@ export default function MultiItemRowDetail() {
     setActiveSectionTab((prev) => (prev && labels.includes(prev) ? prev : labels[0] || ""));
   }, [hasSectionTabs, sectionGroups]);
 
-  // Load reference allowed values for reference sub-fields (same logic as inline editor)
+  // Load reference allowed values for reference / multi_reference sub-fields (same logic as inline editor)
   useEffect(() => {
     if (!token || effectiveOrgId == null || !field || !field.sub_fields?.length) return;
     const keys: { k: string; sid: number; skey: string; subKey?: string }[] = [];
     field.sub_fields.forEach((s) => {
       if (
-        s.field_type === "reference" &&
+        (s.field_type === "reference" || s.field_type === "multi_reference") &&
         (s as any).config?.reference_source_kpi_id &&
         (s as any).config?.reference_source_field_key
       ) {
@@ -407,6 +408,9 @@ export default function MultiItemRowDetail() {
                         : val != null
                         ? String(val)
                         : "—";
+                  } else if (sf.field_type === "multi_reference") {
+                    const arr = Array.isArray(val) ? (val as unknown[]).filter((x) => x != null && String(x).trim() !== "") : [];
+                    display = arr.length > 0 ? arr.map((x) => String(x)).join("; ") : "—";
                   } else {
                     display = val != null && String(val).trim() !== "" ? String(val) : "—";
                   }
@@ -519,6 +523,11 @@ export default function MultiItemRowDetail() {
                     ? Boolean(val) ? "Yes" : "No"
                     : sf.field_type === "date"
                       ? (typeof val === "string" && val ? val : "—")
+                      : sf.field_type === "multi_reference"
+                        ? (() => {
+                            const arr = Array.isArray(val) ? (val as unknown[]).filter((x) => x != null && String(x).trim() !== "") : [];
+                            return arr.length > 0 ? arr.map((x) => String(x)).join("; ") : "—";
+                          })()
                       : val != null && String(val).trim() !== "" ? String(val) : "—";
                 if (!canEdit) {
                   return (
@@ -612,6 +621,36 @@ export default function MultiItemRowDetail() {
                           </option>
                         ))}
                       </select>
+                    </div>
+                  );
+                }
+                if (sf.field_type === "multi_reference") {
+                  const cfg = (sf as any).config as
+                    | {
+                        reference_source_kpi_id?: number;
+                        reference_source_field_key?: string;
+                        reference_source_sub_field_key?: string;
+                      }
+                    | undefined;
+                  const refKey =
+                    cfg?.reference_source_kpi_id && cfg?.reference_source_field_key
+                      ? `${cfg.reference_source_kpi_id}-${cfg.reference_source_field_key}${
+                          cfg.reference_source_sub_field_key ? `-${cfg.reference_source_sub_field_key}` : ""
+                        }`
+                      : "";
+                  const options = refAllowedValues[refKey] ?? [];
+                  const arr = Array.isArray(val) ? (val as string[]) : [];
+                  return (
+                    <div key={key} className="form-group">
+                      <label>
+                        {sf.name}
+                        {sf.is_required ? " *" : ""}
+                      </label>
+                      <MultiReferenceInput
+                        options={options}
+                        value={arr}
+                        onChange={(next) => handleChangeCell(key, next)}
+                      />
                     </div>
                   );
                 }

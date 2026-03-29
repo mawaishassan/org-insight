@@ -26,11 +26,12 @@ const FIELD_TYPES = [
   "boolean",
   "attachment",
   "reference",
+  "multi_reference",
   "multi_line_items",
   "formula",
 ] as const;
 
-const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "attachment"] as const;
+const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference", "attachment"] as const;
 
 function slugifyKey(name: string): string {
   if (!name) return "";
@@ -412,7 +413,11 @@ export default function KpiFieldsPage() {
         full_page_multi_items: data.full_page_multi_items ?? false,
         options: [],
       };
-      if (data.field_type === "reference" && createRefConfig.reference_source_kpi_id && createRefConfig.reference_source_field_key) {
+      if (
+        (data.field_type === "reference" || data.field_type === "multi_reference") &&
+        createRefConfig.reference_source_kpi_id &&
+        createRefConfig.reference_source_field_key
+      ) {
         body.config = {
           reference_source_kpi_id: createRefConfig.reference_source_kpi_id,
           reference_source_field_key: createRefConfig.reference_source_field_key,
@@ -434,7 +439,7 @@ export default function KpiFieldsPage() {
               : "";
           const hasUiSection = uiSection.length > 0;
           const hasRefConfig =
-            s.field_type === "reference" &&
+            (s.field_type === "reference" || s.field_type === "multi_reference") &&
             s.config?.reference_source_kpi_id &&
             s.config?.reference_source_field_key;
 
@@ -502,7 +507,11 @@ export default function KpiFieldsPage() {
         carry_forward_data: data.carry_forward_data,
         full_page_multi_items: data.full_page_multi_items,
       };
-      if (data.field_type === "reference" && refConfig?.reference_source_kpi_id && refConfig?.reference_source_field_key) {
+      if (
+        (data.field_type === "reference" || data.field_type === "multi_reference") &&
+        refConfig?.reference_source_kpi_id &&
+        refConfig?.reference_source_field_key
+      ) {
         body.config = {
           reference_source_kpi_id: refConfig.reference_source_kpi_id,
           reference_source_field_key: refConfig.reference_source_field_key,
@@ -537,7 +546,7 @@ export default function KpiFieldsPage() {
               : "";
           const hasUiSection = uiSection.length > 0;
           const hasRefConfig =
-            s.field_type === "reference" &&
+            (s.field_type === "reference" || s.field_type === "multi_reference") &&
             s.config?.reference_source_kpi_id &&
             s.config?.reference_source_field_key;
 
@@ -1441,11 +1450,13 @@ export default function KpiFieldsPage() {
                 <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }} />
               </div>
             </div>
-            {createForm.watch("field_type") === "reference" && (
+            {(createForm.watch("field_type") === "reference" || createForm.watch("field_type") === "multi_reference") && (
               <div className="form-group">
                 <label>Reference source</label>
                 <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
-                  Values for this field will be restricted to distinct values from the selected KPI field.
+                  {createForm.watch("field_type") === "multi_reference"
+                    ? "Users may pick multiple values; each must appear in the distinct values from the selected KPI field."
+                    : "Values for this field will be restricted to distinct values from the selected KPI field."}
                 </p>
                 <ReferenceConfigUI
                   organizationId={kpi?.organization_id ?? orgId ?? undefined}
@@ -1481,7 +1492,7 @@ export default function KpiFieldsPage() {
                         <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
                         <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
                         <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
-                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (if type = reference)</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (reference / multi reference)</th>
                         <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
                         <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
                       </tr>
@@ -1536,7 +1547,7 @@ export default function KpiFieldsPage() {
                             </select>
                           </td>
                           <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
-                            {s.field_type === "reference" ? (
+                            {s.field_type === "reference" || s.field_type === "multi_reference" ? (
                               <ReferenceConfigUI
                                 organizationId={kpi?.organization_id ?? orgId ?? undefined}
                                 currentKpiId={kpiId}
@@ -1923,7 +1934,7 @@ function ReferenceConfigUI({
       .then((list) => setSourceFields(list))
       .catch(() => setSourceFields([]));
   }, [token, organizationId, value.reference_source_kpi_id]);
-  const scalarFieldTypes = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference"];
+  const scalarFieldTypes = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference"];
   const sourceFieldOptions: { value: string; label: string }[] = [];
   sourceFields.forEach((f) => {
     if (scalarFieldTypes.includes(f.field_type)) {
@@ -2042,7 +2053,7 @@ function FormulaBuilder({
   const canInsertOtherKpiField = refOtherKpiId !== "" && refOtherFieldKey !== "";
   const getRefSourceFromSubKey = (subKey: string): { cacheKey: string; sid: number; skey: string; sourceSubKey?: string } | null => {
     const sf = subFields.find((s) => s.key === subKey);
-    if (!sf || sf.field_type !== "reference") return null;
+    if (!sf || (sf.field_type !== "reference" && sf.field_type !== "multi_reference")) return null;
     const cfg = (sf.config ?? {}) as ReferenceConfig;
     const sid = cfg.reference_source_kpi_id;
     const skey = cfg.reference_source_field_key;
@@ -2367,7 +2378,7 @@ function FieldEditForm({
           currentFieldType === "multi_line_items"
             ? editSubFields.map(({ keyTouched: _, ...s }) => s)
             : undefined,
-          currentFieldType === "reference" ? editRefConfig : undefined
+          currentFieldType === "reference" || currentFieldType === "multi_reference" ? editRefConfig : undefined
         )
       )}
       style={{ width: "100%" }}
@@ -2489,11 +2500,13 @@ function FieldEditForm({
           />
         </div>
       </div>
-      {currentFieldType === "reference" && (
+      {(currentFieldType === "reference" || currentFieldType === "multi_reference") && (
         <div className="form-group">
           <label>Reference source</label>
           <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
-            Values for this field will be restricted to distinct values from the selected KPI field.
+            {currentFieldType === "multi_reference"
+              ? "Users may pick multiple values; each must appear in the distinct values from the selected KPI field."
+              : "Values for this field will be restricted to distinct values from the selected KPI field."}
           </p>
           <ReferenceConfigUI
             organizationId={organizationId}
@@ -2529,7 +2542,7 @@ function FieldEditForm({
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
-                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (if type = reference)</th>
+                  <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (reference / multi reference)</th>
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Section (UI)</th>
                   <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
                   <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
@@ -2583,7 +2596,7 @@ function FieldEditForm({
                       </select>
                     </td>
                     <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
-                      {s.field_type === "reference" ? (
+                      {s.field_type === "reference" || s.field_type === "multi_reference" ? (
                         <ReferenceConfigUI
                           organizationId={organizationId}
                           currentKpiId={currentKpiId}

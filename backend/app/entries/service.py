@@ -1,6 +1,8 @@
 """KPI entry CRUD, submit, lock; formula evaluation for formula fields."""
 
+import json
 from datetime import datetime
+from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, distinct
 from sqlalchemy.orm import selectinload
@@ -160,6 +162,67 @@ _REFERENCE_EMPTY_SENTINELS = frozenset(
 def _is_reference_empty_or_sentinel(normalized: str) -> bool:
     """True if the value should be accepted for reference validation without checking the allowed list."""
     return not normalized or normalized.lower().strip() in _REFERENCE_EMPTY_SENTINELS
+
+
+def coerce_multi_reference_raw(raw: Any) -> list[Any]:
+    """Normalize client/Excel input into a list of raw tokens (strings or JSON-like)."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return parsed
+                return [parsed]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if ";" in s:
+            return [p.strip() for p in s.split(";") if p.strip()]
+        return [p.strip() for p in s.split(",") if p.strip()]
+    return [raw]
+
+
+def _canonical_by_normalized_reference(allowed: list[str]) -> dict[str, str]:
+    """Map normalized token -> first canonical display string from allowed list."""
+    out: dict[str, str] = {}
+    for a in allowed:
+        n = _normalize_reference_value(str(a))
+        if n and n not in out:
+            out[n] = str(a).strip()
+    return out
+
+
+def filter_multi_reference_to_allowed(raw: Any, allowed: list[str]) -> list[str]:
+    """Keep only values that match the reference allowed list (canonical casing). Dedupe."""
+    norm_map = _canonical_by_normalized_reference(allowed)
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in coerce_multi_reference_raw(raw):
+        if isinstance(item, dict):
+            s = None
+            for k in ("label", "text", "value", "name"):
+                if k in item and item[k] is not None:
+                    s = str(item[k])
+                    break
+            if s is None:
+                continue
+        else:
+            s = str(item) if item is not None else ""
+        n = _normalize_reference_value(s)
+        if _is_reference_empty_or_sentinel(n):
+            continue
+        if n in norm_map:
+            canon = norm_map[n]
+            if canon not in seen:
+                seen.add(canon)
+                out.append(canon)
+    return out
 
 
 async def _get_entry(db: AsyncSession, entry_id: int, org_id: int) -> KPIEntry | None:
@@ -788,28 +851,58 @@ async def save_entry_values(
                     # isn't found in the resolved reference list, coerce it to null instead of failing.
                     if not allowed_normalized or normalized not in allowed_normalized:
                         v.value_text = None
+        elif f.field_type == FieldType.multi_reference:
+            config = getattr(f, "config", None) or {}
+            sid = config.get("reference_source_kpi_id")
+            skey = config.get("reference_source_field_key")
+            sub_key = config.get("reference_source_sub_field_key")
+            v.value_text = None
+            if sid and skey:
+                allowed = await get_reference_allowed_values(db, int(sid), str(skey), org_id, source_sub_field_key=sub_key)
+                if not allowed:
+                    v.value_json = None
+                else:
+                    cleaned = filter_multi_reference_to_allowed(
+                        v.value_json if v.value_json is not None else v.value_text,
+                        allowed,
+                    )
+                    v.value_json = cleaned if cleaned else None
+            else:
+                v.value_json = None
         elif f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
             for sub in getattr(f, "sub_fields", []) or []:
-                if getattr(sub, "field_type", None) != FieldType.reference:
-                    continue
+                ft = getattr(sub, "field_type", None)
                 config = getattr(sub, "config", None) or {}
                 sid = config.get("reference_source_kpi_id")
                 skey = config.get("reference_source_field_key")
                 sub_key = config.get("reference_source_sub_field_key")
                 if not sid or not skey:
                     continue
-                allowed = await get_reference_allowed_values(db, int(sid), str(skey), org_id, source_sub_field_key=sub_key)
-                allowed_normalized = {_normalize_reference_value(a) for a in allowed}
-                for row_idx, row in enumerate(v.value_json):
-                    if not isinstance(row, dict):
+                if ft == FieldType.reference:
+                    allowed = await get_reference_allowed_values(db, int(sid), str(skey), org_id, source_sub_field_key=sub_key)
+                    allowed_normalized = {_normalize_reference_value(a) for a in allowed}
+                    for row in v.value_json:
+                        if not isinstance(row, dict):
+                            continue
+                        cell = row.get(sub.key)
+                        raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
+                        normalized = _normalize_reference_value(raw)
+                        if not _is_reference_empty_or_sentinel(normalized):
+                            if not allowed_normalized or normalized not in allowed_normalized:
+                                row[sub.key] = None
+                elif ft == FieldType.multi_reference:
+                    allowed = await get_reference_allowed_values(db, int(sid), str(skey), org_id, source_sub_field_key=sub_key)
+                    if not allowed:
+                        for row in v.value_json:
+                            if isinstance(row, dict) and sub.key in row:
+                                row[sub.key] = None
                         continue
-                    cell = row.get(sub.key)
-                    raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
-                    normalized = _normalize_reference_value(raw)
-                    if not _is_reference_empty_or_sentinel(normalized):
-                        if not allowed_normalized or normalized not in allowed_normalized:
-                            # Mark unresolved references as null for linked/mapped fields.
-                            row[sub.key] = None
+                    for row in v.value_json:
+                        if not isinstance(row, dict):
+                            continue
+                        cell = row.get(sub.key)
+                        cleaned = filter_multi_reference_to_allowed(cell, allowed)
+                        row[sub.key] = cleaned if cleaned else None
 
     if validation_errors:
         raise EntryValidationError(validation_errors)
