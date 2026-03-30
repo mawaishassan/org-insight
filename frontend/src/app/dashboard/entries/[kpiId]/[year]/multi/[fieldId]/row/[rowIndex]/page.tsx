@@ -4,7 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken } from "@/lib/auth";
-import { api, getApiUrl } from "@/lib/api";
+import { api } from "@/lib/api";
+import { makeAttachmentCellValue } from "@/lib/attachmentCellValue";
+import { AttachmentFieldControl } from "@/components/AttachmentFieldControl";
 import { toast } from "react-toastify";
 import MultiReferenceInput from "@/components/MultiReferenceInput";
 
@@ -299,6 +301,62 @@ export default function MultiItemRowDetail() {
     </label>
   );
 
+  /** Persist row data for an existing row (no navigation). Used after attachment upload. */
+  const persistExistingRow = async (data: Record<string, unknown>) => {
+    if (!token) {
+      toast.error("Session expired. Please log in again.");
+      router.push("/login");
+      return;
+    }
+    if (!entryId || !fieldId) {
+      toast.error("Entry is still loading. Please wait and try again.");
+      return;
+    }
+    if (isNew) return;
+    await api<MultiItemsRow>(
+      `/entries/multi-items/rows/${rowIndex}?${new URLSearchParams({
+        entry_id: String(entryId),
+        field_id: String(fieldId),
+        organization_id: String(effectiveOrgId ?? ""),
+      }).toString()}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(data),
+        token,
+      }
+    );
+  };
+
+  /** Create the row on the server (same as Save on a new row), then go to the row URL so further edits use PUT. */
+  const persistNewRow = async (data: Record<string, unknown>) => {
+    if (!token) {
+      toast.error("Session expired. Please log in again.");
+      router.push("/login");
+      return;
+    }
+    if (!entryId || !fieldId || !isNew) return;
+    const created = await api<MultiItemsRow>(
+      `/entries/multi-items/rows?${new URLSearchParams({
+        entry_id: String(entryId),
+        field_id: String(fieldId),
+        organization_id: String(effectiveOrgId ?? ""),
+      }).toString()}`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+        token,
+      }
+    );
+    toast.success("File attached and saved.");
+    const backParams = new URLSearchParams({
+      organization_id: String(effectiveOrgId ?? ""),
+      ...(periodKey ? { period_key: periodKey } : {}),
+    });
+    router.replace(
+      `/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${created.index}?${backParams.toString()}`
+    );
+  };
+
   const handleSave = async () => {
     if (!token) {
       toast.error("Session expired. Please log in again.");
@@ -326,18 +384,7 @@ export default function MultiItemRowDetail() {
         );
         toast.success("Row added successfully");
       } else {
-        await api<MultiItemsRow>(
-          `/entries/multi-items/rows/${rowIndex}?${new URLSearchParams({
-            entry_id: String(entryId),
-            field_id: String(fieldId),
-            organization_id: String(effectiveOrgId ?? ""),
-          }).toString()}`,
-          {
-            method: "PUT",
-            body: JSON.stringify(editData),
-            token,
-          }
-        );
+        await persistExistingRow(editData);
         toast.success("Row updated successfully");
       }
       const backParams = new URLSearchParams({
@@ -655,117 +702,44 @@ export default function MultiItemRowDetail() {
                   );
                 }
                 if (sf.field_type === "attachment") {
-                  const urlVal = typeof val === "string" ? val : val != null ? String(val) : "";
-                  const cleanedUrl = urlVal.trim();
-                  const href = cleanedUrl
-                    ? (
-                        cleanedUrl.startsWith("http://") || cleanedUrl.startsWith("https://")
-                          ? cleanedUrl
-                          : cleanedUrl.startsWith("/api/")
-                            ? cleanedUrl
-                            : cleanedUrl.startsWith("/kpis/")
-                              ? `/api${cleanedUrl}`
-                              : cleanedUrl.startsWith("kpis/")
-                                ? `/api/${cleanedUrl}`
-                                : cleanedUrl.startsWith("/")
-                                  ? cleanedUrl
-                                  : getApiUrl(cleanedUrl)
-                      )
-                    : "";
                   return (
                     <div key={key} className="form-group">
                       <label>
                         {sf.name}
                         {sf.is_required ? " *" : ""}
                       </label>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
-                        <label
-                          className="btn"
-                          style={{ padding: "0.35rem 0.65rem", fontSize: "0.9rem", whiteSpace: "nowrap" }}
-                        >
-                          Upload file
-                          <input
-                            type="file"
-                            style={{ display: "none" }}
-                            onChange={async (e) => {
-                              const file = e.target.files?.[0];
-                              e.target.value = "";
-                              if (!file) return;
-                              if (!token) {
-                                toast.error("Session expired. Please log in again.");
-                                router.push("/login");
-                                return;
+                      <AttachmentFieldControl
+                        value={val}
+                        uploadSuccessAlert={false}
+                        onUploaded={(downloadUrl, filename) => {
+                          const cell = makeAttachmentCellValue(downloadUrl, filename);
+                          setEditData((prev) => {
+                            const merged = { ...prev, [key]: cell };
+                            if (entryId && fieldId) {
+                              if (isNew) {
+                                void persistNewRow(merged).catch((e) =>
+                                  toast.error(e instanceof Error ? e.message : "Could not save row"),
+                                );
+                              } else {
+                                void persistExistingRow(merged)
+                                  .then(() => toast.success("File attached and saved."))
+                                  .catch((e) => toast.error(e instanceof Error ? e.message : "Could not save"));
                               }
-                              if (!entryId) {
-                                toast.error("Entry is still loading. Please wait a moment and try again.");
-                                return;
-                              }
-                              try {
-                                const form = new FormData();
-                                form.append("files", file);
-                                form.append("entry_id", String(entryId));
-                                form.append("year", String(year));
-                                const url = getApiUrl(`/kpis/${kpiId}/files`);
-                                const res = await fetch(url, {
-                                  method: "POST",
-                                  headers: { Authorization: `Bearer ${token}` },
-                                  body: form,
-                                });
-                                if (!res.ok) {
-                                  toast.error("File upload failed");
-                                  return;
-                                }
-                                const uploaded = (await res.json()) as Array<{ download_url?: string }>;
-                                const latest = uploaded[0];
-                                if (!latest || !latest.download_url) {
-                                  toast.error("File upload failed");
-                                  return;
-                                }
-                                handleChangeCell(key, latest.download_url);
-                                const orgPart = effectiveOrgId != null ? `org_${effectiveOrgId}/` : "";
-                                const storageHint = `${orgPart}kpi_${kpiId}/year_${year}`;
-                                toast.success(`File uploaded to ${storageHint}. Click Save to store the file link in this row.`);
-                              } catch {
-                                toast.error("File upload failed");
-                              }
-                            }}
-                          />
-                        </label>
-                        {href ? (
-                          <a
-                            href={href.startsWith("http") ? href : (typeof window !== "undefined" ? window.location.origin : "") + href}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="btn"
-                            style={{
-                              fontSize: "0.9rem",
-                              padding: "0.35rem 0.65rem",
-                              color: "var(--accent)",
-                              textDecoration: "none",
-                              border: "1px solid var(--accent)",
-                              borderRadius: 6,
-                            }}
-                            onClick={token ? async (e) => {
-                              if (!href.startsWith("http") && (href.startsWith("/api") || href.startsWith("/api/"))) {
-                                e.preventDefault();
-                                try {
-                                  const fullUrl = href.startsWith("http") ? href : (typeof window !== "undefined" ? window.location.origin : "") + href;
-                                  const res = await fetch(fullUrl, { headers: { Authorization: `Bearer ${token}` } });
-                                  if (!res.ok) throw new Error("Download failed");
-                                  const blob = await res.blob();
-                                  const blobUrl = URL.createObjectURL(blob);
-                                  window.open(blobUrl, "_blank", "noopener,noreferrer");
-                                  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-                                } catch {
-                                  window.open(href.startsWith("http") ? href : (typeof window !== "undefined" ? window.location.origin : "") + href, "_blank", "noopener,noreferrer");
-                                }
-                              }
-                            } : undefined}
-                          >
-                            Open current file
-                          </a>
-                        ) : null}
-                      </div>
+                            }
+                            return merged;
+                          });
+                        }}
+                        onClear={() => handleChangeCell(key, "")}
+                        token={token}
+                        kpiId={kpiId}
+                        entryId={entryId}
+                        year={year}
+                        onNotAuthenticated={() => {
+                          toast.error("Session expired. Please log in again.");
+                          router.push("/login");
+                        }}
+                        onError={(m) => toast.error(m)}
+                      />
                     </div>
                   );
                 }

@@ -4,7 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken, clearTokens } from "@/lib/auth";
-import { api, getApiUrl } from "@/lib/api";
+import { api, getApiUrl, openKpiStoredFileInNewTab } from "@/lib/api";
+import { getAttachmentDisplayName, getAttachmentUrl } from "@/lib/attachmentCellValue";
 import toast from "react-hot-toast";
 import {
   buildMultiItemsApiRequestExample,
@@ -1483,43 +1484,50 @@ export default function FullPageMultiItems() {
                           if (arr.length === 0) return "—";
                           return arr.map((x) => String(x)).join("; ");
                         }
-                        if (cellVal == null || String(cellVal).trim() === "") return "—";
-                        const strVal = String(cellVal);
                         if (sf.field_type === "attachment") {
-                          const href =
-                            strVal.startsWith("http") ? strVal
-                            : strVal.startsWith("/") ? strVal
-                            : getApiUrl(strVal);
-                          const fullUrl = href.startsWith("http") ? href : (typeof window !== "undefined" ? window.location.origin : "") + href;
-                          const handleOpen = token
-                            ? async (e: React.MouseEvent) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                try {
-                                  const res = await fetch(fullUrl, { headers: { Authorization: `Bearer ${token}` } });
-                                  if (!res.ok) throw new Error("Download failed");
-                                  const blob = await res.blob();
-                                  const blobUrl = URL.createObjectURL(blob);
-                                  window.open(blobUrl, "_blank", "noopener,noreferrer");
-                                  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-                                } catch {
-                                  window.open(fullUrl, "_blank", "noopener,noreferrer");
-                                }
-                              }
-                            : (e: React.MouseEvent) => e.stopPropagation();
+                          const url = getAttachmentUrl(cellVal);
+                          if (!url) return "—";
+                          const name = getAttachmentDisplayName(cellVal);
+                          const handleOpen = async (e: React.MouseEvent) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (!token) {
+                              toast.error("Session expired. Please log in again.");
+                              return;
+                            }
+                            try {
+                              await openKpiStoredFileInNewTab(cellVal, token);
+                            } catch (err) {
+                              toast.error(err instanceof Error ? err.message : "Could not open file");
+                            }
+                          };
                           return (
-                            <a
-                              href={fullUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
+                            <button
+                              type="button"
                               onClick={handleOpen}
-                              style={{ color: "var(--accent)", cursor: "pointer" }}
+                              title={url}
+                              style={{
+                                color: "var(--accent)",
+                                cursor: "pointer",
+                                background: "none",
+                                border: "none",
+                                padding: 0,
+                                font: "inherit",
+                                textDecoration: "underline",
+                                textAlign: "left",
+                                maxWidth: 280,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                display: "block",
+                              }}
                             >
-                              Open file
-                            </a>
+                              {name}
+                            </button>
                           );
                         }
-                        return strVal;
+                        if (cellVal == null || String(cellVal).trim() === "") return "—";
+                        return String(cellVal);
                       })()}
                     </td>
                   ))}

@@ -111,6 +111,19 @@ textarea {
   font-size: 0.9rem;
 }
 
+/* Labels used as .btn (e.g. file upload) must not inherit field-label color; .form-group label beats .btn-primary alone. */
+.form-group label.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0;
+  color: var(--text);
+}
+
+.form-group label.btn-primary {
+  color: #fff;
+}
+
 .form-group input,
 .form-group select,
 .form-group textarea {

@@ -6,6 +6,15 @@ import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
+import {
+  coerceScalarValueTextFromApi,
+  getAttachmentDisplayName,
+  getAttachmentUrl,
+  makeAttachmentCellValue,
+  parseScalarAttachmentValueText,
+  stringifyScalarAttachment,
+} from "@/lib/attachmentCellValue";
+import { AttachmentFieldControl } from "@/components/AttachmentFieldControl";
 import MultiReferenceInput from "@/components/MultiReferenceInput";
 
 interface ReferenceConfig {
@@ -135,6 +144,10 @@ function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
   if (!v) return "—";
   if (f.field_type === "multi_reference" && Array.isArray(v.value_json)) {
     return (v.value_json as string[]).join(", ") || "—";
+  }
+  if (f.field_type === "attachment" && v.value_text != null) {
+    const p = parseScalarAttachmentValueText(v.value_text);
+    if (p.url) return p.filename?.trim() || "Attached file";
   }
   if (v.value_text != null) return String(v.value_text);
   if (v.value_number != null) return String(v.value_number);
@@ -821,7 +834,14 @@ export default function DomainKpiDetailPage() {
         out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as string[]) : [] };
       } else {
         out[f.id] = {};
-        if (v?.value_text != null) out[f.id].value_text = v.value_text;
+        if (v?.value_text != null) {
+          if (f.field_type === "attachment") {
+            const coerced = coerceScalarValueTextFromApi(v.value_text);
+            if (coerced != null) out[f.id].value_text = coerced;
+          } else {
+            out[f.id].value_text = v.value_text;
+          }
+        }
         if (v?.value_number != null) out[f.id].value_number = v.value_number;
         if (v?.value_boolean != null) out[f.id].value_boolean = v.value_boolean;
         if (v?.value_date) out[f.id].value_date = String(v.value_date).slice(0, 10);
@@ -894,15 +914,20 @@ export default function DomainKpiDetailPage() {
     setFormValues((prev) => ({ ...prev, [fieldId]: { ...prev[fieldId], [key]: value } }));
   };
 
-  const handleSave = async () => {
+  const saveEntryWithFormValues = async (
+    fv: Record<number, FormCell>,
+    options?: { silent?: boolean; keepEditing?: boolean },
+  ) => {
+    const silent = options?.silent ?? false;
+    const keepEditing = options?.keepEditing ?? false;
     if (!token || effectiveOrgId == null) return;
-    setSaveError(null);
-    setSaving(true);
+    if (!silent) setSaveError(null);
+    if (!silent) setSaving(true);
     try {
       const values = fields
         .filter((f) => f.field_type !== "formula" && (f.can_edit !== false))
         .map((f) => {
-          const v = formValues[f.id] ?? {};
+          const v = fv[f.id] ?? {};
           const payload: {
             field_id: number;
             value_text?: string | null;
@@ -939,7 +964,7 @@ export default function DomainKpiDetailPage() {
       });
       setEntry(updated);
       const isOrgAdmin = meRole === "ORG_ADMIN";
-      if (isOrgAdmin) {
+      if (isOrgAdmin && !silent) {
         await api(`/kpis/${kpiId}/assignments?${saveQuery}`, {
           method: "PUT",
           body: JSON.stringify({ assignments: editAssignments.map((a) => ({ user_id: a.user_id, permission: a.permission || "data_entry" })) }),
@@ -952,23 +977,45 @@ export default function DomainKpiDetailPage() {
         });
       }
       await loadData();
-      setIsEditing(false);
-      toast.success("Entry saved successfully");
+      if (!silent) {
+        if (!keepEditing) setIsEditing(false);
+        toast.success("Entry saved successfully");
+      }
     } catch (err) {
       const errWithList = err as Error & { errors?: Array<{ field_key?: string; sub_field_key?: string; row_index?: number; value?: string; message?: string }> };
-      if (Array.isArray(errWithList.errors) && errWithList.errors.length > 0) {
-        const lines = errWithList.errors.map((e) => {
-          const loc = e.sub_field_key != null ? `Field "${e.field_key}", row ${(e.row_index ?? 0) + 1}, "${e.sub_field_key}"` : `Field "${e.field_key}"`;
-          return `${loc}: value "${e.value ?? ""}" ${e.message ?? "not allowed"}`;
-        });
-        setSaveError(`Validation failed:\n${lines.join("\n")}`);
+      if (silent) {
+        toast.error(err instanceof Error ? err.message : "Could not save attachment");
       } else {
-        setSaveError(err instanceof Error ? err.message : "Save failed");
+        if (Array.isArray(errWithList.errors) && errWithList.errors.length > 0) {
+          const lines = errWithList.errors.map((e) => {
+            const loc = e.sub_field_key != null ? `Field "${e.field_key}", row ${(e.row_index ?? 0) + 1}, "${e.sub_field_key}"` : `Field "${e.field_key}"`;
+            return `${loc}: value "${e.value ?? ""}" ${e.message ?? "not allowed"}`;
+          });
+          setSaveError(`Validation failed:\n${lines.join("\n")}`);
+        } else {
+          setSaveError(err instanceof Error ? err.message : "Save failed");
+        }
+        toast.error(err instanceof Error ? err.message : "Save failed");
       }
-      toast.error(err instanceof Error ? err.message : "Save failed");
+      throw err;
     } finally {
-      setSaving(false);
+      if (!silent) setSaving(false);
     }
+  };
+
+  const handleSave = async () => {
+    await saveEntryWithFormValues(formValues, { silent: false, keepEditing: false });
+  };
+
+  /** Persist scalar attachment `value_text` immediately (upload, KPI file pick, etc.). */
+  const persistScalarAttachmentThenSave = (fieldId: number, nextText: string, successMsg = "Saved.") => {
+    setFormValues((prev) => {
+      const merged = { ...prev, [fieldId]: { ...(prev[fieldId] ?? {}), value_text: nextText } };
+      void saveEntryWithFormValues(merged, { silent: true, keepEditing: true })
+        .then(() => toast.success(successMsg))
+        .catch(() => undefined);
+      return merged;
+    });
   };
 
   const handleSubmitEntry = async () => {
@@ -1868,41 +1915,83 @@ export default function DomainKpiDetailPage() {
                       );
                     }
                     if (f.field_type === "attachment") {
-                      const valUrl = val?.value_text ?? "";
+                      const parsed = parseScalarAttachmentValueText(val?.value_text);
+                      const valueForControl = parsed.url
+                        ? { url: parsed.url, filename: parsed.filename }
+                        : "";
                       return (
-                        <div key={f.id} style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                        <div key={f.id} style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
                           <label style={{ fontWeight: 500 }}>{f.name}{f.is_required ? " *" : ""}</label>
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-                            <input
-                              type="url"
-                              value={valUrl}
-                              onChange={(e) => updateField(f.id, "value_text", e.target.value)}
-                              placeholder="https://example.com/file.pdf"
-                              style={{ flex: "1 1 260px", minWidth: 180, padding: "0.5rem", border: "1px solid var(--border)", borderRadius: 6 }}
-                            />
-                            {kpiFiles.length > 0 && (
-                              <select
-                                value=""
-                                onChange={(e) => {
-                                  const fileId = Number(e.target.value || "0");
-                                  const file = kpiFiles.find((x) => x.id === fileId);
-                                  if (!file || !file.download_url) return;
-                                  // Store the API URL (without /api prefix) or full URL, depending on how backend expects it
-                                  updateField(f.id, "value_text", file.download_url);
-                                }}
-                                style={{ padding: "0.45rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
-                              >
-                                <option value="">Select attachment…</option>
-                                {kpiFiles.map((file) => (
-                                  <option key={file.id} value={file.id}>
-                                    {file.original_filename}
-                                  </option>
-                                ))}
-                              </select>
-                            )}
-                          </div>
-                          <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.15rem 0 0" }}>
-                            Stores the URL of the selected attachment. You can also paste any URL manually.
+                          <AttachmentFieldControl
+                            value={valueForControl}
+                            uploadSuccessAlert={false}
+                            onUploaded={(downloadUrl, filename) =>
+                              persistScalarAttachmentThenSave(
+                                f.id,
+                                stringifyScalarAttachment(downloadUrl, filename),
+                                "File attached and saved.",
+                              )
+                            }
+                            onClear={() => updateField(f.id, "value_text", "")}
+                            token={token}
+                            kpiId={kpiId}
+                            entryId={entry?.id ?? null}
+                            year={year}
+                            onNotAuthenticated={() => toast.error("Session expired. Please log in again.")}
+                            onError={(m) => toast.error(m)}
+                            attachDisabled={!entry || !token}
+                            emptySlot={
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                                <input
+                                  type="url"
+                                  value={val?.value_text ?? ""}
+                                  onChange={(e) => updateField(f.id, "value_text", e.target.value)}
+                                  placeholder="Paste external file URL (optional)"
+                                  style={{
+                                    flex: "1 1 220px",
+                                    minWidth: 160,
+                                    padding: "0.5rem",
+                                    border: "1px solid var(--border)",
+                                    borderRadius: 6,
+                                  }}
+                                />
+                                {kpiFiles.length > 0 ? (
+                                  <select
+                                    value=""
+                                    onChange={(e) => {
+                                      const fileId = Number(e.target.value || "0");
+                                      const file = kpiFiles.find((x) => x.id === fileId);
+                                      if (!file?.download_url) return;
+                                      e.target.value = "";
+                                      persistScalarAttachmentThenSave(
+                                        f.id,
+                                        stringifyScalarAttachment(
+                                          file.download_url,
+                                          file.original_filename || `File ${file.id}`
+                                        ),
+                                        "Saved.",
+                                      );
+                                    }}
+                                    style={{
+                                      padding: "0.45rem 0.6rem",
+                                      borderRadius: 6,
+                                      border: "1px solid var(--border)",
+                                      fontSize: "0.85rem",
+                                    }}
+                                  >
+                                    <option value="">Select from KPI files…</option>
+                                    {kpiFiles.map((file) => (
+                                      <option key={file.id} value={file.id}>
+                                        {file.original_filename}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : null}
+                              </div>
+                            }
+                          />
+                          <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0 }}>
+                            Uploading or choosing a KPI file saves the attachment immediately. Paste an external URL and click Save to store it with the rest of the entry.
                           </p>
                         </div>
                       );
@@ -3940,64 +4029,58 @@ export default function DomainKpiDetailPage() {
                                   ) : s.field_type === "attachment" ? (
                                     (() => {
                                       const cellVal = row[s.key];
-                                      const valUrl = typeof cellVal === "string" ? cellVal : String(cellVal ?? "");
+                                      const setCell = (v: unknown) => {
+                                        const next = [...rows];
+                                        next[rowIdx] = { ...next[rowIdx], [s.key]: v };
+                                        setRows(next);
+                                      };
                                       return (
-                                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                                          <input
-                                            type="url"
-                                            value={valUrl}
-                                            onChange={(e) => {
-                                              const next = [...rows];
-                                              next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value };
-                                              setRows(next);
+                                        <div style={{ minWidth: 160, maxWidth: 320 }}>
+                                          <AttachmentFieldControl
+                                            compact
+                                            value={cellVal}
+                                            uploadSuccessAlert={false}
+                                            onUploaded={(downloadUrl, filename) => {
+                                              setFormValues((prev) => {
+                                                const curRows = Array.isArray(prev[f.id]?.value_json)
+                                                  ? ([...(prev[f.id]!.value_json as Record<string, unknown>[])])
+                                                  : [...rows];
+                                                const nextRows = [...curRows];
+                                                nextRows[rowIdx] = {
+                                                  ...(nextRows[rowIdx] as Record<string, unknown>),
+                                                  [s.key]: makeAttachmentCellValue(downloadUrl, filename),
+                                                };
+                                                const merged = { ...prev, [f.id]: { ...prev[f.id], value_json: nextRows } };
+                                                void saveEntryWithFormValues(merged, { silent: true, keepEditing: true })
+                                                  .then(() => toast.success("File attached and saved."))
+                                                  .catch(() => undefined);
+                                                return merged;
+                                              });
                                             }}
-                                            placeholder="https://example.com/file.pdf"
-                                            style={{ flex: "1 1 160px", minWidth: 140, padding: "0.35rem" }}
+                                            onClear={() => setCell("")}
+                                            token={token}
+                                            kpiId={kpiId}
+                                            entryId={entry?.id ?? null}
+                                            year={year}
+                                            onNotAuthenticated={() => toast.error("Session expired. Please log in again.")}
+                                            onError={(m) => toast.error(m)}
+                                            attachDisabled={!entry || !token}
+                                            emptySlot={
+                                              <input
+                                                type="url"
+                                                value={typeof cellVal === "string" ? cellVal : ""}
+                                                onChange={(e) => setCell(e.target.value)}
+                                                placeholder="Paste URL (optional)"
+                                                style={{
+                                                  width: "100%",
+                                                  minWidth: 120,
+                                                  padding: "0.35rem",
+                                                  fontSize: "0.85rem",
+                                                  marginBottom: "0.25rem",
+                                                }}
+                                              />
+                                            }
                                           />
-                                          <label
-                                            className="btn"
-                                            style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
-                                          >
-                                            Upload file
-                                            <input
-                                              type="file"
-                                              style={{ display: "none" }}
-                                              onChange={async (e) => {
-                                                const file = e.target.files?.[0];
-                                                e.target.value = "";
-                                                if (!file || !entry || !token) return;
-                                                try {
-                                                  const form = new FormData();
-                                                  form.append("files", file);
-                                                  form.append("entry_id", String(entry.id));
-                                                  form.append("year", String(year));
-                                                  const url = getApiUrl(`/kpis/${kpiId}/files`);
-                                                  const res = await fetch(url, {
-                                                    method: "POST",
-                                                    headers: { Authorization: `Bearer ${token}` },
-                                                    body: form,
-                                                  });
-                                                  if (!res.ok) {
-                                                    toast.error("File upload failed");
-                                                    return;
-                                                  }
-                                                  const uploaded = (await res.json()) as KpiFileItem[];
-                                                  const latest = uploaded[0];
-                                                  if (!latest || !latest.download_url) {
-                                                    toast.error("File upload failed");
-                                                    return;
-                                                  }
-                                                  const next = [...rows];
-                                                  next[rowIdx] = { ...next[rowIdx], [s.key]: latest.download_url };
-                                                  setRows(next);
-                                                  const storageHint = `org_${effectiveOrgId}/kpi_${kpiId}/year_${year}`;
-                                                  toast.success(`File uploaded to ${storageHint}`);
-                                                } catch {
-                                                  toast.error("File upload failed");
-                                                }
-                                              }}
-                                            />
-                                          </label>
                                         </div>
                                       );
                                     })()
@@ -4018,6 +4101,17 @@ export default function DomainKpiDetailPage() {
                                       );
                                     })()
                                   )
+                                ) : s.field_type === "attachment" ? (
+                                  (() => {
+                                    const cellVal = row[s.key];
+                                    const url = getAttachmentUrl(cellVal);
+                                    if (!url) return "—";
+                                    return (
+                                      <span title={url} style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+                                        {getAttachmentDisplayName(cellVal)}
+                                      </span>
+                                    );
+                                  })()
                                 ) : (
                                   row[s.key] != null ? String(row[s.key]) : "—"
                                 )}

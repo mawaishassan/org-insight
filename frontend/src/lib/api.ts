@@ -11,6 +11,119 @@ export function getApiUrl(path: string): string {
   return base ? `${base}/api${p}` : `/api${p}`;
 }
 
+/** Path under /api, e.g. kpis/12/files/34/download */
+function parseKpiFileDownloadPath(pathname: string): string | null {
+  const p = pathname.split("?")[0].replace(/\/+$/, "");
+  const withApi = /^\/api\/(kpis\/\d+\/files\/\d+\/download)$/.exec(p);
+  if (withApi) return withApi[1];
+  const noApi = /^\/(kpis\/\d+\/files\/\d+\/download)$/.exec(p);
+  if (noApi) return noApi[1];
+  return null;
+}
+
+/**
+ * If rawUrl is our protected KPI file download (any host or relative), return path for getApiUrl (kpis/id/files/id/download).
+ * Otherwise return null (external URL or unrelated path).
+ */
+export function resolveKpiFileDownloadApiPath(rawUrl: string): string | null {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+  try {
+    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+      const u = new URL(trimmed);
+      return parseKpiFileDownloadPath(u.pathname);
+    }
+    const pathOnly = trimmed.startsWith("/") ? trimmed.split("?")[0] : `/${trimmed.split("?")[0]}`;
+    return parseKpiFileDownloadPath(pathOnly);
+  } catch {
+    return null;
+  }
+}
+
+function storedFileRefToUrl(ref: unknown): string {
+  if (typeof ref === "string") return ref.trim();
+  if (ref && typeof ref === "object" && "url" in ref && typeof (ref as { url: unknown }).url === "string") {
+    return String((ref as { url: string }).url).trim();
+  }
+  return "";
+}
+
+/**
+ * Delete KPI file record + storage when URL points to /api/kpis/{id}/files/{id}/download. No-op for external URLs.
+ */
+export async function deleteKpiStoredFileByUrl(rawUrl: string, token: string | null): Promise<void> {
+  if (!token) {
+    throw new Error("Not signed in");
+  }
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return;
+  const inner = resolveKpiFileDownloadApiPath(trimmed);
+  if (!inner) return;
+  const m = /^kpis\/(\d+)\/files\/(\d+)\/download$/.exec(inner);
+  if (!m) return;
+  const kpiId = m[1];
+  const fileId = m[2];
+  const res = await fetch(getApiUrl(`kpis/${kpiId}/files/${fileId}`), {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok && res.status !== 204) {
+    const err = await res.json().catch(() => ({}));
+    const d = (err as { detail?: unknown }).detail;
+    throw new Error(typeof d === "string" ? d : `Could not delete file (${res.status})`);
+  }
+}
+
+/**
+ * Open a KPI attachment stored as download URL (relative or absolute). Uses JWT for /api/kpis/.../files/.../download.
+ * For other http(s) URLs, opens in a new tab without auth.
+ */
+export async function openKpiStoredFileInNewTab(ref: unknown, token: string | null): Promise<void> {
+  if (!token) {
+    throw new Error("Not signed in");
+  }
+  const trimmed = storedFileRefToUrl(ref);
+  if (!trimmed) {
+    throw new Error("No file URL");
+  }
+
+  const inner = resolveKpiFileDownloadApiPath(trimmed);
+  const url = inner ? getApiUrl(inner) : null;
+
+  if (url) {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const d = (err as { detail?: unknown }).detail;
+      throw new Error(typeof d === "string" ? d : `Download failed (${res.status})`);
+    }
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    window.open(blobUrl, "_blank", "noopener,noreferrer");
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    return;
+  }
+
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    window.open(trimmed, "_blank", "noopener,noreferrer");
+    return;
+  }
+
+  const rel = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const res = await fetch(`${typeof window !== "undefined" ? window.location.origin : ""}${rel}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const d = (err as { detail?: unknown }).detail;
+    throw new Error(typeof d === "string" ? d : `Download failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  window.open(blobUrl, "_blank", "noopener,noreferrer");
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit & { token?: string } = {}
