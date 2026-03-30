@@ -29,6 +29,7 @@ from app.kpis.schemas import (
     KPIFieldAccessItem,
     KPIReplaceAddRowUsersBody,
     KPIReplaceRowAccessBody,
+    KPIGrantRowViewAllBody,
     KpiRowAccessItem,
     DomainTagRef,
     CategoryTagRef,
@@ -69,6 +70,8 @@ from app.kpis.service import (
     replace_row_access,
     get_row_access_by_entry,
     get_full_row_access_users,
+    grant_view_all_rows_to_user,
+    revoke_all_row_access_for_user,
     sync_kpi_entry_from_api,
 )
 from app.users.schemas import UserResponse
@@ -660,6 +663,56 @@ async def get_kpi_row_access_full_users_route(
     if not can_view:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
     return await get_full_row_access_users(db, entry_id, field_id, org_id)
+
+
+@router.post("/{kpi_id}/row-access/grant-view-all", status_code=status.HTTP_200_OK)
+async def grant_kpi_row_view_all_route(
+    kpi_id: int,
+    body: KPIGrantRowViewAllBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Grant view access to all existing rows for a user on an entry+multi-line field. Org admin only."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    ok = await grant_view_all_rows_to_user(
+        db,
+        user_id=body.user_id,
+        entry_id=body.entry_id,
+        field_id=body.field_id,
+        org_id=org_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI, entry, field, or user not found")
+    await db.commit()
+
+
+@router.post("/{kpi_id}/row-access/revoke-all", status_code=status.HTTP_200_OK)
+async def revoke_kpi_row_access_all_route(
+    kpi_id: int,
+    body: KPIGrantRowViewAllBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Revoke all row-level access for a user on an entry+multi-line field. Org admin only."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    ok = await revoke_all_row_access_for_user(
+        db,
+        user_id=body.user_id,
+        entry_id=body.entry_id,
+        field_id=body.field_id,
+        org_id=org_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI, entry, field, or user not found")
+    await db.commit()
 
 
 def _field_type_str(f) -> str:

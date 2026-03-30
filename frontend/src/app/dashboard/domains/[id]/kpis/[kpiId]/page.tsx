@@ -108,7 +108,7 @@ interface FullRowAccessUser {
   user_id: number;
   full_name: string | null;
   username: string;
-  mode: "edit" | "edit_delete";
+  mode: "view" | "edit" | "edit_delete";
 }
 
 function qs(params: Record<string, string | number | undefined>) {
@@ -265,7 +265,7 @@ export default function DomainKpiDetailPage() {
   const [fullRowAccessLoadingFieldId, setFullRowAccessLoadingFieldId] = useState<number | null>(null);
   const [fullRowAccessSavingFieldId, setFullRowAccessSavingFieldId] = useState<number | null>(null);
   const [fullRowAccessAddUserIdByField, setFullRowAccessAddUserIdByField] = useState<Record<number, number | "">>({});
-  const [fullRowAccessAddModeByField, setFullRowAccessAddModeByField] = useState<Record<number, "edit" | "edit_delete">>({});
+  const [fullRowAccessAddModeByField, setFullRowAccessAddModeByField] = useState<Record<number, "view" | "edit" | "edit_delete">>({});
   /** Security tab: add-row permission management (per multi-line field). */
   const [addRowUsersByField, setAddRowUsersByField] = useState<Record<number, Array<{ id: number; username: string; full_name: string | null }>>>({});
   const [addRowLoadingFieldId, setAddRowLoadingFieldId] = useState<number | null>(null);
@@ -354,27 +354,40 @@ export default function DomainKpiDetailPage() {
   );
 
   const grantAllRowsToUser = useCallback(
-    async (fieldId: number, entryId: number, userId: number, mode: "edit" | "edit_delete") => {
+    async (fieldId: number, entryId: number, userId: number, mode: "view" | "edit" | "edit_delete") => {
       if (!token || !kpiId || effectiveOrgId == null) return;
       setFullRowAccessSavingFieldId(fieldId);
       try {
-        const totalRows = await getRowCountForEntryField(entryId, fieldId);
-        const rows = Array.from({ length: totalRows }, (_, i) => ({
-          row_index: i,
-          can_edit: true,
-          can_delete: mode === "edit_delete",
-        }));
-        await api(`/kpis/${kpiId}/row-access?${qs({ organization_id: effectiveOrgId })}`, {
-          method: "PUT",
-          body: JSON.stringify({
-            user_id: userId,
-            entry_id: entryId,
-            field_id: fieldId,
-            rows,
-          }),
-          token,
-        });
-        toast.success(mode === "edit_delete" ? "Full row access granted (Edit+Delete)" : "Full row access granted (Edit)");
+        if (mode === "view") {
+          await api(`/kpis/${kpiId}/row-access/grant-view-all?${qs({ organization_id: effectiveOrgId })}`, {
+            method: "POST",
+            body: JSON.stringify({
+              user_id: userId,
+              entry_id: entryId,
+              field_id: fieldId,
+            }),
+            token,
+          });
+          toast.success("Full row access granted (View)");
+        } else {
+          const totalRows = await getRowCountForEntryField(entryId, fieldId);
+          const rows = Array.from({ length: totalRows }, (_, i) => ({
+            row_index: i,
+            can_edit: true,
+            can_delete: mode === "edit_delete",
+          }));
+          await api(`/kpis/${kpiId}/row-access?${qs({ organization_id: effectiveOrgId })}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              user_id: userId,
+              entry_id: entryId,
+              field_id: fieldId,
+              rows,
+            }),
+            token,
+          });
+          toast.success(mode === "edit_delete" ? "Full row access granted (Edit+Delete)" : "Full row access granted (Edit)");
+        }
         await fetchFullRowAccessUsers(fieldId, entryId);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Failed to grant full row access");
@@ -390,20 +403,19 @@ export default function DomainKpiDetailPage() {
       if (!token || !kpiId || effectiveOrgId == null) return;
       setFullRowAccessSavingFieldId(fieldId);
       try {
-        await api(`/kpis/${kpiId}/row-access?${qs({ organization_id: effectiveOrgId })}`, {
-          method: "PUT",
+        await api(`/kpis/${kpiId}/row-access/revoke-all?${qs({ organization_id: effectiveOrgId })}`, {
+          method: "POST",
           body: JSON.stringify({
             user_id: userId,
             entry_id: entryId,
             field_id: fieldId,
-            rows: [],
           }),
           token,
         });
-        toast.success("Full row access removed");
+        toast.success("Row access removed");
         await fetchFullRowAccessUsers(fieldId, entryId);
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Failed to remove full row access");
+        toast.error(err instanceof Error ? err.message : "Failed to remove row access");
       } finally {
         setFullRowAccessSavingFieldId(null);
       }
@@ -2719,11 +2731,17 @@ export default function DomainKpiDetailPage() {
                                 onChange={(e) =>
                                   setFullRowAccessAddModeByField((prev) => ({
                                     ...prev,
-                                    [f.id]: e.target.value === "edit_delete" ? "edit_delete" : "edit",
+                                    [f.id]:
+                                      e.target.value === "view"
+                                        ? "view"
+                                        : e.target.value === "edit_delete"
+                                          ? "edit_delete"
+                                          : "edit",
                                   }))
                                 }
                                 style={{ width: "100%", padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.8rem" }}
                               >
+                                <option value="view">View</option>
                                 <option value="edit">Edit</option>
                                 <option value="edit_delete">Edit + Delete</option>
                               </select>
@@ -2746,6 +2764,24 @@ export default function DomainKpiDetailPage() {
                               }
                             >
                               {fullRowAccessSavingFieldId === f.id ? "Saving..." : "Grant all rows"}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              disabled={
+                                fullRowAccessSavingFieldId === f.id ||
+                                !rowAccessEntryIdByField[f.id] ||
+                                !fullRowAccessAddUserIdByField[f.id]
+                              }
+                              onClick={() =>
+                                revokeAllRowsForUser(
+                                  f.id,
+                                  Number(rowAccessEntryIdByField[f.id]),
+                                  Number(fullRowAccessAddUserIdByField[f.id])
+                                )
+                              }
+                            >
+                              {fullRowAccessSavingFieldId === f.id ? "Saving..." : "Revoke all rows"}
                             </button>
                           </div>
                           <div style={{ marginTop: "0.6rem" }}>
@@ -2773,7 +2809,7 @@ export default function DomainKpiDetailPage() {
                                       fontSize: "0.8rem",
                                     }}
                                   >
-                                    {(u.full_name || u.username)} ({u.mode === "edit_delete" ? "Edit+Delete" : "Edit"})
+                                    {(u.full_name || u.username)} ({u.mode === "view" ? "View" : u.mode === "edit_delete" ? "Edit+Delete" : "Edit"})
                                     <button
                                       type="button"
                                       onClick={() =>
@@ -2784,7 +2820,7 @@ export default function DomainKpiDetailPage() {
                                         )
                                       }
                                       style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--danger, #c00)", fontSize: "0.9rem" }}
-                                      title="Remove full access"
+                                      title="Revoke all rows"
                                     >
                                       ×
                                     </button>

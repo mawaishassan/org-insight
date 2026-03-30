@@ -970,10 +970,10 @@ async def get_full_row_access_users(
 ) -> list[dict]:
     """
     Return users who currently have full row-level access on an entry+multi-line field.
-    "Full access" means:
-      - user has an access row for every existing row index [0..total_rows-1]
-      - and each row has can_edit=True
-      - optional can_delete=True for all rows => mode "edit_delete", else "edit"
+    "Full access" means the user has an access row for every existing row index [0..total_rows-1].
+    Mode is derived from flags across all rows:
+      - if all rows have can_edit=True: mode "edit" or "edit_delete"
+      - otherwise: mode "view"
     """
     entry_res = await db.execute(
         select(KPIEntry).where(
@@ -1045,9 +1045,10 @@ async def get_full_row_access_users(
         has_all_rows = len(u["rows"]) >= total_rows and all(i in u["rows"] for i in range(total_rows))
         if not has_all_rows:
             continue
-        if not u["all_edit"]:
-            continue
-        mode = "edit_delete" if u["all_delete"] else "edit"
+        if u["all_edit"]:
+            mode = "edit_delete" if u["all_delete"] else "edit"
+        else:
+            mode = "view"
         out.append(
             {
                 "user_id": u["user_id"],
@@ -1058,6 +1059,111 @@ async def get_full_row_access_users(
         )
     out.sort(key=lambda x: ((x.get("full_name") or "").lower(), (x.get("username") or "").lower()))
     return out
+
+
+async def grant_view_all_rows_to_user(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    entry_id: int,
+    field_id: int,
+    org_id: int,
+) -> bool:
+    """
+    Ensure the user has a row-access record for every existing row (view-only),
+    without removing or downgrading existing row access records.
+    """
+    entry_res = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.id == entry_id,
+            KPIEntry.organization_id == org_id,
+        )
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return False
+    field_res = await db.execute(
+        select(KPIField).where(KPIField.id == field_id, KPIField.kpi_id == entry.kpi_id)
+    )
+    field = field_res.scalar_one_or_none()
+    if not field or _normalized_field_type_for_row(field) != "multi_line_items":
+        return False
+    user_res = await db.execute(select(User).where(User.id == user_id, User.organization_id == org_id))
+    if user_res.scalar_one_or_none() is None:
+        return False
+    fv_res = await db.execute(
+        select(KPIFieldValue.value_json).where(
+            KPIFieldValue.entry_id == entry_id,
+            KPIFieldValue.field_id == field_id,
+        )
+    )
+    fv_row = fv_res.one_or_none()
+    value_json = fv_row[0] if fv_row and fv_row[0] is not None else []
+    total_rows = len(value_json) if isinstance(value_json, list) else 0
+    if total_rows <= 0:
+        return True
+
+    existing_res = await db.execute(
+        select(KpiMultiLineRowAccess.row_index).where(
+            KpiMultiLineRowAccess.user_id == user_id,
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    existing = {int(r[0]) for r in existing_res.all()}
+    for i in range(total_rows):
+        if i in existing:
+            continue
+        db.add(
+            KpiMultiLineRowAccess(
+                user_id=user_id,
+                entry_id=entry_id,
+                field_id=field_id,
+                row_index=i,
+                can_edit=False,
+                can_delete=False,
+            )
+        )
+    await db.flush()
+    return True
+
+
+async def revoke_all_row_access_for_user(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    entry_id: int,
+    field_id: int,
+    org_id: int,
+) -> bool:
+    """Delete all row-level access records for a user on an entry+field."""
+    entry_res = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.id == entry_id,
+            KPIEntry.organization_id == org_id,
+        )
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return False
+    field_res = await db.execute(
+        select(KPIField).where(KPIField.id == field_id, KPIField.kpi_id == entry.kpi_id)
+    )
+    field = field_res.scalar_one_or_none()
+    if not field or _normalized_field_type_for_row(field) != "multi_line_items":
+        return False
+    user_res = await db.execute(select(User).where(User.id == user_id, User.organization_id == org_id))
+    if user_res.scalar_one_or_none() is None:
+        return False
+    await db.execute(
+        delete(KpiMultiLineRowAccess).where(
+            KpiMultiLineRowAccess.user_id == user_id,
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    await db.flush()
+    return True
 
 
 def _normalized_field_type(f) -> str:

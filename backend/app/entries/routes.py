@@ -691,6 +691,11 @@ async def list_multi_items_rows(
         for row_index, can_edit, can_delete in row_rules:
             row_rule_map[int(row_index)] = (bool(can_edit), bool(can_delete))
 
+    # Visibility: when row-level access is enabled, non-admin users should only see rows explicitly assigned to them.
+    # An access record implies view permission; can_edit/can_delete control actions.
+    if field_row_access_enabled and not is_org_admin:
+        rows = [(i, r) for (i, r) in rows if int(i) in row_rule_map]
+
     # Optional: filter down to only rows the user can edit/delete.
     if editable_only:
         if field_row_access_enabled and not is_org_admin:

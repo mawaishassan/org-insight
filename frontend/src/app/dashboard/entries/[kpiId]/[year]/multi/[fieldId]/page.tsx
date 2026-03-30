@@ -105,7 +105,7 @@ export default function FullPageMultiItems() {
   const [rowAccessUsers, setRowAccessUsers] = useState<RowAccessUser[]>([]);
   const [rowAccessAssignments, setRowAccessAssignments] = useState<{ id: number; full_name: string | null; username: string }[]>([]);
   const [rowAccessAddUserId, setRowAccessAddUserId] = useState<number | null>(null);
-  const [rowAccessAddAccess, setRowAccessAddAccess] = useState<"edit" | "edit_delete">("edit_delete");
+  const [rowAccessAddAccess, setRowAccessAddAccess] = useState<"view" | "edit" | "edit_delete">("edit_delete");
   const [rowAccessSaving, setRowAccessSaving] = useState(false);
   const [rowAccessUserSearch, setRowAccessUserSearch] = useState("");
 
@@ -477,7 +477,7 @@ export default function FullPageMultiItems() {
         }).toString()}`,
         { token }
       );
-      const can_edit = true;
+      const can_edit = rowAccessAddAccess !== "view";
       const can_delete = rowAccessAddAccess === "edit_delete";
       const merged = (Array.isArray(existing) ? existing : []).filter((r) => r.row_index !== rowAccessModal.rowIndex);
       merged.push({ row_index: rowAccessModal.rowIndex, can_edit, can_delete });
@@ -492,7 +492,7 @@ export default function FullPageMultiItems() {
         }),
         token,
       });
-      toast.success("User access added to row");
+      toast.success(rowAccessAddAccess === "view" ? "Row view access granted" : "User access added to row");
       setRowAccessModal(null);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to save");
@@ -1780,7 +1780,7 @@ export default function FullPageMultiItems() {
               Record #{rowAccessModal.rowIndex + 1}{rowAccessModal.preview ? ` — ${rowAccessModal.preview}${rowAccessModal.preview.length >= 80 ? "…" : ""}` : ""}
             </p>
             <p style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
-              Assign which users can edit or delete this row.
+              Assign which users can view, edit, or delete this row.
             </p>
             <div style={{ marginBottom: "1rem" }}>
               <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
@@ -1797,7 +1797,7 @@ export default function FullPageMultiItems() {
                       fontSize: "0.8rem",
                     }}
                   >
-                    {u.full_name || u.username} ({u.can_delete ? "Edit+Delete" : "Edit"})
+                    {u.full_name || u.username} ({!u.can_edit ? "View" : u.can_delete ? "Edit+Delete" : "Edit"})
                     <button
                       type="button"
                       onClick={() => removeUserFromRow(u.user_id)}
@@ -1869,9 +1869,10 @@ export default function FullPageMultiItems() {
               </select>
               <select
                 value={rowAccessAddAccess}
-                onChange={(e) => setRowAccessAddAccess(e.target.value as "edit" | "edit_delete")}
+                onChange={(e) => setRowAccessAddAccess(e.target.value as "view" | "edit" | "edit_delete")}
                 style={{ width: "100%", padding: "0.5rem 0.75rem", borderRadius: 8, border: "1px solid var(--border)" }}
               >
+                <option value="view">View only</option>
                 <option value="edit">Edit only</option>
                 <option value="edit_delete">Edit + Delete</option>
               </select>

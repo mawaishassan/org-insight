@@ -114,6 +114,14 @@ class KPIReplaceRowAccessBody(BaseModel):
     )
 
 
+class KPIGrantRowViewAllBody(BaseModel):
+    """Grant view access to all existing rows for a user on an entry+field (multi_line_items)."""
+
+    user_id: int = Field(..., description="User in same organization")
+    entry_id: int = Field(..., description="KPI entry (year/period)")
+    field_id: int = Field(..., description="Multi-line items field ID")
+
+
 class KPIUpdate(BaseModel):
     """Update KPI (optionally replace domain/category/org tags, card display fields)."""
 
