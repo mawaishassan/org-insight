@@ -70,6 +70,53 @@ def _org_id(user: User, org_id_param: int | None) -> int:
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization required")
 
 
+async def _reindex_row_access_after_delete(
+    db: AsyncSession,
+    *,
+    entry_id: int,
+    field_id: int,
+    deleted_indices: set[int],
+) -> None:
+    """
+    Keep row-level access attached to the same logical rows after deleting rows from value_json.
+    - Access rows for deleted indices are removed.
+    - Access rows after deleted positions are shifted down by the number of removed rows before them.
+    """
+    if not deleted_indices:
+        return
+    rules_res = await db.execute(
+        select(KpiMultiLineRowAccess).where(
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    rules = list(rules_res.scalars().all())
+    if not rules:
+        return
+    sorted_deleted = sorted(deleted_indices)
+    to_shift: list[tuple[KpiMultiLineRowAccess, int]] = []
+    for rule in rules:
+        current = int(rule.row_index)
+        if current in deleted_indices:
+            await db.delete(rule)
+            continue
+        shift = 0
+        for deleted_idx in sorted_deleted:
+            if deleted_idx < current:
+                shift += 1
+        if shift > 0:
+            to_shift.append((rule, current - shift))
+    await db.flush()
+    # Two-phase reindex avoids transient uniqueness collisions on
+    # (user_id, entry_id, field_id, row_index) while rows are shifting.
+    for idx, (rule, _) in enumerate(to_shift, start=1):
+        rule.row_index = -idx
+    await db.flush()
+    for rule, final_index in to_shift:
+        rule.row_index = final_index
+    await db.flush()
+
+
 def _entry_to_response(entry):
     entered_by_name = None
     if getattr(entry, "user", None):
@@ -921,6 +968,12 @@ async def delete_multi_items_row(
     del fv.value_json[row_index]
     flag_modified(fv, "value_json")
     await db.flush()
+    await _reindex_row_access_after_delete(
+        db,
+        entry_id=entry.id,
+        field_id=field.id,
+        deleted_indices={row_index},
+    )
     await db.commit()
 
 
@@ -964,6 +1017,12 @@ async def bulk_delete_multi_items_rows(
     fv.value_json = [r for idx, r in enumerate(fv.value_json) if idx not in index_set]
     flag_modified(fv, "value_json")
     await db.flush()
+    await _reindex_row_access_after_delete(
+        db,
+        entry_id=entry.id,
+        field_id=field.id,
+        deleted_indices=index_set,
+    )
     await db.commit()
 
 
