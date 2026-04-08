@@ -74,6 +74,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const kpiFieldsMatch = pathname.match(/^\/dashboard\/kpis\/(\d+)\/fields\/?$/);
   const domainDetailMatch = pathname.match(/^\/dashboard\/domains\/(\d+)\/?$/);
   const reportDetailMatch = pathname.match(/^\/dashboard\/reports\/(\d+)(?:\/|$)/);
+  const dashboardDetailMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)(?:\/|$)/);
   const dataExportMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)\/data-export\/?$/);
   const usersDetailMatch = pathname.match(/^\/dashboard\/users\/(\d+)\/?$/);
   const entryDetailMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/?$/);
@@ -203,6 +204,30 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               segments.push({ label: "Assign", href: `/dashboard/reports/${reportId}/assign?organization_id=${rid}` });
             }
             return { orgId: rid, orgName: org.name, segments };
+          });
+        })
+        .then((tail) => setBreadcrumbTail(tail))
+        .catch(() => setBreadcrumbTail(null));
+      return;
+    }
+    if (dashboardDetailMatch) {
+      const dashboardId = Number(dashboardDetailMatch[1]);
+      const designMatch = pathname.match(/^\/dashboard\/dashboards\/\d+\/design\/?$/);
+      const assignMatch = pathname.match(/^\/dashboard\/dashboards\/\d+\/assign\/?$/);
+      api<{ id: number; name: string; organization_id: number }>(`/dashboards/${dashboardId}`, { token })
+        .then((d) => {
+          const oid = d.organization_id;
+          return api<{ id: number; name: string }>(`/organizations/${oid}`, { token }).then((org) => {
+            const segments: { label: string; href: string }[] = [
+              { label: "Dashboards", href: `/dashboard/organizations/${oid}?tab=dashboards` },
+              { label: d.name, href: `/dashboard/dashboards/${dashboardId}?organization_id=${oid}` },
+            ];
+            if (designMatch) {
+              segments.push({ label: "Design", href: `/dashboard/dashboards/${dashboardId}/design?organization_id=${oid}` });
+            } else if (assignMatch) {
+              segments.push({ label: "Assign", href: `/dashboard/dashboards/${dashboardId}/assign?organization_id=${oid}` });
+            }
+            return { orgId: oid, orgName: org.name, segments };
           });
         })
         .then((tail) => setBreadcrumbTail(tail))
@@ -354,8 +379,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     router.push(`/dashboard/entries?${next.toString()}`);
   };
 
+  const dashboardsHref =
+    selectedOrgId != null
+      ? `/dashboard/dashboards?organization_id=${selectedOrgId}`
+      : user.organization_id != null
+        ? `/dashboard/dashboards?organization_id=${user.organization_id}`
+        : "/dashboard/dashboards";
+
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
     { href: "/dashboard/chat", label: "Chat with data", show: canUseChat(role) && (!isSuperAdmin || !!selectedOrgId) },
+    { href: dashboardsHref, label: "Dashboards", show: !isDataEntryOnlyUser },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },
   ].filter((x) => x.show);
@@ -365,6 +398,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     kpis: "KPIs",
     domains: "Domains",
     reports: "Reports",
+    dashboards: "Dashboards",
     settings: "Settings",
   };
   const orgTabFromUrl = selectedOrgId ? searchParams.get("tab") : null;

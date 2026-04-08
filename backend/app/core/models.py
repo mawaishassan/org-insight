@@ -116,6 +116,7 @@ class Organization(Base):
     tags = relationship("OrganizationTag", back_populates="organization", lazy="selectin", order_by="OrganizationTag.name")
     roles = relationship("OrganizationRole", back_populates="organization", lazy="selectin", order_by="OrganizationRole.name")
     report_templates = relationship("ReportTemplate", back_populates="organization", lazy="selectin")
+    dashboards = relationship("Dashboard", back_populates="organization", lazy="selectin")
     export_api_tokens = relationship("ExportAPIToken", back_populates="organization", lazy="selectin")
     kpi_files = relationship("KpiFile", back_populates="organization", lazy="selectin")
     storage_config = relationship(
@@ -282,6 +283,9 @@ class User(Base):
     kpi_files = relationship("KpiFile", back_populates="uploaded_by", lazy="selectin")
     report_access_permissions = relationship(
         "ReportAccessPermission", back_populates="user", lazy="selectin"
+    )
+    dashboard_access_permissions = relationship(
+        "DashboardAccessPermission", back_populates="user", lazy="selectin"
     )
     export_api_tokens = relationship("ExportAPIToken", back_populates="created_by", lazy="selectin")
 
@@ -892,3 +896,49 @@ class ReportAccessPermission(Base):
 
     report_template = relationship("ReportTemplate", back_populates="access_permissions")
     user = relationship("User", back_populates="report_access_permissions")
+
+
+class Dashboard(Base):
+    """Organization dashboard definition with widget layout (JSON)."""
+
+    __tablename__ = "dashboards"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    layout = Column(JSON, nullable=True)  # list of widgets + layout metadata
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    organization = relationship("Organization", back_populates="dashboards")
+    access_permissions = relationship(
+        "DashboardAccessPermission",
+        back_populates="dashboard",
+        lazy="selectin",
+        cascade="all, delete-orphan",
+    )
+
+
+class DashboardAccessPermission(Base):
+    """Permission for user to view/edit a dashboard."""
+
+    __tablename__ = "dashboard_access_permissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    dashboard_id = Column(
+        Integer, ForeignKey("dashboards.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    can_view = Column(Boolean, default=True, nullable=False)
+    can_edit = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+
+    __table_args__ = (UniqueConstraint("dashboard_id", "user_id", name="uq_dashboard_user"),)
+
+    dashboard = relationship("Dashboard", back_populates="access_permissions")
+    user = relationship("User", back_populates="dashboard_access_permissions")

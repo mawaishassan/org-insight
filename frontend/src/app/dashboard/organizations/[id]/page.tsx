@@ -402,6 +402,7 @@ export default function OrganizationDetailPage() {
     kpiApi: number;
     tagCount: number;
     reportCount: number;
+    dashboardCount: number;
   } | null>(null);
 
   useEffect(() => {
@@ -415,8 +416,9 @@ export default function OrganizationDetailPage() {
       api<KpiRow[]>(`/kpis?${qs({ organization_id: orgId })}`, { token }),
       api<OrgTagRow[]>(`/organizations/${orgId}/tags`, { token }),
       api<{ id: number }[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token }),
+      api<{ id: number }[]>(`/dashboards?${qs({ organization_id: orgId })}`, { token }),
     ])
-      .then(([domainsList, kpisList, tagsList, reportsList]) => {
+      .then(([domainsList, kpisList, tagsList, reportsList, dashboardsList]) => {
         const categoryCount = domainsList.reduce((s, d) => s + (d.summary?.category_count ?? 0), 0);
         const kpiManual = kpisList.filter((k) => (k.entry_mode ?? "manual") === "manual").length;
         const kpiApi = kpisList.filter((k) => k.entry_mode === "api").length;
@@ -428,6 +430,7 @@ export default function OrganizationDetailPage() {
           kpiApi,
           tagCount: tagsList.length,
           reportCount: reportsList.length,
+          dashboardCount: dashboardsList.length,
         });
       })
       .catch(() => setOverviewSummary(null));
@@ -525,6 +528,7 @@ export default function OrganizationDetailPage() {
           orgId={orgId}
           summary={overviewSummary}
           updateUrl={updateUrl}
+          userRole={userRole}
         />
       )}
 
@@ -614,10 +618,21 @@ function OrganizationOverviewCards({
   orgId,
   summary,
   updateUrl,
+  userRole,
 }: {
   orgId: number;
-  summary: { domainCount: number; categoryCount: number; kpiTotal: number; kpiManual: number; kpiApi: number; tagCount: number; reportCount: number } | null;
+  summary: {
+    domainCount: number;
+    categoryCount: number;
+    kpiTotal: number;
+    kpiManual: number;
+    kpiApi: number;
+    tagCount: number;
+    reportCount: number;
+    dashboardCount: number;
+  } | null;
   updateUrl: (tab: TabId, sub?: SettingsSubId) => void;
+  userRole: UserRole | null;
 }) {
   if (!summary) {
     return <p style={{ color: "var(--muted)" }}>Loading overview…</p>;
@@ -667,6 +682,27 @@ function OrganizationOverviewCards({
       ],
       onClick: () => updateUrl("reports"),
     },
+    ...(userRole === "SUPER_ADMIN"
+      ? [
+          {
+            id: "dashboards",
+            title: "Dashboards",
+            icon: (
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="7" height="9" rx="1" />
+                <rect x="14" y="3" width="7" height="5" rx="1" />
+                <rect x="14" y="12" width="7" height="9" rx="1" />
+                <rect x="3" y="16" width="7" height="5" rx="1" />
+              </svg>
+            ),
+            lines: [
+              `${summary.dashboardCount} dashboard${summary.dashboardCount !== 1 ? "s" : ""} in this organization`,
+              "Charts, tables, and shared views",
+            ],
+            href: `/dashboard/dashboards?organization_id=${orgId}`,
+          },
+        ]
+      : []),
     {
       id: "access",
       title: "Access control",
