@@ -69,6 +69,17 @@ export type Widget =
       source_field_key: string;
       /** Sub-field keys viewers are allowed to see (SA configures) */
       sub_field_keys: string[];
+      /** Optional join to another KPI's multi-line items (acts like a lookup join). */
+      join?: {
+        kpi_id: number;
+        source_field_key: string;
+        /** Key in left (primary) items used to match. */
+        on_left_sub_field_key: string;
+        /** Key in right (joined) items used to match. */
+        on_right_sub_field_key: string;
+        /** Sub-field keys to show from joined KPI. */
+        sub_field_keys: string[];
+      };
       full_width?: boolean;
     };
 
@@ -1345,6 +1356,8 @@ function KpiMultiLineTableWidgetInner({
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const [items, setItems] = useState<Record<string, unknown>[]>([]);
   const [labelByKey, setLabelByKey] = useState<Record<string, string>>({});
+  const [joinItemsByKey, setJoinItemsByKey] = useState<Record<string, Record<string, unknown>>>({});
+  const [joinLabelByKey, setJoinLabelByKey] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -1354,24 +1367,50 @@ function KpiMultiLineTableWidgetInner({
   const [page, setPage] = useState(0);
 
   const allowedKeys = widget.sub_field_keys ?? [];
+  const joinAllowedKeys = widget.join?.sub_field_keys ?? [];
+  const hasJoin =
+    !!widget.join &&
+    typeof widget.join.kpi_id === "number" &&
+    !!widget.join.source_field_key &&
+    !!widget.join.on_left_sub_field_key &&
+    !!widget.join.on_right_sub_field_key;
+
+  const joinKeyForLeft = (row: Record<string, unknown>): string => {
+    const k = widget.join?.on_left_sub_field_key || "";
+    return k ? String(row?.[k] ?? "").trim() : "";
+  };
+  const joinLookup = (row: Record<string, unknown>): Record<string, unknown> | null => {
+    if (!hasJoin) return null;
+    const key = joinKeyForLeft(row);
+    return key ? joinItemsByKey[key] ?? null : null;
+  };
 
   useEffect(() => {
-    setVisibleKeys(allowedKeys.length ? [...allowedKeys] : []);
+    const base = allowedKeys.length ? [...allowedKeys] : [];
+    const joinBase = joinAllowedKeys.length ? joinAllowedKeys.map((k) => `join:${k}`) : [];
+    setVisibleKeys([...base, ...joinBase]);
     setSortKey(null);
     setSortDir("asc");
     setSearch("");
     setPage(0);
-  }, [widget.id, JSON.stringify(allowedKeys)]);
+  }, [widget.id, JSON.stringify(allowedKeys), JSON.stringify(joinAllowedKeys)]);
 
   useEffect(() => {
     if (!token) return;
     setLoading(true);
     setError(null);
+    const joinSpec = widget.join;
     Promise.all([
       getKpiFieldsWithSubs(token, organizationId, widget.kpi_id),
       fetchEntryForPeriod(token, organizationId, widget.kpi_id, widget.year, widget.period_key),
+      hasJoin && joinSpec
+        ? Promise.all([
+            getKpiFieldsWithSubs(token, organizationId, joinSpec.kpi_id),
+            fetchEntryForPeriod(token, organizationId, joinSpec.kpi_id, widget.year, widget.period_key),
+          ])
+        : Promise.resolve(null),
     ])
-      .then(([fields, entry]) => {
+      .then(([fields, entry, joinRes]) => {
         const source = fields.find((f) => f.key === widget.source_field_key && f.field_type === "multi_line_items");
         const fid = source?.id;
         const raw = fid ? rawFieldFromEntry(entry, fid) : null;
@@ -1382,26 +1421,72 @@ function KpiMultiLineTableWidgetInner({
           labels[sf.key] = sf.name;
         });
         setLabelByKey(labels);
+
+        if (joinRes && joinSpec) {
+          const [joinFields, joinEntry] = joinRes;
+          const joinSource = joinFields.find((f) => f.key === joinSpec.source_field_key && f.field_type === "multi_line_items");
+          const joinFid = joinSource?.id;
+          const joinRaw = joinFid ? rawFieldFromEntry(joinEntry, joinFid) : null;
+          const joinRows = Array.isArray(joinRaw) ? (joinRaw as Record<string, unknown>[]) : [];
+          const joinLabels: Record<string, string> = {};
+          (joinSource?.sub_fields ?? []).forEach((sf) => {
+            joinLabels[sf.key] = sf.name;
+          });
+          setJoinLabelByKey(joinLabels);
+
+          const idx: Record<string, Record<string, unknown>> = {};
+          const rightKey = joinSpec.on_right_sub_field_key;
+          joinRows.forEach((r) => {
+            const k = rightKey ? String((r as any)?.[rightKey] ?? "").trim() : "";
+            if (!k) return;
+            if (!idx[k]) idx[k] = r;
+          });
+          setJoinItemsByKey(idx);
+        } else {
+          setJoinLabelByKey({});
+          setJoinItemsByKey({});
+        }
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load table data"))
       .finally(() => setLoading(false));
-  }, [token, organizationId, widget.kpi_id, widget.year, widget.period_key, widget.source_field_key]);
+  }, [
+    token,
+    organizationId,
+    widget.kpi_id,
+    widget.year,
+    widget.period_key,
+    widget.source_field_key,
+    JSON.stringify(widget.join ?? null),
+  ]);
 
   const displayKeys = useMemo(() => allowedKeys.filter((k) => visibleKeys.includes(k)), [allowedKeys, visibleKeys]);
+  const joinDisplayKeys = useMemo(() => joinAllowedKeys.filter((k) => visibleKeys.includes(`join:${k}`)), [joinAllowedKeys, visibleKeys]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return items;
-    return items.filter((row) =>
-      allowedKeys.some((k) => formatCellForTable(row[k]).toLowerCase().includes(q))
-    );
-  }, [items, search, allowedKeys]);
+    return items.filter((row) => {
+      const leftHit = allowedKeys.some((k) => formatCellForTable(row[k]).toLowerCase().includes(q));
+      if (leftHit) return true;
+      if (!hasJoin) return false;
+      const j = joinLookup(row);
+      if (!j) return false;
+      return joinAllowedKeys.some((k) => formatCellForTable(j[k]).toLowerCase().includes(q));
+    });
+  }, [items, search, allowedKeys, hasJoin, joinAllowedKeys, JSON.stringify(joinItemsByKey)]);
 
   const sorted = useMemo(() => {
-    if (!sortKey || !displayKeys.includes(sortKey)) return filtered;
+    if (!sortKey) return filtered;
+    if (sortKey.startsWith("join:")) {
+      const k = sortKey.slice("join:".length);
+      if (!joinDisplayKeys.includes(k)) return filtered;
+      const dir = sortDir === "asc" ? 1 : -1;
+      return [...filtered].sort((a, b) => dir * compareCellValues((joinLookup(a) ?? {})[k], (joinLookup(b) ?? {})[k]));
+    }
+    if (!displayKeys.includes(sortKey)) return filtered;
     const dir = sortDir === "asc" ? 1 : -1;
     return [...filtered].sort((a, b) => dir * compareCellValues(a[sortKey], b[sortKey]));
-  }, [filtered, sortKey, sortDir, displayKeys]);
+  }, [filtered, sortKey, sortDir, displayKeys, JSON.stringify(joinItemsByKey), JSON.stringify(joinDisplayKeys)]);
 
   useEffect(() => {
     setPage(0);
@@ -1421,6 +1506,16 @@ function KpiMultiLineTableWidgetInner({
         return next.length === 0 ? [key] : next;
       }
       return [...prev, key].sort((a, b) => allowedKeys.indexOf(a) - allowedKeys.indexOf(b));
+    });
+  };
+  const toggleJoinColumn = (key: string) => {
+    const full = `join:${key}`;
+    setVisibleKeys((prev) => {
+      if (prev.includes(full)) {
+        const next = prev.filter((x) => x !== full);
+        return next.length === 0 ? [full] : next;
+      }
+      return [...prev, full];
     });
   };
 
@@ -1452,7 +1547,7 @@ function KpiMultiLineTableWidgetInner({
 
   useEffect(() => {
     if (!setViewerMenu) return;
-    if (loading || error || allowedKeys.length === 0) {
+    if (loading || error || (allowedKeys.length === 0 && joinAllowedKeys.length === 0)) {
       setViewerMenu(null);
       return;
     }
@@ -1476,10 +1571,43 @@ function KpiMultiLineTableWidgetInner({
             </span>
           </label>
         ))}
+        {hasJoin && joinAllowedKeys.length > 0 && (
+          <>
+            <div style={{ height: 1, background: "var(--border)", margin: "0.25rem 0" }} />
+            <div style={{ fontSize: "0.75rem", color: "var(--muted)", fontWeight: 600 }}>Joined columns</div>
+            {joinAllowedKeys.map((k) => (
+              <label
+                key={k}
+                style={{
+                  display: "flex",
+                  gap: "0.45rem",
+                  alignItems: "center",
+                  fontSize: "0.85rem",
+                  cursor: "pointer",
+                }}
+              >
+                <input type="checkbox" checked={visibleKeys.includes(`join:${k}`)} onChange={() => toggleJoinColumn(k)} />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={k}>
+                  {joinLabelByKey[k] ?? k}
+                </span>
+              </label>
+            ))}
+          </>
+        )}
       </div>
     );
     return () => setViewerMenu(null);
-  }, [setViewerMenu, loading, error, JSON.stringify(allowedKeys), JSON.stringify(visibleKeys), JSON.stringify(labelByKey)]);
+  }, [
+    setViewerMenu,
+    loading,
+    error,
+    JSON.stringify(allowedKeys),
+    JSON.stringify(joinAllowedKeys),
+    JSON.stringify(visibleKeys),
+    JSON.stringify(labelByKey),
+    JSON.stringify(joinLabelByKey),
+    hasJoin,
+  ]);
 
   return (
     <>
@@ -1507,7 +1635,7 @@ function KpiMultiLineTableWidgetInner({
           />
           {sorted.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>No rows to show.</p>
-          ) : displayKeys.length === 0 ? (
+          ) : displayKeys.length === 0 && joinDisplayKeys.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>Select at least one column.</p>
           ) : (
             <div style={{ overflowX: "auto" }}>
@@ -1537,6 +1665,30 @@ function KpiMultiLineTableWidgetInner({
                         </button>
                       </th>
                     ))}
+                    {hasJoin &&
+                      joinDisplayKeys.map((k) => (
+                        <th key={`join:${k}`} style={{ textAlign: "left", padding: "0.45rem 0.5rem", whiteSpace: "nowrap" }}>
+                          <button
+                            type="button"
+                            onClick={() => onHeaderClick(`join:${k}`)}
+                            style={{
+                              border: "none",
+                              background: "transparent",
+                              padding: 0,
+                              cursor: "pointer",
+                              font: "inherit",
+                              fontWeight: 700,
+                              color: "var(--text)",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "0.25rem",
+                            }}
+                          >
+                            {joinLabelByKey[k] ?? k}
+                            {sortKey === `join:${k}` ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+                          </button>
+                        </th>
+                      ))}
                   </tr>
                 </thead>
                 <tbody>
@@ -1547,6 +1699,12 @@ function KpiMultiLineTableWidgetInner({
                           {formatCellForTable(row[k]) || "—"}
                         </td>
                       ))}
+                      {hasJoin &&
+                        joinDisplayKeys.map((k) => (
+                          <td key={`join:${k}`} style={{ padding: "0.45rem 0.5rem", verticalAlign: "top" }}>
+                            {formatCellForTable((joinLookup(row) ?? {})[k]) || "—"}
+                          </td>
+                        ))}
                     </tr>
                   ))}
                 </tbody>
