@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
@@ -12,9 +13,14 @@ export type WidgetDesignMenuActions = {
 };
 
 const WidgetViewerMenuSetterContext = createContext<React.Dispatch<React.SetStateAction<React.ReactNode>> | null>(null);
+const WidgetHeaderAddonSetterContext = createContext<React.Dispatch<React.SetStateAction<React.ReactNode>> | null>(null);
 
 function useWidgetViewerMenuSetter() {
   return useContext(WidgetViewerMenuSetterContext);
+}
+
+function useWidgetHeaderAddonSetter() {
+  return useContext(WidgetHeaderAddonSetterContext);
 }
 
 export type Widget =
@@ -48,6 +54,8 @@ export type Widget =
       group_by_sub_field_key?: string;
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
+      /** Optional viewer-facing label for filter button */
+      filter_label?: string;
       full_width?: boolean;
     }
   | {
@@ -143,10 +151,12 @@ function WidgetSettingsShell({
 }) {
   const [open, setOpen] = useState(false);
   const [viewerMenu, setViewerMenu] = useState<React.ReactNode>(null);
+  const [headerAddon, setHeaderAddon] = useState<React.ReactNode>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setViewerMenu(null);
+    setHeaderAddon(null);
     setOpen(false);
   }, [widgetKey]);
 
@@ -165,21 +175,25 @@ function WidgetSettingsShell({
 
   return (
     <WidgetViewerMenuSetterContext.Provider value={setViewerMenu}>
-      <div className="card" style={{ padding: "1rem", position: "relative" }}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-            gap: "0.5rem",
-            marginBottom: "0.75rem",
-            minHeight: title ? undefined : 36,
-          }}
-        >
-          <div style={{ flex: 1, minWidth: 0 }}>
-            {title ? <h3 style={{ margin: 0, lineHeight: 1.3 }}>{title}</h3> : null}
-          </div>
-          <div ref={wrapRef} style={{ position: "relative", flexShrink: 0 }}>
+      <WidgetHeaderAddonSetterContext.Provider value={setHeaderAddon}>
+        <div className="card" style={{ padding: "1rem", position: "relative" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-start",
+              alignItems: "flex-start",
+              gap: "0.5rem",
+              marginBottom: "0.75rem",
+              minHeight: title ? undefined : 36,
+            }}
+          >
+            <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+              {title ? (
+                <h3 style={{ margin: 0, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</h3>
+              ) : null}
+            </div>
+            {headerAddon ? <div style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{headerAddon}</div> : null}
+            <div ref={wrapRef} style={{ position: "relative", flexShrink: 0, marginLeft: "auto" }}>
             <button
               type="button"
               aria-label="Widget settings"
@@ -266,6 +280,7 @@ function WidgetSettingsShell({
         </div>
         {children}
       </div>
+      </WidgetHeaderAddonSetterContext.Provider>
     </WidgetViewerMenuSetterContext.Provider>
   );
 }
@@ -274,10 +289,16 @@ export function WidgetRenderer({
   widget,
   organizationId,
   designActions,
+  dashboardId,
+  isFullPage,
+  tableRowsPerPage,
 }: {
   widget: Widget;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
+  dashboardId?: number;
+  isFullPage?: boolean;
+  tableRowsPerPage?: number;
 }) {
   if (widget.type === "text") {
     return (
@@ -299,7 +320,16 @@ export function WidgetRenderer({
     return <KpiBarChartWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
   }
   if (widget.type === "kpi_multi_line_table") {
-    return <KpiMultiLineTableWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+    return (
+      <KpiMultiLineTableWidget
+        widget={widget}
+        organizationId={organizationId}
+        designActions={designActions}
+        dashboardId={dashboardId}
+        isFullPage={isFullPage}
+        tableRowsPerPage={tableRowsPerPage}
+      />
+    );
   }
   const w = widget as { id?: string };
   return (
@@ -553,12 +583,14 @@ function KpiBarChartWidgetInner({
 }) {
   const token = getAccessToken();
   const setViewerMenu = useWidgetViewerMenuSetter();
+  const setHeaderAddon = useWidgetHeaderAddonSetter();
   const [bars, setBars] = useState<Array<{ key: string; label: string; value: number | null }>>([]);
   const [groups, setGroups] = useState<Array<{ label: string; value: number }>>([]);
   const [filterValues, setFilterValues] = useState<string[]>([]);
   const [selectedFilterValues, setSelectedFilterValues] = useState<string[]>([]);
   const [filterSearch, setFilterSearch] = useState("");
-  const [filterSuggestOpen, setFilterSuggestOpen] = useState(false);
+  const [filterEditing, setFilterEditing] = useState(false);
+  const filterInputRef = useRef<HTMLInputElement>(null);
   const [viewerChartType, setViewerChartType] = useState<"bar" | "pie">(widget.chart_type || "bar");
   const [hiddenSeriesKeys, setHiddenSeriesKeys] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -651,20 +683,20 @@ function KpiBarChartWidgetInner({
     setSelectedFilterValues((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
   };
 
-  const suggestedFilterValues = useMemo(() => {
+  const shownFilterValues = useMemo(() => {
+    if (!filterEditing) return [];
     const q = filterSearch.trim().toLowerCase();
-    if (!q) return [];
     return filterValues
       .filter((v) => !selectedFilterValues.includes(v))
-      .filter((v) => v.toLowerCase().includes(q))
+      .filter((v) => (q ? v.toLowerCase().includes(q) : true))
       .slice(0, 50);
-  }, [filterValues, selectedFilterValues, filterSearch]);
+  }, [filterValues, selectedFilterValues, filterSearch, filterEditing]);
 
   const addTypedFilterValue = () => {
     const raw = filterSearch.trim();
     if (!raw) return;
     const match = filterValues.find((v) => v.toLowerCase() === raw.toLowerCase());
-    const toAdd = match ?? suggestedFilterValues[0];
+    const toAdd = match ?? shownFilterValues[0];
     if (!toAdd) return;
     setSelectedFilterValues((prev) => (prev.includes(toAdd) ? prev : [...prev, toAdd]));
     setFilterSearch("");
@@ -687,6 +719,179 @@ function KpiBarChartWidgetInner({
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   });
+
+  useEffect(() => {
+    if (!setHeaderAddon) return;
+    if (loading || error) {
+      setHeaderAddon(null);
+      return;
+    }
+
+    const modeNow = widget.mode || "fields";
+    const filterKey = widget.filter_sub_field_key || "";
+    if (modeNow !== "multi_line_items" || !filterKey) {
+      setHeaderAddon(null);
+      return;
+    }
+
+    const filterLabel = (widget.filter_label || "").trim() || filterKey;
+    const pillLabel =
+      selectedFilterValues.length === 0 ? `All ${filterLabel}` : `${filterLabel}: ${selectedFilterValues.length} selected`;
+
+    setHeaderAddon(
+      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+        {!filterEditing ? (
+          <button
+            type="button"
+            onClick={() => {
+              setFilterEditing(true);
+              window.setTimeout(() => filterInputRef.current?.focus(), 0);
+            }}
+            style={{
+              height: 36,
+              maxWidth: 260,
+              padding: "0 0.65rem",
+              borderRadius: 999,
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              color: selectedFilterValues.length > 0 ? "var(--accent)" : "var(--muted)",
+              cursor: "pointer",
+              fontSize: "0.85rem",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "0.35rem",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title="Click to filter"
+          >
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pillLabel}</span>
+          </button>
+        ) : (
+          <>
+            <div
+              style={{
+                height: 36,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.35rem",
+                padding: "0 0.45rem",
+                borderRadius: 12,
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+              }}
+            >
+              <span style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{filterKey}:</span>
+              <input
+                ref={filterInputRef}
+                value={filterSearch}
+                onChange={(e) => setFilterSearch(e.target.value)}
+                placeholder={filterValues.length === 0 ? "No values" : "Type to search"}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addTypedFilterValue();
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setFilterEditing(false);
+                    setFilterSearch("");
+                  }
+                }}
+                style={{
+                  width: 150,
+                  border: "none",
+                  outline: "none",
+                  background: "transparent",
+                  padding: 0,
+                  fontSize: "0.9rem",
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterEditing(false);
+                  setFilterSearch("");
+                }}
+                aria-label="Close filter"
+                style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--muted)", fontSize: "1.1rem", lineHeight: 1, padding: 0 }}
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div
+              style={{
+                position: "absolute",
+                right: 0,
+                top: "calc(100% + 6px)",
+                zIndex: 45,
+                minWidth: 260,
+                maxWidth: "min(90vw, 360px)",
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                borderRadius: 12,
+                boxShadow: "0 10px 24px rgba(0,0,0,0.14)",
+                overflow: "hidden",
+              }}
+            >
+              <div style={{ maxHeight: 240, overflow: "auto" }}>
+                {shownFilterValues.length === 0 ? (
+                  <div style={{ padding: "0.55rem 0.7rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+                    {filterValues.length === 0 ? "No values." : "No matches."}
+                  </div>
+                ) : (
+                  shownFilterValues.map((v) => (
+                    <button
+                      key={v}
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        setSelectedFilterValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
+                        setFilterSearch("");
+                      }}
+                      style={{
+                        width: "100%",
+                        textAlign: "left",
+                        border: "none",
+                        background: "transparent",
+                        color: "inherit",
+                        padding: "0.45rem 0.7rem",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        fontSize: "0.9rem",
+                      }}
+                      title={v}
+                    >
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    );
+
+    return () => setHeaderAddon(null);
+  }, [
+    setHeaderAddon,
+    loading,
+    error,
+    widget.id,
+    widget.mode,
+    widget.filter_sub_field_key,
+    filterEditing,
+    filterSearch,
+    JSON.stringify(filterValues),
+    JSON.stringify(selectedFilterValues),
+    JSON.stringify(shownFilterValues),
+  ]);
 
   useEffect(() => {
     if (!setViewerMenu) return;
@@ -822,120 +1027,37 @@ function KpiBarChartWidgetInner({
         <p className="form-error">{error}</p>
       ) : mode === "multi_line_items" ? (
         <div style={{ display: "grid", gap: "0.75rem" }}>
-          {widget.filter_sub_field_key && (
-            <div style={{ display: "grid", gap: "0.5rem" }}>
-              <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Filter ({widget.filter_sub_field_key}):</span>
-              <div style={{ position: "relative" }}>
-                <div
+          {widget.filter_sub_field_key && selectedFilterValues.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+              {selectedFilterValues.map((v) => (
+                <span
+                  key={v}
                   style={{
-                    display: "flex",
-                    flexWrap: "wrap",
-                    gap: "0.35rem",
+                    display: "inline-flex",
+                    gap: "0.25rem",
                     alignItems: "center",
-                    padding: "0.35rem 0.45rem",
-                    borderRadius: 12,
+                    padding: "0.1rem 0.4rem",
+                    borderRadius: 999,
                     border: "1px solid var(--border)",
-                    background: "var(--surface)",
-                    minHeight: 40,
+                    background: "var(--bg)",
+                    color: "var(--text)",
+                    fontSize: "0.78rem",
+                    maxWidth: 220,
                   }}
+                  title={v}
                 >
-                  {selectedFilterValues.length === 0 ? (
-                    <span style={{ color: "var(--muted)", fontSize: "0.85rem", padding: "0.1rem 0.25rem" }}>All</span>
-                  ) : (
-                    selectedFilterValues.map((v) => (
-                      <span
-                        key={v}
-                        style={{
-                          display: "inline-flex",
-                          gap: "0.25rem",
-                          alignItems: "center",
-                          padding: "0.1rem 0.4rem",
-                          borderRadius: 999,
-                          border: "1px solid var(--border)",
-                          background: "var(--bg)",
-                          color: "var(--text)",
-                          fontSize: "0.78rem",
-                          maxWidth: 180,
-                        }}
-                        title={v}
-                      >
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
-                        <button
-                          type="button"
-                          onClick={() => toggleFilterValue(v)}
-                          style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", fontSize: "0.9rem", lineHeight: 1, padding: 0 }}
-                          aria-label={`Remove ${v}`}
-                          title="Remove"
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))
-                  )}
-
-                  <input
-                    value={filterSearch}
-                    onChange={(e) => setFilterSearch(e.target.value)}
-                    placeholder={filterValues.length === 0 ? "No values" : "Type value, press Enter"}
-                    onFocus={() => setFilterSuggestOpen(true)}
-                    onBlur={() => window.setTimeout(() => setFilterSuggestOpen(false), 120)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        addTypedFilterValue();
-                      }
-                    }}
-                    disabled={filterValues.length === 0}
-                    style={{ flex: "1 1 120px", minWidth: 120, border: "none", outline: "none", background: "transparent", padding: "0.25rem 0.25rem", fontSize: "0.9rem" }}
-                  />
-                </div>
-
-                {filterSuggestOpen && suggestedFilterValues.length > 0 && (
-                  <div
-                    style={{
-                      position: "absolute",
-                      top: "calc(100% + 6px)",
-                      left: 0,
-                      right: 0,
-                      zIndex: 20,
-                      border: "1px solid var(--border)",
-                      background: "var(--surface)",
-                      borderRadius: 12,
-                      boxShadow: "0 10px 24px rgba(0,0,0,0.14)",
-                      overflow: "hidden",
-                    }}
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                  <button
+                    type="button"
+                    onClick={() => toggleFilterValue(v)}
+                    style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", fontSize: "0.9rem", lineHeight: 1, padding: 0 }}
+                    aria-label={`Remove ${v}`}
+                    title="Remove"
                   >
-                    <div style={{ maxHeight: 200, overflow: "auto" }}>
-                      {suggestedFilterValues.map((v) => (
-                        <button
-                          key={v}
-                          type="button"
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => {
-                            setSelectedFilterValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
-                            setFilterSearch("");
-                          }}
-                          style={{
-                            width: "100%",
-                            textAlign: "left",
-                            border: "none",
-                            background: "transparent",
-                            color: "inherit",
-                            padding: "0.45rem 0.7rem",
-                            cursor: "pointer",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "0.5rem",
-                            fontSize: "0.9rem",
-                          }}
-                        >
-                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
+                    ×
+                  </button>
+                </span>
+              ))}
             </div>
           )}
 
@@ -1207,12 +1329,19 @@ function compareCellValues(a: unknown, b: unknown): number {
 function KpiMultiLineTableWidgetInner({
   widget,
   organizationId,
+  pageSize,
+  showOpenFullLink,
+  dashboardId,
 }: {
   widget: Extract<Widget, { type: "kpi_multi_line_table" }>;
   organizationId: number;
+  pageSize: number;
+  showOpenFullLink: boolean;
+  dashboardId?: number;
 }) {
   const token = getAccessToken();
   const setViewerMenu = useWidgetViewerMenuSetter();
+  const setHeaderAddon = useWidgetHeaderAddonSetter();
   const [items, setItems] = useState<Record<string, unknown>[]>([]);
   const [labelByKey, setLabelByKey] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -1221,6 +1350,7 @@ function KpiMultiLineTableWidgetInner({
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [visibleKeys, setVisibleKeys] = useState<string[]>([]);
+  const [page, setPage] = useState(0);
 
   const allowedKeys = widget.sub_field_keys ?? [];
 
@@ -1229,6 +1359,7 @@ function KpiMultiLineTableWidgetInner({
     setSortKey(null);
     setSortDir("asc");
     setSearch("");
+    setPage(0);
   }, [widget.id, JSON.stringify(allowedKeys)]);
 
   useEffect(() => {
@@ -1271,6 +1402,17 @@ function KpiMultiLineTableWidgetInner({
     return [...filtered].sort((a, b) => dir * compareCellValues(a[sortKey], b[sortKey]));
   }, [filtered, sortKey, sortDir, displayKeys]);
 
+  useEffect(() => {
+    setPage(0);
+  }, [search, sortKey, sortDir, JSON.stringify(displayKeys), items.length]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(sorted.length / Math.max(1, pageSize))), [sorted.length, pageSize]);
+  const safePage = Math.min(page, totalPages - 1);
+  const paged = useMemo(() => {
+    const start = safePage * pageSize;
+    return sorted.slice(start, start + pageSize);
+  }, [sorted, safePage, pageSize]);
+
   const toggleColumn = (key: string) => {
     setVisibleKeys((prev) => {
       if (prev.includes(key)) {
@@ -1288,6 +1430,24 @@ function KpiMultiLineTableWidgetInner({
       setSortDir("asc");
     }
   };
+
+  useEffect(() => {
+    if (!setHeaderAddon) return;
+    if (!showOpenFullLink || dashboardId == null) {
+      setHeaderAddon(null);
+      return;
+    }
+    setHeaderAddon(
+      <Link
+        href={`/dashboard/dashboards/${dashboardId}/widgets/${widget.id}`}
+        className="btn"
+        style={{ fontSize: "0.85rem", textDecoration: "none", height: 36, display: "inline-flex", alignItems: "center" }}
+      >
+        Open full table
+      </Link>
+    );
+    return () => setHeaderAddon(null);
+  }, [setHeaderAddon, showOpenFullLink, dashboardId, widget.id]);
 
   useEffect(() => {
     if (!setViewerMenu) return;
@@ -1379,7 +1539,7 @@ function KpiMultiLineTableWidgetInner({
                   </tr>
                 </thead>
                 <tbody>
-                  {sorted.map((row, idx) => (
+                  {paged.map((row, idx) => (
                     <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
                       {displayKeys.map((k) => (
                         <td key={k} style={{ padding: "0.45rem 0.5rem", verticalAlign: "top" }}>
@@ -1392,6 +1552,27 @@ function KpiMultiLineTableWidgetInner({
               </table>
             </div>
           )}
+
+          {sorted.length > pageSize && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+              <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+                Page {safePage + 1} of {totalPages}
+              </span>
+              <div style={{ display: "flex", gap: "0.4rem" }}>
+                <button type="button" className="btn" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={safePage === 0}>
+                  Prev
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                  disabled={safePage >= totalPages - 1}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </>
@@ -1402,14 +1583,26 @@ function KpiMultiLineTableWidget({
   widget,
   organizationId,
   designActions,
+  dashboardId,
+  isFullPage,
+  tableRowsPerPage,
 }: {
   widget: Extract<Widget, { type: "kpi_multi_line_table" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
+  dashboardId?: number;
+  isFullPage?: boolean;
+  tableRowsPerPage?: number;
 }) {
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
-      <KpiMultiLineTableWidgetInner widget={widget} organizationId={organizationId} />
+      <KpiMultiLineTableWidgetInner
+        widget={widget}
+        organizationId={organizationId}
+        pageSize={Math.max(1, tableRowsPerPage ?? (isFullPage ? 10 : 5))}
+        showOpenFullLink={!isFullPage}
+        dashboardId={dashboardId}
+      />
     </WidgetSettingsShell>
   );
 }

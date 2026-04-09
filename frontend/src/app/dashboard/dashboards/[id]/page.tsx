@@ -74,7 +74,7 @@ export default function DashboardViewPage() {
         <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
           {widgets.map((w) => (
             <div key={w.id} style={{ gridColumn: (w as any).full_width ? "1 / -1" : undefined }}>
-              <WidgetRenderer widget={w} organizationId={dashboard.organization_id} />
+              <WidgetRenderer widget={w} organizationId={dashboard.organization_id} dashboardId={dashboard.id} />
             </div>
           ))}
         </div>

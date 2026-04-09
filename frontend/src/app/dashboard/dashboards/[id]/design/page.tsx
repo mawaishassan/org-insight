@@ -46,6 +46,7 @@ type Widget =
       group_by_sub_field_key?: string;
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
+      filter_label?: string;
       full_width?: boolean;
     }
   | {
@@ -130,6 +131,7 @@ export default function DashboardDesignPage() {
   const [addGroupBySubFieldKey, setAddGroupBySubFieldKey] = useState<string>("");
   const [addValueSubFieldKey, setAddValueSubFieldKey] = useState<string>("");
   const [addFilterSubFieldKey, setAddFilterSubFieldKey] = useState<string>("");
+  const [addFilterLabel, setAddFilterLabel] = useState<string>("");
   const [addMultiLineTableFieldKey, setAddMultiLineTableFieldKey] = useState<string>("");
   const [addMultiLineTableSubKeys, setAddMultiLineTableSubKeys] = useState<string[]>([]);
   const [editTab, setEditTab] = useState<EditTab>("basics");
@@ -153,6 +155,7 @@ export default function DashboardDesignPage() {
     setAddGroupBySubFieldKey("");
     setAddValueSubFieldKey("");
     setAddFilterSubFieldKey("");
+    setAddFilterLabel("");
     setAddMultiLineTableFieldKey("");
     setAddMultiLineTableSubKeys([]);
     setWidgetModalOpen(true);
@@ -179,6 +182,7 @@ export default function DashboardDesignPage() {
     setAddGroupBySubFieldKey((w as any).group_by_sub_field_key || "");
     setAddValueSubFieldKey((w as any).value_sub_field_key || "");
     setAddFilterSubFieldKey((w as any).filter_sub_field_key || "");
+    setAddFilterLabel((w as any).filter_label || "");
     if (w.type === "kpi_multi_line_table") {
       setAddMultiLineTableFieldKey(w.source_field_key || "");
       setAddMultiLineTableSubKeys(Array.isArray(w.sub_field_keys) ? [...w.sub_field_keys] : []);
@@ -251,13 +255,39 @@ export default function DashboardDesignPage() {
   );
   const tableMultiLineSubFields = useMemo(() => selectedTableMultiLineField?.sub_fields ?? [], [selectedTableMultiLineField]);
 
+  const persistWidgets = async (nextWidgets: Widget[]) => {
+    if (!token || !dashboard) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api(`/dashboards/${dashboard.id}?organization_id=${dashboard.organization_id}`, {
+        method: "PATCH",
+        token,
+        body: JSON.stringify({ layout: { widgets: nextWidgets } }),
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Save failed";
+      setError(msg);
+      toast.error(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const applyWidgetUpsert = (w: Widget) => {
+    const nextWidgets = editingWidgetId ? widgets.map((x) => (x.id === editingWidgetId ? w : x)) : [...widgets, w];
+    setWidgets(nextWidgets);
+    toast.success(editingWidgetId ? "Widget updated" : "Widget added");
+    setWidgetModalOpen(false);
+    // Auto-persist so refresh doesn't lose title/filter label/etc.
+    persistWidgets(nextWidgets);
+  };
+
   const upsertWidget = () => {
     const title = addTitle.trim() || undefined;
     if (addType === "text") {
       const w: Widget = { id: editingWidgetId ?? newId(), type: "text", title, text: addText, full_width: fullWidth };
-      setWidgets((prev) => (editingWidgetId ? prev.map((x) => (x.id === editingWidgetId ? w : x)) : [...prev, w]));
-      toast.success(editingWidgetId ? "Widget updated" : "Widget added");
-      setWidgetModalOpen(false);
+      applyWidgetUpsert(w);
       return;
     }
     if (!addKpiId) return;
@@ -274,9 +304,7 @@ export default function DashboardDesignPage() {
         field_key: addFieldKey.trim(),
         full_width: fullWidth,
       };
-      setWidgets((prev) => (editingWidgetId ? prev.map((x) => (x.id === editingWidgetId ? w : x)) : [...prev, w]));
-      toast.success(editingWidgetId ? "Widget updated" : "Widget added");
-      setWidgetModalOpen(false);
+      applyWidgetUpsert(w);
       return;
     }
     if (addType === "kpi_table") {
@@ -294,9 +322,7 @@ export default function DashboardDesignPage() {
         field_keys: keys.length ? keys : undefined,
         full_width: fullWidth,
       };
-      setWidgets((prev) => (editingWidgetId ? prev.map((x) => (x.id === editingWidgetId ? w : x)) : [...prev, w]));
-      toast.success(editingWidgetId ? "Widget updated" : "Widget added");
-      setWidgetModalOpen(false);
+      applyWidgetUpsert(w);
       return;
     }
     if (addType === "kpi_line_chart") {
@@ -318,9 +344,7 @@ export default function DashboardDesignPage() {
         period_key,
         full_width: fullWidth,
       };
-      setWidgets((prev) => (editingWidgetId ? prev.map((x) => (x.id === editingWidgetId ? w : x)) : [...prev, w]));
-      toast.success(editingWidgetId ? "Widget updated" : "Widget added");
-      setWidgetModalOpen(false);
+      applyWidgetUpsert(w);
       return;
     }
     if (addType === "kpi_bar_chart") {
@@ -368,6 +392,7 @@ export default function DashboardDesignPage() {
               group_by_sub_field_key: addGroupBySubFieldKey.trim(),
               value_sub_field_key: addAggFn === "count_rows" ? undefined : addValueSubFieldKey.trim(),
               filter_sub_field_key: addFilterSubFieldKey.trim() || undefined,
+              filter_label: addFilterLabel.trim() || undefined,
               full_width: fullWidth,
             }
           : {
@@ -385,9 +410,7 @@ export default function DashboardDesignPage() {
                 .filter(Boolean),
               full_width: fullWidth,
             };
-      setWidgets((prev) => (editingWidgetId ? prev.map((x) => (x.id === editingWidgetId ? w : x)) : [...prev, w]));
-      toast.success(editingWidgetId ? "Widget updated" : "Widget added");
-      setWidgetModalOpen(false);
+      applyWidgetUpsert(w as Widget);
       return;
     }
     if (addType === "kpi_multi_line_table") {
@@ -411,31 +434,15 @@ export default function DashboardDesignPage() {
         sub_field_keys: subKeys,
         full_width: fullWidth,
       };
-      setWidgets((prev) => (editingWidgetId ? prev.map((x) => (x.id === editingWidgetId ? w : x)) : [...prev, w]));
-      toast.success(editingWidgetId ? "Widget updated" : "Widget added");
-      setWidgetModalOpen(false);
+      applyWidgetUpsert(w);
       return;
     }
   };
 
   const handleSave = async () => {
     if (!token || !dashboard) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await api(`/dashboards/${dashboard.id}?organization_id=${dashboard.organization_id}`, {
-        method: "PATCH",
-        token,
-        body: JSON.stringify({ layout: { widgets } }),
-      });
-      toast.success("Saved");
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Save failed";
-      setError(msg);
-      toast.error(msg);
-    } finally {
-      setSaving(false);
-    }
+    await persistWidgets(widgets);
+    if (!error) toast.success("Saved");
   };
 
   const removeWidget = (wid: string) => setWidgets((prev) => prev.filter((w) => w.id !== wid));
@@ -481,6 +488,7 @@ export default function DashboardDesignPage() {
                 <WidgetRenderer
                   widget={w as any}
                   organizationId={dashboard.organization_id}
+                  dashboardId={dashboard.id}
                   designActions={
                     userRole === "SUPER_ADMIN"
                       ? {
@@ -854,7 +862,11 @@ export default function DashboardDesignPage() {
                           <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Filter</label>
                           <select
                             value={addFilterSubFieldKey}
-                            onChange={(e) => setAddFilterSubFieldKey(e.target.value)}
+                            onChange={(e) => {
+                              const next = e.target.value;
+                              setAddFilterSubFieldKey(next);
+                              if (!next) setAddFilterLabel("");
+                            }}
                             style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
                           >
                             <option value="">None</option>
@@ -865,6 +877,17 @@ export default function DashboardDesignPage() {
                             ))}
                           </select>
                         </div>
+                        {addFilterSubFieldKey.trim() && (
+                          <div style={{ display: "grid", gap: "0.35rem" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Filter button text</label>
+                            <input
+                              value={addFilterLabel}
+                              onChange={(e) => setAddFilterLabel(e.target.value)}
+                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              placeholder={`Optional (defaults to ${addFilterSubFieldKey})`}
+                            />
+                          </div>
+                        )}
                       </div>
                     )}
 
