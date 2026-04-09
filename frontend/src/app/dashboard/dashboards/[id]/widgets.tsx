@@ -356,6 +356,21 @@ function rawFieldFromEntry(entry: any, fieldId: number): unknown {
   return field?.value_text ?? field?.value_number ?? field?.value_boolean ?? field?.value_date ?? field?.value_json;
 }
 
+function entryHasAnyData(entry: any): boolean {
+  const vals = entry?.values;
+  if (!Array.isArray(vals) || vals.length === 0) return false;
+  return vals.some((v: any) => {
+    if (!v || typeof v !== "object") return false;
+    return (
+      v.value_text != null ||
+      v.value_number != null ||
+      v.value_boolean != null ||
+      v.value_date != null ||
+      v.value_json != null
+    );
+  });
+}
+
 function toNumeric(v: unknown): number | null {
   if (v == null) return null;
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -596,6 +611,8 @@ function KpiBarChartWidgetInner({
   const token = getAccessToken();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
+  const [viewerYear, setViewerYear] = useState<number>(widget.year);
+  const [yearOptions, setYearOptions] = useState<number[]>([]);
   const [bars, setBars] = useState<Array<{ key: string; label: string; value: number | null }>>([]);
   const [groups, setGroups] = useState<Array<{ label: string; value: number }>>([]);
   const [filterValues, setFilterValues] = useState<string[]>([]);
@@ -611,13 +628,35 @@ function KpiBarChartWidgetInner({
   useEffect(() => {
     setViewerChartType(widget.chart_type || "bar");
     setHiddenSeriesKeys([]);
+    setViewerYear(widget.year);
+    setSelectedFilterValues([]);
+    setFilterSearch("");
+    setFilterEditing(false);
   }, [widget.id, widget.chart_type, widget.mode]);
+
+  useEffect(() => {
+    if (!token) return;
+    const now = new Date().getFullYear();
+    const base = Array.from({ length: 12 }, (_, i) => now - i);
+    const mustInclude = new Set<number>([widget.year, viewerYear, ...base]);
+    const nextYear = now + 1;
+    (async () => {
+      try {
+        const en = await fetchEntryForPeriod(token, organizationId, widget.kpi_id, nextYear, widget.period_key);
+        if (entryHasAnyData(en)) mustInclude.add(nextYear);
+      } catch {
+        // ignore
+      }
+      const list = Array.from(mustInclude).sort((a, b) => b - a);
+      setYearOptions(list);
+    })();
+  }, [token, organizationId, widget.kpi_id, widget.period_key, widget.id, widget.year, viewerYear]);
 
   useEffect(() => {
     if (!token) return;
     setLoading(true);
     setError(null);
-    Promise.all([getKpiFieldMap(token, organizationId, widget.kpi_id), fetchEntryForPeriod(token, organizationId, widget.kpi_id, widget.year, widget.period_key)])
+    Promise.all([getKpiFieldMap(token, organizationId, widget.kpi_id), fetchEntryForPeriod(token, organizationId, widget.kpi_id, viewerYear, widget.period_key)])
       .then(([map, entry]) => {
         const mode = widget.mode || "fields";
         if (mode === "multi_line_items") {
@@ -667,7 +706,7 @@ function KpiBarChartWidgetInner({
     token,
     organizationId,
     widget.kpi_id,
-    widget.year,
+    viewerYear,
     widget.period_key,
     widget.mode,
     widget.chart_type,
@@ -741,8 +780,29 @@ function KpiBarChartWidgetInner({
 
     const modeNow = widget.mode || "fields";
     const filterKey = widget.filter_sub_field_key || "";
+    const yearSelect = (
+      <select
+        value={viewerYear}
+        onChange={(e) => {
+          const next = Number(e.target.value);
+          setViewerYear(next);
+          setSelectedFilterValues([]);
+          setFilterSearch("");
+          setFilterEditing(false);
+        }}
+        style={{ height: 36, padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
+        title="Year"
+      >
+        {(yearOptions.length ? yearOptions : [viewerYear]).map((y) => (
+          <option key={y} value={y}>
+            {y}
+          </option>
+        ))}
+      </select>
+    );
+
     if (modeNow !== "multi_line_items" || !filterKey) {
-      setHeaderAddon(null);
+      setHeaderAddon(<div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>{yearSelect}</div>);
       return;
     }
 
@@ -751,142 +811,145 @@ function KpiBarChartWidgetInner({
       selectedFilterValues.length === 0 ? `All ${filterLabel}` : `${filterLabel}: ${selectedFilterValues.length} selected`;
 
     setHeaderAddon(
-      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.35rem" }}>
-        {!filterEditing ? (
-          <button
-            type="button"
-            onClick={() => {
-              setFilterEditing(true);
-              window.setTimeout(() => filterInputRef.current?.focus(), 0);
-            }}
-            style={{
-              height: 36,
-              maxWidth: 260,
-              padding: "0 0.65rem",
-              borderRadius: 999,
-              border: "1px solid var(--border)",
-              background: "var(--surface)",
-              color: selectedFilterValues.length > 0 ? "var(--accent)" : "var(--muted)",
-              cursor: "pointer",
-              fontSize: "0.85rem",
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "0.35rem",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-            title="Click to filter"
-          >
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pillLabel}</span>
-          </button>
-        ) : (
-          <>
-            <div
+      <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
+        {yearSelect}
+        <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+          {!filterEditing ? (
+            <button
+              type="button"
+              onClick={() => {
+                setFilterEditing(true);
+                window.setTimeout(() => filterInputRef.current?.focus(), 0);
+              }}
               style={{
                 height: 36,
+                maxWidth: 260,
+                padding: "0 0.65rem",
+                borderRadius: 999,
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                color: selectedFilterValues.length > 0 ? "var(--accent)" : "var(--muted)",
+                cursor: "pointer",
+                fontSize: "0.85rem",
                 display: "inline-flex",
                 alignItems: "center",
                 gap: "0.35rem",
-                padding: "0 0.45rem",
-                borderRadius: 12,
-                border: "1px solid var(--border)",
-                background: "var(--surface)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
               }}
+              title="Click to filter"
             >
-              <span style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{filterKey}:</span>
-              <input
-                ref={filterInputRef}
-                value={filterSearch}
-                onChange={(e) => setFilterSearch(e.target.value)}
-                placeholder={filterValues.length === 0 ? "No values" : "Type to search"}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    addTypedFilterValue();
-                  }
-                  if (e.key === "Escape") {
-                    e.preventDefault();
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pillLabel}</span>
+            </button>
+          ) : (
+            <>
+              <div
+                style={{
+                  height: 36,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.35rem",
+                  padding: "0 0.45rem",
+                  borderRadius: 12,
+                  border: "1px solid var(--border)",
+                  background: "var(--surface)",
+                }}
+              >
+                <span style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{filterLabel}:</span>
+                <input
+                  ref={filterInputRef}
+                  value={filterSearch}
+                  onChange={(e) => setFilterSearch(e.target.value)}
+                  placeholder={filterValues.length === 0 ? "No values" : "Type to search"}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addTypedFilterValue();
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setFilterEditing(false);
+                      setFilterSearch("");
+                    }
+                  }}
+                  style={{
+                    width: 150,
+                    border: "none",
+                    outline: "none",
+                    background: "transparent",
+                    padding: 0,
+                    fontSize: "0.9rem",
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
                     setFilterEditing(false);
                     setFilterSearch("");
-                  }
-                }}
-                style={{
-                  width: 150,
-                  border: "none",
-                  outline: "none",
-                  background: "transparent",
-                  padding: 0,
-                  fontSize: "0.9rem",
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  setFilterEditing(false);
-                  setFilterSearch("");
-                }}
-                aria-label="Close filter"
-                style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--muted)", fontSize: "1.1rem", lineHeight: 1, padding: 0 }}
-                title="Close"
-              >
-                ×
-              </button>
-            </div>
-
-            <div
-              style={{
-                position: "absolute",
-                right: 0,
-                top: "calc(100% + 6px)",
-                zIndex: 45,
-                minWidth: 260,
-                maxWidth: "min(90vw, 360px)",
-                border: "1px solid var(--border)",
-                background: "var(--surface)",
-                borderRadius: 12,
-                boxShadow: "0 10px 24px rgba(0,0,0,0.14)",
-                overflow: "hidden",
-              }}
-            >
-              <div style={{ maxHeight: 240, overflow: "auto" }}>
-                {shownFilterValues.length === 0 ? (
-                  <div style={{ padding: "0.55rem 0.7rem", color: "var(--muted)", fontSize: "0.85rem" }}>
-                    {filterValues.length === 0 ? "No values." : "No matches."}
-                  </div>
-                ) : (
-                  shownFilterValues.map((v) => (
-                    <button
-                      key={v}
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => {
-                        setSelectedFilterValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
-                        setFilterSearch("");
-                      }}
-                      style={{
-                        width: "100%",
-                        textAlign: "left",
-                        border: "none",
-                        background: "transparent",
-                        color: "inherit",
-                        padding: "0.45rem 0.7rem",
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        fontSize: "0.9rem",
-                      }}
-                      title={v}
-                    >
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
-                    </button>
-                  ))
-                )}
+                  }}
+                  aria-label="Close filter"
+                  style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--muted)", fontSize: "1.1rem", lineHeight: 1, padding: 0 }}
+                  title="Close"
+                >
+                  ×
+                </button>
               </div>
-            </div>
-          </>
-        )}
+
+              <div
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 6px)",
+                  zIndex: 45,
+                  minWidth: 260,
+                  maxWidth: "min(90vw, 360px)",
+                  border: "1px solid var(--border)",
+                  background: "var(--surface)",
+                  borderRadius: 12,
+                  boxShadow: "0 10px 24px rgba(0,0,0,0.14)",
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ maxHeight: 240, overflow: "auto" }}>
+                  {shownFilterValues.length === 0 ? (
+                    <div style={{ padding: "0.55rem 0.7rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+                      {filterValues.length === 0 ? "No values." : "No matches."}
+                    </div>
+                  ) : (
+                    shownFilterValues.map((v) => (
+                      <button
+                        key={v}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setSelectedFilterValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
+                          setFilterSearch("");
+                        }}
+                        style={{
+                          width: "100%",
+                          textAlign: "left",
+                          border: "none",
+                          background: "transparent",
+                          color: "inherit",
+                          padding: "0.45rem 0.7rem",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                          fontSize: "0.9rem",
+                        }}
+                        title={v}
+                      >
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     );
 
@@ -898,6 +961,8 @@ function KpiBarChartWidgetInner({
     widget.id,
     widget.mode,
     widget.filter_sub_field_key,
+    widget.filter_label,
+    viewerYear,
     filterEditing,
     filterSearch,
     JSON.stringify(filterValues),
@@ -1354,6 +1419,8 @@ function KpiMultiLineTableWidgetInner({
   const token = getAccessToken();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
+  const [viewerYear, setViewerYear] = useState<number>(widget.year);
+  const [yearOptions, setYearOptions] = useState<number[]>([]);
   const [items, setItems] = useState<Record<string, unknown>[]>([]);
   const [labelByKey, setLabelByKey] = useState<Record<string, string>>({});
   const [joinItemsByKey, setJoinItemsByKey] = useState<Record<string, Record<string, unknown>>>({});
@@ -1393,7 +1460,26 @@ function KpiMultiLineTableWidgetInner({
     setSortDir("asc");
     setSearch("");
     setPage(0);
+    setViewerYear(widget.year);
   }, [widget.id, JSON.stringify(allowedKeys), JSON.stringify(joinAllowedKeys)]);
+
+  useEffect(() => {
+    if (!token) return;
+    const now = new Date().getFullYear();
+    const base = Array.from({ length: 12 }, (_, i) => now - i);
+    const mustInclude = new Set<number>([widget.year, viewerYear, ...base]);
+    const nextYear = now + 1;
+    (async () => {
+      try {
+        const en = await fetchEntryForPeriod(token, organizationId, widget.kpi_id, nextYear, widget.period_key);
+        if (entryHasAnyData(en)) mustInclude.add(nextYear);
+      } catch {
+        // ignore
+      }
+      const list = Array.from(mustInclude).sort((a, b) => b - a);
+      setYearOptions(list);
+    })();
+  }, [token, organizationId, widget.kpi_id, widget.period_key, widget.id, widget.year, viewerYear]);
 
   useEffect(() => {
     if (!token) return;
@@ -1402,11 +1488,11 @@ function KpiMultiLineTableWidgetInner({
     const joinSpec = widget.join;
     Promise.all([
       getKpiFieldsWithSubs(token, organizationId, widget.kpi_id),
-      fetchEntryForPeriod(token, organizationId, widget.kpi_id, widget.year, widget.period_key),
+      fetchEntryForPeriod(token, organizationId, widget.kpi_id, viewerYear, widget.period_key),
       hasJoin && joinSpec
         ? Promise.all([
             getKpiFieldsWithSubs(token, organizationId, joinSpec.kpi_id),
-            fetchEntryForPeriod(token, organizationId, joinSpec.kpi_id, widget.year, widget.period_key),
+            fetchEntryForPeriod(token, organizationId, joinSpec.kpi_id, viewerYear, widget.period_key),
           ])
         : Promise.resolve(null),
     ])
@@ -1453,7 +1539,7 @@ function KpiMultiLineTableWidgetInner({
     token,
     organizationId,
     widget.kpi_id,
-    widget.year,
+    viewerYear,
     widget.period_key,
     widget.source_field_key,
     JSON.stringify(widget.join ?? null),
@@ -1529,21 +1615,38 @@ function KpiMultiLineTableWidgetInner({
 
   useEffect(() => {
     if (!setHeaderAddon) return;
-    if (!showOpenFullLink || dashboardId == null) {
-      setHeaderAddon(null);
-      return;
-    }
-    setHeaderAddon(
-      <Link
-        href={`/dashboard/dashboards/${dashboardId}/widgets/${widget.id}`}
-        className="btn"
-        style={{ fontSize: "0.85rem", textDecoration: "none", height: 36, display: "inline-flex", alignItems: "center" }}
+    const now = new Date().getFullYear();
+    const yearSelect = (
+      <select
+        value={viewerYear}
+        onChange={(e) => setViewerYear(Number(e.target.value))}
+        style={{ height: 36, padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
+        title="Year"
       >
-        Full Page View
-      </Link>
+        {(yearOptions.length ? yearOptions : [now]).map((y) => (
+          <option key={y} value={y}>
+            {y}
+          </option>
+        ))}
+      </select>
+    );
+
+    setHeaderAddon(
+      <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
+        {yearSelect}
+        {showOpenFullLink && dashboardId != null ? (
+          <Link
+            href={`/dashboard/dashboards/${dashboardId}/widgets/${widget.id}`}
+            className="btn"
+            style={{ fontSize: "0.85rem", textDecoration: "none", height: 36, display: "inline-flex", alignItems: "center" }}
+          >
+            Full Page View
+          </Link>
+        ) : null}
+      </div>
     );
     return () => setHeaderAddon(null);
-  }, [setHeaderAddon, showOpenFullLink, dashboardId, widget.id]);
+  }, [setHeaderAddon, showOpenFullLink, dashboardId, widget.id, viewerYear, JSON.stringify(yearOptions)]);
 
   useEffect(() => {
     if (!setViewerMenu) return;
