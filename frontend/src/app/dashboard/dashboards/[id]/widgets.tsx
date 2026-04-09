@@ -1,8 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+
+export type WidgetDesignMenuActions = {
+  onEdit: () => void;
+  onDelete: () => void;
+  onToggleFullWidth: () => void;
+  isFullWidth: boolean;
+};
+
+const WidgetViewerMenuSetterContext = createContext<React.Dispatch<React.SetStateAction<React.ReactNode>> | null>(null);
+
+function useWidgetViewerMenuSetter() {
+  return useContext(WidgetViewerMenuSetterContext);
+}
 
 export type Widget =
   | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean }
@@ -36,9 +49,40 @@ export type Widget =
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
       full_width?: boolean;
+    }
+  | {
+      id: string;
+      type: "kpi_multi_line_table";
+      title?: string;
+      kpi_id: number;
+      year: number;
+      period_key?: string | null;
+      /** Multi-line items field key on the KPI */
+      source_field_key: string;
+      /** Sub-field keys viewers are allowed to see (SA configures) */
+      sub_field_keys: string[];
+      full_width?: boolean;
     };
 
 type KpiFieldMap = { idByKey: Record<string, number>; keyById: Record<number, string>; nameByKey: Record<string, string> };
+type KpiFieldWithSubs = {
+  id: number;
+  key: string;
+  name: string;
+  field_type: string;
+  sub_fields?: Array<{ id: number; key: string; name: string; field_type: string }>;
+};
+const _kpiFieldsDetailCache: Record<string, Promise<KpiFieldWithSubs[]> | undefined> = {};
+
+async function getKpiFieldsWithSubs(token: string, organizationId: number, kpiId: number): Promise<KpiFieldWithSubs[]> {
+  const cacheKey = `${organizationId}:${kpiId}:subs`;
+  if (_kpiFieldsDetailCache[cacheKey]) return _kpiFieldsDetailCache[cacheKey];
+  _kpiFieldsDetailCache[cacheKey] = api<KpiFieldWithSubs[]>(
+    `/fields?kpi_id=${kpiId}&organization_id=${organizationId}`,
+    { token }
+  ).catch(() => []);
+  return _kpiFieldsDetailCache[cacheKey];
+}
 const _kpiFieldMapCache: Record<string, Promise<KpiFieldMap> | undefined> = {};
 
 async function getKpiFieldMap(token: string, organizationId: number, kpiId: number): Promise<KpiFieldMap> {
@@ -63,39 +107,205 @@ async function getKpiFieldMap(token: string, organizationId: number, kpiId: numb
   return _kpiFieldMapCache[cacheKey];
 }
 
-function Card({ title, children }: { title?: string; children: React.ReactNode }) {
+function MenuRow({ children, onClick, danger }: { children: React.ReactNode; onClick: () => void; danger?: boolean }) {
   return (
-    <div className="card" style={{ padding: "1rem" }}>
-      {title && <h3 style={{ marginTop: 0, marginBottom: "0.75rem" }}>{title}</h3>}
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        display: "block",
+        width: "100%",
+        textAlign: "left",
+        padding: "0.5rem 0.75rem",
+        border: "none",
+        background: "transparent",
+        fontSize: "0.9rem",
+        cursor: "pointer",
+        color: danger ? "var(--danger, #c00)" : "var(--text)",
+      }}
+    >
       {children}
-    </div>
+    </button>
   );
 }
 
-export function WidgetRenderer({ widget, organizationId }: { widget: Widget; organizationId: number }) {
+function WidgetSettingsShell({
+  title,
+  designActions,
+  widgetKey,
+  children,
+}: {
+  title?: string;
+  designActions?: WidgetDesignMenuActions;
+  widgetKey: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const [viewerMenu, setViewerMenu] = useState<React.ReactNode>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setViewerMenu(null);
+    setOpen(false);
+  }, [widgetKey]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const hasDesign = !!designActions;
+  const hasViewer = viewerMenu != null;
+  const showEmptyHint = open && !hasDesign && !hasViewer;
+
+  return (
+    <WidgetViewerMenuSetterContext.Provider value={setViewerMenu}>
+      <div className="card" style={{ padding: "1rem", position: "relative" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: "0.5rem",
+            marginBottom: "0.75rem",
+            minHeight: title ? undefined : 36,
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {title ? <h3 style={{ margin: 0, lineHeight: 1.3 }}>{title}</h3> : null}
+          </div>
+          <div ref={wrapRef} style={{ position: "relative", flexShrink: 0 }}>
+            <button
+              type="button"
+              aria-label="Widget settings"
+              aria-expanded={open}
+              aria-haspopup="true"
+              onClick={() => setOpen((o) => !o)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 36,
+                height: 36,
+                padding: 0,
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                background: "var(--surface)",
+                color: "var(--text)",
+                cursor: "pointer",
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <circle cx="12" cy="12" r="3" />
+                <path
+                  d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+            {open && (
+              <div
+                role="menu"
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 6px)",
+                  minWidth: 220,
+                  maxWidth: "min(90vw, 320px)",
+                  maxHeight: "min(70vh, 380px)",
+                  overflowY: "auto",
+                  zIndex: 40,
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--surface)",
+                  boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
+                  padding: "0.35rem 0",
+                }}
+              >
+                {hasDesign && (
+                  <>
+                    <MenuRow
+                      onClick={() => {
+                        designActions!.onEdit();
+                        setOpen(false);
+                      }}
+                    >
+                      Edit
+                    </MenuRow>
+                    <MenuRow
+                      onClick={() => {
+                        designActions!.onToggleFullWidth();
+                      }}
+                    >
+                      {designActions!.isFullWidth ? "Use half width" : "Use full width"}
+                    </MenuRow>
+                    <MenuRow
+                      danger
+                      onClick={() => {
+                        designActions!.onDelete();
+                        setOpen(false);
+                      }}
+                    >
+                      Delete
+                    </MenuRow>
+                  </>
+                )}
+                {hasDesign && hasViewer && <div style={{ borderTop: "1px solid var(--border)", margin: "0.25rem 0" }} />}
+                {hasViewer && <div style={{ padding: "0.45rem 0.65rem" }}>{viewerMenu}</div>}
+                {showEmptyHint && (
+                  <div style={{ padding: "0.65rem", color: "var(--muted)", fontSize: "0.85rem" }}>No options for this widget.</div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+        {children}
+      </div>
+    </WidgetViewerMenuSetterContext.Provider>
+  );
+}
+
+export function WidgetRenderer({
+  widget,
+  organizationId,
+  designActions,
+}: {
+  widget: Widget;
+  organizationId: number;
+  designActions?: WidgetDesignMenuActions;
+}) {
   if (widget.type === "text") {
     return (
-      <Card title={widget.title}>
+      <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
         <div style={{ whiteSpace: "pre-wrap" }}>{widget.text || ""}</div>
-      </Card>
+      </WidgetSettingsShell>
     );
   }
   if (widget.type === "kpi_single_value") {
-    return <KpiSingleValueWidget widget={widget} organizationId={organizationId} />;
+    return <KpiSingleValueWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
   }
   if (widget.type === "kpi_table") {
-    return <KpiTableWidget widget={widget} organizationId={organizationId} />;
+    return <KpiTableWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
   }
   if (widget.type === "kpi_line_chart") {
-    return <KpiLineChartWidget widget={widget} organizationId={organizationId} />;
+    return <KpiLineChartWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
   }
   if (widget.type === "kpi_bar_chart") {
-    return <KpiBarChartWidget widget={widget} organizationId={organizationId} />;
+    return <KpiBarChartWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
   }
+  if (widget.type === "kpi_multi_line_table") {
+    return <KpiMultiLineTableWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+  }
+  const w = widget as { id?: string };
   return (
-    <Card title="Unknown widget">
+    <WidgetSettingsShell title="Unknown widget" designActions={designActions} widgetKey={w.id ?? "unknown"}>
       <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(widget, null, 2)}</pre>
-    </Card>
+    </WidgetSettingsShell>
   );
 }
 
@@ -133,9 +343,11 @@ async function fetchEntryForPeriod(
 function KpiSingleValueWidget({
   widget,
   organizationId,
+  designActions,
 }: {
   widget: Extract<Widget, { type: "kpi_single_value" }>;
   organizationId: number;
+  designActions?: WidgetDesignMenuActions;
 }) {
   const token = getAccessToken();
   const [value, setValue] = useState<string>("");
@@ -168,7 +380,7 @@ function KpiSingleValueWidget({
   }, [token, widget.kpi_id, widget.year, widget.period_key, widget.field_key, organizationId]);
 
   return (
-    <Card title={widget.title}>
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
       {loading ? (
         <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
       ) : error ? (
@@ -176,16 +388,18 @@ function KpiSingleValueWidget({
       ) : (
         <div style={{ fontSize: "1.6rem", fontWeight: 700 }}>{value || "—"}</div>
       )}
-    </Card>
+    </WidgetSettingsShell>
   );
 }
 
 function KpiLineChartWidget({
   widget,
   organizationId,
+  designActions,
 }: {
   widget: Extract<Widget, { type: "kpi_line_chart" }>;
   organizationId: number;
+  designActions?: WidgetDesignMenuActions;
 }) {
   const token = getAccessToken();
   const [points, setPoints] = useState<Array<{ year: number; value: number | null }>>([]);
@@ -227,7 +441,7 @@ function KpiLineChartWidget({
   const maxV = values.length ? Math.max(...values) : 1;
 
   return (
-    <Card title={widget.title}>
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
       {loading ? (
         <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
       ) : error ? (
@@ -279,7 +493,7 @@ function KpiLineChartWidget({
           </p>
         </div>
       )}
-    </Card>
+    </WidgetSettingsShell>
   );
 }
 
@@ -330,7 +544,7 @@ function pieArcPath(cx: number, cy: number, r: number, start: number, end: numbe
   return `M ${cx} ${cy} L ${p1.x} ${p1.y} A ${r} ${r} 0 ${largeArc} 1 ${p2.x} ${p2.y} Z`;
 }
 
-function KpiBarChartWidget({
+function KpiBarChartWidgetInner({
   widget,
   organizationId,
 }: {
@@ -338,6 +552,7 @@ function KpiBarChartWidget({
   organizationId: number;
 }) {
   const token = getAccessToken();
+  const setViewerMenu = useWidgetViewerMenuSetter();
   const [bars, setBars] = useState<Array<{ key: string; label: string; value: number | null }>>([]);
   const [groups, setGroups] = useState<Array<{ label: string; value: number }>>([]);
   const [filterValues, setFilterValues] = useState<string[]>([]);
@@ -459,56 +674,154 @@ function KpiBarChartWidget({
     setHiddenSeriesKeys((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]));
   };
 
+  const chipBtnStyle = (hidden: boolean) => ({
+    padding: "0.12rem 0.45rem",
+    borderRadius: 999,
+    border: `1px solid ${hidden ? "var(--border)" : "var(--accent)"}`,
+    background: hidden ? "var(--surface)" : "rgba(79,70,229,0.10)",
+    color: hidden ? "var(--muted)" : "var(--accent)",
+    fontSize: "0.78rem",
+    cursor: "pointer",
+    maxWidth: 220,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  });
+
+  useEffect(() => {
+    if (!setViewerMenu) return;
+    if (loading || error) {
+      setViewerMenu(null);
+      return;
+    }
+    const chartToggle = (
+      <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 999, overflow: "hidden" }}>
+        <button
+          type="button"
+          onClick={() => setViewerChartType("bar")}
+          style={{
+            padding: "0.25rem 0.55rem",
+            border: "none",
+            background: viewerChartType === "bar" ? "rgba(79,70,229,0.10)" : "transparent",
+            color: viewerChartType === "bar" ? "var(--accent)" : "var(--text)",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+          }}
+          aria-pressed={viewerChartType === "bar"}
+        >
+          Bar
+        </button>
+        <button
+          type="button"
+          onClick={() => setViewerChartType("pie")}
+          style={{
+            padding: "0.25rem 0.55rem",
+            border: "none",
+            borderLeft: "1px solid var(--border)",
+            background: viewerChartType === "pie" ? "rgba(79,70,229,0.10)" : "transparent",
+            color: viewerChartType === "pie" ? "var(--accent)" : "var(--text)",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+          }}
+          aria-pressed={viewerChartType === "pie"}
+        >
+          Pie
+        </button>
+      </div>
+    );
+
+    if (mode === "multi_line_items") {
+      setViewerMenu(
+        <div style={{ display: "grid", gap: "0.65rem" }}>
+          <div>
+            <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 4 }}>Chart</div>
+            {chartToggle}
+          </div>
+          {hiddenSeriesKeys.length > 0 && (
+            <button type="button" className="btn" onClick={() => setHiddenSeriesKeys([])} style={{ fontSize: "0.85rem", width: "100%" }}>
+              Reset hidden series
+            </button>
+          )}
+          {groups.length > 0 && (
+            <div>
+              <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 6 }}>Visible groups</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                {groups.slice(0, 20).map((g) => {
+                  const hidden = hiddenSeriesKeys.includes(g.label);
+                  return (
+                    <button
+                      key={g.label}
+                      type="button"
+                      onClick={() => toggleHiddenSeries(g.label)}
+                      style={chipBtnStyle(hidden)}
+                      title={hidden ? "Hidden (click to show)" : "Visible (click to hide)"}
+                    >
+                      {g.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+      return () => setViewerMenu(null);
+    }
+
+    setViewerMenu(
+      <div style={{ display: "grid", gap: "0.65rem" }}>
+        <div>
+          <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 4 }}>Chart</div>
+          {chartToggle}
+        </div>
+        {hiddenSeriesKeys.length > 0 && (
+          <button type="button" className="btn" onClick={() => setHiddenSeriesKeys([])} style={{ fontSize: "0.85rem", width: "100%" }}>
+            Reset hidden series
+          </button>
+        )}
+        {numeric.length > 0 && (
+          <div>
+            <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 6 }}>Visible fields</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+              {numeric.slice(0, 20).map((b) => {
+                const hidden = hiddenSeriesKeys.includes(b.key);
+                return (
+                  <button
+                    key={b.key}
+                    type="button"
+                    onClick={() => toggleHiddenSeries(b.key)}
+                    style={chipBtnStyle(hidden)}
+                    title={hidden ? "Hidden (click to show)" : "Visible (click to hide)"}
+                  >
+                    {b.key}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+    return () => setViewerMenu(null);
+  }, [
+    setViewerMenu,
+    loading,
+    error,
+    mode,
+    viewerChartType,
+    JSON.stringify(hiddenSeriesKeys),
+    JSON.stringify(groups),
+    JSON.stringify(numeric.map((b) => b.key)),
+  ]);
+
   return (
-    <Card title={widget.title}>
+    <>
       {loading ? (
         <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
       ) : error ? (
         <p className="form-error">{error}</p>
       ) : mode === "multi_line_items" ? (
         <div style={{ display: "grid", gap: "0.75rem" }}>
-          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
-            <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Chart:</span>
-            <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 999, overflow: "hidden" }}>
-              <button
-                type="button"
-                onClick={() => setViewerChartType("bar")}
-                style={{
-                  padding: "0.25rem 0.55rem",
-                  border: "none",
-                  background: viewerChartType === "bar" ? "rgba(79,70,229,0.10)" : "transparent",
-                  color: viewerChartType === "bar" ? "var(--accent)" : "var(--text)",
-                  cursor: "pointer",
-                  fontSize: "0.85rem",
-                }}
-                aria-pressed={viewerChartType === "bar"}
-              >
-                Bar
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewerChartType("pie")}
-                style={{
-                  padding: "0.25rem 0.55rem",
-                  border: "none",
-                  borderLeft: "1px solid var(--border)",
-                  background: viewerChartType === "pie" ? "rgba(79,70,229,0.10)" : "transparent",
-                  color: viewerChartType === "pie" ? "var(--accent)" : "var(--text)",
-                  cursor: "pointer",
-                  fontSize: "0.85rem",
-                }}
-                aria-pressed={viewerChartType === "pie"}
-              >
-                Pie
-              </button>
-            </div>
-            {hiddenSeriesKeys.length > 0 && (
-              <button type="button" className="btn" onClick={() => setHiddenSeriesKeys([])} style={{ fontSize: "0.85rem" }}>
-                Reset hidden
-              </button>
-            )}
-          </div>
-
           {widget.filter_sub_field_key && (
             <div style={{ display: "grid", gap: "0.5rem" }}>
               <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Filter ({widget.filter_sub_field_key}):</span>
@@ -629,7 +942,7 @@ function KpiBarChartWidget({
           {visibleGroups.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>No grouped data available for this multi-line field.</p>
           ) : chartType === "pie" ? (
-            <div style={{ width: "100%", maxWidth: 720, display: "grid", gap: "0.75rem" }}>
+            <div style={{ width: "100%", maxWidth: 720 }}>
               <svg viewBox="0 0 640 300" role="img" aria-label="Pie chart" style={{ width: "100%", height: "auto", display: "block" }}>
                 <rect x="0" y="0" width="640" height="300" fill="var(--bg)" rx="6" />
                 {(() => {
@@ -663,34 +976,6 @@ function KpiBarChartWidget({
                   );
                 })()}
               </svg>
-              <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
-                {groups.slice(0, 20).map((g) => {
-                  const hidden = hiddenSeriesKeys.includes(g.label);
-                  return (
-                    <button
-                      key={g.label}
-                      type="button"
-                      onClick={() => toggleHiddenSeries(g.label)}
-                      style={{
-                        padding: "0.12rem 0.45rem",
-                        borderRadius: 999,
-                        border: `1px solid ${hidden ? "var(--border)" : "var(--accent)"}`,
-                        background: hidden ? "var(--surface)" : "rgba(79,70,229,0.10)",
-                        color: hidden ? "var(--muted)" : "var(--accent)",
-                        fontSize: "0.78rem",
-                        cursor: "pointer",
-                        maxWidth: 220,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                      title={hidden ? "Hidden (click to show)" : "Visible (click to hide)"}
-                    >
-                      {g.label}
-                    </button>
-                  );
-                })}
-              </div>
             </div>
           ) : (
             <div style={{ width: "100%", maxWidth: 720 }}>
@@ -731,34 +1016,6 @@ function KpiBarChartWidget({
                   );
                 })()}
               </svg>
-              <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
-                {groups.slice(0, 20).map((g) => {
-                  const hidden = hiddenSeriesKeys.includes(g.label);
-                  return (
-                    <button
-                      key={g.label}
-                      type="button"
-                      onClick={() => toggleHiddenSeries(g.label)}
-                      style={{
-                        padding: "0.12rem 0.45rem",
-                        borderRadius: 999,
-                        border: `1px solid ${hidden ? "var(--border)" : "var(--accent)"}`,
-                        background: hidden ? "var(--surface)" : "rgba(79,70,229,0.10)",
-                        color: hidden ? "var(--muted)" : "var(--accent)",
-                        fontSize: "0.78rem",
-                        cursor: "pointer",
-                        maxWidth: 220,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                      title={hidden ? "Hidden (click to show)" : "Visible (click to hide)"}
-                    >
-                      {g.label}
-                    </button>
-                  );
-                })}
-              </div>
             </div>
           )}
         </div>
@@ -766,48 +1023,6 @@ function KpiBarChartWidget({
         <p style={{ color: "var(--muted)", margin: 0 }}>No numeric data for the selected fields.</p>
       ) : (
         <div style={{ width: "100%", maxWidth: 720 }}>
-          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "0.5rem" }}>
-            <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Chart:</span>
-            <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 999, overflow: "hidden" }}>
-              <button
-                type="button"
-                onClick={() => setViewerChartType("bar")}
-                style={{
-                  padding: "0.25rem 0.55rem",
-                  border: "none",
-                  background: viewerChartType === "bar" ? "rgba(79,70,229,0.10)" : "transparent",
-                  color: viewerChartType === "bar" ? "var(--accent)" : "var(--text)",
-                  cursor: "pointer",
-                  fontSize: "0.85rem",
-                }}
-                aria-pressed={viewerChartType === "bar"}
-              >
-                Bar
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewerChartType("pie")}
-                style={{
-                  padding: "0.25rem 0.55rem",
-                  border: "none",
-                  borderLeft: "1px solid var(--border)",
-                  background: viewerChartType === "pie" ? "rgba(79,70,229,0.10)" : "transparent",
-                  color: viewerChartType === "pie" ? "var(--accent)" : "var(--text)",
-                  cursor: "pointer",
-                  fontSize: "0.85rem",
-                }}
-                aria-pressed={viewerChartType === "pie"}
-              >
-                Pie
-              </button>
-            </div>
-            {hiddenSeriesKeys.length > 0 && (
-              <button type="button" className="btn" onClick={() => setHiddenSeriesKeys([])} style={{ fontSize: "0.85rem" }}>
-                Reset hidden
-              </button>
-            )}
-          </div>
-
           {chartType === "pie" ? (
             <svg viewBox="0 0 640 300" role="img" aria-label="Pie chart" style={{ width: "100%", height: "auto", display: "block" }}>
               <rect x="0" y="0" width="640" height="300" fill="var(--bg)" rx="6" />
@@ -881,46 +1096,36 @@ function KpiBarChartWidget({
               })()}
             </svg>
           )}
-          <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
-            {numeric.slice(0, 20).map((b) => {
-              const hidden = hiddenSeriesKeys.includes(b.key);
-              return (
-                <button
-                  key={b.key}
-                  type="button"
-                  onClick={() => toggleHiddenSeries(b.key)}
-                  style={{
-                    padding: "0.12rem 0.45rem",
-                    borderRadius: 999,
-                    border: `1px solid ${hidden ? "var(--border)" : "var(--accent)"}`,
-                    background: hidden ? "var(--surface)" : "rgba(79,70,229,0.10)",
-                    color: hidden ? "var(--muted)" : "var(--accent)",
-                    fontSize: "0.78rem",
-                    cursor: "pointer",
-                    maxWidth: 220,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                  title={hidden ? "Hidden (click to show)" : "Visible (click to hide)"}
-                >
-                  {b.key}
-                </button>
-              );
-            })}
-          </div>
         </div>
       )}
-    </Card>
+    </>
+  );
+}
+
+function KpiBarChartWidget({
+  widget,
+  organizationId,
+  designActions,
+}: {
+  widget: Extract<Widget, { type: "kpi_bar_chart" }>;
+  organizationId: number;
+  designActions?: WidgetDesignMenuActions;
+}) {
+  return (
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
+      <KpiBarChartWidgetInner widget={widget} organizationId={organizationId} />
+    </WidgetSettingsShell>
   );
 }
 
 function KpiTableWidget({
   widget,
   organizationId,
+  designActions,
 }: {
   widget: Extract<Widget, { type: "kpi_table" }>;
   organizationId: number;
+  designActions?: WidgetDesignMenuActions;
 }) {
   const token = getAccessToken();
   const [rows, setRows] = useState<Array<{ label: string; value: string }>>([]);
@@ -959,7 +1164,7 @@ function KpiTableWidget({
   }, [token, widget.kpi_id, widget.year, widget.period_key, organizationId, JSON.stringify(widget.field_keys ?? [])]);
 
   return (
-    <Card title={widget.title}>
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
       {loading ? (
         <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
       ) : error ? (
@@ -980,7 +1185,232 @@ function KpiTableWidget({
           </table>
         </div>
       )}
-    </Card>
+    </WidgetSettingsShell>
+  );
+}
+
+function formatCellForTable(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function compareCellValues(a: unknown, b: unknown): number {
+  const sa = formatCellForTable(a);
+  const sb = formatCellForTable(b);
+  const na = Number(String(sa).replace(/,/g, ""));
+  const nb = Number(String(sb).replace(/,/g, ""));
+  if (sa.trim() !== "" && sb.trim() !== "" && Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  return sa.localeCompare(sb, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function KpiMultiLineTableWidgetInner({
+  widget,
+  organizationId,
+}: {
+  widget: Extract<Widget, { type: "kpi_multi_line_table" }>;
+  organizationId: number;
+}) {
+  const token = getAccessToken();
+  const setViewerMenu = useWidgetViewerMenuSetter();
+  const [items, setItems] = useState<Record<string, unknown>[]>([]);
+  const [labelByKey, setLabelByKey] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [visibleKeys, setVisibleKeys] = useState<string[]>([]);
+
+  const allowedKeys = widget.sub_field_keys ?? [];
+
+  useEffect(() => {
+    setVisibleKeys(allowedKeys.length ? [...allowedKeys] : []);
+    setSortKey(null);
+    setSortDir("asc");
+    setSearch("");
+  }, [widget.id, JSON.stringify(allowedKeys)]);
+
+  useEffect(() => {
+    if (!token) return;
+    setLoading(true);
+    setError(null);
+    Promise.all([
+      getKpiFieldsWithSubs(token, organizationId, widget.kpi_id),
+      fetchEntryForPeriod(token, organizationId, widget.kpi_id, widget.year, widget.period_key),
+    ])
+      .then(([fields, entry]) => {
+        const source = fields.find((f) => f.key === widget.source_field_key && f.field_type === "multi_line_items");
+        const fid = source?.id;
+        const raw = fid ? rawFieldFromEntry(entry, fid) : null;
+        const rows = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
+        setItems(rows);
+        const labels: Record<string, string> = {};
+        (source?.sub_fields ?? []).forEach((sf) => {
+          labels[sf.key] = sf.name;
+        });
+        setLabelByKey(labels);
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load table data"))
+      .finally(() => setLoading(false));
+  }, [token, organizationId, widget.kpi_id, widget.year, widget.period_key, widget.source_field_key]);
+
+  const displayKeys = useMemo(() => allowedKeys.filter((k) => visibleKeys.includes(k)), [allowedKeys, visibleKeys]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter((row) =>
+      allowedKeys.some((k) => formatCellForTable(row[k]).toLowerCase().includes(q))
+    );
+  }, [items, search, allowedKeys]);
+
+  const sorted = useMemo(() => {
+    if (!sortKey || !displayKeys.includes(sortKey)) return filtered;
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...filtered].sort((a, b) => dir * compareCellValues(a[sortKey], b[sortKey]));
+  }, [filtered, sortKey, sortDir, displayKeys]);
+
+  const toggleColumn = (key: string) => {
+    setVisibleKeys((prev) => {
+      if (prev.includes(key)) {
+        const next = prev.filter((x) => x !== key);
+        return next.length === 0 ? [key] : next;
+      }
+      return [...prev, key].sort((a, b) => allowedKeys.indexOf(a) - allowedKeys.indexOf(b));
+    });
+  };
+
+  const onHeaderClick = (key: string) => {
+    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  useEffect(() => {
+    if (!setViewerMenu) return;
+    if (loading || error || allowedKeys.length === 0) {
+      setViewerMenu(null);
+      return;
+    }
+    setViewerMenu(
+      <div style={{ display: "grid", gap: "0.5rem" }}>
+        <div style={{ fontSize: "0.75rem", color: "var(--muted)", fontWeight: 600 }}>Columns</div>
+        {allowedKeys.map((k) => (
+          <label
+            key={k}
+            style={{
+              display: "flex",
+              gap: "0.45rem",
+              alignItems: "center",
+              fontSize: "0.85rem",
+              cursor: "pointer",
+            }}
+          >
+            <input type="checkbox" checked={visibleKeys.includes(k)} onChange={() => toggleColumn(k)} />
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={k}>
+              {labelByKey[k] ?? k}
+            </span>
+          </label>
+        ))}
+      </div>
+    );
+    return () => setViewerMenu(null);
+  }, [setViewerMenu, loading, error, JSON.stringify(allowedKeys), JSON.stringify(visibleKeys), JSON.stringify(labelByKey)]);
+
+  return (
+    <>
+      {loading ? (
+        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+      ) : error ? (
+        <p className="form-error">{error}</p>
+      ) : (
+        <div style={{ display: "grid", gap: "0.75rem" }}>
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search rows…"
+            style={{
+              width: "100%",
+              maxWidth: 320,
+              padding: "0.4rem 0.55rem",
+              fontSize: "0.9rem",
+              borderRadius: 8,
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              boxSizing: "border-box",
+            }}
+          />
+          {sorted.length === 0 ? (
+            <p style={{ color: "var(--muted)", margin: 0 }}>No rows to show.</p>
+          ) : displayKeys.length === 0 ? (
+            <p style={{ color: "var(--muted)", margin: 0 }}>Select at least one column.</p>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                <thead>
+                  <tr style={{ borderBottom: "2px solid var(--border)" }}>
+                    {displayKeys.map((k) => (
+                      <th key={k} style={{ textAlign: "left", padding: "0.45rem 0.5rem", whiteSpace: "nowrap" }}>
+                        <button
+                          type="button"
+                          onClick={() => onHeaderClick(k)}
+                          style={{
+                            border: "none",
+                            background: "transparent",
+                            padding: 0,
+                            cursor: "pointer",
+                            font: "inherit",
+                            fontWeight: 700,
+                            color: "var(--text)",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "0.25rem",
+                          }}
+                        >
+                          {labelByKey[k] ?? k}
+                          {sortKey === k ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+                        </button>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sorted.map((row, idx) => (
+                    <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                      {displayKeys.map((k) => (
+                        <td key={k} style={{ padding: "0.45rem 0.5rem", verticalAlign: "top" }}>
+                          {formatCellForTable(row[k]) || "—"}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function KpiMultiLineTableWidget({
+  widget,
+  organizationId,
+  designActions,
+}: {
+  widget: Extract<Widget, { type: "kpi_multi_line_table" }>;
+  organizationId: number;
+  designActions?: WidgetDesignMenuActions;
+}) {
+  return (
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
+      <KpiMultiLineTableWidgetInner widget={widget} organizationId={organizationId} />
+    </WidgetSettingsShell>
   );
 }
 

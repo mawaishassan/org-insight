@@ -7,7 +7,13 @@ import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer } from "../widgets";
 
-type WidgetType = "text" | "kpi_single_value" | "kpi_table" | "kpi_line_chart" | "kpi_bar_chart";
+type WidgetType =
+  | "text"
+  | "kpi_single_value"
+  | "kpi_table"
+  | "kpi_line_chart"
+  | "kpi_bar_chart"
+  | "kpi_multi_line_table";
 type EditTab = "basics" | "options";
 
 type Widget =
@@ -40,6 +46,17 @@ type Widget =
       group_by_sub_field_key?: string;
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
+      full_width?: boolean;
+    }
+  | {
+      id: string;
+      type: "kpi_multi_line_table";
+      title?: string;
+      kpi_id: number;
+      year: number;
+      period_key?: string | null;
+      source_field_key: string;
+      sub_field_keys: string[];
       full_width?: boolean;
     };
 
@@ -90,6 +107,7 @@ export default function DashboardDesignPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [userRole, setUserRole] = useState<string | null>(null);
 
   const [widgetModalOpen, setWidgetModalOpen] = useState(false);
   const [editingWidgetId, setEditingWidgetId] = useState<string | null>(null);
@@ -112,6 +130,8 @@ export default function DashboardDesignPage() {
   const [addGroupBySubFieldKey, setAddGroupBySubFieldKey] = useState<string>("");
   const [addValueSubFieldKey, setAddValueSubFieldKey] = useState<string>("");
   const [addFilterSubFieldKey, setAddFilterSubFieldKey] = useState<string>("");
+  const [addMultiLineTableFieldKey, setAddMultiLineTableFieldKey] = useState<string>("");
+  const [addMultiLineTableSubKeys, setAddMultiLineTableSubKeys] = useState<string[]>([]);
   const [editTab, setEditTab] = useState<EditTab>("basics");
 
   const isEditing = editingWidgetId != null;
@@ -133,6 +153,8 @@ export default function DashboardDesignPage() {
     setAddGroupBySubFieldKey("");
     setAddValueSubFieldKey("");
     setAddFilterSubFieldKey("");
+    setAddMultiLineTableFieldKey("");
+    setAddMultiLineTableSubKeys([]);
     setWidgetModalOpen(true);
   };
 
@@ -157,8 +179,22 @@ export default function DashboardDesignPage() {
     setAddGroupBySubFieldKey((w as any).group_by_sub_field_key || "");
     setAddValueSubFieldKey((w as any).value_sub_field_key || "");
     setAddFilterSubFieldKey((w as any).filter_sub_field_key || "");
+    if (w.type === "kpi_multi_line_table") {
+      setAddMultiLineTableFieldKey(w.source_field_key || "");
+      setAddMultiLineTableSubKeys(Array.isArray(w.sub_field_keys) ? [...w.sub_field_keys] : []);
+    } else {
+      setAddMultiLineTableFieldKey("");
+      setAddMultiLineTableSubKeys([]);
+    }
     setWidgetModalOpen(true);
   };
+
+  useEffect(() => {
+    if (!token) return;
+    api<{ role: string }>("/auth/me", { token })
+      .then((m) => setUserRole(m.role))
+      .catch(() => setUserRole(null));
+  }, [token]);
 
   useEffect(() => {
     if (!id || !token) return;
@@ -208,6 +244,12 @@ export default function DashboardDesignPage() {
     () => selectedMultiLineSubFields.filter((sf) => sf.field_type === "number"),
     [selectedMultiLineSubFields]
   );
+
+  const selectedTableMultiLineField = useMemo(
+    () => addMultiLineFields.find((f) => f.key === addMultiLineTableFieldKey) ?? null,
+    [addMultiLineFields, addMultiLineTableFieldKey]
+  );
+  const tableMultiLineSubFields = useMemo(() => selectedTableMultiLineField?.sub_fields ?? [], [selectedTableMultiLineField]);
 
   const upsertWidget = () => {
     const title = addTitle.trim() || undefined;
@@ -348,6 +390,32 @@ export default function DashboardDesignPage() {
       setWidgetModalOpen(false);
       return;
     }
+    if (addType === "kpi_multi_line_table") {
+      if (!addMultiLineTableFieldKey.trim()) {
+        toast.error("Select a multi-line items field");
+        return;
+      }
+      const subKeys = addMultiLineTableSubKeys.filter((k) => k.trim());
+      if (subKeys.length === 0) {
+        toast.error("Select at least one sub-field column");
+        return;
+      }
+      const w: Widget = {
+        id: editingWidgetId ?? newId(),
+        type: "kpi_multi_line_table",
+        title,
+        kpi_id: addKpiId,
+        year: addYear,
+        period_key,
+        source_field_key: addMultiLineTableFieldKey.trim(),
+        sub_field_keys: subKeys,
+        full_width: fullWidth,
+      };
+      setWidgets((prev) => (editingWidgetId ? prev.map((x) => (x.id === editingWidgetId ? w : x)) : [...prev, w]));
+      toast.success(editingWidgetId ? "Widget updated" : "Widget added");
+      setWidgetModalOpen(false);
+      return;
+    }
   };
 
   const handleSave = async () => {
@@ -409,19 +477,21 @@ export default function DashboardDesignPage() {
         ) : (
           <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
             {widgets.map((w) => (
-              <div key={w.id} style={{ gridColumn: (w as any).full_width ? "1 / -1" : undefined, position: "relative" }}>
-                <div style={{ position: "absolute", top: 10, right: 10, display: "flex", gap: "0.35rem", zIndex: 5 }}>
-                  <button type="button" className="btn" onClick={() => openEditWidget(w)} style={{ fontSize: "0.85rem" }}>
-                    Edit
-                  </button>
-                  <button type="button" className="btn" onClick={() => toggleWidgetFullWidth(w.id)} style={{ fontSize: "0.85rem" }}>
-                    {(w as any).full_width ? "Half" : "Full"}
-                  </button>
-                  <button type="button" className="btn btn-danger" onClick={() => removeWidget(w.id)} style={{ fontSize: "0.85rem" }}>
-                    Delete
-                  </button>
-                </div>
-                <WidgetRenderer widget={w as any} organizationId={dashboard.organization_id} />
+              <div key={w.id} style={{ gridColumn: (w as any).full_width ? "1 / -1" : undefined }}>
+                <WidgetRenderer
+                  widget={w as any}
+                  organizationId={dashboard.organization_id}
+                  designActions={
+                    userRole === "SUPER_ADMIN"
+                      ? {
+                          onEdit: () => openEditWidget(w),
+                          onDelete: () => removeWidget(w.id),
+                          onToggleFullWidth: () => toggleWidgetFullWidth(w.id),
+                          isFullWidth: !!(w as any).full_width,
+                        }
+                      : undefined
+                  }
+                />
               </div>
             ))}
           </div>
@@ -505,6 +575,7 @@ export default function DashboardDesignPage() {
                         <option value="kpi_table">KPI table</option>
                         <option value="kpi_line_chart">KPI line chart (by year)</option>
                         <option value="kpi_bar_chart">KPI chart (bar/pie)</option>
+                        <option value="kpi_multi_line_table">KPI multi-line table</option>
                       </select>
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
@@ -671,6 +742,52 @@ export default function DashboardDesignPage() {
                       </div>
                     )}
 
+                    {addType === "kpi_multi_line_table" && (
+                      <div style={{ display: "grid", gap: "0.75rem" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Source</label>
+                          <select
+                            value={addMultiLineTableFieldKey}
+                            onChange={(e) => {
+                              setAddMultiLineTableFieldKey(e.target.value);
+                              setAddMultiLineTableSubKeys([]);
+                            }}
+                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                          >
+                            <option value="">Select…</option>
+                            {addMultiLineFields.map((f) => (
+                              <option key={f.key} value={f.key}>
+                                {f.name} ({f.key})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {tableMultiLineSubFields.length > 0 && (
+                          <div style={{ display: "grid", gap: "0.35rem" }}>
+                            <div style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Columns viewers may see</div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+                              {tableMultiLineSubFields.map((sf) => (
+                                <label key={sf.key} style={{ display: "flex", gap: "0.45rem", alignItems: "center", fontSize: "0.9rem" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={addMultiLineTableSubKeys.includes(sf.key)}
+                                    onChange={(e) => {
+                                      setAddMultiLineTableSubKeys((prev) =>
+                                        e.target.checked ? [...prev, sf.key] : prev.filter((k) => k !== sf.key)
+                                      );
+                                    }}
+                                  />
+                                  <span>
+                                    {sf.name} <span style={{ color: "var(--muted)" }}>({sf.key})</span>
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {addType === "kpi_bar_chart" && addChartMode === "multi_line_items" && (
                       <div style={{ display: "grid", gap: "0.75rem" }}>
                         <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
@@ -751,7 +868,10 @@ export default function DashboardDesignPage() {
                       </div>
                     )}
 
-                    {addType !== "kpi_table" && addType !== "kpi_bar_chart" && addType !== "text" && (
+                    {addType !== "kpi_table" &&
+                      addType !== "kpi_bar_chart" &&
+                      addType !== "kpi_multi_line_table" &&
+                      addType !== "text" && (
                       <div className="card" style={{ padding: "0.9rem" }}>
                         <div style={{ fontWeight: 700, marginBottom: "0.25rem" }}>No extra options</div>
                         <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>This widget type doesn’t have additional options.</div>
