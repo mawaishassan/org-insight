@@ -87,6 +87,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const dashboardViewMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/?$/);
   const isDashboardView = !!dashboardViewMatch;
   const dashboardViewId = dashboardViewMatch ? Number(dashboardViewMatch[1]) : null;
+  const dashboardWidgetFullMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/widgets\/([^/]+)\/?$/);
+  const isDashboardWidgetFull = !!dashboardWidgetFullMatch;
+  const dashboardWidgetFullDashboardId = dashboardWidgetFullMatch ? Number(dashboardWidgetFullMatch[1]) : null;
 
   useEffect(() => {
     const token = getAccessToken();
@@ -578,6 +581,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         )}
 
         <div style={{ marginLeft: "auto", position: "relative" }} ref={menuRef}>
+          {isDashboardWidgetFull && dashboardWidgetFullDashboardId ? (
+            <Link
+              href={`/dashboard/dashboards/${dashboardWidgetFullDashboardId}?${qs({ organization_id: selectedOrgId ?? undefined })}`}
+              className="btn"
+              style={{ marginRight: "0.5rem" }}
+              onClick={() => setMenuOpen(false)}
+            >
+              Back to dashboard
+            </Link>
+          ) : null}
           {isSuperAdmin && isDashboardView && dashboardViewId ? (
             <Link
               href={`/dashboard/dashboards/${dashboardViewId}/design?${qs({ organization_id: selectedOrgId ?? undefined })}`}

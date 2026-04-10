@@ -462,6 +462,8 @@ export function WidgetRenderer({
   dashboardId,
   isFullPage,
   tableRowsPerPage,
+  onTableRowsPerPageChange,
+  tableRowsPerPageOptions,
 }: {
   widget: Widget;
   organizationId: number;
@@ -469,6 +471,8 @@ export function WidgetRenderer({
   dashboardId?: number;
   isFullPage?: boolean;
   tableRowsPerPage?: number;
+  onTableRowsPerPageChange?: (n: number) => void;
+  tableRowsPerPageOptions?: number[];
 }) {
   if (widget.type === "text") {
     return (
@@ -501,6 +505,8 @@ export function WidgetRenderer({
         dashboardId={dashboardId}
         isFullPage={isFullPage}
         tableRowsPerPage={tableRowsPerPage}
+        onTableRowsPerPageChange={onTableRowsPerPageChange}
+        tableRowsPerPageOptions={tableRowsPerPageOptions}
       />
     );
   }
@@ -1731,12 +1737,16 @@ function KpiMultiLineTableWidgetInner({
   widget,
   organizationId,
   pageSize,
+  onChangePageSize,
+  pageSizeOptions,
   showOpenFullLink,
   dashboardId,
 }: {
   widget: Extract<Widget, { type: "kpi_multi_line_table" }>;
   organizationId: number;
   pageSize: number;
+  onChangePageSize?: (n: number) => void;
+  pageSizeOptions?: number[];
   showOpenFullLink: boolean;
   dashboardId?: number;
 }) {
@@ -2091,22 +2101,23 @@ function KpiMultiLineTableWidgetInner({
         <p className="form-error">{error}</p>
       ) : (
         <div style={{ display: "grid", gap: "0.75rem" }}>
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search rows…"
-            style={{
-              width: "100%",
-              maxWidth: 320,
-              padding: "0.4rem 0.55rem",
-              fontSize: "0.9rem",
-              borderRadius: 8,
-              border: "1px solid var(--border)",
-              background: "var(--surface)",
-              boxSizing: "border-box",
-            }}
-          />
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search rows…"
+              style={{
+                width: "min(680px, 100%)",
+                padding: "0.45rem 0.6rem",
+                fontSize: "0.95rem",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
           {sorted.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>No rows to show.</p>
           ) : orderedKeys.length === 0 ? (
@@ -2186,11 +2197,30 @@ function KpiMultiLineTableWidgetInner({
             </div>
           )}
 
-          {sorted.length > pageSize && (
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-              <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+          {(sorted.length > pageSize || onChangePageSize) && (
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+              {onChangePageSize ? (
+                <div style={{ display: "inline-flex", gap: "0.45rem", alignItems: "center" }}>
+                  <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Rows per page</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => onChangePageSize(Number(e.target.value))}
+                    style={{ height: 34, padding: "0.3rem 0.45rem", fontSize: "0.85rem" }}
+                    title="Rows per page"
+                  >
+                    {(pageSizeOptions?.length ? pageSizeOptions : [5, 10, 25, 50, 100]).map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
+
+              <span style={{ color: "var(--muted)", fontSize: "0.85rem", marginLeft: "auto" }}>
                 Page {safePage + 1} of {totalPages}
               </span>
+
               <div style={{ display: "flex", gap: "0.4rem" }}>
                 <button type="button" className="btn" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={safePage === 0}>
                   Prev
@@ -2219,6 +2249,8 @@ function KpiMultiLineTableWidget({
   dashboardId,
   isFullPage,
   tableRowsPerPage,
+  onTableRowsPerPageChange,
+  tableRowsPerPageOptions,
 }: {
   widget: Extract<Widget, { type: "kpi_multi_line_table" }>;
   organizationId: number;
@@ -2226,6 +2258,8 @@ function KpiMultiLineTableWidget({
   dashboardId?: number;
   isFullPage?: boolean;
   tableRowsPerPage?: number;
+  onTableRowsPerPageChange?: (n: number) => void;
+  tableRowsPerPageOptions?: number[];
 }) {
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
@@ -2233,6 +2267,8 @@ function KpiMultiLineTableWidget({
         widget={widget}
         organizationId={organizationId}
         pageSize={Math.max(1, tableRowsPerPage ?? (isFullPage ? 10 : widget.rows_limit ?? 5))}
+        onChangePageSize={onTableRowsPerPageChange}
+        pageSizeOptions={tableRowsPerPageOptions}
         showOpenFullLink={!isFullPage}
         dashboardId={dashboardId}
       />
