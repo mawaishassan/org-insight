@@ -13,6 +13,7 @@ type WidgetType =
   | "kpi_table"
   | "kpi_line_chart"
   | "kpi_bar_chart"
+  | "kpi_card_single_value"
   | "kpi_multi_line_table";
 type EditTab = "basics" | "options";
 
@@ -47,6 +48,36 @@ type Widget =
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
       filter_label?: string;
+      full_width?: boolean;
+    }
+  | {
+      id: string;
+      type: "kpi_card_single_value";
+      title?: string;
+      kpi_id: number;
+      year: number;
+      period_key?: string | null;
+      source_mode: "field" | "multi_line_agg" | "static";
+      field_key?: string;
+      source_field_key?: string;
+      agg?: "sum" | "avg" | "count" | "min" | "max";
+      value_sub_field_key?: string;
+      static_value?: number | string;
+      subtitle?: string;
+      prefix?: string;
+      suffix?: string;
+      decimals?: number;
+      thousand_sep?: boolean;
+      align?: "left" | "center" | "right";
+      title_size?: number;
+      value_size?: number;
+      subtitle_size?: number;
+      title_weight?: 400 | 500 | 600 | 700 | 800;
+      value_weight?: 400 | 500 | 600 | 700 | 800;
+      theme?: string;
+      allow_custom_colors?: boolean;
+      bg_color?: string;
+      fg_color?: string;
       full_width?: boolean;
     }
   | {
@@ -139,6 +170,18 @@ export default function DashboardDesignPage() {
   const [addValueSubFieldKey, setAddValueSubFieldKey] = useState<string>("");
   const [addFilterSubFieldKey, setAddFilterSubFieldKey] = useState<string>("");
   const [addFilterLabel, setAddFilterLabel] = useState<string>("");
+  const [addCardSourceMode, setAddCardSourceMode] = useState<"field" | "multi_line_agg" | "static">("field");
+  const [addCardStaticValue, setAddCardStaticValue] = useState<string>("");
+  const [addCardSubtitle, setAddCardSubtitle] = useState<string>("");
+  const [addCardPrefix, setAddCardPrefix] = useState<string>("");
+  const [addCardSuffix, setAddCardSuffix] = useState<string>("");
+  const [addCardDecimals, setAddCardDecimals] = useState<number>(0);
+  const [addCardThousandSep, setAddCardThousandSep] = useState(true);
+  const [addCardAlign, setAddCardAlign] = useState<"left" | "center" | "right">("left");
+  const [addCardTheme, setAddCardTheme] = useState<string>("success_light");
+  const [addCardAllowCustomColors, setAddCardAllowCustomColors] = useState(false);
+  const [addCardBgColor, setAddCardBgColor] = useState<string>("");
+  const [addCardFgColor, setAddCardFgColor] = useState<string>("");
   const [addMultiLineTableFieldKey, setAddMultiLineTableFieldKey] = useState<string>("");
   const [addMultiLineTableSubKeys, setAddMultiLineTableSubKeys] = useState<string[]>([]);
   const [addMultiLineTableJoinEnabled, setAddMultiLineTableJoinEnabled] = useState(false);
@@ -169,6 +212,18 @@ export default function DashboardDesignPage() {
     setAddValueSubFieldKey("");
     setAddFilterSubFieldKey("");
     setAddFilterLabel("");
+    setAddCardSourceMode("field");
+    setAddCardStaticValue("");
+    setAddCardSubtitle("");
+    setAddCardPrefix("");
+    setAddCardSuffix("");
+    setAddCardDecimals(0);
+    setAddCardThousandSep(true);
+    setAddCardAlign("left");
+    setAddCardTheme("success_light");
+    setAddCardAllowCustomColors(false);
+    setAddCardBgColor("");
+    setAddCardFgColor("");
     setAddMultiLineTableFieldKey("");
     setAddMultiLineTableSubKeys([]);
     setAddMultiLineTableJoinEnabled(false);
@@ -202,6 +257,24 @@ export default function DashboardDesignPage() {
     setAddValueSubFieldKey((w as any).value_sub_field_key || "");
     setAddFilterSubFieldKey((w as any).filter_sub_field_key || "");
     setAddFilterLabel((w as any).filter_label || "");
+    if (w.type === "kpi_card_single_value") {
+      setAddCardSourceMode((w as any).source_mode || "field");
+      setAddCardStaticValue((w as any).static_value != null ? String((w as any).static_value) : "");
+      setAddCardSubtitle((w as any).subtitle || "");
+      setAddCardPrefix((w as any).prefix || "");
+      setAddCardSuffix((w as any).suffix || "");
+      setAddCardDecimals(Number.isFinite((w as any).decimals) ? Number((w as any).decimals) : 0);
+      setAddCardThousandSep((w as any).thousand_sep !== false);
+      setAddCardAlign((w as any).align || "left");
+      setAddCardTheme((w as any).theme || "success_light");
+      setAddCardAllowCustomColors(!!(w as any).allow_custom_colors);
+      setAddCardBgColor((w as any).bg_color || "");
+      setAddCardFgColor((w as any).fg_color || "");
+      setAddFieldKey((w as any).field_key || "");
+      setAddMultiLineFieldKey((w as any).source_field_key || "");
+      setAddAggFn((w as any).agg || "count_rows");
+      setAddValueSubFieldKey((w as any).value_sub_field_key || "");
+    }
     if (w.type === "kpi_multi_line_table") {
       setAddMultiLineTableFieldKey(w.source_field_key || "");
       setAddMultiLineTableSubKeys(Array.isArray(w.sub_field_keys) ? [...w.sub_field_keys] : []);
@@ -473,6 +546,35 @@ export default function DashboardDesignPage() {
       applyWidgetUpsert(w as Widget);
       return;
     }
+    if (addType === "kpi_card_single_value") {
+      const w: Widget = {
+        id: editingWidgetId ?? newId(),
+        type: "kpi_card_single_value",
+        title,
+        kpi_id: addKpiId,
+        year: addYear,
+        period_key,
+        source_mode: addCardSourceMode,
+        field_key: addCardSourceMode === "field" ? addFieldKey.trim() : undefined,
+        source_field_key: addCardSourceMode === "multi_line_agg" ? addMultiLineFieldKey.trim() : undefined,
+        agg: addCardSourceMode === "multi_line_agg" ? ("sum" as any) : undefined,
+        value_sub_field_key: addCardSourceMode === "multi_line_agg" ? addValueSubFieldKey.trim() || undefined : undefined,
+        static_value: addCardSourceMode === "static" ? (addCardStaticValue.trim() || "") : undefined,
+        subtitle: addCardSubtitle.trim() || undefined,
+        prefix: addCardPrefix || undefined,
+        suffix: addCardSuffix || undefined,
+        decimals: addCardDecimals,
+        thousand_sep: addCardThousandSep,
+        align: addCardAlign,
+        theme: addCardTheme,
+        allow_custom_colors: addCardAllowCustomColors,
+        bg_color: addCardAllowCustomColors ? addCardBgColor.trim() || undefined : undefined,
+        fg_color: addCardAllowCustomColors ? addCardFgColor.trim() || undefined : undefined,
+        full_width: fullWidth,
+      } as any;
+      applyWidgetUpsert(w);
+      return;
+    }
     if (addType === "kpi_multi_line_table") {
       if (!addMultiLineTableFieldKey.trim()) {
         toast.error("Select a multi-line items field");
@@ -663,6 +765,7 @@ export default function DashboardDesignPage() {
                       >
                         <option value="text">Text</option>
                         <option value="kpi_single_value">KPI single value</option>
+                      <option value="kpi_card_single_value">KPI card (single value)</option>
                         <option value="kpi_table">KPI table</option>
                         <option value="kpi_line_chart">KPI line chart (by year)</option>
                         <option value="kpi_bar_chart">KPI chart (bar/pie)</option>
@@ -1103,10 +1206,144 @@ export default function DashboardDesignPage() {
                     {addType !== "kpi_table" &&
                       addType !== "kpi_bar_chart" &&
                       addType !== "kpi_multi_line_table" &&
+                      addType !== "kpi_card_single_value" &&
                       addType !== "text" && (
                       <div className="card" style={{ padding: "0.9rem" }}>
                         <div style={{ fontWeight: 700, marginBottom: "0.25rem" }}>No extra options</div>
                         <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>This widget type doesn’t have additional options.</div>
+                      </div>
+                    )}
+
+                    {addType === "kpi_card_single_value" && (
+                      <div style={{ display: "grid", gap: "0.75rem" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Value source</label>
+                          <select
+                            value={addCardSourceMode}
+                            onChange={(e) => setAddCardSourceMode(e.target.value as any)}
+                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                          >
+                            <option value="field">Formula/field</option>
+                            <option value="multi_line_agg">Multi-line aggregation</option>
+                            <option value="static">Static/manual</option>
+                          </select>
+                        </div>
+
+                        {addCardSourceMode === "static" && (
+                          <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Static value</label>
+                            <input value={addCardStaticValue} onChange={(e) => setAddCardStaticValue(e.target.value)} style={{ padding: "0.35rem 0.45rem" }} />
+                          </div>
+                        )}
+
+                        {addCardSourceMode === "field" && (
+                          <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Field</label>
+                            <select value={addFieldKey} onChange={(e) => setAddFieldKey(e.target.value)} style={{ padding: "0.35rem 0.45rem" }}>
+                              <option value="">Select…</option>
+                              {addFields.map((f) => (
+                                <option key={f.key} value={f.key}>
+                                  {f.name} ({f.key})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+
+                        {addCardSourceMode === "multi_line_agg" && (
+                          <div style={{ display: "grid", gap: "0.6rem" }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Source</label>
+                              <select value={addMultiLineFieldKey} onChange={(e) => setAddMultiLineFieldKey(e.target.value)} style={{ padding: "0.35rem 0.45rem" }}>
+                                <option value="">Select…</option>
+                                {addMultiLineFields.map((f) => (
+                                  <option key={f.key} value={f.key}>
+                                    {f.name} ({f.key})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Numeric sub-field</label>
+                              <select value={addValueSubFieldKey} onChange={(e) => setAddValueSubFieldKey(e.target.value)} style={{ padding: "0.35rem 0.45rem" }}>
+                                <option value="">Select…</option>
+                                {selectedMultiLineSubFields.map((sf) => (
+                                  <option key={sf.key} value={sf.key}>
+                                    {sf.name} ({sf.key})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                        )}
+
+                        <div style={{ height: 1, background: "var(--border)" }} />
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Subtitle</label>
+                          <input value={addCardSubtitle} onChange={(e) => setAddCardSubtitle(e.target.value)} style={{ padding: "0.35rem 0.45rem" }} placeholder="Optional" />
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.6rem" }}>
+                          <div style={{ display: "grid", gap: "0.25rem" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Prefix</label>
+                            <input value={addCardPrefix} onChange={(e) => setAddCardPrefix(e.target.value)} style={{ padding: "0.35rem 0.45rem" }} placeholder="e.g. PKR " />
+                          </div>
+                          <div style={{ display: "grid", gap: "0.25rem" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Suffix</label>
+                            <input value={addCardSuffix} onChange={(e) => setAddCardSuffix(e.target.value)} style={{ padding: "0.35rem 0.45rem" }} placeholder="e.g. %" />
+                          </div>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.6rem" }}>
+                          <div style={{ display: "grid", gap: "0.25rem" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Decimals</label>
+                            <input type="number" value={addCardDecimals} onChange={(e) => setAddCardDecimals(Number(e.target.value))} style={{ padding: "0.35rem 0.45rem" }} />
+                          </div>
+                          <div style={{ display: "grid", gap: "0.25rem" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Alignment</label>
+                            <select value={addCardAlign} onChange={(e) => setAddCardAlign(e.target.value as any)} style={{ padding: "0.35rem 0.45rem" }}>
+                              <option value="left">Left</option>
+                              <option value="center">Center</option>
+                              <option value="right">Right</option>
+                            </select>
+                          </div>
+                        </div>
+                        <label style={{ display: "flex", gap: "0.45rem", alignItems: "center", fontSize: "0.9rem" }}>
+                          <input type="checkbox" checked={addCardThousandSep} onChange={(e) => setAddCardThousandSep(e.target.checked)} />
+                          Thousand separators
+                        </label>
+
+                        <div style={{ height: 1, background: "var(--border)" }} />
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Theme</label>
+                          <select value={addCardTheme} onChange={(e) => setAddCardTheme(e.target.value)} style={{ padding: "0.35rem 0.45rem" }}>
+                            <option value="success_light">Light Green / White</option>
+                            <option value="success_dark">Dark Green / White</option>
+                            <option value="info_light">Light Blue / White</option>
+                            <option value="info_dark">Dark Blue / White</option>
+                            <option value="alert_light">Light Red / White</option>
+                            <option value="warning_orange">Orange / White</option>
+                            <option value="neutral_grey_dark">Grey / White</option>
+                            <option value="neutral_grey_light">Grey / Black</option>
+                            <option value="minimal_white">White / Dark</option>
+                            <option value="grad_blue_purple">Gradient Blue → Purple</option>
+                            <option value="grad_green_teal">Gradient Green → Teal</option>
+                          </select>
+                        </div>
+                        <label style={{ display: "flex", gap: "0.45rem", alignItems: "center", fontSize: "0.9rem" }}>
+                          <input type="checkbox" checked={addCardAllowCustomColors} onChange={(e) => setAddCardAllowCustomColors(e.target.checked)} />
+                          Allow custom colors
+                        </label>
+                        {addCardAllowCustomColors && (
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.6rem" }}>
+                            <div style={{ display: "grid", gap: "0.25rem" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Background</label>
+                              <input value={addCardBgColor} onChange={(e) => setAddCardBgColor(e.target.value)} style={{ padding: "0.35rem 0.45rem" }} placeholder="#22c55e or linear-gradient(...)" />
+                            </div>
+                            <div style={{ display: "grid", gap: "0.25rem" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Text color</label>
+                              <input value={addCardFgColor} onChange={(e) => setAddCardFgColor(e.target.value)} style={{ padding: "0.35rem 0.45rem" }} placeholder="#ffffff" />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

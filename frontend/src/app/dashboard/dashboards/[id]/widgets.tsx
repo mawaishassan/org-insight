@@ -60,6 +60,36 @@ export type Widget =
     }
   | {
       id: string;
+      type: "kpi_card_single_value";
+      title?: string;
+      kpi_id: number;
+      year: number;
+      period_key?: string | null;
+      source_mode: "field" | "multi_line_agg" | "static";
+      field_key?: string;
+      source_field_key?: string;
+      agg?: "sum" | "avg" | "count" | "min" | "max";
+      value_sub_field_key?: string;
+      static_value?: number | string;
+      subtitle?: string;
+      prefix?: string;
+      suffix?: string;
+      decimals?: number;
+      thousand_sep?: boolean;
+      align?: "left" | "center" | "right";
+      title_size?: number;
+      value_size?: number;
+      subtitle_size?: number;
+      title_weight?: 400 | 500 | 600 | 700 | 800;
+      value_weight?: 400 | 500 | 600 | 700 | 800;
+      theme?: string;
+      allow_custom_colors?: boolean;
+      bg_color?: string;
+      fg_color?: string;
+      full_width?: boolean;
+    }
+  | {
+      id: string;
       type: "kpi_multi_line_table";
       title?: string;
       kpi_id: number;
@@ -331,6 +361,9 @@ export function WidgetRenderer({
   if (widget.type === "kpi_bar_chart") {
     return <KpiBarChartWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
   }
+  if (widget.type === "kpi_card_single_value") {
+    return <KpiCardSingleValueWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+  }
   if (widget.type === "kpi_multi_line_table") {
     return (
       <KpiMultiLineTableWidget
@@ -379,6 +412,47 @@ function toNumeric(v: unknown): number | null {
   if (!s) return null;
   const n = Number(s.replace(/,/g, ""));
   return Number.isFinite(n) ? n : null;
+}
+
+function formatNumberForCard(n: number, opts: { decimals?: number; thousandSep?: boolean }): string {
+  const d = typeof opts.decimals === "number" && opts.decimals >= 0 && opts.decimals <= 10 ? opts.decimals : 0;
+  const useSep = opts.thousandSep !== false;
+  if (useSep) {
+    return n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+  return n.toFixed(d);
+}
+
+const KPI_CARD_THEMES: Array<{ id: string; label: string; bg: string; fg: string }> = [
+  { id: "success_light", label: "Light Green / White", bg: "#22c55e", fg: "#ffffff" },
+  { id: "success_dark", label: "Dark Green / White", bg: "#166534", fg: "#ffffff" },
+  { id: "info_light", label: "Light Blue / White", bg: "#3b82f6", fg: "#ffffff" },
+  { id: "info_dark", label: "Dark Blue / White", bg: "#1e3a8a", fg: "#ffffff" },
+  { id: "alert_light", label: "Light Red / White", bg: "#ef4444", fg: "#ffffff" },
+  { id: "warning_orange", label: "Orange / White", bg: "#f97316", fg: "#ffffff" },
+  { id: "neutral_grey_dark", label: "Grey / White", bg: "#334155", fg: "#ffffff" },
+  { id: "neutral_grey_light", label: "Grey / Black", bg: "#e5e7eb", fg: "#111827" },
+  { id: "minimal_white", label: "White / Dark", bg: "#ffffff", fg: "#111827" },
+  { id: "grad_blue_purple", label: "Gradient Blue → Purple", bg: "linear-gradient(135deg, #3b82f6 0%, #7c3aed 100%)", fg: "#ffffff" },
+  { id: "grad_green_teal", label: "Gradient Green → Teal", bg: "linear-gradient(135deg, #22c55e 0%, #14b8a6 100%)", fg: "#ffffff" },
+];
+
+function aggregateSingleValue(items: any[], opts: { agg: "sum" | "avg" | "count" | "min" | "max"; valueKey?: string }): number | null {
+  if (!Array.isArray(items)) return null;
+  const { agg, valueKey } = opts;
+  if (agg === "count") return items.length;
+  const nums: number[] = [];
+  for (const row of items) {
+    if (!row || typeof row !== "object") continue;
+    const n = toNumeric((row as any)[valueKey || ""]);
+    if (n != null) nums.push(n);
+  }
+  if (nums.length === 0) return null;
+  if (agg === "sum") return nums.reduce((s, x) => s + x, 0);
+  if (agg === "avg") return nums.reduce((s, x) => s + x, 0) / nums.length;
+  if (agg === "min") return Math.min(...nums);
+  if (agg === "max") return Math.max(...nums);
+  return null;
 }
 
 async function fetchEntryForPeriod(
@@ -444,6 +518,128 @@ function KpiSingleValueWidget({
         <p className="form-error">{error}</p>
       ) : (
         <div style={{ fontSize: "1.6rem", fontWeight: 700 }}>{value || "—"}</div>
+      )}
+    </WidgetSettingsShell>
+  );
+}
+
+function KpiCardSingleValueWidget({
+  widget,
+  organizationId,
+  designActions,
+}: {
+  widget: Extract<Widget, { type: "kpi_card_single_value" }>;
+  organizationId: number;
+  designActions?: WidgetDesignMenuActions;
+}) {
+  const token = getAccessToken();
+  const [value, setValue] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!token) return;
+    setLoading(true);
+    setError(null);
+
+    if (widget.source_mode === "static") {
+      const raw = widget.static_value;
+      const n = toNumeric(raw);
+      if (n != null) setValue(formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
+      else setValue(raw == null ? "" : String(raw));
+      setLoading(false);
+      return;
+    }
+
+    Promise.all([
+      getKpiFieldMap(token, organizationId, widget.kpi_id),
+      fetchEntryForPeriod(token, organizationId, widget.kpi_id, widget.year, widget.period_key),
+    ])
+      .then(([map, entry]) => {
+        if (widget.source_mode === "field") {
+          const key = widget.field_key || "";
+          const fid = key ? map.idByKey[key] : undefined;
+          const raw = fid ? rawFieldFromEntry(entry, fid) : null;
+          const n = toNumeric(raw);
+          if (n != null) setValue(formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
+          else setValue(raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw));
+          return;
+        }
+        if (widget.source_mode === "multi_line_agg") {
+          const sourceKey = widget.source_field_key || "";
+          const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
+          const raw = sourceId ? rawFieldFromEntry(entry, sourceId) : null;
+          const items = Array.isArray(raw) ? raw : [];
+          const agg = widget.agg || "count";
+          const n = aggregateSingleValue(items, { agg, valueKey: widget.value_sub_field_key });
+          setValue(n == null ? "" : formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
+          return;
+        }
+        setValue("");
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load KPI value"))
+      .finally(() => setLoading(false));
+  }, [
+    token,
+    organizationId,
+    widget.kpi_id,
+    widget.year,
+    widget.period_key,
+    widget.source_mode,
+    widget.field_key,
+    widget.source_field_key,
+    widget.agg,
+    widget.value_sub_field_key,
+    widget.static_value,
+    widget.decimals,
+    widget.thousand_sep,
+  ]);
+
+  const theme = useMemo(() => KPI_CARD_THEMES.find((t) => t.id === (widget.theme || "")) ?? KPI_CARD_THEMES[0], [widget.theme]);
+  const bg = widget.allow_custom_colors && widget.bg_color ? widget.bg_color : theme.bg;
+  const fg = widget.allow_custom_colors && widget.fg_color ? widget.fg_color : theme.fg;
+
+  const prefix = widget.prefix ?? "";
+  const suffix = widget.suffix ?? "";
+  const subtitle = widget.subtitle?.trim() || "";
+
+  const align = widget.align || "left";
+  const titleSize = widget.title_size ?? 14;
+  const valueSize = widget.value_size ?? 34;
+  const subtitleSize = widget.subtitle_size ?? 12;
+  const titleWeight = widget.title_weight ?? 700;
+  const valueWeight = widget.value_weight ?? 800;
+
+  const display = value ? `${prefix}${value}${suffix}` : "";
+  const bgStyle = bg.startsWith("linear-gradient") ? ({ backgroundImage: bg } as const) : ({ background: bg } as const);
+
+  return (
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
+      {loading ? (
+        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+      ) : error ? (
+        <p className="form-error">{error}</p>
+      ) : (
+        <div
+          style={{
+            borderRadius: 14,
+            padding: "1rem 1.1rem",
+            color: fg,
+            minHeight: 120,
+            display: "grid",
+            alignContent: "center",
+            gap: "0.35rem",
+            textAlign: align as any,
+            border: bg === "#ffffff" ? "1px solid var(--border)" : "1px solid rgba(0,0,0,0.04)",
+            ...bgStyle,
+          }}
+        >
+          {subtitle ? (
+            <div style={{ fontSize: subtitleSize, opacity: 0.92, fontWeight: titleWeight, lineHeight: 1.2 }}>{subtitle}</div>
+          ) : null}
+          <div style={{ fontSize: valueSize, fontWeight: valueWeight, lineHeight: 1.1 }}>{display || "—"}</div>
+          <div style={{ fontSize: titleSize, opacity: 0.92, fontWeight: titleWeight, lineHeight: 1.2 }}>{widget.title || ""}</div>
+        </div>
       )}
     </WidgetSettingsShell>
   );
