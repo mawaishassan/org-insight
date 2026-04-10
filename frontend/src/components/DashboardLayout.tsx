@@ -74,11 +74,22 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const kpiFieldsMatch = pathname.match(/^\/dashboard\/kpis\/(\d+)\/fields\/?$/);
   const domainDetailMatch = pathname.match(/^\/dashboard\/domains\/(\d+)\/?$/);
   const reportDetailMatch = pathname.match(/^\/dashboard\/reports\/(\d+)(?:\/|$)/);
+  const dashboardDetailMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)(?:\/|$)/);
   const dataExportMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)\/data-export\/?$/);
   const usersDetailMatch = pathname.match(/^\/dashboard\/users\/(\d+)\/?$/);
   const entryDetailMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/?$/);
   const entryMultiMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/?$/);
   const entryMultiRowMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/row\/([^/]+)\/?$/);
+
+  const dashboardDesignMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/design\/?$/);
+  const isDashboardDesign = !!dashboardDesignMatch;
+  const dashboardDesignId = dashboardDesignMatch ? Number(dashboardDesignMatch[1]) : null;
+  const dashboardViewMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/?$/);
+  const isDashboardView = !!dashboardViewMatch;
+  const dashboardViewId = dashboardViewMatch ? Number(dashboardViewMatch[1]) : null;
+  const dashboardWidgetFullMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/widgets\/([^/]+)\/?$/);
+  const isDashboardWidgetFull = !!dashboardWidgetFullMatch;
+  const dashboardWidgetFullDashboardId = dashboardWidgetFullMatch ? Number(dashboardWidgetFullMatch[1]) : null;
 
   useEffect(() => {
     const token = getAccessToken();
@@ -209,6 +220,36 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         .catch(() => setBreadcrumbTail(null));
       return;
     }
+    if (dashboardDetailMatch) {
+      const dashboardId = Number(dashboardDetailMatch[1]);
+      const designMatch = pathname.match(/^\/dashboard\/dashboards\/\d+\/design\/?$/);
+      const assignMatch = pathname.match(/^\/dashboard\/dashboards\/\d+\/assign\/?$/);
+      api<{ id: number; name: string; organization_id: number }>(`/dashboards/${dashboardId}`, { token })
+        .then((d) => {
+          const oid = d.organization_id;
+          const segments: { label: string; href: string }[] = [
+            { label: "Dashboards", href: `/dashboard/dashboards?${qs({ organization_id: oid })}` },
+            { label: d.name, href: `/dashboard/dashboards/${dashboardId}?organization_id=${oid}` },
+          ];
+          if (designMatch) {
+            segments.push({ label: "Design", href: `/dashboard/dashboards/${dashboardId}/design?organization_id=${oid}` });
+          } else if (assignMatch) {
+            segments.push({ label: "Assign", href: `/dashboard/dashboards/${dashboardId}/assign?organization_id=${oid}` });
+          }
+
+          // Organization detail endpoint is Super Admin only; for other roles, show breadcrumbs without org name.
+          if (user?.role !== "SUPER_ADMIN") {
+            return { orgId: oid, orgName: null, segments };
+          }
+
+          return api<{ id: number; name: string }>(`/organizations/${oid}`, { token })
+            .then((org) => ({ orgId: oid, orgName: org.name, segments }))
+            .catch(() => ({ orgId: oid, orgName: null, segments }));
+        })
+        .then((tail) => setBreadcrumbTail(tail))
+        .catch(() => setBreadcrumbTail(null));
+      return;
+    }
     if (usersDetailMatch) {
       const userId = usersDetailMatch[1];
       api<{ id: number; username: string; full_name: string | null }>(`/users/${userId}`, { token })
@@ -328,7 +369,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       return;
     }
     setBreadcrumbTail(null);
-  }, [pathname, searchParams.get("organization_id")]);
+  }, [pathname, searchParams.get("organization_id"), user?.role]);
 
   if (loading) {
     return (
@@ -354,8 +395,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     router.push(`/dashboard/entries?${next.toString()}`);
   };
 
+  const dashboardsHref =
+    selectedOrgId != null
+      ? `/dashboard/dashboards?organization_id=${selectedOrgId}`
+      : user.organization_id != null
+        ? `/dashboard/dashboards?organization_id=${user.organization_id}`
+        : "/dashboard/dashboards";
+
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
-    { href: "/dashboard/chat", label: "Chat with data", show: canUseChat(role) && (!isSuperAdmin || !!selectedOrgId) },
+    { href: dashboardsHref, label: "Dashboards", show: true },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },
   ].filter((x) => x.show);
@@ -365,6 +413,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     kpis: "KPIs",
     domains: "Domains",
     reports: "Reports",
+    dashboards: "Dashboards",
     settings: "Settings",
   };
   const orgTabFromUrl = selectedOrgId ? searchParams.get("tab") : null;
@@ -406,6 +455,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     breadcrumbs.push({ label: "Home", href: "/dashboard/entries" });
     if (pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users") {
       breadcrumbs.push({ label: "Users", href: "/dashboard/users" });
+    }
+    if (pathname === "/dashboard/dashboards") {
+      breadcrumbs.push({ label: "Dashboards", href: dashboardsHref });
+    } else if (pathname.startsWith("/dashboard/dashboards/")) {
+      // Tail should normally handle this; keep a safe fallback.
+      breadcrumbs.push({ label: "Dashboards", href: dashboardsHref });
     }
   }
 
@@ -537,6 +592,39 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         )}
 
         <div style={{ marginLeft: "auto", position: "relative" }} ref={menuRef}>
+          {isDashboardWidgetFull && dashboardWidgetFullDashboardId ? (
+            <Link
+              href={`/dashboard/dashboards/${dashboardWidgetFullDashboardId}?${qs({ organization_id: selectedOrgId ?? undefined })}`}
+              className="btn"
+              style={{ marginRight: "0.5rem" }}
+              onClick={() => setMenuOpen(false)}
+            >
+              Back to dashboard
+            </Link>
+          ) : null}
+          {isSuperAdmin && isDashboardView && dashboardViewId ? (
+            <Link
+              href={`/dashboard/dashboards/${dashboardViewId}/design?${qs({ organization_id: selectedOrgId ?? undefined })}`}
+              className="btn btn-primary"
+              style={{ marginRight: "0.5rem" }}
+              onClick={() => setMenuOpen(false)}
+            >
+              Design mode
+            </Link>
+          ) : null}
+          {isSuperAdmin && isDashboardDesign && dashboardDesignId ? (
+            <Link
+              href={`${pathname}?${qs({
+                organization_id: selectedOrgId ?? undefined,
+                add_widget: 1,
+              })}`}
+              className="btn btn-primary"
+              style={{ marginRight: "0.5rem" }}
+              onClick={() => setMenuOpen(false)}
+            >
+              + Add widget
+            </Link>
+          ) : null}
           <button
             type="button"
             onClick={() => setMenuOpen((o) => !o)}
@@ -602,14 +690,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   >
                     Reports
                   </Link>
-                  {/* Legacy per-organization access page removed in favor of /dashboard/access */}
                   <Link
-                    href={`/dashboard/chat?organization_id=${selectedOrgId}`}
+                    href={dashboardsHref}
                     style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
                     onClick={() => setMenuOpen(false)}
                   >
-                    Chat with data
+                    Dashboards
                   </Link>
+                  {/* Legacy per-organization access page removed in favor of /dashboard/access */}
                   <Link
                     href={`/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage`}
                     style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
