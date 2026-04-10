@@ -24,6 +24,8 @@ type WidgetType =
   | "kpi_multi_line_table";
 type EditTab = "basics" | "options";
 
+const SUPER_ADMIN_WIDGET_TYPES: WidgetType[] = ["kpi_card_single_value", "kpi_bar_chart", "kpi_multi_line_table"];
+
 type Widget =
   | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean; col_span?: number }
   | {
@@ -341,7 +343,7 @@ export default function DashboardDesignPage() {
     setEditingWidgetId(null);
     setEditTab("basics");
     setFullWidth(false);
-    setAddType("text");
+    setAddType("kpi_card_single_value");
     setAddTitle("");
     setAddText("");
     setAddFieldKey("");
@@ -1140,11 +1142,10 @@ export default function DashboardDesignPage() {
                         onChange={(e) => setAddType(e.target.value as WidgetType)}
                         style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
                       >
-                        <option value="text">Text</option>
-                        <option value="kpi_single_value">KPI single value</option>
-                      <option value="kpi_card_single_value">KPI card (single value)</option>
-                        <option value="kpi_table">KPI table</option>
-                        <option value="kpi_line_chart">KPI line chart (by year)</option>
+                        {isEditing && !SUPER_ADMIN_WIDGET_TYPES.includes(addType) ? (
+                          <option value={addType}>Existing widget type ({addType})</option>
+                        ) : null}
+                        <option value="kpi_card_single_value">KPI card (single value)</option>
                         <option value="kpi_bar_chart">KPI chart (bar/pie)</option>
                         <option value="kpi_multi_line_table">KPI multi-line table</option>
                       </select>
