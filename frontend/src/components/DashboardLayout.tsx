@@ -227,18 +227,24 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       api<{ id: number; name: string; organization_id: number }>(`/dashboards/${dashboardId}`, { token })
         .then((d) => {
           const oid = d.organization_id;
-          return api<{ id: number; name: string }>(`/organizations/${oid}`, { token }).then((org) => {
-            const segments: { label: string; href: string }[] = [
-              { label: "Dashboards", href: `/dashboard/organizations/${oid}?tab=dashboards` },
-              { label: d.name, href: `/dashboard/dashboards/${dashboardId}?organization_id=${oid}` },
-            ];
-            if (designMatch) {
-              segments.push({ label: "Design", href: `/dashboard/dashboards/${dashboardId}/design?organization_id=${oid}` });
-            } else if (assignMatch) {
-              segments.push({ label: "Assign", href: `/dashboard/dashboards/${dashboardId}/assign?organization_id=${oid}` });
-            }
-            return { orgId: oid, orgName: org.name, segments };
-          });
+          const segments: { label: string; href: string }[] = [
+            { label: "Dashboards", href: `/dashboard/dashboards?${qs({ organization_id: oid })}` },
+            { label: d.name, href: `/dashboard/dashboards/${dashboardId}?organization_id=${oid}` },
+          ];
+          if (designMatch) {
+            segments.push({ label: "Design", href: `/dashboard/dashboards/${dashboardId}/design?organization_id=${oid}` });
+          } else if (assignMatch) {
+            segments.push({ label: "Assign", href: `/dashboard/dashboards/${dashboardId}/assign?organization_id=${oid}` });
+          }
+
+          // Organization detail endpoint is Super Admin only; for other roles, show breadcrumbs without org name.
+          if (user?.role !== "SUPER_ADMIN") {
+            return { orgId: oid, orgName: null, segments };
+          }
+
+          return api<{ id: number; name: string }>(`/organizations/${oid}`, { token })
+            .then((org) => ({ orgId: oid, orgName: org.name, segments }))
+            .catch(() => ({ orgId: oid, orgName: null, segments }));
         })
         .then((tail) => setBreadcrumbTail(tail))
         .catch(() => setBreadcrumbTail(null));
@@ -363,7 +369,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       return;
     }
     setBreadcrumbTail(null);
-  }, [pathname, searchParams.get("organization_id")]);
+  }, [pathname, searchParams.get("organization_id"), user?.role]);
 
   if (loading) {
     return (
@@ -449,6 +455,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     breadcrumbs.push({ label: "Home", href: "/dashboard/entries" });
     if (pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users") {
       breadcrumbs.push({ label: "Users", href: "/dashboard/users" });
+    }
+    if (pathname === "/dashboard/dashboards") {
+      breadcrumbs.push({ label: "Dashboards", href: dashboardsHref });
+    } else if (pathname.startsWith("/dashboard/dashboards/")) {
+      // Tail should normally handle this; keep a safe fallback.
+      breadcrumbs.push({ label: "Dashboards", href: dashboardsHref });
     }
   }
 
