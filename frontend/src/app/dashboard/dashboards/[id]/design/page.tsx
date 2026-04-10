@@ -130,6 +130,13 @@ type Widget =
         on_right_sub_field_key: string;
         sub_field_keys: string[];
       };
+      joins?: Array<{
+        kpi_id: number;
+        source_field_key: string;
+        on_left_sub_field_key: string;
+        on_right_sub_field_key: string;
+        sub_field_keys: string[];
+      }>;
       full_width?: boolean;
       col_span?: number;
     };
@@ -309,6 +316,17 @@ export default function DashboardDesignPage() {
   const [addMultiLineTableJoinOnLeftKey, setAddMultiLineTableJoinOnLeftKey] = useState<string>("");
   const [addMultiLineTableJoinOnRightKey, setAddMultiLineTableJoinOnRightKey] = useState<string>("");
   const [addMultiLineTableJoinSubKeys, setAddMultiLineTableJoinSubKeys] = useState<string[]>([]);
+  const [mlJoins, setMlJoins] = useState<
+    Array<{
+      kpi_id: number | null;
+      source_field_key: string;
+      on_left_sub_field_key: string;
+      on_right_sub_field_key: string;
+      sub_field_keys: string[];
+      collapsed: boolean;
+      search: string;
+    }>
+  >([]);
   const [addMultiLineTableColumnOrder, setAddMultiLineTableColumnOrder] = useState<string[]>([]);
   const [draggingTableColKey, setDraggingTableColKey] = useState<string | null>(null);
   const [mlTableSearch, setMlTableSearch] = useState("");
@@ -359,6 +377,7 @@ export default function DashboardDesignPage() {
     setAddMultiLineTableJoinOnLeftKey("");
     setAddMultiLineTableJoinOnRightKey("");
     setAddMultiLineTableJoinSubKeys([]);
+    setMlJoins([]);
     setAddMultiLineTableColumnOrder([]);
     setMlTableSearch("");
     setMlJoinSearch("");
@@ -419,7 +438,7 @@ export default function DashboardDesignPage() {
       );
       const defaultOrder = [
         ...(Array.isArray((w as any).sub_field_keys) ? ((w as any).sub_field_keys as string[]) : []),
-        ...(((w as any).join?.sub_field_keys as string[] | undefined) ?? []).map((k) => `join:${k}`),
+        ...(((w as any).join?.sub_field_keys as string[] | undefined) ?? []).map((k) => `join:0:${k}`),
       ];
       setAddMultiLineTableColumnOrder(
         Array.isArray((w as any).column_order) && (w as any).column_order.length ? [...(w as any).column_order] : defaultOrder
@@ -428,22 +447,28 @@ export default function DashboardDesignPage() {
       setMlJoinSearch("");
       setMlPrimaryCollapsed(false);
       setMlJoinCollapsed(false);
-      const j = (w as any).join;
-      if (j && typeof j === "object") {
-        setAddMultiLineTableJoinEnabled(true);
-        setAddMultiLineTableJoinKpiId(typeof j.kpi_id === "number" ? j.kpi_id : null);
-        setAddMultiLineTableJoinFieldKey(j.source_field_key || "");
-        setAddMultiLineTableJoinOnLeftKey(j.on_left_sub_field_key || "");
-        setAddMultiLineTableJoinOnRightKey(j.on_right_sub_field_key || "");
-        setAddMultiLineTableJoinSubKeys(Array.isArray(j.sub_field_keys) ? [...j.sub_field_keys] : []);
-      } else {
-        setAddMultiLineTableJoinEnabled(false);
-        setAddMultiLineTableJoinKpiId(null);
-        setAddMultiLineTableJoinFieldKey("");
-        setAddMultiLineTableJoinOnLeftKey("");
-        setAddMultiLineTableJoinOnRightKey("");
-        setAddMultiLineTableJoinSubKeys([]);
-      }
+      const joinsFromWidget: any[] = Array.isArray((w as any).joins) ? (w as any).joins : [];
+      const legacy = (w as any).join && typeof (w as any).join === "object" ? [(w as any).join] : [];
+      const merged = [...joinsFromWidget, ...legacy].filter((j) => j && typeof j === "object");
+      setMlJoins(
+        merged.map((j) => ({
+          kpi_id: typeof j.kpi_id === "number" ? j.kpi_id : null,
+          source_field_key: j.source_field_key || "",
+          on_left_sub_field_key: j.on_left_sub_field_key || "",
+          on_right_sub_field_key: j.on_right_sub_field_key || "",
+          sub_field_keys: Array.isArray(j.sub_field_keys) ? [...j.sub_field_keys] : [],
+          collapsed: false,
+          search: "",
+        }))
+      );
+      // Keep legacy single-join state populated (no longer used for UI).
+      const j0 = merged[0];
+      setAddMultiLineTableJoinEnabled(!!j0);
+      setAddMultiLineTableJoinKpiId(j0 && typeof j0.kpi_id === "number" ? j0.kpi_id : null);
+      setAddMultiLineTableJoinFieldKey(j0?.source_field_key || "");
+      setAddMultiLineTableJoinOnLeftKey(j0?.on_left_sub_field_key || "");
+      setAddMultiLineTableJoinOnRightKey(j0?.on_right_sub_field_key || "");
+      setAddMultiLineTableJoinSubKeys(Array.isArray(j0?.sub_field_keys) ? [...j0.sub_field_keys] : []);
     } else {
       setAddMultiLineTableFieldKey("");
       setAddMultiLineTableSubKeys([]);
@@ -454,6 +479,7 @@ export default function DashboardDesignPage() {
       setAddMultiLineTableJoinOnLeftKey("");
       setAddMultiLineTableJoinOnRightKey("");
       setAddMultiLineTableJoinSubKeys([]);
+      setMlJoins([]);
       setAddMultiLineTableColumnOrder([]);
       setMlTableSearch("");
       setMlJoinSearch("");
@@ -752,22 +778,21 @@ export default function DashboardDesignPage() {
       }
       const rowsLimit = Math.max(1, Math.min(200, Math.round(addMultiLineTableTopRows || 5)));
 
-      const join =
-        addMultiLineTableJoinEnabled && addMultiLineTableJoinKpiId && addMultiLineTableJoinFieldKey.trim()
-          ? {
-              kpi_id: addMultiLineTableJoinKpiId,
-              source_field_key: addMultiLineTableJoinFieldKey.trim(),
-              on_left_sub_field_key: addMultiLineTableJoinOnLeftKey.trim(),
-              on_right_sub_field_key: addMultiLineTableJoinOnRightKey.trim(),
-              sub_field_keys: addMultiLineTableJoinSubKeys.filter((k) => k.trim()),
-            }
-          : undefined;
-      if (join) {
-        if (!join.on_left_sub_field_key || !join.on_right_sub_field_key) {
+      const joins = mlJoins
+        .map((j) => ({
+          kpi_id: j.kpi_id,
+          source_field_key: j.source_field_key.trim(),
+          on_left_sub_field_key: j.on_left_sub_field_key.trim(),
+          on_right_sub_field_key: j.on_right_sub_field_key.trim(),
+          sub_field_keys: j.sub_field_keys.filter((k) => k.trim()),
+        }))
+        .filter((j) => j.kpi_id && j.source_field_key);
+      for (const j of joins) {
+        if (!j.on_left_sub_field_key || !j.on_right_sub_field_key) {
           toast.error("Select join keys (left and right)");
           return;
         }
-        if (join.sub_field_keys.length === 0) {
+        if (j.sub_field_keys.length === 0) {
           toast.error("Select at least one joined sub-field column");
           return;
         }
@@ -784,7 +809,7 @@ export default function DashboardDesignPage() {
         sub_field_keys: subKeys,
         rows_limit: rowsLimit as any,
         column_order: addMultiLineTableColumnOrder as any,
-        join,
+        joins: joins as any,
       };
       applyWidgetUpsert(w);
       return;
@@ -1305,26 +1330,6 @@ export default function DashboardDesignPage() {
 
                     {addType === "kpi_multi_line_table" && (
                       <div style={{ display: "grid", gap: "0.75rem" }}>
-                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
-                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Source</label>
-                          <select
-                            value={addMultiLineTableFieldKey}
-                            onChange={(e) => {
-                              setAddMultiLineTableFieldKey(e.target.value);
-                              setAddMultiLineTableSubKeys([]);
-                              setAddMultiLineTableJoinSubKeys([]);
-                              setAddMultiLineTableColumnOrder([]);
-                            }}
-                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                          >
-                            <option value="">Select…</option>
-                            {addMultiLineFields.map((f) => (
-                              <option key={f.key} value={f.key}>
-                                {f.name} ({f.key})
-                              </option>
-                            ))}
-                          </select>
-                        </div>
                         <div
                           style={{
                             display: "grid",
@@ -1343,6 +1348,26 @@ export default function DashboardDesignPage() {
                               </div>
                               {!mlPrimaryCollapsed ? (
                                 <div style={{ display: "grid", gap: "0.6rem", marginTop: "0.6rem" }}>
+                                  <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                                    <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Source</label>
+                                    <select
+                                      value={addMultiLineTableFieldKey}
+                                      onChange={(e) => {
+                                        setAddMultiLineTableFieldKey(e.target.value);
+                                        setAddMultiLineTableSubKeys([]);
+                                        setMlJoins([]);
+                                        setAddMultiLineTableColumnOrder([]);
+                                      }}
+                                      style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                    >
+                                      <option value="">Select…</option>
+                                      {addMultiLineFields.map((f) => (
+                                        <option key={f.key} value={f.key}>
+                                          {f.name} ({f.key})
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
                                   <input
                                     value={mlTableSearch}
                                     onChange={(e) => setMlTableSearch(e.target.value)}
@@ -1384,158 +1409,207 @@ export default function DashboardDesignPage() {
                               ) : null}
                             </div>
 
-                            <label style={{ display: "flex", gap: "0.45rem", alignItems: "center", fontSize: "0.9rem" }}>
-                              <input
-                                type="checkbox"
-                                checked={addMultiLineTableJoinEnabled}
-                                onChange={(e) => {
-                                  const on = e.target.checked;
-                                  setAddMultiLineTableJoinEnabled(on);
-                                  if (!on) {
-                                    setAddMultiLineTableJoinKpiId(null);
-                                    setAddMultiLineTableJoinFieldKey("");
-                                    setAddMultiLineTableJoinOnLeftKey("");
-                                    setAddMultiLineTableJoinOnRightKey("");
-                                    setAddMultiLineTableJoinSubKeys([]);
-                                    setAddMultiLineTableColumnOrder((prev) => prev.filter((k) => !k.startsWith("join:")));
-                                  }
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
+                              <div style={{ fontWeight: 800 }}>Joins</div>
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => {
+                                  setMlJoins((prev) => [
+                                    ...prev,
+                                    {
+                                      kpi_id: null,
+                                      source_field_key: "",
+                                      on_left_sub_field_key: "",
+                                      on_right_sub_field_key: "",
+                                      sub_field_keys: [],
+                                      collapsed: false,
+                                      search: "",
+                                    },
+                                  ]);
                                 }}
-                              />
-                              Join another KPI’s multi-line items
-                            </label>
-
-                            {addMultiLineTableJoinEnabled && (
+                                style={{ fontSize: "0.85rem" }}
+                              >
+                                + Join another KPI
+                              </button>
+                            </div>
+                            {mlJoins.length === 0 ? (
+                              <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No joins added.</div>
+                            ) : (
                               <div style={{ display: "grid", gap: "0.75rem" }}>
-                                <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
-                                  <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join KPI</label>
-                                  <select
-                                    value={addMultiLineTableJoinKpiId ?? ""}
-                                    onChange={(e) => {
-                                      const next = Number(e.target.value);
-                                      setAddMultiLineTableJoinKpiId(Number.isFinite(next) ? next : null);
-                                      setAddMultiLineTableJoinFieldKey("");
-                                      setAddMultiLineTableJoinOnRightKey("");
-                                      setAddMultiLineTableJoinSubKeys([]);
-                                      setAddMultiLineTableColumnOrder((prev) => prev.filter((k) => !k.startsWith("join:")));
-                                    }}
-                                    style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                                  >
-                                    <option value="">Select…</option>
-                                    {kpis.map((k) => (
-                                      <option key={k.id} value={k.id}>
-                                        {k.name} (#{k.id})
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-
-                                <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
-                                  <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join source</label>
-                                  <select
-                                    value={addMultiLineTableJoinFieldKey}
-                                    onChange={(e) => {
-                                      setAddMultiLineTableJoinFieldKey(e.target.value);
-                                      setAddMultiLineTableJoinOnRightKey("");
-                                      setAddMultiLineTableJoinSubKeys([]);
-                                      setAddMultiLineTableColumnOrder((prev) => prev.filter((k) => !k.startsWith("join:")));
-                                    }}
-                                    style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                                    disabled={!addMultiLineTableJoinKpiId}
-                                  >
-                                    <option value="">Select…</option>
-                                    {joinMultiLineFields.map((f) => (
-                                      <option key={f.key} value={f.key}>
-                                        {f.name} ({f.key})
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-
-                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.6rem" }}>
-                                  <div style={{ display: "grid", gap: "0.25rem" }}>
-                                    <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join key (this table)</label>
-                                    <select
-                                      value={addMultiLineTableJoinOnLeftKey}
-                                      onChange={(e) => setAddMultiLineTableJoinOnLeftKey(e.target.value)}
-                                      style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                                      disabled={!addMultiLineTableFieldKey}
-                                    >
-                                      <option value="">Select…</option>
-                                      {tableMultiLineSubFields.map((sf) => (
-                                        <option key={sf.key} value={sf.key}>
-                                          {sf.name} ({sf.key})
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                  <div style={{ display: "grid", gap: "0.25rem" }}>
-                                    <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join key (joined KPI)</label>
-                                    <select
-                                      value={addMultiLineTableJoinOnRightKey}
-                                      onChange={(e) => setAddMultiLineTableJoinOnRightKey(e.target.value)}
-                                      style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                                      disabled={!addMultiLineTableJoinFieldKey}
-                                    >
-                                      <option value="">Select…</option>
-                                      {joinMultiLineSubFields.map((sf) => (
-                                        <option key={sf.key} value={sf.key}>
-                                          {sf.name} ({sf.key})
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                </div>
-
-                                {joinMultiLineSubFields.length > 0 ? (
-                                  <div className="card" style={{ padding: "0.85rem" }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
-                                      <div style={{ fontWeight: 800 }}>Joined KPI columns</div>
-                                      <button type="button" className="btn" onClick={() => setMlJoinCollapsed((v) => !v)} style={{ fontSize: "0.85rem" }}>
-                                        {mlJoinCollapsed ? "Expand" : "Collapse"}
-                                      </button>
-                                    </div>
-                                    {!mlJoinCollapsed ? (
-                                      <div style={{ display: "grid", gap: "0.6rem", marginTop: "0.6rem" }}>
-                                        <input
-                                          value={mlJoinSearch}
-                                          onChange={(e) => setMlJoinSearch(e.target.value)}
-                                          placeholder="Search joined columns…"
-                                          style={{ padding: "0.45rem 0.55rem", borderRadius: 8, border: "1px solid var(--border)", fontSize: "0.9rem" }}
-                                        />
-                                        <div style={{ display: "grid", gap: "0.35rem", maxHeight: 240, overflow: "auto", paddingRight: 4 }}>
-                                          {joinMultiLineSubFields
-                                            .filter((sf) => {
-                                              const q = mlJoinSearch.trim().toLowerCase();
-                                              if (!q) return true;
-                                              return `${sf.name} ${sf.key}`.toLowerCase().includes(q);
-                                            })
-                                            .map((sf) => (
-                                              <label key={sf.key} style={{ display: "flex", gap: "0.45rem", alignItems: "center", fontSize: "0.9rem" }}>
-                                                <input
-                                                  type="checkbox"
-                                                  checked={addMultiLineTableJoinSubKeys.includes(sf.key)}
-                                                  onChange={(e) => {
-                                                    const checked = e.target.checked;
-                                                    setAddMultiLineTableJoinSubKeys((prev) =>
-                                                      checked ? [...prev, sf.key] : prev.filter((k) => k !== sf.key)
-                                                    );
-                                                    setAddMultiLineTableColumnOrder((prev) => {
-                                                      const key = `join:${sf.key}`;
-                                                      if (checked) return prev.includes(key) ? prev : [...prev, key];
-                                                      return prev.filter((k) => k !== key);
-                                                    });
-                                                  }}
-                                                />
-                                                <span>
-                                                  {sf.name} <span style={{ color: "var(--muted)" }}>({sf.key})</span>
-                                                </span>
-                                              </label>
-                                            ))}
+                                {mlJoins.map((j, idx) => {
+                                  const joinKpiId = j.kpi_id;
+                                  const joinKpiName = joinKpiId ? kpis.find((k) => k.id === joinKpiId)?.name : null;
+                                  const title = joinKpiName ? `Join: ${joinKpiName}` : `Join #${idx + 1}`;
+                                  const joinKpiFields = joinKpiId ? (fieldsByKpiId[joinKpiId] ?? []) : [];
+                                  const joinMlFields = joinKpiFields.filter((f) => f.field_type === "multi_line_items");
+                                  const joinSelectedField = joinMlFields.find((f) => f.key === j.source_field_key) ?? null;
+                                  const joinSubFields = joinSelectedField?.sub_fields ?? [];
+                                  const q = (j.search || "").trim().toLowerCase();
+                                  const filteredJoinSubFields = q ? joinSubFields.filter((sf) => `${sf.name} ${sf.key}`.toLowerCase().includes(q)) : joinSubFields;
+                                  return (
+                                    <div key={idx} className="card" style={{ padding: "0.85rem" }}>
+                                      <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", alignItems: "center" }}>
+                                        <div style={{ fontWeight: 800, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={title}>
+                                          {title}
+                                        </div>
+                                        <div style={{ display: "flex", gap: "0.35rem" }}>
+                                          <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() => setMlJoins((prev) => prev.map((x, i) => (i === idx ? { ...x, collapsed: !x.collapsed } : x)))}
+                                            style={{ fontSize: "0.85rem" }}
+                                          >
+                                            {j.collapsed ? "Expand" : "Collapse"}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() => {
+                                              setMlJoins((prev) => prev.filter((_, i) => i !== idx));
+                                              setAddMultiLineTableColumnOrder((prev) => prev.filter((k) => !k.startsWith(`join:${idx}:`)));
+                                            }}
+                                            style={{ fontSize: "0.85rem" }}
+                                          >
+                                            Remove
+                                          </button>
                                         </div>
                                       </div>
-                                    ) : null}
-                                  </div>
-                                ) : null}
+
+                                        {!j.collapsed ? (
+                                          <div style={{ display: "grid", gap: "0.6rem", marginTop: "0.6rem" }}>
+                                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join KPI</label>
+                                              <select
+                                                value={j.kpi_id ?? ""}
+                                                onChange={(e) => {
+                                                  const next = Number(e.target.value);
+                                                  setMlJoins((prev) =>
+                                                    prev.map((x, i) =>
+                                                      i === idx
+                                                        ? {
+                                                            ...x,
+                                                            kpi_id: Number.isFinite(next) ? next : null,
+                                                            source_field_key: "",
+                                                            on_right_sub_field_key: "",
+                                                            sub_field_keys: [],
+                                                          }
+                                                        : x
+                                                    )
+                                                  );
+                                                  setAddMultiLineTableColumnOrder((prev) => prev.filter((k) => !k.startsWith(`join:${idx}:`)));
+                                                }}
+                                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                              >
+                                                <option value="">Select…</option>
+                                                {kpis.map((k) => (
+                                                  <option key={k.id} value={k.id}>
+                                                    {k.name} (#{k.id})
+                                                  </option>
+                                                ))}
+                                              </select>
+                                            </div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join source</label>
+                                              <select
+                                                value={j.source_field_key}
+                                                onChange={(e) => {
+                                                  const v = e.target.value;
+                                                  setMlJoins((prev) => prev.map((x, i) => (i === idx ? { ...x, source_field_key: v, on_right_sub_field_key: "", sub_field_keys: [] } : x)));
+                                                  setAddMultiLineTableColumnOrder((prev) => prev.filter((k) => !k.startsWith(`join:${idx}:`)));
+                                                }}
+                                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                                disabled={!j.kpi_id}
+                                              >
+                                                <option value="">Select…</option>
+                                                {joinMlFields.map((f) => (
+                                                  <option key={f.key} value={f.key}>
+                                                    {f.name} ({f.key})
+                                                  </option>
+                                                ))}
+                                              </select>
+                                            </div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.6rem" }}>
+                                              <div style={{ display: "grid", gap: "0.25rem" }}>
+                                                <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join key (this table)</label>
+                                                <select
+                                                  value={j.on_left_sub_field_key}
+                                                  onChange={(e) =>
+                                                    setMlJoins((prev) => prev.map((x, i) => (i === idx ? { ...x, on_left_sub_field_key: e.target.value } : x)))
+                                                  }
+                                                  style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                                  disabled={!addMultiLineTableFieldKey}
+                                                >
+                                                  <option value="">Select…</option>
+                                                  {tableMultiLineSubFields.map((sf) => (
+                                                    <option key={sf.key} value={sf.key}>
+                                                      {sf.name} ({sf.key})
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                              </div>
+                                              <div style={{ display: "grid", gap: "0.25rem" }}>
+                                                <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join key (joined KPI)</label>
+                                                <select
+                                                  value={j.on_right_sub_field_key}
+                                                  onChange={(e) =>
+                                                    setMlJoins((prev) => prev.map((x, i) => (i === idx ? { ...x, on_right_sub_field_key: e.target.value } : x)))
+                                                  }
+                                                  style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                                  disabled={!j.source_field_key}
+                                                >
+                                                  <option value="">Select…</option>
+                                                  {joinSubFields.map((sf) => (
+                                                    <option key={sf.key} value={sf.key}>
+                                                      {sf.name} ({sf.key})
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                              </div>
+                                            </div>
+
+                                            <input
+                                              value={j.search}
+                                              onChange={(e) => setMlJoins((prev) => prev.map((x, i) => (i === idx ? { ...x, search: e.target.value } : x)))}
+                                              placeholder="Search joined columns…"
+                                              style={{ padding: "0.45rem 0.55rem", borderRadius: 8, border: "1px solid var(--border)", fontSize: "0.9rem" }}
+                                              disabled={!j.source_field_key}
+                                            />
+                                            <div style={{ display: "grid", gap: "0.35rem", maxHeight: 240, overflow: "auto", paddingRight: 4 }}>
+                                              {filteredJoinSubFields.map((sf) => (
+                                                <label key={sf.key} style={{ display: "flex", gap: "0.45rem", alignItems: "center", fontSize: "0.9rem" }}>
+                                                  <input
+                                                    type="checkbox"
+                                                    checked={j.sub_field_keys.includes(sf.key)}
+                                                    onChange={(e) => {
+                                                      const checked = e.target.checked;
+                                                      setMlJoins((prev) =>
+                                                        prev.map((x, i) =>
+                                                          i === idx
+                                                            ? { ...x, sub_field_keys: checked ? [...x.sub_field_keys, sf.key] : x.sub_field_keys.filter((k) => k !== sf.key) }
+                                                            : x
+                                                        )
+                                                      );
+                                                      setAddMultiLineTableColumnOrder((prev) => {
+                                                        const key = `join:${idx}:${sf.key}`;
+                                                        if (checked) return prev.includes(key) ? prev : [...prev, key];
+                                                        return prev.filter((k) => k !== key);
+                                                      });
+                                                    }}
+                                                  />
+                                                  <span>
+                                                    {sf.name} <span style={{ color: "var(--muted)" }}>({sf.key})</span>
+                                                  </span>
+                                                </label>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        ) : null}
+                                    </div>
+                                  );
+                                })}
                               </div>
                             )}
                           </div>
@@ -1551,16 +1625,32 @@ export default function DashboardDesignPage() {
                               ) : null}
                               {addMultiLineTableColumnOrder
                                 .filter((k) => {
-                                  if (k.startsWith("join:")) return addMultiLineTableJoinSubKeys.includes(k.slice("join:".length));
+                                  if (k.startsWith("join:")) {
+                                    const parts = k.split(":");
+                                    const idx = Number(parts[1]);
+                                    const key = parts.slice(2).join(":");
+                                    if (!Number.isFinite(idx)) return false;
+                                    return mlJoins[idx]?.sub_field_keys.includes(key) ?? false;
+                                  }
                                   return addMultiLineTableSubKeys.includes(k);
                                 })
                                 .map((key) => {
                                   const isJoin = key.startsWith("join:");
-                                  const raw = isJoin ? key.slice("join:".length) : key;
+                                  const raw = (() => {
+                                    if (!isJoin) return key;
+                                    const parts = key.split(":");
+                                    return parts.slice(2).join(":");
+                                  })();
+                                  const joinIdx = (() => {
+                                    if (!isJoin) return null;
+                                    const parts = key.split(":");
+                                    const n = Number(parts[1]);
+                                    return Number.isFinite(n) ? n : null;
+                                  })();
                                   const label = isJoin
-                                    ? joinMultiLineSubFields.find((sf) => sf.key === raw)?.name ?? raw
+                                    ? raw
                                     : tableMultiLineSubFields.find((sf) => sf.key === raw)?.name ?? raw;
-                                  const pill = isJoin ? "Join" : "Primary";
+                                  const pill = isJoin ? `Join #${(joinIdx ?? 0) + 1}` : "Primary";
                                   return (
                                     <div
                                       key={key}

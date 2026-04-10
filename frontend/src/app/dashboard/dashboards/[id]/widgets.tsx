@@ -269,31 +269,32 @@ function WidgetSettingsShell({
 
   const hasDesign = !!designActions;
   const hasViewer = viewerMenu != null;
-  const showEmptyHint = open && !hasDesign && !hasViewer;
+  const showSettingsButton = hasDesign || hasViewer;
+  const showHeader = !!title || headerAddon != null || hasDesign || hasViewer;
 
   return (
     <WidgetViewerMenuSetterContext.Provider value={setViewerMenu}>
       <WidgetHeaderAddonSetterContext.Provider value={setHeaderAddon}>
         <div className="card" style={{ padding: "1rem", position: "relative" }}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "flex-start",
-              alignItems: "flex-start",
-              gap: "0.5rem",
-              marginBottom: "0.75rem",
-              minHeight: title ? undefined : 36,
-            }}
-          >
-            <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
-              {title ? (
-                <h3 style={{ margin: 0, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</h3>
-              ) : null}
-            </div>
-            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
-              {headerAddon ? <div style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{headerAddon}</div> : null}
-              {hasDesign ? (
-                <div ref={layoutWrapRef} style={{ position: "relative", flexShrink: 0 }}>
+          {showHeader ? (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-start",
+                alignItems: "flex-start",
+                gap: "0.5rem",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+                {title ? (
+                  <h3 style={{ margin: 0, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</h3>
+                ) : null}
+              </div>
+              <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
+                {headerAddon ? <div style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{headerAddon}</div> : null}
+                {hasDesign ? (
+                  <div ref={layoutWrapRef} style={{ position: "relative", flexShrink: 0 }}>
                   <button
                     type="button"
                     aria-label="Layout"
@@ -366,56 +367,57 @@ function WidgetSettingsShell({
                       ))}
                     </div>
                   )}
-                </div>
-              ) : null}
-              <div ref={wrapRef} style={{ position: "relative", flexShrink: 0 }}>
-                <button
-                  type="button"
-                  aria-label="Widget settings"
-                  aria-expanded={open}
-                  aria-haspopup="true"
-                  onClick={() => setOpen((o) => !o)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    width: 36,
-                    height: 36,
-                    padding: 0,
-                    border: "1px solid var(--border)",
-                    borderRadius: 8,
-                    background: "var(--surface)",
-                    color: "var(--text)",
-                    cursor: "pointer",
-                  }}
-                >
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                    <circle cx="12" cy="12" r="3" />
-                    <path
-                      d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                </button>
-                {open && (
-                  <div
-                    role="menu"
+                  </div>
+                ) : null}
+                {showSettingsButton ? (
+                  <div ref={wrapRef} style={{ position: "relative", flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    aria-label="Widget settings"
+                    aria-expanded={open}
+                    aria-haspopup="true"
+                    onClick={() => setOpen((o) => !o)}
                     style={{
-                      position: "absolute",
-                      right: 0,
-                      top: "calc(100% + 6px)",
-                      minWidth: 220,
-                      maxWidth: "min(90vw, 320px)",
-                      maxHeight: "min(70vh, 380px)",
-                      overflowY: "auto",
-                      zIndex: 40,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 36,
+                      height: 36,
+                      padding: 0,
                       border: "1px solid var(--border)",
-                      borderRadius: 10,
+                      borderRadius: 8,
                       background: "var(--surface)",
-                      boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
-                      padding: "0.35rem 0",
+                      color: "var(--text)",
+                      cursor: "pointer",
                     }}
                   >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                      <circle cx="12" cy="12" r="3" />
+                      <path
+                        d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </button>
+                  {open && (
+                    <div
+                      role="menu"
+                      style={{
+                        position: "absolute",
+                        right: 0,
+                        top: "calc(100% + 6px)",
+                        minWidth: 220,
+                        maxWidth: "min(90vw, 320px)",
+                        maxHeight: "min(70vh, 380px)",
+                        overflowY: "auto",
+                        zIndex: 40,
+                        border: "1px solid var(--border)",
+                        borderRadius: 10,
+                        background: "var(--surface)",
+                        boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
+                        padding: "0.35rem 0",
+                      }}
+                    >
                 {hasDesign && (
                   <>
                     <MenuRow
@@ -439,14 +441,13 @@ function WidgetSettingsShell({
                 )}
                 {hasDesign && hasViewer && <div style={{ borderTop: "1px solid var(--border)", margin: "0.25rem 0" }} />}
                 {hasViewer && <div style={{ padding: "0.45rem 0.65rem" }}>{viewerMenu}</div>}
-                {showEmptyHint && (
-                  <div style={{ padding: "0.65rem", color: "var(--muted)", fontSize: "0.85rem" }}>No options for this widget.</div>
-                )}
+                    </div>
+                  )}
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
-        </div>
+          ) : null}
         {children}
       </div>
       </WidgetHeaderAddonSetterContext.Provider>
@@ -1746,8 +1747,8 @@ function KpiMultiLineTableWidgetInner({
   const [yearOptions, setYearOptions] = useState<number[]>([]);
   const [items, setItems] = useState<Record<string, unknown>[]>([]);
   const [labelByKey, setLabelByKey] = useState<Record<string, string>>({});
-  const [joinItemsByKey, setJoinItemsByKey] = useState<Record<string, Record<string, unknown>>>({});
-  const [joinLabelByKey, setJoinLabelByKey] = useState<Record<string, string>>({});
+  const [joinIndexes, setJoinIndexes] = useState<Array<Record<string, Record<string, unknown>>>>([]);
+  const [joinLabels, setJoinLabels] = useState<Array<Record<string, string>>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -1757,34 +1758,48 @@ function KpiMultiLineTableWidgetInner({
   const [page, setPage] = useState(0);
 
   const allowedKeys = widget.sub_field_keys ?? [];
-  const joinAllowedKeys = widget.join?.sub_field_keys ?? [];
-  const hasJoin =
-    !!widget.join &&
-    typeof widget.join.kpi_id === "number" &&
-    !!widget.join.source_field_key &&
-    !!widget.join.on_left_sub_field_key &&
-    !!widget.join.on_right_sub_field_key;
+  const joinSpecs: Array<{
+    kpi_id: number;
+    source_field_key: string;
+    on_left_sub_field_key: string;
+    on_right_sub_field_key: string;
+    sub_field_keys: string[];
+  }> = useMemo(() => {
+    const list: any[] = Array.isArray((widget as any).joins) ? ((widget as any).joins as any[]) : [];
+    const legacy = (widget as any).join && typeof (widget as any).join === "object" ? [(widget as any).join] : [];
+    const merged = [...list, ...legacy].filter((j) => j && typeof j === "object");
+    return merged
+      .map((j) => ({
+        kpi_id: typeof j.kpi_id === "number" ? j.kpi_id : NaN,
+        source_field_key: String(j.source_field_key || ""),
+        on_left_sub_field_key: String(j.on_left_sub_field_key || ""),
+        on_right_sub_field_key: String(j.on_right_sub_field_key || ""),
+        sub_field_keys: Array.isArray(j.sub_field_keys) ? (j.sub_field_keys as string[]).filter(Boolean) : [],
+      }))
+      .filter((j) => Number.isFinite(j.kpi_id) && j.source_field_key && j.on_left_sub_field_key && j.on_right_sub_field_key);
+  }, [JSON.stringify((widget as any).joins ?? null), JSON.stringify((widget as any).join ?? null)]);
 
-  const joinKeyForLeft = (row: Record<string, unknown>): string => {
-    const k = widget.join?.on_left_sub_field_key || "";
-    return k ? String(row?.[k] ?? "").trim() : "";
-  };
-  const joinLookup = (row: Record<string, unknown>): Record<string, unknown> | null => {
-    if (!hasJoin) return null;
-    const key = joinKeyForLeft(row);
-    return key ? joinItemsByKey[key] ?? null : null;
+  const hasJoins = joinSpecs.length > 0;
+
+  const joinLookup = (joinIdx: number, row: Record<string, unknown>): Record<string, unknown> | null => {
+    const spec = joinSpecs[joinIdx];
+    if (!spec) return null;
+    const leftKey = spec.on_left_sub_field_key;
+    const k = leftKey ? String(row?.[leftKey] ?? "").trim() : "";
+    if (!k) return null;
+    return joinIndexes[joinIdx]?.[k] ?? null;
   };
 
   useEffect(() => {
     const base = allowedKeys.length ? [...allowedKeys] : [];
-    const joinBase = joinAllowedKeys.length ? joinAllowedKeys.map((k) => `join:${k}`) : [];
+    const joinBase = joinSpecs.flatMap((j, idx) => (j.sub_field_keys || []).map((k) => `join:${idx}:${k}`));
     setVisibleKeys([...base, ...joinBase]);
     setSortKey(null);
     setSortDir("asc");
     setSearch("");
     setPage(0);
     setViewerYear(widget.year);
-  }, [widget.id, JSON.stringify(allowedKeys), JSON.stringify(joinAllowedKeys)]);
+  }, [widget.id, JSON.stringify(allowedKeys), JSON.stringify(joinSpecs)]);
 
   useEffect(() => {
     if (!token) return;
@@ -1808,18 +1823,17 @@ function KpiMultiLineTableWidgetInner({
     if (!token) return;
     setLoading(true);
     setError(null);
-    const joinSpec = widget.join;
     Promise.all([
       getKpiFieldsWithSubs(token, organizationId, widget.kpi_id),
       fetchEntryForPeriod(token, organizationId, widget.kpi_id, viewerYear, widget.period_key),
-      hasJoin && joinSpec
-        ? Promise.all([
-            getKpiFieldsWithSubs(token, organizationId, joinSpec.kpi_id),
-            fetchEntryForPeriod(token, organizationId, joinSpec.kpi_id, viewerYear, widget.period_key),
-          ])
-        : Promise.resolve(null),
+      ...joinSpecs.map((j) =>
+        Promise.all([
+          getKpiFieldsWithSubs(token, organizationId, j.kpi_id),
+          fetchEntryForPeriod(token, organizationId, j.kpi_id, viewerYear, widget.period_key),
+        ])
+      ),
     ])
-      .then(([fields, entry, joinRes]) => {
+      .then(([fields, entry, ...joinResults]) => {
         const source = fields.find((f) => f.key === widget.source_field_key && f.field_type === "multi_line_items");
         const fid = source?.id;
         const raw = fid ? rawFieldFromEntry(entry, fid) : null;
@@ -1831,30 +1845,31 @@ function KpiMultiLineTableWidgetInner({
         });
         setLabelByKey(labels);
 
-        if (joinRes && joinSpec) {
-          const [joinFields, joinEntry] = joinRes;
-          const joinSource = joinFields.find((f) => f.key === joinSpec.source_field_key && f.field_type === "multi_line_items");
+        const nextJoinLabels: Array<Record<string, string>> = [];
+        const nextJoinIndexes: Array<Record<string, Record<string, unknown>>> = [];
+        joinResults.forEach((jr, idx) => {
+          const spec = joinSpecs[idx];
+          const [joinFields, joinEntry] = jr as any;
+          const joinSource = joinFields.find((f: any) => f.key === spec.source_field_key && f.field_type === "multi_line_items");
           const joinFid = joinSource?.id;
           const joinRaw = joinFid ? rawFieldFromEntry(joinEntry, joinFid) : null;
           const joinRows = Array.isArray(joinRaw) ? (joinRaw as Record<string, unknown>[]) : [];
-          const joinLabels: Record<string, string> = {};
-          (joinSource?.sub_fields ?? []).forEach((sf) => {
-            joinLabels[sf.key] = sf.name;
+          const labels: Record<string, string> = {};
+          (joinSource?.sub_fields ?? []).forEach((sf: any) => {
+            labels[sf.key] = sf.name;
           });
-          setJoinLabelByKey(joinLabels);
-
-          const idx: Record<string, Record<string, unknown>> = {};
-          const rightKey = joinSpec.on_right_sub_field_key;
+          nextJoinLabels[idx] = labels;
+          const ix: Record<string, Record<string, unknown>> = {};
+          const rightKey = spec.on_right_sub_field_key;
           joinRows.forEach((r) => {
             const k = rightKey ? String((r as any)?.[rightKey] ?? "").trim() : "";
             if (!k) return;
-            if (!idx[k]) idx[k] = r;
+            if (!ix[k]) ix[k] = r;
           });
-          setJoinItemsByKey(idx);
-        } else {
-          setJoinLabelByKey({});
-          setJoinItemsByKey({});
-        }
+          nextJoinIndexes[idx] = ix;
+        });
+        setJoinLabels(nextJoinLabels);
+        setJoinIndexes(nextJoinIndexes);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load table data"))
       .finally(() => setLoading(false));
@@ -1865,23 +1880,37 @@ function KpiMultiLineTableWidgetInner({
     viewerYear,
     widget.period_key,
     widget.source_field_key,
-    JSON.stringify(widget.join ?? null),
+    JSON.stringify((widget as any).joins ?? null),
+    JSON.stringify((widget as any).join ?? null),
   ]);
+
+  const joinAllowedKeySpecs = useMemo(
+    () =>
+      joinSpecs.flatMap((j, idx) => (j.sub_field_keys || []).map((k) => ({ idx, key: k, full: `join:${idx}:${k}` }))),
+    [JSON.stringify(joinSpecs)]
+  );
 
   const orderedKeys = useMemo(() => {
     const base =
       Array.isArray(widget.column_order) && widget.column_order.length
         ? widget.column_order
-        : [...allowedKeys, ...joinAllowedKeys.map((k) => `join:${k}`)];
-    const allowSet = new Set<string>([...allowedKeys, ...joinAllowedKeys.map((k) => `join:${k}`)]);
+        : [...allowedKeys, ...joinAllowedKeySpecs.map((x) => x.full)];
+    const allowSet = new Set<string>([...allowedKeys, ...joinAllowedKeySpecs.map((x) => x.full)]);
     return base.filter((k) => allowSet.has(k) && visibleKeys.includes(k));
-  }, [JSON.stringify(widget.column_order ?? null), JSON.stringify(allowedKeys), JSON.stringify(joinAllowedKeys), JSON.stringify(visibleKeys)]);
+  }, [JSON.stringify(widget.column_order ?? null), JSON.stringify(allowedKeys), JSON.stringify(joinAllowedKeySpecs), JSON.stringify(visibleKeys)]);
 
   const orderedPrimaryKeys = useMemo(() => orderedKeys.filter((k) => !k.startsWith("join:")), [orderedKeys]);
-  const orderedJoinKeys = useMemo(
-    () => orderedKeys.filter((k) => k.startsWith("join:")).map((k) => k.slice("join:".length)),
-    [orderedKeys]
-  );
+  const orderedJoinCols = useMemo(() => {
+    return orderedKeys
+      .filter((k) => k.startsWith("join:"))
+      .map((k) => {
+        const parts = k.split(":");
+        const idx = Number(parts[1]);
+        const key = parts.slice(2).join(":");
+        return { joinIdx: Number.isFinite(idx) ? idx : -1, key, full: k };
+      })
+      .filter((x) => x.joinIdx >= 0 && !!x.key);
+  }, [orderedKeys]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1889,25 +1918,31 @@ function KpiMultiLineTableWidgetInner({
     return items.filter((row) => {
       const leftHit = allowedKeys.some((k) => formatCellForTable(row[k]).toLowerCase().includes(q));
       if (leftHit) return true;
-      if (!hasJoin) return false;
-      const j = joinLookup(row);
-      if (!j) return false;
-      return joinAllowedKeys.some((k) => formatCellForTable(j[k]).toLowerCase().includes(q));
+      if (!hasJoins) return false;
+      return joinAllowedKeySpecs.some(({ idx, key }) => {
+        const j = joinLookup(idx, row);
+        if (!j) return false;
+        return formatCellForTable(j[key]).toLowerCase().includes(q);
+      });
     });
-  }, [items, search, allowedKeys, hasJoin, joinAllowedKeys, JSON.stringify(joinItemsByKey)]);
+  }, [items, search, allowedKeys, hasJoins, JSON.stringify(joinAllowedKeySpecs), JSON.stringify(joinIndexes)]);
 
   const sorted = useMemo(() => {
     if (!sortKey) return filtered;
     if (sortKey.startsWith("join:")) {
-      const k = sortKey.slice("join:".length);
-      if (!orderedJoinKeys.includes(k)) return filtered;
+      const raw = sortKey.slice("join:".length);
+      const parts = raw.split(":");
+      const joinIdx = Number(parts[0]);
+      const k = parts.slice(1).join(":");
+      if (!Number.isFinite(joinIdx) || !k) return filtered;
+      if (!orderedJoinCols.some((x) => x.joinIdx === joinIdx && x.key === k)) return filtered;
       const dir = sortDir === "asc" ? 1 : -1;
-      return [...filtered].sort((a, b) => dir * compareCellValues((joinLookup(a) ?? {})[k], (joinLookup(b) ?? {})[k]));
+      return [...filtered].sort((a, b) => dir * compareCellValues((joinLookup(joinIdx, a) ?? {})[k], (joinLookup(joinIdx, b) ?? {})[k]));
     }
     if (!orderedPrimaryKeys.includes(sortKey)) return filtered;
     const dir = sortDir === "asc" ? 1 : -1;
     return [...filtered].sort((a, b) => dir * compareCellValues(a[sortKey], b[sortKey]));
-  }, [filtered, sortKey, sortDir, orderedPrimaryKeys, JSON.stringify(joinItemsByKey), JSON.stringify(orderedJoinKeys)]);
+  }, [filtered, sortKey, sortDir, orderedPrimaryKeys, JSON.stringify(joinIndexes), JSON.stringify(orderedJoinCols)]);
 
   useEffect(() => {
     setPage(0);
@@ -1930,6 +1965,7 @@ function KpiMultiLineTableWidgetInner({
     });
   };
   const toggleJoinColumn = (key: string) => {
+    // key is `${joinIdx}:${subKey}`
     const full = `join:${key}`;
     setVisibleKeys((prev) => {
       if (prev.includes(full)) {
@@ -1985,7 +2021,7 @@ function KpiMultiLineTableWidgetInner({
 
   useEffect(() => {
     if (!setViewerMenu) return;
-    if (loading || error || (allowedKeys.length === 0 && joinAllowedKeys.length === 0)) {
+    if (loading || error || (allowedKeys.length === 0 && joinAllowedKeySpecs.length === 0)) {
       setViewerMenu(null);
       return;
     }
@@ -2009,13 +2045,13 @@ function KpiMultiLineTableWidgetInner({
             </span>
           </label>
         ))}
-        {hasJoin && joinAllowedKeys.length > 0 && (
+        {hasJoins && joinAllowedKeySpecs.length > 0 && (
           <>
             <div style={{ height: 1, background: "var(--border)", margin: "0.25rem 0" }} />
             <div style={{ fontSize: "0.75rem", color: "var(--muted)", fontWeight: 600 }}>Joined columns</div>
-            {joinAllowedKeys.map((k) => (
+            {joinAllowedKeySpecs.map(({ idx, key, full }) => (
               <label
-                key={k}
+                key={full}
                 style={{
                   display: "flex",
                   gap: "0.45rem",
@@ -2024,9 +2060,9 @@ function KpiMultiLineTableWidgetInner({
                   cursor: "pointer",
                 }}
               >
-                <input type="checkbox" checked={visibleKeys.includes(`join:${k}`)} onChange={() => toggleJoinColumn(k)} />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={k}>
-                  {joinLabelByKey[k] ?? k}
+                <input type="checkbox" checked={visibleKeys.includes(full)} onChange={() => toggleJoinColumn(`${idx}:${key}`)} />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={full}>
+                  {(joinLabels[idx] ?? {})[key] ?? key}
                 </span>
               </label>
             ))}
@@ -2040,11 +2076,11 @@ function KpiMultiLineTableWidgetInner({
     loading,
     error,
     JSON.stringify(allowedKeys),
-    JSON.stringify(joinAllowedKeys),
+    JSON.stringify(joinAllowedKeySpecs),
     JSON.stringify(visibleKeys),
     JSON.stringify(labelByKey),
-    JSON.stringify(joinLabelByKey),
-    hasJoin,
+    JSON.stringify(joinLabels),
+    hasJoins,
   ]);
 
   return (
@@ -2103,12 +2139,12 @@ function KpiMultiLineTableWidgetInner({
                         </button>
                       </th>
                     ))}
-                    {hasJoin &&
-                      orderedJoinKeys.map((k) => (
-                        <th key={`join:${k}`} style={{ textAlign: "left", padding: "0.45rem 0.5rem", whiteSpace: "nowrap" }}>
+                    {hasJoins &&
+                      orderedJoinCols.map(({ joinIdx, key, full }) => (
+                        <th key={full} style={{ textAlign: "left", padding: "0.45rem 0.5rem", whiteSpace: "nowrap" }}>
                           <button
                             type="button"
-                            onClick={() => onHeaderClick(`join:${k}`)}
+                            onClick={() => onHeaderClick(full)}
                             style={{
                               border: "none",
                               background: "transparent",
@@ -2122,8 +2158,8 @@ function KpiMultiLineTableWidgetInner({
                               gap: "0.25rem",
                             }}
                           >
-                            {joinLabelByKey[k] ?? k}
-                            {sortKey === `join:${k}` ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+                            {(joinLabels[joinIdx] ?? {})[key] ?? key}
+                            {sortKey === full ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
                           </button>
                         </th>
                       ))}
@@ -2137,10 +2173,10 @@ function KpiMultiLineTableWidgetInner({
                           {formatCellForTable(row[k]) || "—"}
                         </td>
                       ))}
-                      {hasJoin &&
-                        orderedJoinKeys.map((k) => (
-                          <td key={`join:${k}`} style={{ padding: "0.45rem 0.5rem", verticalAlign: "top" }}>
-                            {formatCellForTable((joinLookup(row) ?? {})[k]) || "—"}
+                      {hasJoins &&
+                        orderedJoinCols.map(({ joinIdx, key, full }) => (
+                          <td key={full} style={{ padding: "0.45rem 0.5rem", verticalAlign: "top" }}>
+                            {formatCellForTable((joinLookup(joinIdx, row) ?? {})[key]) || "—"}
                           </td>
                         ))}
                     </tr>
