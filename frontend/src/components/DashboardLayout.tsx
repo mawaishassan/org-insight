@@ -81,6 +81,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const entryMultiMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/?$/);
   const entryMultiRowMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/row\/([^/]+)\/?$/);
 
+  const dashboardDesignMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/design\/?$/);
+  const isDashboardDesign = !!dashboardDesignMatch;
+  const dashboardDesignId = dashboardDesignMatch ? Number(dashboardDesignMatch[1]) : null;
+  const dashboardViewMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/?$/);
+  const isDashboardView = !!dashboardViewMatch;
+  const dashboardViewId = dashboardViewMatch ? Number(dashboardViewMatch[1]) : null;
+
   useEffect(() => {
     const token = getAccessToken();
     if (!token) {
@@ -571,6 +578,29 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         )}
 
         <div style={{ marginLeft: "auto", position: "relative" }} ref={menuRef}>
+          {isSuperAdmin && isDashboardView && dashboardViewId ? (
+            <Link
+              href={`/dashboard/dashboards/${dashboardViewId}/design?${qs({ organization_id: selectedOrgId ?? undefined })}`}
+              className="btn btn-primary"
+              style={{ marginRight: "0.5rem" }}
+              onClick={() => setMenuOpen(false)}
+            >
+              Design mode
+            </Link>
+          ) : null}
+          {isSuperAdmin && isDashboardDesign && dashboardDesignId ? (
+            <Link
+              href={`${pathname}?${qs({
+                organization_id: selectedOrgId ?? undefined,
+                add_widget: 1,
+              })}`}
+              className="btn btn-primary"
+              style={{ marginRight: "0.5rem" }}
+              onClick={() => setMenuOpen(false)}
+            >
+              + Add widget
+            </Link>
+          ) : null}
           <button
             type="button"
             onClick={() => setMenuOpen((o) => !o)}

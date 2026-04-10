@@ -238,23 +238,30 @@ function WidgetSettingsShell({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const [layoutOpen, setLayoutOpen] = useState(false);
   const [viewerMenu, setViewerMenu] = useState<React.ReactNode>(null);
   const [headerAddon, setHeaderAddon] = useState<React.ReactNode>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const layoutWrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setViewerMenu(null);
     setOpen(false);
+    setLayoutOpen(false);
   }, [widgetKey]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open && !layoutOpen) return;
     const onDoc = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      const inSettings = !!(wrapRef.current && wrapRef.current.contains(t));
+      const inLayout = !!(layoutWrapRef.current && layoutWrapRef.current.contains(t));
+      if (!inSettings) setOpen(false);
+      if (!inLayout) setLayoutOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  }, [open, layoutOpen]);
 
   const hasDesign = !!designActions;
   const hasViewer = viewerMenu != null;
@@ -281,6 +288,82 @@ function WidgetSettingsShell({
             </div>
             <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
               {headerAddon ? <div style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{headerAddon}</div> : null}
+              {hasDesign ? (
+                <div ref={layoutWrapRef} style={{ position: "relative", flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    aria-label="Layout"
+                    aria-expanded={layoutOpen}
+                    aria-haspopup="true"
+                    onClick={() => setLayoutOpen((o) => !o)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 36,
+                      height: 36,
+                      padding: 0,
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      background: "var(--surface)",
+                      color: "var(--text)",
+                      cursor: "pointer",
+                    }}
+                    title="Layout"
+                  >
+                    {/* layout icon */}
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                      <rect x="3" y="4" width="7" height="7" rx="1" />
+                      <rect x="14" y="4" width="7" height="7" rx="1" />
+                      <rect x="3" y="13" width="18" height="7" rx="1" />
+                    </svg>
+                  </button>
+                  {layoutOpen && (
+                    <div
+                      role="menu"
+                      style={{
+                        position: "absolute",
+                        right: 0,
+                        top: "calc(100% + 6px)",
+                        minWidth: 220,
+                        maxWidth: "min(90vw, 320px)",
+                        maxHeight: "min(70vh, 380px)",
+                        overflowY: "auto",
+                        zIndex: 40,
+                        border: "1px solid var(--border)",
+                        borderRadius: 10,
+                        background: "var(--surface)",
+                        boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
+                        padding: "0.35rem 0",
+                      }}
+                    >
+                      <div
+                        style={{
+                          padding: "0.35rem 0.75rem 0.2rem",
+                          fontSize: "0.72rem",
+                          color: "var(--muted)",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.04em",
+                        }}
+                      >
+                        Width in row (12 columns)
+                      </div>
+                      {DESIGN_COL_SPAN_OPTIONS.map(({ span, label }) => (
+                        <MenuRow
+                          key={span}
+                          active={designActions!.colSpan === span}
+                          onClick={() => {
+                            designActions!.onSetColSpan(span);
+                            setLayoutOpen(false);
+                          }}
+                        >
+                          {label}
+                        </MenuRow>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : null}
               <div ref={wrapRef} style={{ position: "relative", flexShrink: 0 }}>
                 <button
                   type="button"
@@ -339,27 +422,6 @@ function WidgetSettingsShell({
                     >
                       Edit
                     </MenuRow>
-                    <MenuRow
-                      onClick={() => {
-                        designActions!.onToggleFullWidth();
-                      }}
-                    >
-                      {designActions!.isFullWidth ? "Use half width" : "Use full width"}
-                    </MenuRow>
-                    <div style={{ padding: "0.35rem 0.75rem 0.2rem", fontSize: "0.72rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
-                      Width in row (12 columns)
-                    </div>
-                    {DESIGN_COL_SPAN_OPTIONS.map(({ span, label }) => (
-                      <MenuRow
-                        key={span}
-                        active={designActions!.colSpan === span}
-                        onClick={() => {
-                          designActions!.onSetColSpan(span);
-                        }}
-                      >
-                        {label}
-                      </MenuRow>
-                    ))}
                     <MenuRow
                       danger
                       onClick={() => {

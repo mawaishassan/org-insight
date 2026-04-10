@@ -2,7 +2,7 @@
 
 import type { CSSProperties } from "react";
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
@@ -243,6 +243,7 @@ function DesignMoveArrow({
 export default function DashboardDesignPage() {
   const params = useParams();
   const searchParams = useSearchParams();
+  const router = useRouter();
   const id = Number(params.id);
   const token = getAccessToken();
   const orgIdFromQuery = searchParams.get("organization_id");
@@ -750,23 +751,40 @@ export default function DashboardDesignPage() {
     }
   };
 
-  const handleSave = async () => {
-    if (!token || !dashboard) return;
-    await persistWidgets(widgets);
-    if (!error) toast.success("Saved");
+  // Open the add-widget modal when navigated with ?add_widget=1 (used by top bar button).
+  useEffect(() => {
+    if (!token) return;
+    if (widgetModalOpen) return;
+    const q = searchParams.get("add_widget");
+    if (q !== "1") return;
+    openAddWidget();
+    // Remove param so refresh doesn't keep opening.
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("add_widget");
+    const qs = next.toString();
+    router.replace(qs ? `?${qs}` : "?", { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, searchParams, widgetModalOpen]);
+
+  const removeWidget = (wid: string) => {
+    setWidgets((prev) => {
+      const next = prev.filter((w) => w.id !== wid);
+      void persistWidgets(next);
+      return next;
+    });
   };
 
-  const removeWidget = (wid: string) => setWidgets((prev) => prev.filter((w) => w.id !== wid));
-
   const toggleWidgetFullWidth = (wid: string) => {
-    setWidgets((prev) =>
-      prev.map((w) => {
+    setWidgets((prev) => {
+      const next = prev.map((w) => {
         if (w.id !== wid) return w;
         const nextFull = !(w as { full_width?: boolean }).full_width;
         if (nextFull) return { ...w, full_width: true, col_span: undefined } as Widget;
         return { ...w, full_width: false, col_span: (w as { col_span?: number }).col_span ?? 6 } as Widget;
-      })
-    );
+      });
+      void persistWidgets(next);
+      return next;
+    });
   };
 
   const setWidgetColSpan = (wid: string, span: number) => {
@@ -842,23 +860,6 @@ export default function DashboardDesignPage() {
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.75rem", flexWrap: "wrap" }}>
-        <div>
-          <h1 style={{ marginBottom: "0.25rem", fontSize: "1.5rem" }}>Design: {dashboard.name}</h1>
-          <p style={{ color: "var(--muted)", marginTop: 0, marginBottom: 0 }}>
-            Hover or click a widget to see move arrows on its sides. Drag ⋮⋮ to reorder as well. Use the gear menu for width (12-column row) or full row. Save layout if auto-save did not run.
-          </p>
-        </div>
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-          <button type="button" className="btn" onClick={handleSave} disabled={saving}>
-            {saving ? "Saving…" : "Save layout"}
-          </button>
-          <button type="button" className="btn btn-primary" onClick={openAddWidget}>
-            + Add widget
-          </button>
-        </div>
-      </div>
-
       {!widgetModalOpen &&
         (widgets.length === 0 ? (
           <div className="card" style={{ padding: "1rem" }}>

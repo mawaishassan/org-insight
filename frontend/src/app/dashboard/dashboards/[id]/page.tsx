@@ -62,11 +62,6 @@ export default function DashboardViewPage() {
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
-      <div>
-        <h1 style={{ marginBottom: "0.25rem", fontSize: "1.5rem" }}>{dashboard.name}</h1>
-        {dashboard.description && <p style={{ color: "var(--muted)", marginTop: 0 }}>{dashboard.description}</p>}
-      </div>
-
       {widgets.length === 0 ? (
         <Card title="No widgets">
           <p style={{ color: "var(--muted)", margin: 0 }}>This dashboard has no widgets yet.</p>
