@@ -1,12 +1,18 @@
 "use client";
 
+import type { CSSProperties } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer } from "../widgets";
-import { DASHBOARD_GRID_COLUMNS, effectiveColSpan, widgetGridColumnStyle } from "../layoutGrid";
+import {
+  DASHBOARD_GRID_COLUMNS,
+  effectiveColSpan,
+  findNeighborSwapId,
+  widgetGridColumnStyle,
+} from "../layoutGrid";
 
 type WidgetType =
   | "text"
@@ -173,6 +179,67 @@ function normalizeKpiCardAgg(raw: unknown): KpiCardAgg {
   return "sum";
 }
 
+function DesignMoveArrow({
+  dir,
+  disabled,
+  onClick,
+  positionStyle,
+}: {
+  dir: "up" | "down" | "left" | "right";
+  disabled: boolean;
+  onClick: () => void;
+  positionStyle: CSSProperties;
+}) {
+  const labels = { up: "Move up", down: "Move down", left: "Move left", right: "Move right" };
+  const rotate: Record<typeof dir, number> = { up: 0, right: 90, down: 180, left: -90 };
+  return (
+    <button
+      type="button"
+      data-design-move-arrow
+      disabled={disabled}
+      aria-label={labels[dir]}
+      title={labels[dir]}
+      onClick={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (!disabled) onClick();
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+      style={{
+        position: "absolute",
+        width: 28,
+        height: 28,
+        padding: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: "50%",
+        border: "1px solid var(--border)",
+        background: "var(--surface)",
+        color: "var(--text)",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.35 : 1,
+        boxShadow: "0 2px 10px rgba(0,0,0,0.1)",
+        zIndex: 12,
+        ...positionStyle,
+      }}
+    >
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        style={{ transform: `rotate(${rotate[dir]}deg)` }}
+        aria-hidden
+      >
+        <path d="M18 15l-6-6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
+}
+
 export default function DashboardDesignPage() {
   const params = useParams();
   const searchParams = useSearchParams();
@@ -190,6 +257,8 @@ export default function DashboardDesignPage() {
   const [saving, setSaving] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [draggingWidgetId, setDraggingWidgetId] = useState<string | null>(null);
+  const [hoveredDesignWidgetId, setHoveredDesignWidgetId] = useState<string | null>(null);
+  const [selectedDesignWidgetId, setSelectedDesignWidgetId] = useState<string | null>(null);
 
   const [widgetModalOpen, setWidgetModalOpen] = useState(false);
   const [editingWidgetId, setEditingWidgetId] = useState<string | null>(null);
@@ -277,10 +346,12 @@ export default function DashboardDesignPage() {
     setAddMultiLineTableJoinOnLeftKey("");
     setAddMultiLineTableJoinOnRightKey("");
     setAddMultiLineTableJoinSubKeys([]);
+    setSelectedDesignWidgetId(null);
     setWidgetModalOpen(true);
   };
 
   const openEditWidget = (w: Widget) => {
+    setSelectedDesignWidgetId(null);
     setEditingWidgetId(w.id);
     setEditTab("basics");
     setFullWidth(!!(w as any).full_width);
@@ -727,6 +798,44 @@ export default function DashboardDesignPage() {
     });
   };
 
+  const swapWidgetsInLayout = (idA: string, idB: string) => {
+    if (idA === idB) return;
+    setWidgets((prev) => {
+      const ia = prev.findIndex((x) => x.id === idA);
+      const ib = prev.findIndex((x) => x.id === idB);
+      if (ia < 0 || ib < 0) return prev;
+      const next = [...prev];
+      [next[ia], next[ib]] = [next[ib], next[ia]];
+      void persistWidgets(next);
+      return next;
+    });
+  };
+
+  const widgetMoveNeighbors = useMemo(() => {
+    const m = new Map<string, { up: string | null; down: string | null; left: string | null; right: string | null }>();
+    for (const w of widgets) {
+      m.set(w.id, {
+        up: findNeighborSwapId(widgets, w.id, "up"),
+        down: findNeighborSwapId(widgets, w.id, "down"),
+        left: findNeighborSwapId(widgets, w.id, "left"),
+        right: findNeighborSwapId(widgets, w.id, "right"),
+      });
+    }
+    return m;
+  }, [widgets]);
+
+  useEffect(() => {
+    if (selectedDesignWidgetId == null) return;
+    const onDoc = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (!el) return;
+      if (el.closest("[data-design-widget-cell]")) return;
+      setSelectedDesignWidgetId(null);
+    };
+    document.addEventListener("mousedown", onDoc, true);
+    return () => document.removeEventListener("mousedown", onDoc, true);
+  }, [selectedDesignWidgetId]);
+
   if (loading) return <p>Loading…</p>;
   if (error) return <p className="form-error">{error}</p>;
   if (!dashboard) return null;
@@ -737,7 +846,7 @@ export default function DashboardDesignPage() {
         <div>
           <h1 style={{ marginBottom: "0.25rem", fontSize: "1.5rem" }}>Design: {dashboard.name}</h1>
           <p style={{ color: "var(--muted)", marginTop: 0, marginBottom: 0 }}>
-            This page matches the live dashboard. Drag ⋮⋮ to reorder widgets; use the gear menu to set width (12-column row) or full row. Save layout if auto-save did not run.
+            Hover or click a widget to see move arrows on its sides. Drag ⋮⋮ to reorder as well. Use the gear menu for width (12-column row) or full row. Save layout if auto-save did not run.
           </p>
         </div>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
@@ -765,14 +874,30 @@ export default function DashboardDesignPage() {
           >
             {widgets.map((w) => {
               const canDesign = userRole === "SUPER_ADMIN";
+              const showMoveChrome =
+                canDesign && (hoveredDesignWidgetId === w.id || selectedDesignWidgetId === w.id);
+              const isDesignActive = showMoveChrome;
+              const nb = widgetMoveNeighbors.get(w.id);
               return (
                 <div
                   key={w.id}
+                  data-design-widget-cell
                   style={{
                     position: "relative",
                     paddingLeft: canDesign ? 28 : undefined,
                     ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
                     opacity: draggingWidgetId === w.id ? 0.55 : 1,
+                    outline: isDesignActive ? "2px solid #3b82f6" : undefined,
+                    outlineOffset: isDesignActive ? 2 : undefined,
+                    borderRadius: isDesignActive ? 12 : undefined,
+                    transition: "outline-color 0.15s ease, outline-offset 0.15s ease",
+                  }}
+                  onMouseEnter={() => canDesign && setHoveredDesignWidgetId(w.id)}
+                  onMouseLeave={() => canDesign && setHoveredDesignWidgetId((cur) => (cur === w.id ? null : cur))}
+                  onMouseDown={(e) => {
+                    if (!canDesign || e.button !== 0) return;
+                    if ((e.target as HTMLElement).closest("[data-design-move-arrow]")) return;
+                    setSelectedDesignWidgetId(w.id);
                   }}
                   onDragOver={
                     canDesign
@@ -792,9 +917,38 @@ export default function DashboardDesignPage() {
                       : undefined
                   }
                 >
+                  {showMoveChrome && nb ? (
+                    <>
+                      <DesignMoveArrow
+                        dir="up"
+                        disabled={!nb.up}
+                        positionStyle={{ top: -14, left: "50%", marginLeft: -14 }}
+                        onClick={() => nb.up && swapWidgetsInLayout(w.id, nb.up)}
+                      />
+                      <DesignMoveArrow
+                        dir="down"
+                        disabled={!nb.down}
+                        positionStyle={{ bottom: -14, left: "50%", marginLeft: -14 }}
+                        onClick={() => nb.down && swapWidgetsInLayout(w.id, nb.down)}
+                      />
+                      <DesignMoveArrow
+                        dir="left"
+                        disabled={!nb.left}
+                        positionStyle={{ left: -14, top: "50%", marginTop: -14 }}
+                        onClick={() => nb.left && swapWidgetsInLayout(w.id, nb.left)}
+                      />
+                      <DesignMoveArrow
+                        dir="right"
+                        disabled={!nb.right}
+                        positionStyle={{ right: -14, top: "50%", marginTop: -14 }}
+                        onClick={() => nb.right && swapWidgetsInLayout(w.id, nb.right)}
+                      />
+                    </>
+                  ) : null}
                   {canDesign ? (
                     <div
                       draggable
+                      onMouseDown={(e) => e.stopPropagation()}
                       onDragStart={(e) => {
                         e.stopPropagation();
                         e.dataTransfer.setData("text/plain", w.id);
