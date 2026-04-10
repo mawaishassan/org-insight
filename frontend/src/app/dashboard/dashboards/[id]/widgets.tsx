@@ -84,6 +84,33 @@ export type Widget =
     }
   | {
       id: string;
+      type: "kpi_trend";
+      title?: string;
+      kpi_id: number;
+      period_key?: string | null;
+      /** Year range available to viewers (multi-select subset). */
+      start_year: number;
+      end_year: number;
+      /** Default visualization in viewer. */
+      view?: "bar" | "line";
+      /** Default years selected for comparison in viewer. */
+      default_years?: number[];
+      mode?: "fields" | "multi_line_items";
+      /** fields mode: scalar KPI value fields */
+      field_keys?: string[];
+      // multi_line_items mode
+      source_field_key?: string;
+      agg?: "count_rows" | "sum" | "avg";
+      group_by_sub_field_key?: string;
+      value_sub_field_key?: string;
+      filter_sub_field_key?: string;
+      /** Optional viewer-facing label for filter button */
+      filter_label?: string;
+      full_width?: boolean;
+      col_span?: number;
+    }
+  | {
+      id: string;
       type: "kpi_card_single_value";
       title?: string;
       kpi_id: number;
@@ -156,10 +183,15 @@ const _kpiFieldsDetailCache: Record<string, Promise<KpiFieldWithSubs[]> | undefi
 async function getKpiFieldsWithSubs(token: string, organizationId: number, kpiId: number): Promise<KpiFieldWithSubs[]> {
   const cacheKey = `${organizationId}:${kpiId}:subs`;
   if (_kpiFieldsDetailCache[cacheKey]) return _kpiFieldsDetailCache[cacheKey];
+  // Prefer /entries/fields for viewer contexts (often less strict than /fields),
+  // but fall back to /fields so dashboard viewers can still resolve widget configs
+  // even if field-level rights aren't assigned.
   _kpiFieldsDetailCache[cacheKey] = api<KpiFieldWithSubs[]>(
-    `/fields?kpi_id=${kpiId}&organization_id=${organizationId}`,
+    `/entries/fields?kpi_id=${kpiId}&organization_id=${organizationId}`,
     { token }
-  ).catch(() => []);
+  )
+    .then((rows) => (Array.isArray(rows) && rows.length ? rows : api<KpiFieldWithSubs[]>(`/fields?kpi_id=${kpiId}&organization_id=${organizationId}`, { token })))
+    .catch(() => []);
   return _kpiFieldsDetailCache[cacheKey];
 }
 const _kpiFieldMapCache: Record<string, Promise<KpiFieldMap> | undefined> = {};
@@ -167,11 +199,7 @@ const _kpiFieldMapCache: Record<string, Promise<KpiFieldMap> | undefined> = {};
 async function getKpiFieldMap(token: string, organizationId: number, kpiId: number): Promise<KpiFieldMap> {
   const cacheKey = `${organizationId}:${kpiId}`;
   if (_kpiFieldMapCache[cacheKey]) return _kpiFieldMapCache[cacheKey];
-  _kpiFieldMapCache[cacheKey] = api<Array<{ id: number; key: string; name: string }>>(
-    `/fields?kpi_id=${kpiId}&organization_id=${organizationId}`,
-    { token }
-  )
-    .then((fields) => {
+  const build = (fields: Array<{ id: number; key: string; name: string }>) => {
       const idByKey: Record<string, number> = {};
       const keyById: Record<number, string> = {};
       const nameByKey: Record<string, string> = {};
@@ -181,6 +209,15 @@ async function getKpiFieldMap(token: string, organizationId: number, kpiId: numb
         nameByKey[f.key] = f.name;
       });
       return { idByKey, keyById, nameByKey };
+  };
+
+  _kpiFieldMapCache[cacheKey] = api<Array<{ id: number; key: string; name: string }>>(
+    `/entries/fields?kpi_id=${kpiId}&organization_id=${organizationId}`,
+    { token }
+  )
+    .then((fields) => {
+      if (Array.isArray(fields) && fields.length) return build(fields);
+      return api<Array<{ id: number; key: string; name: string }>>(`/fields?kpi_id=${kpiId}&organization_id=${organizationId}`, { token }).then(build);
     })
     .catch(() => ({ idByKey: {}, keyById: {}, nameByKey: {} }));
   return _kpiFieldMapCache[cacheKey];
@@ -492,6 +529,9 @@ export function WidgetRenderer({
   }
   if (widget.type === "kpi_bar_chart") {
     return <KpiBarChartWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+  }
+  if (widget.type === "kpi_trend") {
+    return <KpiTrendWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
   }
   if (widget.type === "kpi_card_single_value") {
     return <KpiCardSingleValueWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
@@ -1644,6 +1684,767 @@ function KpiBarChartWidget({
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
       <KpiBarChartWidgetInner widget={widget} organizationId={organizationId} />
     </WidgetSettingsShell>
+  );
+}
+
+function yearRange(start: number, end: number): number[] {
+  const s = Number.isFinite(start) ? Math.trunc(start) : end;
+  const e = Number.isFinite(end) ? Math.trunc(end) : start;
+  const lo = Math.min(s, e);
+  const hi = Math.max(s, e);
+  const out: number[] = [];
+  for (let y = hi; y >= lo; y--) out.push(y);
+  return out;
+}
+
+function KpiTrendWidget({
+  widget,
+  organizationId,
+  designActions,
+}: {
+  widget: Extract<Widget, { type: "kpi_trend" }>;
+  organizationId: number;
+  designActions?: WidgetDesignMenuActions;
+}) {
+  return (
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
+      <KpiTrendWidgetInner widget={widget} organizationId={organizationId} />
+    </WidgetSettingsShell>
+  );
+}
+
+function KpiTrendWidgetInner({
+  widget,
+  organizationId,
+}: {
+  widget: Extract<Widget, { type: "kpi_trend" }>;
+  organizationId: number;
+}) {
+  const token = getAccessToken();
+  const setViewerMenu = useWidgetViewerMenuSetter();
+  const setHeaderAddon = useWidgetHeaderAddonSetter();
+  const mode = widget.mode || "multi_line_items";
+  const [viewerView, setViewerView] = useState<"bar" | "line">(widget.view || "bar");
+  const [selectedYears, setSelectedYears] = useState<number[]>(() => {
+    const y = Math.max(widget.start_year, widget.end_year);
+    const raw = Array.isArray(widget.default_years) ? widget.default_years : [];
+    const uniq = Array.from(new Set(raw.map((n) => Math.trunc(Number(n))).filter((n) => Number.isFinite(n))));
+    const within = uniq.filter((yy) => yy >= Math.min(widget.start_year, widget.end_year) && yy <= Math.max(widget.start_year, widget.end_year));
+    return within.length ? within.sort((a, b) => b - a) : [y];
+  });
+  const [yearOptions, setYearOptions] = useState<number[]>([]);
+  const [filterValues, setFilterValues] = useState<string[]>([]);
+  const [selectedFilterValues, setSelectedFilterValues] = useState<string[]>([]);
+  const [filterSearch, setFilterSearch] = useState("");
+  const [filterEditing, setFilterEditing] = useState(false);
+  const filterInputRef = useRef<HTMLInputElement>(null);
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [seriesByYear, setSeriesByYear] = useState<Record<number, Array<{ label: string; value: number }>>>({});
+  const [fieldBarsByYear, setFieldBarsByYear] = useState<Record<number, Array<{ key: string; label: string; value: number | null }>>>({});
+
+  useEffect(() => {
+    setViewerView(widget.view || "bar");
+    const y = Math.max(widget.start_year, widget.end_year);
+    const raw = Array.isArray(widget.default_years) ? widget.default_years : [];
+    const uniq = Array.from(new Set(raw.map((n) => Math.trunc(Number(n))).filter((n) => Number.isFinite(n))));
+    const within = uniq.filter((yy) => yy >= Math.min(widget.start_year, widget.end_year) && yy <= Math.max(widget.start_year, widget.end_year));
+    setSelectedYears(within.length ? within.sort((a, b) => b - a) : [y]);
+    setSelectedFilterValues([]);
+    setFilterSearch("");
+    setFilterEditing(false);
+  }, [widget.id, widget.view, widget.mode, widget.start_year, widget.end_year, JSON.stringify(widget.default_years ?? [])]);
+
+  useEffect(() => {
+    const opts = yearRange(widget.start_year, widget.end_year);
+    setYearOptions(opts);
+    setSelectedYears((prev) => {
+      const uniq = Array.from(new Set(prev.filter((y) => opts.includes(y))));
+      if (uniq.length) return uniq.sort((a, b) => b - a);
+      const fallback = Math.max(widget.start_year, widget.end_year);
+      return opts.includes(fallback) ? [fallback] : (opts.length ? [opts[0]] : []);
+    });
+  }, [widget.start_year, widget.end_year, widget.id]);
+
+  useEffect(() => {
+    if (!token) return;
+    if (selectedYears.length === 0) return;
+    setLoading(true);
+    setError(null);
+    Promise.all([getKpiFieldMap(token, organizationId, widget.kpi_id), Promise.all(selectedYears.map((y) => fetchEntryForPeriod(token, organizationId, widget.kpi_id, y, widget.period_key)))])
+      .then(([map, entries]) => {
+        const years = [...selectedYears].sort((a, b) => b - a);
+        const entryByYear = new Map<number, any>();
+        years.forEach((y, idx) => entryByYear.set(y, entries[idx]));
+
+        if (mode === "multi_line_items") {
+          const sourceKey = widget.source_field_key || "";
+          const groupBy = widget.group_by_sub_field_key || "";
+          const agg = widget.agg || "count_rows";
+          const valueKey = widget.value_sub_field_key;
+          const filterKey = widget.filter_sub_field_key || "";
+          const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
+          if (!sourceId || !groupBy) {
+            setSeriesByYear({});
+            setFilterValues([]);
+            setSelectedFilterValues([]);
+            setFieldBarsByYear({});
+            return;
+          }
+
+          const allItems: any[] = [];
+          const rawItemsByYear = new Map<number, any[]>();
+          years.forEach((y) => {
+            const entry = entryByYear.get(y);
+            const raw = rawFieldFromEntry(entry, sourceId);
+            const items = Array.isArray(raw) ? raw : [];
+            rawItemsByYear.set(y, items);
+            allItems.push(...items);
+          });
+
+          if (filterKey) {
+            const uniq = Array.from(new Set(allItems.map((r: any) => safeKey(r?.[filterKey])).filter((v) => v && v !== "(empty)"))).sort((a, b) => a.localeCompare(b));
+            setFilterValues(uniq);
+            setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
+          } else {
+            setFilterValues([]);
+            setSelectedFilterValues([]);
+          }
+
+          const byYear: Record<number, Array<{ label: string; value: number }>> = {};
+          years.forEach((y) => {
+            const items = rawItemsByYear.get(y) ?? [];
+            const filtered =
+              filterKey && selectedFilterValues.length > 0 ? items.filter((r: any) => selectedFilterValues.includes(safeKey(r?.[filterKey]))) : items;
+            byYear[y] = aggregateMultiLine(filtered, { groupByKey: groupBy, agg, valueKey });
+          });
+          setSeriesByYear(byYear);
+          setFieldBarsByYear({});
+          return;
+        }
+
+        const keys = widget.field_keys || [];
+        const outByYear: Record<number, Array<{ key: string; label: string; value: number | null }>> = {};
+        selectedYears.forEach((y) => {
+          const entry = entryByYear.get(y);
+          outByYear[y] = keys.map((key) => {
+            const fid = map.idByKey[key];
+            return { key, label: map.nameByKey[key] ?? key, value: fid ? toNumeric(rawFieldFromEntry(entry, fid)) : null };
+          });
+        });
+        setFieldBarsByYear(outByYear);
+        setSeriesByYear({});
+        setFilterValues([]);
+        setSelectedFilterValues([]);
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load trend data"))
+      .finally(() => setLoading(false));
+  }, [
+    token,
+    organizationId,
+    widget.kpi_id,
+    widget.period_key,
+    widget.id,
+    widget.mode,
+    widget.source_field_key,
+    widget.group_by_sub_field_key,
+    widget.agg,
+    widget.value_sub_field_key,
+    widget.filter_sub_field_key,
+    JSON.stringify(widget.field_keys || []),
+    JSON.stringify(selectedYears),
+    JSON.stringify(selectedFilterValues),
+  ]);
+
+  const toggleYear = (y: number) => {
+    setSelectedYears((prev) => {
+      const next = prev.includes(y) ? prev.filter((x) => x !== y) : [...prev, y];
+      const uniq = Array.from(new Set(next)).filter((x) => yearOptions.includes(x));
+      return uniq.sort((a, b) => b - a);
+    });
+  };
+
+  const shownFilterValues = useMemo(() => {
+    if (!filterEditing) return [];
+    const q = filterSearch.trim().toLowerCase();
+    return filterValues
+      .filter((v) => !selectedFilterValues.includes(v))
+      .filter((v) => (q ? v.toLowerCase().includes(q) : true))
+      .slice(0, 50);
+  }, [filterValues, selectedFilterValues, filterSearch, filterEditing]);
+
+  const addTypedFilterValue = () => {
+    const raw = filterSearch.trim();
+    if (!raw) return;
+    const match = filterValues.find((v) => v.toLowerCase() === raw.toLowerCase());
+    const toAdd = match ?? shownFilterValues[0];
+    if (!toAdd) return;
+    setSelectedFilterValues((prev) => (prev.includes(toAdd) ? prev : [...prev, toAdd]));
+    setFilterSearch("");
+  };
+
+  useEffect(() => {
+    if (!setHeaderAddon) return;
+    if (loading || error) {
+      setHeaderAddon(null);
+      return;
+    }
+
+    const yearsLabel =
+      selectedYears.length === 0 ? "Select years" : selectedYears.length === 1 ? `${selectedYears[0]}` : `${selectedYears.length} years`;
+    const pill = (
+      <div
+        style={{
+          height: 36,
+          padding: "0 0.65rem",
+          borderRadius: 999,
+          border: "1px solid var(--border)",
+          background: "var(--surface)",
+          color: "var(--muted)",
+          fontSize: "0.85rem",
+          display: "inline-flex",
+          alignItems: "center",
+        }}
+        title="Selected years"
+      >
+        Years: {yearsLabel}
+      </div>
+    );
+
+    if (mode !== "multi_line_items" || !widget.filter_sub_field_key) {
+      setHeaderAddon(<div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>{pill}</div>);
+      return;
+    }
+
+    const filterKey = widget.filter_sub_field_key || "";
+    const filterLabel = (widget.filter_label || "").trim() || filterKey;
+    const filterPillLabel =
+      selectedFilterValues.length === 0 ? `All ${filterLabel}` : `${filterLabel}: ${selectedFilterValues.length} selected`;
+
+    setHeaderAddon(
+      <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
+        {pill}
+        <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+          {!filterEditing ? (
+            <button
+              type="button"
+              onClick={() => {
+                setFilterEditing(true);
+                window.setTimeout(() => filterInputRef.current?.focus(), 0);
+              }}
+              style={{
+                height: 36,
+                maxWidth: 260,
+                padding: "0 0.65rem",
+                borderRadius: 999,
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                color: selectedFilterValues.length > 0 ? "var(--accent)" : "var(--muted)",
+                cursor: "pointer",
+                fontSize: "0.85rem",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.35rem",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+              title="Click to filter"
+            >
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{filterPillLabel}</span>
+            </button>
+          ) : (
+            <>
+              <div
+                style={{
+                  height: 36,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.35rem",
+                  padding: "0 0.45rem",
+                  borderRadius: 12,
+                  border: "1px solid var(--border)",
+                  background: "var(--surface)",
+                }}
+              >
+                <span style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{filterLabel}:</span>
+                <input
+                  ref={filterInputRef}
+                  value={filterSearch}
+                  onChange={(e) => setFilterSearch(e.target.value)}
+                  placeholder={filterValues.length === 0 ? "No values" : "Type to search"}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addTypedFilterValue();
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setFilterEditing(false);
+                      setFilterSearch("");
+                    }
+                  }}
+                  style={{
+                    width: 150,
+                    border: "none",
+                    outline: "none",
+                    background: "transparent",
+                    padding: 0,
+                    fontSize: "0.9rem",
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterEditing(false);
+                    setFilterSearch("");
+                  }}
+                  aria-label="Close filter"
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    cursor: "pointer",
+                    color: "var(--muted)",
+                    fontSize: "1.1rem",
+                    lineHeight: 1,
+                    padding: 0,
+                  }}
+                  title="Close"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 6px)",
+                  zIndex: 45,
+                  minWidth: 260,
+                  maxWidth: "min(90vw, 360px)",
+                  border: "1px solid var(--border)",
+                  background: "var(--surface)",
+                  borderRadius: 12,
+                  boxShadow: "0 10px 24px rgba(0,0,0,0.14)",
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ maxHeight: 240, overflow: "auto" }}>
+                  {shownFilterValues.length === 0 ? (
+                    <div style={{ padding: "0.55rem 0.7rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+                      {filterValues.length === 0 ? "No values." : "No matches."}
+                    </div>
+                  ) : (
+                    shownFilterValues.map((v) => (
+                      <button
+                        key={v}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setSelectedFilterValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
+                          setFilterSearch("");
+                        }}
+                        style={{
+                          width: "100%",
+                          textAlign: "left",
+                          border: "none",
+                          background: "transparent",
+                          color: "inherit",
+                          padding: "0.45rem 0.7rem",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                          fontSize: "0.9rem",
+                        }}
+                        title={v}
+                      >
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }, [
+    setHeaderAddon,
+    loading,
+    error,
+    widget.id,
+    mode,
+    widget.filter_sub_field_key,
+    widget.filter_label,
+    JSON.stringify(selectedYears),
+    filterEditing,
+    filterSearch,
+    JSON.stringify(filterValues),
+    JSON.stringify(selectedFilterValues),
+    JSON.stringify(shownFilterValues),
+  ]);
+
+  useEffect(() => {
+    if (!setViewerMenu) return;
+    if (loading || error) {
+      setViewerMenu(null);
+      return;
+    }
+
+    const viewToggle = (
+      <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 999, overflow: "hidden" }}>
+        <button
+          type="button"
+          onClick={() => setViewerView("bar")}
+          style={{
+            padding: "0.25rem 0.55rem",
+            border: "none",
+            background: viewerView === "bar" ? "rgba(79,70,229,0.10)" : "transparent",
+            color: viewerView === "bar" ? "var(--accent)" : "var(--text)",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+          }}
+          aria-pressed={viewerView === "bar"}
+        >
+          Bars
+        </button>
+        <button
+          type="button"
+          onClick={() => setViewerView("line")}
+          style={{
+            padding: "0.25rem 0.55rem",
+            border: "none",
+            borderLeft: "1px solid var(--border)",
+            background: viewerView === "line" ? "rgba(79,70,229,0.10)" : "transparent",
+            color: viewerView === "line" ? "var(--accent)" : "var(--text)",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+          }}
+          aria-pressed={viewerView === "line"}
+        >
+          Line
+        </button>
+      </div>
+    );
+
+    setViewerMenu(
+      <div style={{ display: "grid", gap: "0.75rem" }}>
+        <div>
+          <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 4 }}>View</div>
+          {viewToggle}
+        </div>
+        <div>
+          <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 6 }}>Years</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+            {yearOptions.map((y) => {
+              const active = selectedYears.includes(y);
+              return (
+                <button
+                  key={y}
+                  type="button"
+                  onClick={() => toggleYear(y)}
+                  style={{
+                    padding: "0.12rem 0.45rem",
+                    borderRadius: 999,
+                    border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
+                    background: active ? "rgba(79,70,229,0.10)" : "var(--surface)",
+                    color: active ? "var(--accent)" : "var(--text)",
+                    fontSize: "0.78rem",
+                    cursor: "pointer",
+                  }}
+                  aria-pressed={active}
+                >
+                  {y}
+                </button>
+              );
+            })}
+          </div>
+          {selectedYears.length === 0 && <div style={{ marginTop: 6, color: "var(--muted)", fontSize: "0.82rem" }}>Select at least one year.</div>}
+        </div>
+      </div>
+    );
+    return () => setViewerMenu(null);
+  }, [setViewerMenu, loading, error, viewerView, JSON.stringify(yearOptions), JSON.stringify(selectedYears)]);
+
+  const years = useMemo(() => [...selectedYears].sort((a, b) => a - b), [JSON.stringify(selectedYears)]);
+  const yearColors = useMemo(() => {
+    const pal = ["var(--accent)", "rgba(79,70,229,0.65)", "rgba(79,70,229,0.45)", "rgba(79,70,229,0.3)", "rgba(16,185,129,0.65)", "rgba(245,158,11,0.7)"];
+    const out: Record<number, string> = {};
+    years.forEach((y, i) => (out[y] = pal[i % pal.length]));
+    return out;
+  }, [JSON.stringify(years)]);
+
+  const categories = useMemo(() => {
+    if (mode !== "multi_line_items") return [];
+    const union = new Map<string, number>();
+    years.forEach((y) => {
+      (seriesByYear[y] || []).forEach((g) => {
+        union.set(g.label, Math.max(union.get(g.label) ?? 0, g.value));
+      });
+    });
+    const latest = years.length ? years[years.length - 1] : null;
+    const latestMap = new Map<string, number>((latest != null ? (seriesByYear[latest] || []) : []).map((g) => [g.label, g.value]));
+    return Array.from(union.keys())
+      .sort((a, b) => (latestMap.get(b) ?? 0) - (latestMap.get(a) ?? 0) || (union.get(b) ?? 0) - (union.get(a) ?? 0) || a.localeCompare(b))
+      .slice(0, 12);
+  }, [mode, JSON.stringify(years), JSON.stringify(seriesByYear)]);
+
+  return (
+    <>
+      {loading ? (
+        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+      ) : error ? (
+        <p className="form-error">{error}</p>
+      ) : selectedYears.length === 0 ? (
+        <p style={{ color: "var(--muted)", margin: 0 }}>Select one or more years to view the trend.</p>
+      ) : mode === "multi_line_items" ? (
+        <div style={{ display: "grid", gap: "0.75rem" }}>
+          {widget.filter_sub_field_key && selectedFilterValues.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+              {selectedFilterValues.map((v) => (
+                <span
+                  key={v}
+                  style={{
+                    display: "inline-flex",
+                    gap: "0.25rem",
+                    alignItems: "center",
+                    padding: "0.1rem 0.4rem",
+                    borderRadius: 999,
+                    border: "1px solid var(--border)",
+                    background: "var(--bg)",
+                    color: "var(--text)",
+                    fontSize: "0.78rem",
+                    maxWidth: 220,
+                  }}
+                  title={v}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedFilterValues((prev) => prev.filter((x) => x !== v))}
+                    style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", fontSize: "0.9rem", lineHeight: 1, padding: 0 }}
+                    aria-label={`Remove ${v}`}
+                    title="Remove"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {categories.length === 0 ? (
+            <p style={{ color: "var(--muted)", margin: 0 }}>No grouped data available.</p>
+          ) : viewerView === "bar" ? (
+            <div style={{ width: "100%", maxWidth: 840 }}>
+              <svg viewBox="0 0 720 320" role="img" aria-label="Trend bars" style={{ width: "100%", height: "auto", display: "block" }}>
+                <rect x="0" y="0" width="720" height="320" fill="var(--bg)" rx="6" />
+                {(() => {
+                  const W = 720;
+                  const H = 320;
+                  const left = 44;
+                  const right = 16;
+                  const top = 18;
+                  const bottom = 86;
+                  const innerW = W - left - right;
+                  const innerH = H - top - bottom;
+                  const perCat = years.length;
+                  const catGap = 10;
+                  const barGap = 3;
+                  const catW = categories.length > 0 ? Math.max(28, (innerW - catGap * (categories.length - 1)) / categories.length) : 28;
+                  const barW = perCat > 0 ? Math.max(4, (catW - barGap * (perCat - 1)) / perCat) : 4;
+
+                  let maxV = 1;
+                  categories.forEach((c) => {
+                    years.forEach((y) => {
+                      const v = (seriesByYear[y] || []).find((g) => g.label === c)?.value ?? 0;
+                      if (v > maxV) maxV = v;
+                    });
+                  });
+
+                  return (
+                    <>
+                      <text x={8} y={top + 12} fontSize="11" fill="var(--muted)">
+                        {maxV.toLocaleString()}
+                      </text>
+                      {categories.map((c, i) => {
+                        const catX = left + i * (catW + catGap);
+                        return (
+                          <g key={c}>
+                            {years.map((y, j) => {
+                              const v = (seriesByYear[y] || []).find((g) => g.label === c)?.value ?? 0;
+                              const h = maxV > 0 ? (v / maxV) * innerH : 0;
+                              const x = catX + j * (barW + barGap);
+                              const yy = top + innerH - h;
+                              return <rect key={`${c}:${y}`} x={x} y={yy} width={barW} height={h} fill={yearColors[y]} opacity={0.9} rx={2} />;
+                            })}
+                            <text x={catX + catW / 2} y={H - 56} fontSize="9" fill="var(--muted)" textAnchor="middle">
+                              {c.length > 14 ? `${c.slice(0, 12)}…` : c}
+                            </text>
+                          </g>
+                        );
+                      })}
+                      <g>
+                        {years.slice().reverse().map((y, i) => (
+                          <g key={y} transform={`translate(${left + i * 96}, ${H - 34})`}>
+                            <rect x="0" y="-9" width="10" height="10" fill={yearColors[y]} />
+                            <text x="14" y="0" fontSize="10" fill="var(--muted)">
+                              {y}
+                            </text>
+                          </g>
+                        ))}
+                      </g>
+                    </>
+                  );
+                })()}
+              </svg>
+            </div>
+          ) : (
+            <div style={{ width: "100%", maxWidth: 840 }}>
+              <svg viewBox="0 0 720 320" role="img" aria-label="Trend lines" style={{ width: "100%", height: "auto", display: "block" }}>
+                <rect x="0" y="0" width="720" height="320" fill="var(--bg)" rx="6" />
+                {(() => {
+                  const W = 720;
+                  const H = 320;
+                  const left = 52;
+                  const right = 16;
+                  const top = 18;
+                  const bottom = 62;
+                  const innerW = W - left - right;
+                  const innerH = H - top - bottom;
+                  const xStep = years.length > 1 ? innerW / (years.length - 1) : 0;
+
+                  const topCats = categories.slice(0, 6);
+                  const catColors = ["var(--accent)", "rgba(16,185,129,0.85)", "rgba(245,158,11,0.9)", "rgba(236,72,153,0.85)", "rgba(59,130,246,0.85)", "rgba(107,114,128,0.85)"];
+
+                  let maxV = 1;
+                  topCats.forEach((c) => {
+                    years.forEach((y) => {
+                      const v = (seriesByYear[y] || []).find((g) => g.label === c)?.value ?? 0;
+                      if (v > maxV) maxV = v;
+                    });
+                  });
+
+                  return (
+                    <>
+                      <text x={8} y={top + 12} fontSize="11" fill="var(--muted)">
+                        {maxV.toLocaleString()}
+                      </text>
+                      {years.map((y, i) => (
+                        <g key={y}>
+                          <line x1={left + i * xStep} y1={top} x2={left + i * xStep} y2={top + innerH} stroke="var(--border)" strokeWidth="1" opacity={0.6} />
+                          <text x={left + i * xStep} y={H - 16} fontSize="10" fill="var(--muted)" textAnchor="middle">
+                            {y}
+                          </text>
+                        </g>
+                      ))}
+                      {topCats.map((c, idx) => {
+                        const pts = years.map((y, i) => {
+                          const v = (seriesByYear[y] || []).find((g) => g.label === c)?.value ?? 0;
+                          const xx = left + i * xStep;
+                          const yy = top + innerH - (maxV > 0 ? (v / maxV) * innerH : 0);
+                          return { x: xx, y: yy, v };
+                        });
+                        const d = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+                        return (
+                          <g key={c}>
+                            <path d={d} fill="none" stroke={catColors[idx % catColors.length]} strokeWidth="2.5" />
+                            {pts.map((p, i) => (
+                              <circle key={`${c}:${i}`} cx={p.x} cy={p.y} r="3" fill={catColors[idx % catColors.length]} />
+                            ))}
+                          </g>
+                        );
+                      })}
+                      <g>
+                        {topCats.map((c, i) => (
+                          <g key={c} transform={`translate(${left + i * 110}, ${top + 12})`}>
+                            <rect x="0" y="-9" width="10" height="10" fill={["var(--accent)", "rgba(16,185,129,0.85)", "rgba(245,158,11,0.9)", "rgba(236,72,153,0.85)", "rgba(59,130,246,0.85)", "rgba(107,114,128,0.85)"][i % 6]} />
+                            <text x="14" y="0" fontSize="10" fill="var(--muted)">
+                              {c.length > 16 ? `${c.slice(0, 14)}…` : c}
+                            </text>
+                          </g>
+                        ))}
+                      </g>
+                    </>
+                  );
+                })()}
+              </svg>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: "0.75rem" }}>
+          <div style={{ width: "100%", maxWidth: 840 }}>
+            <svg viewBox="0 0 720 320" role="img" aria-label="Field trend" style={{ width: "100%", height: "auto", display: "block" }}>
+              <rect x="0" y="0" width="720" height="320" fill="var(--bg)" rx="6" />
+              {(() => {
+                const W = 720;
+                const H = 320;
+                const left = 44;
+                const right = 16;
+                const top = 18;
+                const bottom = 86;
+                const innerW = W - left - right;
+                const innerH = H - top - bottom;
+                const keys = (widget.field_keys || []).slice(0, 10);
+                const perCat = years.length;
+                const catGap = 10;
+                const barGap = 3;
+                const catW = keys.length > 0 ? Math.max(28, (innerW - catGap * (keys.length - 1)) / keys.length) : 28;
+                const barW = perCat > 0 ? Math.max(4, (catW - barGap * (perCat - 1)) / perCat) : 4;
+
+                let maxV = 1;
+                keys.forEach((k) => {
+                  years.forEach((y) => {
+                    const v = (fieldBarsByYear[y] || []).find((b) => b.key === k)?.value ?? 0;
+                    if (v > maxV) maxV = v;
+                  });
+                });
+
+                return (
+                  <>
+                    <text x={8} y={top + 12} fontSize="11" fill="var(--muted)">
+                      {maxV.toLocaleString()}
+                    </text>
+                    {keys.map((k, i) => {
+                      const catX = left + i * (catW + catGap);
+                      return (
+                        <g key={k}>
+                          {years.map((y, j) => {
+                            const v = (fieldBarsByYear[y] || []).find((b) => b.key === k)?.value ?? 0;
+                            const h = maxV > 0 ? (v / maxV) * innerH : 0;
+                            const x = catX + j * (barW + barGap);
+                            const yy = top + innerH - h;
+                            return <rect key={`${k}:${y}`} x={x} y={yy} width={barW} height={h} fill={yearColors[y]} opacity={0.9} rx={2} />;
+                          })}
+                          <text x={catX + catW / 2} y={H - 56} fontSize="9" fill="var(--muted)" textAnchor="middle">
+                            {k.length > 14 ? `${k.slice(0, 12)}…` : k}
+                          </text>
+                        </g>
+                      );
+                    })}
+                    <g>
+                      {years.slice().reverse().map((y, i) => (
+                        <g key={y} transform={`translate(${left + i * 96}, ${H - 34})`}>
+                          <rect x="0" y="-9" width="10" height="10" fill={yearColors[y]} />
+                          <text x="14" y="0" fontSize="10" fill="var(--muted)">
+                            {y}
+                          </text>
+                        </g>
+                      ))}
+                    </g>
+                  </>
+                );
+              })()}
+            </svg>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

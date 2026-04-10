@@ -45,6 +45,7 @@ export default function DashboardAssignPage() {
   const orgIdFromQuery = searchParams.get("organization_id");
 
   const [dashboard, setDashboard] = useState<DashboardRow | null>(null);
+  const [meRole, setMeRole] = useState<string | null>(null);
   const [orgUsers, setOrgUsers] = useState<UserRow[]>([]);
   const [assignments, setAssignments] = useState<AssignmentRow[]>([]);
   const [rightsByUserId, setRightsByUserId] = useState<Record<number, Rights>>({});
@@ -59,8 +60,13 @@ export default function DashboardAssignPage() {
     setLoading(true);
     setError(null);
     const query = orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : "";
-    Promise.all([api<DashboardRow>(`/dashboards/${id}${query}`, { token }), api<AssignmentRow[]>(`/dashboards/${id}/users${query}`, { token })])
-      .then(([d, a]) => {
+    Promise.all([
+      api<{ role: string }>("/auth/me", { token }).catch(() => null),
+      api<DashboardRow>(`/dashboards/${id}${query}`, { token }),
+      api<AssignmentRow[]>(`/dashboards/${id}/users${query}`, { token }),
+    ])
+      .then(([me, d, a]) => {
+        setMeRole(me?.role ?? null);
         setDashboard(d);
         setAssignments(a);
         return api<UserRow[]>(`/users?${qs({ organization_id: d.organization_id })}`, { token }).then((users) => {
@@ -76,6 +82,8 @@ export default function DashboardAssignPage() {
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
       .finally(() => setLoading(false));
   }, [id, token, orgIdFromQuery]);
+
+  const canGrantEdit = meRole === "SUPER_ADMIN";
 
   const filteredUsers = useMemo(() => {
     const q = userFilter.trim().toLowerCase();
@@ -104,11 +112,12 @@ export default function DashboardAssignPage() {
       for (const u of orgUsers) {
         const r = rightsByUserId[u.id] ?? { can_view: false, can_edit: false };
         const hadAssignment = assignments.some((a) => a.user_id === u.id);
-        if (r.can_view || r.can_edit) {
+        const effective = canGrantEdit ? r : { ...r, can_edit: false };
+        if (effective.can_view || effective.can_edit) {
           await api(`/dashboards/${id}/assign${base}`, {
             method: "POST",
             token,
-            body: JSON.stringify({ user_id: u.id, can_view: r.can_view, can_edit: r.can_edit }),
+            body: JSON.stringify({ user_id: u.id, can_view: effective.can_view, can_edit: effective.can_edit }),
           });
         } else if (hadAssignment) {
           await api(`/dashboards/${id}/users/${u.id}${base}`, { method: "DELETE", token });
@@ -137,7 +146,7 @@ export default function DashboardAssignPage() {
     <div style={{ padding: "0 1rem 1rem" }}>
       <h1 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>Assign users: {dashboard.name}</h1>
       <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
-        Set view and edit rights per user. Only users in this organization are listed. Save to apply changes.
+        Set view rights per user. Only users in this organization are listed. Save to apply changes.
       </p>
 
       <div className="card">
@@ -161,7 +170,7 @@ export default function DashboardAssignPage() {
               <tr style={{ borderBottom: "2px solid var(--border)", textAlign: "left" }}>
                 <th style={{ padding: "0.5rem 0.75rem" }}>User</th>
                 <th style={{ padding: "0.5rem 0.75rem" }}>View</th>
-                <th style={{ padding: "0.5rem 0.75rem" }}>Edit</th>
+                {canGrantEdit && <th style={{ padding: "0.5rem 0.75rem" }}>Edit</th>}
               </tr>
             </thead>
             <tbody>
@@ -179,14 +188,16 @@ export default function DashboardAssignPage() {
                         aria-label={`View for ${display}`}
                       />
                     </td>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>
-                      <input
-                        type="checkbox"
-                        checked={r.can_edit}
-                        onChange={(e) => setRights(u.id, { can_edit: e.target.checked })}
-                        aria-label={`Edit for ${display}`}
-                      />
-                    </td>
+                    {canGrantEdit && (
+                      <td style={{ padding: "0.5rem 0.75rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={r.can_edit}
+                          onChange={(e) => setRights(u.id, { can_edit: e.target.checked })}
+                          aria-label={`Edit for ${display}`}
+                        />
+                      </td>
+                    )}
                   </tr>
                 );
               })}

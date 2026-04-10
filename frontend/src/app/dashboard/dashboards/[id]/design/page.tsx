@@ -20,11 +20,12 @@ type WidgetType =
   | "kpi_table"
   | "kpi_line_chart"
   | "kpi_bar_chart"
+  | "kpi_trend"
   | "kpi_card_single_value"
   | "kpi_multi_line_table";
 type EditTab = "basics" | "options";
 
-const SUPER_ADMIN_WIDGET_TYPES: WidgetType[] = ["kpi_card_single_value", "kpi_bar_chart", "kpi_multi_line_table"];
+const SUPER_ADMIN_WIDGET_TYPES: WidgetType[] = ["kpi_card_single_value", "kpi_bar_chart", "kpi_trend", "kpi_multi_line_table"];
 
 type Widget =
   | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean; col_span?: number }
@@ -72,6 +73,27 @@ type Widget =
       field_keys: string[];
       chart_type?: "bar" | "pie";
       mode?: "fields" | "multi_line_items";
+      source_field_key?: string;
+      agg?: "count_rows" | "sum" | "avg";
+      group_by_sub_field_key?: string;
+      value_sub_field_key?: string;
+      filter_sub_field_key?: string;
+      filter_label?: string;
+      full_width?: boolean;
+      col_span?: number;
+    }
+  | {
+      id: string;
+      type: "kpi_trend";
+      title?: string;
+      kpi_id: number;
+      period_key?: string | null;
+      start_year: number;
+      end_year: number;
+      view?: "bar" | "line";
+      default_years?: number[];
+      mode?: "fields" | "multi_line_items";
+      field_keys?: string[];
       source_field_key?: string;
       agg?: "count_rows" | "sum" | "avg";
       group_by_sub_field_key?: string;
@@ -290,6 +312,9 @@ export default function DashboardDesignPage() {
   const [addFieldKeys, setAddFieldKeys] = useState<string>("");
   const [addChartType, setAddChartType] = useState<"bar" | "pie">("bar");
   const [addChartMode, setAddChartMode] = useState<"fields" | "multi_line_items">("fields");
+  const [addTrendView, setAddTrendView] = useState<"bar" | "line">("bar");
+  const [addTrendMode, setAddTrendMode] = useState<"fields" | "multi_line_items">("multi_line_items");
+  const [addTrendDefaultYears, setAddTrendDefaultYears] = useState<number[]>([]);
   const [addMultiLineFieldKey, setAddMultiLineFieldKey] = useState<string>("");
   const [addAggFn, setAddAggFn] = useState<"count_rows" | "sum" | "avg">("count_rows");
   const [addGroupBySubFieldKey, setAddGroupBySubFieldKey] = useState<string>("");
@@ -351,6 +376,9 @@ export default function DashboardDesignPage() {
     setAddPeriodKey("");
     setAddChartType("bar");
     setAddChartMode("fields");
+    setAddTrendView("bar");
+    setAddTrendMode("multi_line_items");
+    setAddTrendDefaultYears([]);
     setAddMultiLineFieldKey("");
     setAddAggFn("count_rows");
     setAddGroupBySubFieldKey("");
@@ -406,8 +434,14 @@ export default function DashboardDesignPage() {
     if ("field_keys" in w && Array.isArray((w as any).field_keys)) setAddFieldKeys(((w as any).field_keys || []).join(", "));
     setAddChartType(((w as any).chart_type as any) || "bar");
     setAddChartMode((((w as any).mode as any) || "fields") as any);
+    setAddTrendView((((w as any).view as any) || "bar") as any);
+    setAddTrendMode((((w as any).mode as any) || "multi_line_items") as any);
+    setAddTrendDefaultYears(Array.isArray((w as any).default_years) ? (w as any).default_years.map((n: any) => Number(n)).filter((n: any) => Number.isFinite(n)) : []);
     setAddMultiLineFieldKey((w as any).source_field_key || "");
     if (w.type === "kpi_bar_chart") {
+      setAddAggFn((((w as any).agg as any) || "count_rows") as any);
+    }
+    if (w.type === "kpi_trend") {
       setAddAggFn((((w as any).agg as any) || "count_rows") as any);
     }
     setAddGroupBySubFieldKey((w as any).group_by_sub_field_key || "");
@@ -725,6 +759,76 @@ export default function DashboardDesignPage() {
                 .filter(Boolean),
             };
       applyWidgetUpsert(w as Widget);
+      return;
+    }
+    if (addType === "kpi_trend") {
+      const a = Math.min(addStartYear, addEndYear);
+      const b = Math.max(addStartYear, addEndYear);
+      if (b - a > 30) {
+        toast.error("Year range: max 31 years");
+        return;
+      }
+      const defaultYears = Array.from(new Set(addTrendDefaultYears.map((y) => Math.trunc(y)))).filter((y) => y >= a && y <= b);
+      if (addTrendMode === "fields") {
+        const keys = addFieldKeys
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean);
+        if (keys.length === 0) {
+          toast.error("Add at least one field key for Trend (fields mode)");
+          return;
+        }
+        const w: Widget = {
+          id: editingWidgetId ?? newId(),
+          type: "kpi_trend",
+          title,
+          kpi_id: addKpiId,
+          period_key,
+          start_year: a,
+          end_year: b,
+          view: addTrendView,
+          default_years: defaultYears.length ? defaultYears : undefined,
+          mode: "fields",
+          field_keys: keys,
+        };
+        applyWidgetUpsert(w);
+        return;
+      }
+      if (!addMultiLineFieldKey.trim()) {
+        toast.error("Select a multi-line items field");
+        return;
+      }
+      if (!addGroupBySubFieldKey.trim()) {
+        toast.error("Select a group-by sub-field");
+        return;
+      }
+      if (addFilterSubFieldKey.trim() && addFilterSubFieldKey.trim() === addGroupBySubFieldKey.trim()) {
+        toast.error("Filter column should be different from Group by");
+        return;
+      }
+      if ((addAggFn === "sum" || addAggFn === "avg") && !addValueSubFieldKey.trim()) {
+        toast.error("Select a numeric sub-field to aggregate");
+        return;
+      }
+      const w: Widget = {
+        id: editingWidgetId ?? newId(),
+        type: "kpi_trend",
+        title,
+        kpi_id: addKpiId,
+        period_key,
+        start_year: a,
+        end_year: b,
+        view: addTrendView,
+        default_years: defaultYears.length ? defaultYears : undefined,
+        mode: "multi_line_items",
+        source_field_key: addMultiLineFieldKey.trim(),
+        agg: addAggFn,
+        group_by_sub_field_key: addGroupBySubFieldKey.trim(),
+        value_sub_field_key: addAggFn === "count_rows" ? undefined : addValueSubFieldKey.trim(),
+        filter_sub_field_key: addFilterSubFieldKey.trim() || undefined,
+        filter_label: addFilterLabel.trim() || undefined,
+      };
+      applyWidgetUpsert(w);
       return;
     }
     if (addType === "kpi_card_single_value") {
@@ -1147,6 +1251,7 @@ export default function DashboardDesignPage() {
                         ) : null}
                         <option value="kpi_card_single_value">KPI card (single value)</option>
                         <option value="kpi_bar_chart">KPI chart (bar/pie)</option>
+                        <option value="kpi_trend">KPI trend</option>
                         <option value="kpi_multi_line_table">KPI multi-line table</option>
                       </select>
                     </div>
@@ -1184,7 +1289,7 @@ export default function DashboardDesignPage() {
                           </select>
                         </div>
 
-                        {addType === "kpi_line_chart" ? (
+                        {addType === "kpi_line_chart" || addType === "kpi_trend" ? (
                           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.6rem" }}>
                             <div style={{ display: "grid", gap: "0.25rem" }}>
                               <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Start year</label>
@@ -1317,7 +1422,93 @@ export default function DashboardDesignPage() {
                       </>
                     )}
 
+                    {addType === "kpi_trend" && (
+                      <>
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>View</label>
+                          <select
+                            value={addTrendView}
+                            onChange={(e) => setAddTrendView(e.target.value as any)}
+                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                          >
+                            <option value="bar">Bar (multi-year)</option>
+                            <option value="line">Line (trend)</option>
+                          </select>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Data</label>
+                          <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+                            <label style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                              <input type="radio" checked={addTrendMode === "multi_line_items"} onChange={() => setAddTrendMode("multi_line_items")} />
+                              Multi-line items
+                            </label>
+                            <label style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                              <input type="radio" checked={addTrendMode === "fields"} onChange={() => setAddTrendMode("fields")} />
+                              Fields
+                            </label>
+                          </div>
+                        </div>
+                        <div style={{ display: "grid", gap: "0.35rem" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Default years (viewer starts with these)</label>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                            {(() => {
+                              const a = Math.min(addStartYear, addEndYear);
+                              const b = Math.max(addStartYear, addEndYear);
+                              const years: number[] = [];
+                              for (let y = b; y >= a; y--) years.push(y);
+                              const setYear = (y: number) =>
+                                setAddTrendDefaultYears((prev) =>
+                                  prev.includes(y) ? prev.filter((x) => x !== y) : [...prev, y].sort((m, n) => n - m)
+                                );
+                              return years.map((y) => {
+                                const active = addTrendDefaultYears.includes(y);
+                                return (
+                                  <button
+                                    key={y}
+                                    type="button"
+                                    onClick={() => setYear(y)}
+                                    className="btn"
+                                    style={{
+                                      fontSize: "0.85rem",
+                                      padding: "0.2rem 0.55rem",
+                                      borderRadius: 999,
+                                      borderColor: active ? "var(--accent)" : undefined,
+                                      color: active ? "var(--accent)" : undefined,
+                                      background: active ? "rgba(79,70,229,0.08)" : undefined,
+                                    }}
+                                    aria-pressed={active}
+                                  >
+                                    {y}
+                                  </button>
+                                );
+                              });
+                            })()}
+                          </div>
+                          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                            <button type="button" className="btn" onClick={() => setAddTrendDefaultYears([])} style={{ fontSize: "0.85rem" }}>
+                              Clear
+                            </button>
+                            <div style={{ color: "var(--muted)", fontSize: "0.85rem", alignSelf: "center" }}>
+                              Leave empty to default to latest year.
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+
                     {addType === "kpi_bar_chart" && addChartMode === "fields" && (
+                      <div style={{ display: "grid", gap: "0.35rem" }}>
+                        <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Field keys</label>
+                        <input
+                          value={addFieldKeys}
+                          onChange={(e) => setAddFieldKeys(e.target.value)}
+                          style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                          placeholder="Comma-separated (required)"
+                        />
+                      </div>
+                    )}
+
+                    {addType === "kpi_trend" && addTrendMode === "fields" && (
                       <div style={{ display: "grid", gap: "0.35rem" }}>
                         <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Field keys</label>
                         <input
@@ -1816,8 +2007,104 @@ export default function DashboardDesignPage() {
                       </div>
                     )}
 
+                    {addType === "kpi_trend" && addTrendMode === "multi_line_items" && (
+                      <div style={{ display: "grid", gap: "0.75rem" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Source</label>
+                          <select
+                            value={addMultiLineFieldKey}
+                            onChange={(e) => setAddMultiLineFieldKey(e.target.value)}
+                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                          >
+                            <option value="">Select…</option>
+                            {addMultiLineFields.map((f) => (
+                              <option key={f.key} value={f.key}>
+                                {f.name} ({f.key})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Aggregate</label>
+                          <select
+                            value={addAggFn}
+                            onChange={(e) => setAddAggFn(e.target.value as any)}
+                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                            disabled={!addMultiLineFieldKey}
+                          >
+                            <option value="count_rows">Count rows</option>
+                            <option value="sum">Sum</option>
+                            <option value="avg">Average</option>
+                          </select>
+                        </div>
+                        {(addAggFn === "sum" || addAggFn === "avg") && (
+                          <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Value</label>
+                            <select
+                              value={addValueSubFieldKey}
+                              onChange={(e) => setAddValueSubFieldKey(e.target.value)}
+                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                            >
+                              <option value="">Select numeric…</option>
+                              {numericSubFields.map((sf) => (
+                                <option key={sf.key} value={sf.key}>
+                                  {sf.name} ({sf.key})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Group by</label>
+                          <select
+                            value={addGroupBySubFieldKey}
+                            onChange={(e) => setAddGroupBySubFieldKey(e.target.value)}
+                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                          >
+                            <option value="">Select…</option>
+                            {selectedMultiLineSubFields.map((sf) => (
+                              <option key={sf.key} value={sf.key}>
+                                {sf.name} ({sf.key})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Filter</label>
+                          <select
+                            value={addFilterSubFieldKey}
+                            onChange={(e) => {
+                              const next = e.target.value;
+                              setAddFilterSubFieldKey(next);
+                              if (!next) setAddFilterLabel("");
+                            }}
+                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                          >
+                            <option value="">None</option>
+                            {selectedMultiLineSubFields.map((sf) => (
+                              <option key={sf.key} value={sf.key}>
+                                {sf.name} ({sf.key})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {addFilterSubFieldKey.trim() && (
+                          <div style={{ display: "grid", gap: "0.35rem" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Filter button text</label>
+                            <input
+                              value={addFilterLabel}
+                              onChange={(e) => setAddFilterLabel(e.target.value)}
+                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              placeholder={`Optional (defaults to ${addFilterSubFieldKey})`}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {addType !== "kpi_table" &&
                       addType !== "kpi_bar_chart" &&
+                      addType !== "kpi_trend" &&
                       addType !== "kpi_multi_line_table" &&
                       addType !== "kpi_card_single_value" &&
                       addType !== "text" && (

@@ -397,8 +397,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         : "/dashboard/dashboards";
 
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
-    { href: "/dashboard/chat", label: "Chat with data", show: canUseChat(role) && (!isSuperAdmin || !!selectedOrgId) },
-    { href: dashboardsHref, label: "Dashboards", show: !isDataEntryOnlyUser },
+    { href: dashboardsHref, label: "Dashboards", show: true },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },
   ].filter((x) => x.show);
@@ -679,14 +678,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   >
                     Reports
                   </Link>
-                  {/* Legacy per-organization access page removed in favor of /dashboard/access */}
                   <Link
-                    href={`/dashboard/chat?organization_id=${selectedOrgId}`}
+                    href={dashboardsHref}
                     style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
                     onClick={() => setMenuOpen(false)}
                   >
-                    Chat with data
+                    Dashboards
                   </Link>
+                  {/* Legacy per-organization access page removed in favor of /dashboard/access */}
                   <Link
                     href={`/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage`}
                     style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
