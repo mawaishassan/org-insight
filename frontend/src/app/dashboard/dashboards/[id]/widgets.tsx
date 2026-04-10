@@ -4,12 +4,14 @@ import Link from "next/link";
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
-
 export type WidgetDesignMenuActions = {
   onEdit: () => void;
   onDelete: () => void;
   onToggleFullWidth: () => void;
   isFullWidth: boolean;
+  /** Current span when not full width (1–12). */
+  colSpan: number;
+  onSetColSpan: (span: number) => void;
 };
 
 const WidgetViewerMenuSetterContext = createContext<React.Dispatch<React.SetStateAction<React.ReactNode>> | null>(null);
@@ -24,9 +26,29 @@ function useWidgetHeaderAddonSetter() {
 }
 
 export type Widget =
-  | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean }
-  | { id: string; type: "kpi_single_value"; title?: string; kpi_id: number; year: number; period_key?: string | null; field_key: string; full_width?: boolean }
-  | { id: string; type: "kpi_table"; title?: string; kpi_id: number; year: number; period_key?: string | null; field_keys?: string[]; full_width?: boolean }
+  | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean; col_span?: number }
+  | {
+      id: string;
+      type: "kpi_single_value";
+      title?: string;
+      kpi_id: number;
+      year: number;
+      period_key?: string | null;
+      field_key: string;
+      full_width?: boolean;
+      col_span?: number;
+    }
+  | {
+      id: string;
+      type: "kpi_table";
+      title?: string;
+      kpi_id: number;
+      year: number;
+      period_key?: string | null;
+      field_keys?: string[];
+      full_width?: boolean;
+      col_span?: number;
+    }
   | {
       id: string;
       type: "kpi_line_chart";
@@ -37,6 +59,7 @@ export type Widget =
       end_year: number;
       period_key?: string | null;
       full_width?: boolean;
+      col_span?: number;
     }
   | {
       id: string;
@@ -57,6 +80,7 @@ export type Widget =
       /** Optional viewer-facing label for filter button */
       filter_label?: string;
       full_width?: boolean;
+      col_span?: number;
     }
   | {
       id: string;
@@ -87,6 +111,7 @@ export type Widget =
       bg_color?: string;
       fg_color?: string;
       full_width?: boolean;
+      col_span?: number;
     }
   | {
       id: string;
@@ -111,6 +136,7 @@ export type Widget =
         sub_field_keys: string[];
       };
       full_width?: boolean;
+      col_span?: number;
     };
 
 type KpiFieldMap = { idByKey: Record<string, number>; keyById: Record<number, string>; nameByKey: Record<string, string> };
@@ -156,7 +182,27 @@ async function getKpiFieldMap(token: string, organizationId: number, kpiId: numb
   return _kpiFieldMapCache[cacheKey];
 }
 
-function MenuRow({ children, onClick, danger }: { children: React.ReactNode; onClick: () => void; danger?: boolean }) {
+const DESIGN_COL_SPAN_OPTIONS: { span: number; label: string }[] = [
+  { span: 12, label: "Full row (12)" },
+  { span: 8, label: "⅔ row (8)" },
+  { span: 6, label: "Half (6)" },
+  { span: 4, label: "⅓ row (4)" },
+  { span: 3, label: "¼ row (3)" },
+  { span: 2, label: "⅙ row (2)" },
+  { span: 1, label: "1 column (1)" },
+];
+
+function MenuRow({
+  children,
+  onClick,
+  danger,
+  active,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  danger?: boolean;
+  active?: boolean;
+}) {
   return (
     <button
       type="button"
@@ -168,9 +214,10 @@ function MenuRow({ children, onClick, danger }: { children: React.ReactNode; onC
         textAlign: "left",
         padding: "0.5rem 0.75rem",
         border: "none",
-        background: "transparent",
+        background: active ? "var(--border, #e5e5e5)" : "transparent",
         fontSize: "0.9rem",
         cursor: "pointer",
+        fontWeight: active ? 600 : 400,
         color: danger ? "var(--danger, #c00)" : "var(--text)",
       }}
     >
@@ -299,6 +346,20 @@ function WidgetSettingsShell({
                     >
                       {designActions!.isFullWidth ? "Use half width" : "Use full width"}
                     </MenuRow>
+                    <div style={{ padding: "0.35rem 0.75rem 0.2rem", fontSize: "0.72rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                      Width in row (12 columns)
+                    </div>
+                    {DESIGN_COL_SPAN_OPTIONS.map(({ span, label }) => (
+                      <MenuRow
+                        key={span}
+                        active={designActions!.colSpan === span}
+                        onClick={() => {
+                          designActions!.onSetColSpan(span);
+                        }}
+                      >
+                        {label}
+                      </MenuRow>
+                    ))}
                     <MenuRow
                       danger
                       onClick={() => {
@@ -570,7 +631,7 @@ function KpiCardSingleValueWidget({
           const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
           const raw = sourceId ? rawFieldFromEntry(entry, sourceId) : null;
           const items = Array.isArray(raw) ? raw : [];
-          const agg = widget.agg || "count";
+          const agg = widget.agg ?? "sum";
           const n = aggregateSingleValue(items, { agg, valueKey: widget.value_sub_field_key });
           setValue(n == null ? "" : formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
           return;

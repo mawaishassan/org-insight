@@ -5,6 +5,7 @@ import { useParams, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer, type Widget } from "./widgets";
+import { DASHBOARD_GRID_COLUMNS, widgetGridColumnStyle } from "./layoutGrid";
 
 interface DashboardDetail {
   id: number;
@@ -71,9 +72,15 @@ export default function DashboardViewPage() {
           <p style={{ color: "var(--muted)", margin: 0 }}>This dashboard has no widgets yet.</p>
         </Card>
       ) : (
-        <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+        <div
+          style={{
+            display: "grid",
+            gap: "1rem",
+            gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+          }}
+        >
           {widgets.map((w) => (
-            <div key={w.id} style={{ gridColumn: (w as any).full_width ? "1 / -1" : undefined }}>
+            <div key={w.id} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
               <WidgetRenderer widget={w} organizationId={dashboard.organization_id} dashboardId={dashboard.id} />
             </div>
           ))}

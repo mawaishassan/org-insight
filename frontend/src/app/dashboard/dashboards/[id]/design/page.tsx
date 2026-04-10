@@ -6,6 +6,7 @@ import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer } from "../widgets";
+import { DASHBOARD_GRID_COLUMNS, effectiveColSpan, widgetGridColumnStyle } from "../layoutGrid";
 
 type WidgetType =
   | "text"
@@ -18,9 +19,29 @@ type WidgetType =
 type EditTab = "basics" | "options";
 
 type Widget =
-  | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean }
-  | { id: string; type: "kpi_single_value"; title?: string; kpi_id: number; year: number; period_key?: string | null; field_key: string; full_width?: boolean }
-  | { id: string; type: "kpi_table"; title?: string; kpi_id: number; year: number; period_key?: string | null; field_keys?: string[]; full_width?: boolean }
+  | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean; col_span?: number }
+  | {
+      id: string;
+      type: "kpi_single_value";
+      title?: string;
+      kpi_id: number;
+      year: number;
+      period_key?: string | null;
+      field_key: string;
+      full_width?: boolean;
+      col_span?: number;
+    }
+  | {
+      id: string;
+      type: "kpi_table";
+      title?: string;
+      kpi_id: number;
+      year: number;
+      period_key?: string | null;
+      field_keys?: string[];
+      full_width?: boolean;
+      col_span?: number;
+    }
   | {
       id: string;
       type: "kpi_line_chart";
@@ -31,6 +52,7 @@ type Widget =
       end_year: number;
       period_key?: string | null;
       full_width?: boolean;
+      col_span?: number;
     }
   | {
       id: string;
@@ -49,6 +71,7 @@ type Widget =
       filter_sub_field_key?: string;
       filter_label?: string;
       full_width?: boolean;
+      col_span?: number;
     }
   | {
       id: string;
@@ -79,6 +102,7 @@ type Widget =
       bg_color?: string;
       fg_color?: string;
       full_width?: boolean;
+      col_span?: number;
     }
   | {
       id: string;
@@ -97,6 +121,7 @@ type Widget =
         sub_field_keys: string[];
       };
       full_width?: boolean;
+      col_span?: number;
     };
 
 interface DashboardDetail {
@@ -127,8 +152,25 @@ function ensureLayout(layout: any): { widgets: Widget[] } {
   return { widgets: [] };
 }
 
+function layoutFieldsForSave(
+  fullWidth: boolean,
+  widgetId: string,
+  widgets: Widget[]
+): { full_width: boolean; col_span?: number } {
+  if (fullWidth) return { full_width: true, col_span: undefined };
+  const prev = widgets.find((x) => x.id === widgetId);
+  return { full_width: false, col_span: (prev as { col_span?: number })?.col_span ?? 6 };
+}
+
 function newId() {
   return `w_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+}
+
+type KpiCardAgg = "sum" | "avg" | "count" | "min" | "max";
+
+function normalizeKpiCardAgg(raw: unknown): KpiCardAgg {
+  if (raw === "sum" || raw === "avg" || raw === "count" || raw === "min" || raw === "max") return raw;
+  return "sum";
 }
 
 export default function DashboardDesignPage() {
@@ -147,6 +189,7 @@ export default function DashboardDesignPage() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [draggingWidgetId, setDraggingWidgetId] = useState<string | null>(null);
 
   const [widgetModalOpen, setWidgetModalOpen] = useState(false);
   const [editingWidgetId, setEditingWidgetId] = useState<string | null>(null);
@@ -171,6 +214,7 @@ export default function DashboardDesignPage() {
   const [addFilterSubFieldKey, setAddFilterSubFieldKey] = useState<string>("");
   const [addFilterLabel, setAddFilterLabel] = useState<string>("");
   const [addCardSourceMode, setAddCardSourceMode] = useState<"field" | "multi_line_agg" | "static">("field");
+  const [addCardAgg, setAddCardAgg] = useState<KpiCardAgg>("sum");
   const [addCardStaticValue, setAddCardStaticValue] = useState<string>("");
   const [addCardSubtitle, setAddCardSubtitle] = useState<string>("");
   const [addCardPrefix, setAddCardPrefix] = useState<string>("");
@@ -213,6 +257,7 @@ export default function DashboardDesignPage() {
     setAddFilterSubFieldKey("");
     setAddFilterLabel("");
     setAddCardSourceMode("field");
+    setAddCardAgg("sum");
     setAddCardStaticValue("");
     setAddCardSubtitle("");
     setAddCardPrefix("");
@@ -252,7 +297,9 @@ export default function DashboardDesignPage() {
     setAddChartType(((w as any).chart_type as any) || "bar");
     setAddChartMode((((w as any).mode as any) || "fields") as any);
     setAddMultiLineFieldKey((w as any).source_field_key || "");
-    setAddAggFn((((w as any).agg as any) || "count_rows") as any);
+    if (w.type === "kpi_bar_chart") {
+      setAddAggFn((((w as any).agg as any) || "count_rows") as any);
+    }
     setAddGroupBySubFieldKey((w as any).group_by_sub_field_key || "");
     setAddValueSubFieldKey((w as any).value_sub_field_key || "");
     setAddFilterSubFieldKey((w as any).filter_sub_field_key || "");
@@ -272,7 +319,7 @@ export default function DashboardDesignPage() {
       setAddCardFgColor((w as any).fg_color || "");
       setAddFieldKey((w as any).field_key || "");
       setAddMultiLineFieldKey((w as any).source_field_key || "");
-      setAddAggFn((w as any).agg || "count_rows");
+      setAddCardAgg(normalizeKpiCardAgg((w as any).agg));
       setAddValueSubFieldKey((w as any).value_sub_field_key || "");
     }
     if (w.type === "kpi_multi_line_table") {
@@ -408,7 +455,9 @@ export default function DashboardDesignPage() {
   };
 
   const applyWidgetUpsert = (w: Widget) => {
-    const nextWidgets = editingWidgetId ? widgets.map((x) => (x.id === editingWidgetId ? w : x)) : [...widgets, w];
+    const layout = layoutFieldsForSave(fullWidth, w.id, widgets);
+    const merged = { ...w, ...layout } as Widget;
+    const nextWidgets = editingWidgetId ? widgets.map((x) => (x.id === editingWidgetId ? merged : x)) : [...widgets, merged];
     setWidgets(nextWidgets);
     toast.success(editingWidgetId ? "Widget updated" : "Widget added");
     setWidgetModalOpen(false);
@@ -419,7 +468,7 @@ export default function DashboardDesignPage() {
   const upsertWidget = () => {
     const title = addTitle.trim() || undefined;
     if (addType === "text") {
-      const w: Widget = { id: editingWidgetId ?? newId(), type: "text", title, text: addText, full_width: fullWidth };
+      const w: Widget = { id: editingWidgetId ?? newId(), type: "text", title, text: addText };
       applyWidgetUpsert(w);
       return;
     }
@@ -435,7 +484,6 @@ export default function DashboardDesignPage() {
         year: addYear,
         period_key,
         field_key: addFieldKey.trim(),
-        full_width: fullWidth,
       };
       applyWidgetUpsert(w);
       return;
@@ -453,7 +501,6 @@ export default function DashboardDesignPage() {
         year: addYear,
         period_key,
         field_keys: keys.length ? keys : undefined,
-        full_width: fullWidth,
       };
       applyWidgetUpsert(w);
       return;
@@ -475,7 +522,6 @@ export default function DashboardDesignPage() {
         start_year: a,
         end_year: b,
         period_key,
-        full_width: fullWidth,
       };
       applyWidgetUpsert(w);
       return;
@@ -526,7 +572,6 @@ export default function DashboardDesignPage() {
               value_sub_field_key: addAggFn === "count_rows" ? undefined : addValueSubFieldKey.trim(),
               filter_sub_field_key: addFilterSubFieldKey.trim() || undefined,
               filter_label: addFilterLabel.trim() || undefined,
-              full_width: fullWidth,
             }
           : {
               id: editingWidgetId ?? newId(),
@@ -541,12 +586,21 @@ export default function DashboardDesignPage() {
                 .split(",")
                 .map((x) => x.trim())
                 .filter(Boolean),
-              full_width: fullWidth,
             };
       applyWidgetUpsert(w as Widget);
       return;
     }
     if (addType === "kpi_card_single_value") {
+      if (addCardSourceMode === "multi_line_agg") {
+        if (!addMultiLineFieldKey.trim()) {
+          toast.error("Select a multi-line items field");
+          return;
+        }
+        if (addCardAgg !== "count" && !addValueSubFieldKey.trim()) {
+          toast.error("Select a numeric sub-field for Sum, Average, Min, or Max");
+          return;
+        }
+      }
       const w: Widget = {
         id: editingWidgetId ?? newId(),
         type: "kpi_card_single_value",
@@ -557,8 +611,11 @@ export default function DashboardDesignPage() {
         source_mode: addCardSourceMode,
         field_key: addCardSourceMode === "field" ? addFieldKey.trim() : undefined,
         source_field_key: addCardSourceMode === "multi_line_agg" ? addMultiLineFieldKey.trim() : undefined,
-        agg: addCardSourceMode === "multi_line_agg" ? ("sum" as any) : undefined,
-        value_sub_field_key: addCardSourceMode === "multi_line_agg" ? addValueSubFieldKey.trim() || undefined : undefined,
+        agg: addCardSourceMode === "multi_line_agg" ? addCardAgg : undefined,
+        value_sub_field_key:
+          addCardSourceMode === "multi_line_agg" && addCardAgg !== "count"
+            ? addValueSubFieldKey.trim() || undefined
+            : undefined,
         static_value: addCardSourceMode === "static" ? (addCardStaticValue.trim() || "") : undefined,
         subtitle: addCardSubtitle.trim() || undefined,
         prefix: addCardPrefix || undefined,
@@ -570,7 +627,6 @@ export default function DashboardDesignPage() {
         allow_custom_colors: addCardAllowCustomColors,
         bg_color: addCardAllowCustomColors ? addCardBgColor.trim() || undefined : undefined,
         fg_color: addCardAllowCustomColors ? addCardFgColor.trim() || undefined : undefined,
-        full_width: fullWidth,
       } as any;
       applyWidgetUpsert(w);
       return;
@@ -617,7 +673,6 @@ export default function DashboardDesignPage() {
         source_field_key: addMultiLineTableFieldKey.trim(),
         sub_field_keys: subKeys,
         join,
-        full_width: fullWidth,
       };
       applyWidgetUpsert(w);
       return;
@@ -634,8 +689,42 @@ export default function DashboardDesignPage() {
 
   const toggleWidgetFullWidth = (wid: string) => {
     setWidgets((prev) =>
-      prev.map((w) => (w.id === wid ? ({ ...w, full_width: !(w as any).full_width } as any) : w))
+      prev.map((w) => {
+        if (w.id !== wid) return w;
+        const nextFull = !(w as { full_width?: boolean }).full_width;
+        if (nextFull) return { ...w, full_width: true, col_span: undefined } as Widget;
+        return { ...w, full_width: false, col_span: (w as { col_span?: number }).col_span ?? 6 } as Widget;
+      })
     );
+  };
+
+  const setWidgetColSpan = (wid: string, span: number) => {
+    const s = Math.max(1, Math.min(DASHBOARD_GRID_COLUMNS, Math.round(span)));
+    setWidgets((prev) => {
+      const next = prev.map((w) =>
+        w.id !== wid
+          ? w
+          : s >= DASHBOARD_GRID_COLUMNS
+            ? ({ ...w, full_width: true, col_span: undefined } as Widget)
+            : ({ ...w, full_width: false, col_span: s } as Widget)
+      );
+      void persistWidgets(next);
+      return next;
+    });
+  };
+
+  const reorderWidgets = (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    setWidgets((prev) => {
+      const others = prev.filter((w) => w.id !== fromId);
+      const insertAt = others.findIndex((w) => w.id === toId);
+      if (insertAt < 0) return prev;
+      const item = prev.find((w) => w.id === fromId);
+      if (!item) return prev;
+      const next = [...others.slice(0, insertAt), item, ...others.slice(insertAt)];
+      void persistWidgets(next);
+      return next;
+    });
   };
 
   if (loading) return <p>Loading…</p>;
@@ -648,7 +737,7 @@ export default function DashboardDesignPage() {
         <div>
           <h1 style={{ marginBottom: "0.25rem", fontSize: "1.5rem" }}>Design: {dashboard.name}</h1>
           <p style={{ color: "var(--muted)", marginTop: 0, marginBottom: 0 }}>
-            This page renders the dashboard exactly as users will see it. Use the inline controls on widgets to edit the layout.
+            This page matches the live dashboard. Drag ⋮⋮ to reorder widgets; use the gear menu to set width (12-column row) or full row. Save layout if auto-save did not run.
           </p>
         </div>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
@@ -667,26 +756,94 @@ export default function DashboardDesignPage() {
             <p style={{ color: "var(--muted)", margin: 0 }}>No widgets yet. Click “Add widget”.</p>
           </div>
         ) : (
-          <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
-            {widgets.map((w) => (
-              <div key={w.id} style={{ gridColumn: (w as any).full_width ? "1 / -1" : undefined }}>
-                <WidgetRenderer
-                  widget={w as any}
-                  organizationId={dashboard.organization_id}
-                  dashboardId={dashboard.id}
-                  designActions={
-                    userRole === "SUPER_ADMIN"
-                      ? {
-                          onEdit: () => openEditWidget(w),
-                          onDelete: () => removeWidget(w.id),
-                          onToggleFullWidth: () => toggleWidgetFullWidth(w.id),
-                          isFullWidth: !!(w as any).full_width,
+          <div
+            style={{
+              display: "grid",
+              gap: "1rem",
+              gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+            }}
+          >
+            {widgets.map((w) => {
+              const canDesign = userRole === "SUPER_ADMIN";
+              return (
+                <div
+                  key={w.id}
+                  style={{
+                    position: "relative",
+                    paddingLeft: canDesign ? 28 : undefined,
+                    ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
+                    opacity: draggingWidgetId === w.id ? 0.55 : 1,
+                  }}
+                  onDragOver={
+                    canDesign
+                      ? (e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = "move";
                         }
                       : undefined
                   }
-                />
-              </div>
-            ))}
+                  onDrop={
+                    canDesign
+                      ? (e) => {
+                          e.preventDefault();
+                          const from = e.dataTransfer.getData("text/plain");
+                          if (from) reorderWidgets(from, w.id);
+                        }
+                      : undefined
+                  }
+                >
+                  {canDesign ? (
+                    <div
+                      draggable
+                      onDragStart={(e) => {
+                        e.stopPropagation();
+                        e.dataTransfer.setData("text/plain", w.id);
+                        e.dataTransfer.effectAllowed = "move";
+                        setDraggingWidgetId(w.id);
+                      }}
+                      onDragEnd={() => setDraggingWidgetId(null)}
+                      title="Drag to reorder"
+                      role="button"
+                      aria-label="Drag to reorder widget"
+                      style={{
+                        position: "absolute",
+                        top: 6,
+                        left: 6,
+                        zIndex: 5,
+                        cursor: "grab",
+                        padding: "4px 6px",
+                        lineHeight: 1,
+                        fontSize: "14px",
+                        color: "var(--muted)",
+                        borderRadius: 6,
+                        background: "var(--surface)",
+                        border: "1px solid var(--border)",
+                        userSelect: "none",
+                      }}
+                    >
+                      ⋮⋮
+                    </div>
+                  ) : null}
+                  <WidgetRenderer
+                    widget={w as any}
+                    organizationId={dashboard.organization_id}
+                    dashboardId={dashboard.id}
+                    designActions={
+                      canDesign
+                        ? {
+                            onEdit: () => openEditWidget(w),
+                            onDelete: () => removeWidget(w.id),
+                            onToggleFullWidth: () => toggleWidgetFullWidth(w.id),
+                            isFullWidth: !!(w as { full_width?: boolean }).full_width,
+                            colSpan: effectiveColSpan(w as { full_width?: boolean; col_span?: number }),
+                            onSetColSpan: (span) => setWidgetColSpan(w.id, span),
+                          }
+                        : undefined
+                    }
+                  />
+                </div>
+              );
+            })}
           </div>
         ))}
 
@@ -1264,8 +1421,29 @@ export default function DashboardDesignPage() {
                               </select>
                             </div>
                             <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
-                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Numeric sub-field</label>
-                              <select value={addValueSubFieldKey} onChange={(e) => setAddValueSubFieldKey(e.target.value)} style={{ padding: "0.35rem 0.45rem" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Aggregation</label>
+                              <select
+                                value={addCardAgg}
+                                onChange={(e) => setAddCardAgg(e.target.value as KpiCardAgg)}
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              >
+                                <option value="count">Count rows</option>
+                                <option value="sum">Sum</option>
+                                <option value="avg">Average</option>
+                                <option value="min">Minimum</option>
+                                <option value="max">Maximum</option>
+                              </select>
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>
+                                {addCardAgg === "count" ? "Sub-field (optional)" : "Numeric sub-field"}
+                              </label>
+                              <select
+                                value={addValueSubFieldKey}
+                                onChange={(e) => setAddValueSubFieldKey(e.target.value)}
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                disabled={addCardAgg === "count"}
+                              >
                                 <option value="">Select…</option>
                                 {selectedMultiLineSubFields.map((sf) => (
                                   <option key={sf.key} value={sf.key}>
@@ -1274,6 +1452,11 @@ export default function DashboardDesignPage() {
                                 ))}
                               </select>
                             </div>
+                            {addCardAgg === "count" ? (
+                              <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--muted)" }}>
+                                Count shows how many rows are in the multi-line list. Pick a sub-field only if you use Sum, Average, Min, or Max.
+                              </p>
+                            ) : null}
                           </div>
                         )}
 
