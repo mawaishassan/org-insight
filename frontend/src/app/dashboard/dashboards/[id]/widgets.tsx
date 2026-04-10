@@ -124,6 +124,10 @@ export type Widget =
       source_field_key: string;
       /** Sub-field keys viewers are allowed to see (SA configures) */
       sub_field_keys: string[];
+      /** Viewer row limit for embedded widget. */
+      rows_limit?: number;
+      /** Display order for combined columns (primary + join:...). */
+      column_order?: string[];
       /** Optional join to another KPI's multi-line items (acts like a lookup join). */
       join?: {
         kpi_id: number;
@@ -1864,8 +1868,20 @@ function KpiMultiLineTableWidgetInner({
     JSON.stringify(widget.join ?? null),
   ]);
 
-  const displayKeys = useMemo(() => allowedKeys.filter((k) => visibleKeys.includes(k)), [allowedKeys, visibleKeys]);
-  const joinDisplayKeys = useMemo(() => joinAllowedKeys.filter((k) => visibleKeys.includes(`join:${k}`)), [joinAllowedKeys, visibleKeys]);
+  const orderedKeys = useMemo(() => {
+    const base =
+      Array.isArray(widget.column_order) && widget.column_order.length
+        ? widget.column_order
+        : [...allowedKeys, ...joinAllowedKeys.map((k) => `join:${k}`)];
+    const allowSet = new Set<string>([...allowedKeys, ...joinAllowedKeys.map((k) => `join:${k}`)]);
+    return base.filter((k) => allowSet.has(k) && visibleKeys.includes(k));
+  }, [JSON.stringify(widget.column_order ?? null), JSON.stringify(allowedKeys), JSON.stringify(joinAllowedKeys), JSON.stringify(visibleKeys)]);
+
+  const orderedPrimaryKeys = useMemo(() => orderedKeys.filter((k) => !k.startsWith("join:")), [orderedKeys]);
+  const orderedJoinKeys = useMemo(
+    () => orderedKeys.filter((k) => k.startsWith("join:")).map((k) => k.slice("join:".length)),
+    [orderedKeys]
+  );
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1884,18 +1900,18 @@ function KpiMultiLineTableWidgetInner({
     if (!sortKey) return filtered;
     if (sortKey.startsWith("join:")) {
       const k = sortKey.slice("join:".length);
-      if (!joinDisplayKeys.includes(k)) return filtered;
+      if (!orderedJoinKeys.includes(k)) return filtered;
       const dir = sortDir === "asc" ? 1 : -1;
       return [...filtered].sort((a, b) => dir * compareCellValues((joinLookup(a) ?? {})[k], (joinLookup(b) ?? {})[k]));
     }
-    if (!displayKeys.includes(sortKey)) return filtered;
+    if (!orderedPrimaryKeys.includes(sortKey)) return filtered;
     const dir = sortDir === "asc" ? 1 : -1;
     return [...filtered].sort((a, b) => dir * compareCellValues(a[sortKey], b[sortKey]));
-  }, [filtered, sortKey, sortDir, displayKeys, JSON.stringify(joinItemsByKey), JSON.stringify(joinDisplayKeys)]);
+  }, [filtered, sortKey, sortDir, orderedPrimaryKeys, JSON.stringify(joinItemsByKey), JSON.stringify(orderedJoinKeys)]);
 
   useEffect(() => {
     setPage(0);
-  }, [search, sortKey, sortDir, JSON.stringify(displayKeys), items.length]);
+  }, [search, sortKey, sortDir, JSON.stringify(orderedKeys), items.length]);
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(sorted.length / Math.max(1, pageSize))), [sorted.length, pageSize]);
   const safePage = Math.min(page, totalPages - 1);
@@ -1910,7 +1926,7 @@ function KpiMultiLineTableWidgetInner({
         const next = prev.filter((x) => x !== key);
         return next.length === 0 ? [key] : next;
       }
-      return [...prev, key].sort((a, b) => allowedKeys.indexOf(a) - allowedKeys.indexOf(b));
+      return [...prev, key];
     });
   };
   const toggleJoinColumn = (key: string) => {
@@ -2057,14 +2073,14 @@ function KpiMultiLineTableWidgetInner({
           />
           {sorted.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>No rows to show.</p>
-          ) : displayKeys.length === 0 && joinDisplayKeys.length === 0 ? (
+          ) : orderedKeys.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>Select at least one column.</p>
           ) : (
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                 <thead>
                   <tr style={{ borderBottom: "2px solid var(--border)" }}>
-                    {displayKeys.map((k) => (
+                    {orderedPrimaryKeys.map((k) => (
                       <th key={k} style={{ textAlign: "left", padding: "0.45rem 0.5rem", whiteSpace: "nowrap" }}>
                         <button
                           type="button"
@@ -2088,7 +2104,7 @@ function KpiMultiLineTableWidgetInner({
                       </th>
                     ))}
                     {hasJoin &&
-                      joinDisplayKeys.map((k) => (
+                      orderedJoinKeys.map((k) => (
                         <th key={`join:${k}`} style={{ textAlign: "left", padding: "0.45rem 0.5rem", whiteSpace: "nowrap" }}>
                           <button
                             type="button"
@@ -2116,13 +2132,13 @@ function KpiMultiLineTableWidgetInner({
                 <tbody>
                   {paged.map((row, idx) => (
                     <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
-                      {displayKeys.map((k) => (
+                      {orderedPrimaryKeys.map((k) => (
                         <td key={k} style={{ padding: "0.45rem 0.5rem", verticalAlign: "top" }}>
                           {formatCellForTable(row[k]) || "—"}
                         </td>
                       ))}
                       {hasJoin &&
-                        joinDisplayKeys.map((k) => (
+                        orderedJoinKeys.map((k) => (
                           <td key={`join:${k}`} style={{ padding: "0.45rem 0.5rem", verticalAlign: "top" }}>
                             {formatCellForTable((joinLookup(row) ?? {})[k]) || "—"}
                           </td>
@@ -2180,7 +2196,7 @@ function KpiMultiLineTableWidget({
       <KpiMultiLineTableWidgetInner
         widget={widget}
         organizationId={organizationId}
-        pageSize={Math.max(1, tableRowsPerPage ?? (isFullPage ? 10 : 5))}
+        pageSize={Math.max(1, tableRowsPerPage ?? (isFullPage ? 10 : widget.rows_limit ?? 5))}
         showOpenFullLink={!isFullPage}
         dashboardId={dashboardId}
       />
