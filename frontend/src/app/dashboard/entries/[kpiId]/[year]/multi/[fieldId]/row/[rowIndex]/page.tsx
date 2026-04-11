@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken } from "@/lib/auth";
@@ -66,6 +66,8 @@ export default function MultiItemRowDetail() {
   const [refAllowedValues, setRefAllowedValues] = useState<Record<string, string[]>>({});
   const [activeSectionTab, setActiveSectionTab] = useState<string>("");
 
+  const rowPageContextLoadGenRef = useRef(0);
+
   const effectiveOrgId = useMemo(
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
     [organizationIdFromUrl, meOrgId]
@@ -81,7 +83,7 @@ export default function MultiItemRowDetail() {
       .catch(() => setMeOrgId(null));
   }, [token, router]);
 
-  const loadContext = async () => {
+  const loadContext = async (loadId: number) => {
     if (!token || !kpiId || effectiveOrgId == null || !fieldId) return;
     setError(null);
     try {
@@ -89,6 +91,7 @@ export default function MultiItemRowDetail() {
         `/kpis/${kpiId}?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`,
         { token }
       ).catch(() => null);
+      if (loadId !== rowPageContextLoadGenRef.current) return;
       if (kpi?.name) setKpiName(kpi.name);
 
       const fields = await api<FieldSummary[]>(
@@ -98,6 +101,7 @@ export default function MultiItemRowDetail() {
         }).toString()}`,
         { token }
       ).catch(() => []);
+      if (loadId !== rowPageContextLoadGenRef.current) return;
       const f = fields.find((x) => x.id === fieldId && x.field_type === "multi_line_items") || null;
       setField(f);
 
@@ -110,6 +114,7 @@ export default function MultiItemRowDetail() {
         }).toString()}`,
         { token }
       );
+      if (loadId !== rowPageContextLoadGenRef.current) return;
       setEntryId(forPeriod.id);
 
       if (!isNew && rowIndex != null) {
@@ -126,6 +131,7 @@ export default function MultiItemRowDetail() {
         const res = await api<{
           rows: MultiItemsRow[];
         }>(`/entries/multi-items/rows?${params.toString()}`, { token });
+        if (loadId !== rowPageContextLoadGenRef.current) return;
         const found = res.rows.find((r) => r.index === rowIndex);
         if (found) {
           setEditData(found.data || {});
@@ -134,15 +140,24 @@ export default function MultiItemRowDetail() {
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load row");
+      if (loadId === rowPageContextLoadGenRef.current) {
+        setError(e instanceof Error ? e.message : "Failed to load row");
+      }
     } finally {
-      setLoading(false);
+      if (loadId === rowPageContextLoadGenRef.current) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     if (!token || effectiveOrgId == null) return;
-    loadContext().catch(() => undefined);
+    const loadId = ++rowPageContextLoadGenRef.current;
+    setLoading(true);
+    loadContext(loadId).catch(() => undefined);
+    return () => {
+      rowPageContextLoadGenRef.current += 1;
+    };
   }, [token, effectiveOrgId, kpiId, year, fieldId, rowIndex, isNew, periodKey]);
 
   const subFields = field?.sub_fields ?? [];

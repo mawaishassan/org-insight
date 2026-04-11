@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken, clearTokens } from "@/lib/auth";
@@ -109,6 +109,11 @@ export default function FullPageMultiItems() {
   const [rowAccessSaving, setRowAccessSaving] = useState(false);
   const [rowAccessUserSearch, setRowAccessUserSearch] = useState("");
 
+  /** Ignore stale API responses when year/org/field changes quickly (fixes missing rows / wrong permissions UI). */
+  const multiPageContextLoadGenRef = useRef(0);
+  const multiPageRowsLoadGenRef = useRef(0);
+  const entryIdLiveRef = useRef<number | null>(null);
+
   const isAdmin = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
   const canManageRowAccess = isAdmin;
   const canAddRowEffective = canAddRow || isAdmin;
@@ -117,6 +122,10 @@ export default function FullPageMultiItems() {
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
     [organizationIdFromUrl, meOrgId]
   );
+
+  useEffect(() => {
+    entryIdLiveRef.current = entryId;
+  }, [entryId]);
 
   // If token is missing/cleared (e.g. expired), send user to login
   useEffect(() => {
@@ -139,13 +148,16 @@ export default function FullPageMultiItems() {
 
   const loadContext = async () => {
     if (!token || !kpiId || effectiveOrgId == null || !fieldId) return;
+    const loadId = ++multiPageContextLoadGenRef.current;
     setError(null);
     try {
       // Load KPI name
       const kpi = await api<KpiInfo>(`/kpis/${kpiId}?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`, { token }).catch(() => null);
+      if (loadId !== multiPageContextLoadGenRef.current) return;
       if (kpi?.name) setKpiName(kpi.name);
       // Load fields and find this multi_line_items field
       const fields = await api<FieldSummary[]>(`/entries/fields?${new URLSearchParams({ kpi_id: String(kpiId), organization_id: String(effectiveOrgId) }).toString()}`, { token }).catch(() => []);
+      if (loadId !== multiPageContextLoadGenRef.current) return;
       const f = fields.find((x) => x.id === fieldId && x.field_type === "multi_line_items") || null;
       setField(f);
       // Ensure entry exists for this period
@@ -158,12 +170,14 @@ export default function FullPageMultiItems() {
         }).toString()}`,
         { token }
       );
+      if (loadId !== multiPageContextLoadGenRef.current) return;
       setEntryId(forPeriod.id);
       // User's edit rights for this KPI (view-only users get can_edit: false)
       const apiInfo = await api<{ can_edit?: boolean; kpi_level_can_edit?: boolean }>(
         `/entries/kpi-api-info?${new URLSearchParams({ kpi_id: String(kpiId), organization_id: String(effectiveOrgId) }).toString()}`,
         { token }
       ).catch(() => ({ can_edit: false, kpi_level_can_edit: false }));
+      if (loadId !== multiPageContextLoadGenRef.current) return;
       setCanEditKpi(apiInfo?.can_edit !== false);
       setKpiLevelCanEdit(apiInfo?.kpi_level_can_edit === true);
 
@@ -172,14 +186,19 @@ export default function FullPageMultiItems() {
         `/entries/multi-items/add-row-info?${new URLSearchParams({ field_id: String(fieldId), organization_id: String(effectiveOrgId) }).toString()}`,
         { token }
       ).catch(() => ({ can_add_row: false }));
+      if (loadId !== multiPageContextLoadGenRef.current) return;
       setCanAddRow(addRowInfo?.can_add_row === true);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load context");
+      if (loadId === multiPageContextLoadGenRef.current) {
+        setError(e instanceof Error ? e.message : "Failed to load context");
+      }
     }
   };
 
   const loadRows = async () => {
     if (!token || !entryId || !fieldId || effectiveOrgId == null) return;
+    const rowLoadId = ++multiPageRowsLoadGenRef.current;
+    const entryIdForThisFetch = entryId;
     setLoading(true);
     setError(null);
     try {
@@ -202,21 +221,35 @@ export default function FullPageMultiItems() {
         params.set("filters", JSON.stringify(activeFilters));
       }
       const res = await api<MultiItemsListResponse>(`/entries/multi-items/rows?${params.toString()}`, { token });
+      if (
+        rowLoadId !== multiPageRowsLoadGenRef.current ||
+        entryIdForThisFetch !== entryIdLiveRef.current
+      ) {
+        return;
+      }
       setRows(res.rows);
       setTotal(res.total);
       if (res.sub_fields && (!field || !field.sub_fields)) {
         setField((prev) => (prev ? { ...prev, sub_fields: res.sub_fields } : prev));
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load rows");
+      if (rowLoadId === multiPageRowsLoadGenRef.current && entryIdForThisFetch === entryIdLiveRef.current) {
+        setError(e instanceof Error ? e.message : "Failed to load rows");
+      }
     } finally {
-      setLoading(false);
+      if (rowLoadId === multiPageRowsLoadGenRef.current && entryIdForThisFetch === entryIdLiveRef.current) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     if (!token || effectiveOrgId == null) return;
     loadContext().catch(() => undefined);
+    return () => {
+      multiPageContextLoadGenRef.current += 1;
+      multiPageRowsLoadGenRef.current += 1;
+    };
   }, [token, kpiId, year, effectiveOrgId, fieldId, periodKey]);
 
   const subFields = field?.sub_fields ?? [];

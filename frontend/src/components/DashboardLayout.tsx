@@ -56,6 +56,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [selectedOrgName, setSelectedOrgName] = useState<string | null>(null);
   /** For routes outside /dashboard/organizations/[id] that still have org context (e.g. kpis/[id]/fields?organization_id=3). */
   const [breadcrumbTail, setBreadcrumbTail] = useState<{ orgId: number; orgName: string | null; segments: { label: string; href: string }[] } | null>(null);
+  /** Ignore stale breadcrumb API responses when pathname/query changes quickly (avoids clearing tail or showing wrong year). */
+  const breadcrumbFetchGenRef = useRef(0);
 
   const onEntries = pathname === "/dashboard/entries";
   const yearParam = onEntries ? searchParams.get("year") : null;
@@ -151,8 +153,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     const token = getAccessToken();
+    const fetchId = ++breadcrumbFetchGenRef.current;
+    const applyBreadcrumbTail = (tail: Parameters<typeof setBreadcrumbTail>[0]) => {
+      if (fetchId !== breadcrumbFetchGenRef.current) return;
+      setBreadcrumbTail(tail);
+    };
     if (!token) {
-      setBreadcrumbTail(null);
+      applyBreadcrumbTail(null);
       return;
     }
     const orgIdFromQuery = searchParams.get("organization_id");
@@ -165,7 +172,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         api<{ id: number; name: string }>(`/kpis/${kpiId}?${qs({ organization_id: oid })}`, { token }),
       ])
         .then(([org, kpi]) => {
-          setBreadcrumbTail({
+          applyBreadcrumbTail({
             orgId: oid,
             orgName: org.name,
             segments: [
@@ -174,7 +181,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             ],
           });
         })
-        .catch(() => setBreadcrumbTail(null));
+        .catch(() => applyBreadcrumbTail(null));
       return;
     }
     if (domainDetailMatch && oid) {
@@ -184,7 +191,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         api<{ id: number; name: string }>(`/domains/${domainId}?${qs({ organization_id: oid })}`, { token }),
       ])
         .then(([org, domain]) => {
-          setBreadcrumbTail({
+          applyBreadcrumbTail({
             orgId: oid,
             orgName: org.name,
             segments: [
@@ -193,7 +200,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             ],
           });
         })
-        .catch(() => setBreadcrumbTail(null));
+        .catch(() => applyBreadcrumbTail(null));
       return;
     }
     if (reportDetailMatch) {
@@ -216,8 +223,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             return { orgId: rid, orgName: org.name, segments };
           });
         })
-        .then((tail) => setBreadcrumbTail(tail))
-        .catch(() => setBreadcrumbTail(null));
+        .then((tail) => applyBreadcrumbTail(tail))
+        .catch(() => applyBreadcrumbTail(null));
       return;
     }
     if (dashboardDetailMatch) {
@@ -246,15 +253,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             .then((org) => ({ orgId: oid, orgName: org.name, segments }))
             .catch(() => ({ orgId: oid, orgName: null, segments }));
         })
-        .then((tail) => setBreadcrumbTail(tail))
-        .catch(() => setBreadcrumbTail(null));
+        .then((tail) => applyBreadcrumbTail(tail))
+        .catch(() => applyBreadcrumbTail(null));
       return;
     }
     if (usersDetailMatch) {
       const userId = usersDetailMatch[1];
       api<{ id: number; username: string; full_name: string | null }>(`/users/${userId}`, { token })
         .then((u) => {
-          setBreadcrumbTail({
+          applyBreadcrumbTail({
             orgId: 0,
             orgName: null,
             segments: [
@@ -263,7 +270,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             ],
           });
         })
-        .catch(() => setBreadcrumbTail(null));
+        .catch(() => applyBreadcrumbTail(null));
       return;
     }
     if (entryMultiRowMatch) {
@@ -303,13 +310,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             },
             { label: lastLabel, href: pathname + (searchParams.toString() ? `?${searchParams.toString()}` : "") },
           ];
-          setBreadcrumbTail({
+          applyBreadcrumbTail({
             orgId: oid || 0,
             orgName: null,
             segments,
           });
         })
-        .catch(() => setBreadcrumbTail(null));
+        .catch(() => applyBreadcrumbTail(null));
       return;
     }
     if (entryMultiMatch) {
@@ -336,13 +343,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             { label: kpi.name, href: entryHref },
             { label: lastLabel, href: multiHref },
           ];
-          setBreadcrumbTail({
+          applyBreadcrumbTail({
             orgId: oid || 0,
             orgName: null,
             segments,
           });
         })
-        .catch(() => setBreadcrumbTail(null));
+        .catch(() => applyBreadcrumbTail(null));
       return;
     }
     if (entryDetailMatch) {
@@ -355,16 +362,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             { label: targetYear, href: `/dashboard/entries?year=${targetYear}${oid ? `&organization_id=${oid}` : ""}` },
             { label: kpi.name, href: searchParams.toString() ? `${pathname}?${searchParams.toString()}` : pathname },
           ];
-          setBreadcrumbTail({
+          applyBreadcrumbTail({
             orgId: oid || 0,
             orgName: null, // we don't need the org name prefixed before segments here, the layout handles "Home" 
             segments,
           });
         })
-        .catch(() => setBreadcrumbTail(null));
+        .catch(() => applyBreadcrumbTail(null));
       return;
     }
-    setBreadcrumbTail(null);
+    applyBreadcrumbTail(null);
   }, [pathname, searchParams.get("organization_id"), user?.role]);
 
   if (loading) {

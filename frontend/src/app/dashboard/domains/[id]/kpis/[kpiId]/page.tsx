@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
@@ -290,6 +290,9 @@ export default function DomainKpiDetailPage() {
   const [columnAccessAddRoleId, setColumnAccessAddRoleId] = useState<number | null>(null);
   const [columnAccessAddPermission, setColumnAccessAddPermission] = useState<"view" | "data_entry">("data_entry");
 
+  /** Drop stale loadData results when year/org/period changes quickly (avoids empty or wrong-year UI). */
+  const entryDetailLoadGenRef = useRef(0);
+
   type FormCell = {
     value_text?: string;
     value_number?: number;
@@ -551,7 +554,7 @@ export default function DomainKpiDetailPage() {
       .catch(() => setKpiOrgId(null));
   }, [token, kpiId, meRole, organizationIdFromUrl, meOrgId]);
 
-  const loadData = async () => {
+  const loadData = async (loadId: number) => {
     if (!token || !kpiId || effectiveOrgId == null) return;
     setError(null);
     const fieldsQuery = `?${qs({ kpi_id: kpiId, organization_id: effectiveOrgId })}`;
@@ -579,12 +582,15 @@ export default function DomainKpiDetailPage() {
       api<UserRef[]>(`/users${usersQuery}`, { token }).catch(() => []),
       api<{ entry_mode?: string; api_endpoint_url?: string | null; can_edit?: boolean }>(`/entries/kpi-api-info${apiInfoQuery}`, { token }).catch(() => null),
     ]);
+    if (loadId !== entryDetailLoadGenRef.current) return;
     setFields(fieldsList);
     if (isEntriesRoute) {
+      if (loadId !== entryDetailLoadGenRef.current) return;
       setAllEntriesForPeriodBar(entriesList);
       const pk = periodKeyFromUrl ?? "";
       const match = entriesList.find((e) => (e.period_key ?? "") === pk);
       if (match) {
+        if (loadId !== entryDetailLoadGenRef.current) return;
         setEntry(match);
       } else if (effectiveOrgId != null) {
         // No entry for this period: get-or-create so carry-forward from previous period is shown
@@ -593,19 +599,25 @@ export default function DomainKpiDetailPage() {
             `/entries/for-period?${qs({ kpi_id: kpiId, year, period_key: pk, organization_id: effectiveOrgId })}`,
             { token }
           );
+          if (loadId !== entryDetailLoadGenRef.current) return;
           setAllEntriesForPeriodBar((prev) => [...prev, forPeriod]);
           setEntry(forPeriod);
         } catch {
+          if (loadId !== entryDetailLoadGenRef.current) return;
           setEntry(entriesList[0] ?? null);
         }
       } else {
+        if (loadId !== entryDetailLoadGenRef.current) return;
         setEntry(entriesList[0] ?? null);
       }
     } else {
+      if (loadId !== entryDetailLoadGenRef.current) return;
       setEntry(entriesList[0] ?? null);
     }
+    if (loadId !== entryDetailLoadGenRef.current) return;
     setOverviewItem(overviewList.find((x) => x.kpi_id === kpiId) ?? null);
     const ov = overviewList.find((x) => x.kpi_id === kpiId);
+    if (loadId !== entryDetailLoadGenRef.current) return;
     if (kpiResp?.name) setKpiName(kpiResp.name);
     else if (ov?.kpi_name) setKpiName(ov.kpi_name);
     else setKpiName(`KPI #${kpiId}`);
@@ -615,23 +627,54 @@ export default function DomainKpiDetailPage() {
     setOrgUsers(Array.isArray(usersList) ? usersList : []);
     setKpiApiInfo(apiInfo ?? null);
     api<KpiFileItem[]>(`/kpis/${kpiId}/files?${qs({ year })}`, { token })
-      .then(setKpiFiles)
-      .catch(() => setKpiFiles([]));
+      .then((files) => {
+        if (loadId !== entryDetailLoadGenRef.current) return;
+        setKpiFiles(files);
+      })
+      .catch(() => {
+        if (loadId !== entryDetailLoadGenRef.current) return;
+        setKpiFiles([]);
+      });
 
     if (isEntriesRoute && effectiveOrgId != null) {
       api<{ time_dimension: string }>(`/organizations/${effectiveOrgId}/time-dimension`, { token })
-        .then((r) => setOrgTimeDimension(r.time_dimension ?? null))
-        .catch(() => setOrgTimeDimension(null));
+        .then((r) => {
+          if (loadId !== entryDetailLoadGenRef.current) return;
+          setOrgTimeDimension(r.time_dimension ?? null);
+        })
+        .catch(() => {
+          if (loadId !== entryDetailLoadGenRef.current) return;
+          setOrgTimeDimension(null);
+        });
       api<{ time_dimension?: string | null }>(`/kpis/${kpiId}?${kpiQuery}`, { token })
-        .then((k) => setKpiTimeDimension(k.time_dimension ?? null))
-        .catch(() => setKpiTimeDimension(null));
+        .then((k) => {
+          if (loadId !== entryDetailLoadGenRef.current) return;
+          setKpiTimeDimension(k.time_dimension ?? null);
+        })
+        .catch(() => {
+          if (loadId !== entryDetailLoadGenRef.current) return;
+          setKpiTimeDimension(null);
+        });
     }
   };
 
   useEffect(() => {
     if (!token || !kpiId || effectiveOrgId == null) return;
+    const loadId = ++entryDetailLoadGenRef.current;
+    setLoading(true);
     setError(null);
-    loadData().catch((e) => setError(e instanceof Error ? e.message : "Failed to load")).finally(() => setLoading(false));
+    loadData(loadId)
+      .catch((e) => {
+        if (loadId === entryDetailLoadGenRef.current) {
+          setError(e instanceof Error ? e.message : "Failed to load");
+        }
+      })
+      .finally(() => {
+        if (loadId === entryDetailLoadGenRef.current) setLoading(false);
+      });
+    return () => {
+      entryDetailLoadGenRef.current += 1;
+    };
   }, [token, kpiId, year, effectiveOrgId, periodKeyFromUrl, isEntriesRoute]);
 
   // Load field-level access when field-rights modal opens
@@ -988,7 +1031,7 @@ export default function DomainKpiDetailPage() {
           token,
         });
       }
-      await loadData();
+      await loadData(entryDetailLoadGenRef.current);
       if (!silent) {
         if (!keepEditing) setIsEditing(false);
         toast.success("Entry saved successfully");
@@ -1042,7 +1085,7 @@ export default function DomainKpiDetailPage() {
         token,
       });
       setEntry(updated);
-      await loadData();
+      await loadData(entryDetailLoadGenRef.current);
       toast.success("Entry submitted successfully");
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Submit failed");
@@ -1591,7 +1634,7 @@ export default function DomainKpiDetailPage() {
                             }
                             throw new Error(err.detail ?? res.statusText);
                           }
-                          await loadData();
+                          await loadData(entryDetailLoadGenRef.current);
                           toast.success("Excel imported successfully");
                         } catch (err) {
                           setError(err instanceof Error ? err.message : "Upload failed");
@@ -3454,7 +3497,7 @@ export default function DomainKpiDetailPage() {
                                   });
                                   if (res.ok) {
                                     const payload = await res.json().catch(() => ({} as Record<string, unknown>));
-                                    await loadData();
+                                    await loadData(entryDetailLoadGenRef.current);
                                     if (uploadOption === "upsert") {
                                       const u = Number(payload.rows_updated ?? 0);
                                       const a = Number(payload.rows_added ?? 0);
@@ -3621,7 +3664,7 @@ export default function DomainKpiDetailPage() {
                                 toast.error(msg);
                                 return;
                               }
-                              await loadData();
+                              await loadData(entryDetailLoadGenRef.current);
                               const n = result?.fields_updated ?? 0;
                               setSyncFeedback(n > 0 ? `${n} field(s) updated.` : "Sync completed; no fields updated.");
                               setTimeout(() => setSyncFeedback(null), 5000);
