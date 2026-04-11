@@ -102,3 +102,8 @@ backend/app/users/__pycache__/*.pyc
 backend/app/domains/__pycache__/*.pyc
 backend/app/categories/__pycache__/*.pyc
 backend/app/kpis/__pycache__/*.pyc
+backend/app/dashboards/__pycache__/service.cpython-312.pyc
+backend/app/dashboards/__pycache__/routes.cpython-312.pyc
+backend/app/dashboards/__pycache__/__init__.cpython-312.pyc
+backend/app/dashboards/__pycache__/routes.cpython-312.pyc
+backend/app/dashboards/__pycache__/service.cpython-312.pyc

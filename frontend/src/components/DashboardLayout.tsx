@@ -282,7 +282,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       ])
         .then(([kpi, fields]) => {
           const field = fields.find((f) => f.id === fieldId) || null;
-          const kpisHref = `/dashboard/kpis?${qs({ year: targetYear, organization_id: orgForQuery })}`;
           const yearHref = `/dashboard/entries?${qs({ year: targetYear, organization_id: orgForQuery })}`;
           const entryHref = `/dashboard/entries/${kpiId}/${targetYear}${
             orgForQuery ? `?${qs({ organization_id: orgForQuery })}` : ""
@@ -296,7 +295,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             ? `Record #${rowIndexNum + 1} detail`
             : "Record detail";
           const segments = [
-            { label: "KPIs", href: kpisHref },
             { label: targetYear, href: yearHref },
             { label: kpi.name, href: entryHref },
             {
@@ -327,7 +325,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       ])
         .then(([kpi, fields]) => {
           const field = fields.find((f) => f.id === fieldId) || null;
-          const kpisHref = `/dashboard/kpis?${qs({ year: targetYear, organization_id: orgForQuery })}`;
           const yearHref = `/dashboard/entries?${qs({ year: targetYear, organization_id: orgForQuery })}`;
           const entryHref = `/dashboard/entries/${kpiId}/${targetYear}${
             orgForQuery ? `?${qs({ organization_id: orgForQuery })}` : ""
@@ -335,7 +332,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           const multiHref = searchParams.toString() ? `${pathname}?${searchParams.toString()}` : pathname;
           const lastLabel = field ? `${field.name} (multiple record entry)` : "Multiple record entry";
           const segments = [
-            { label: "KPIs", href: kpisHref },
             { label: targetYear, href: yearHref },
             { label: kpi.name, href: entryHref },
             { label: lastLabel, href: multiHref },
