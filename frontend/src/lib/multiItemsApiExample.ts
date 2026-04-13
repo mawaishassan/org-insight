@@ -29,6 +29,8 @@ export function sampleValueForSubField(fieldType: string | null | undefined, row
       return r === 0 ? "example_ref_token_alpha" : "example_ref_token_beta";
     case "multi_reference":
       return r === 0 ? ["Alpha", "Beta"] : ["Gamma"];
+    case "mixed_list":
+      return r === 0 ? ["Sample text", 123, "2026-04-01"] : ["Other", 456, "2026-05-10"];
     case "attachment":
       return null;
     case "multi_line_text":

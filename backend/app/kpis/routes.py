@@ -736,23 +736,42 @@ def _example_value_for_field(f) -> str | int | float | bool | list[dict] | None:
         return 1  # API may send 1 or 0
     if ft == "date":
         return "2025-01-15"
+    if ft == "mixed_list":
+        return ["Sample text", 123, "2026-04-01"]
     if ft == "multi_line_items":
         sub_fields = getattr(f, "sub_fields", None) or []
         sub_keys = [getattr(s, "key", f"col_{i}") for i, s in enumerate(sub_fields)]
         if not sub_keys:
             sub_keys = ["item_name", "quantity"]
         # Example: list of row objects; each row has all sub_keys with sample values
-        numeric_types = {"number"}
-        sub_types = {}
+        sub_types: dict[str, str] = {}
         for s in sub_fields:
-            st = getattr(getattr(s, "field_type", None), "value", None) or str(getattr(s, "field_type", "single_line_text"))
-            sub_types[getattr(s, "key", "")] = st in numeric_types
+            st = (
+                getattr(getattr(s, "field_type", None), "value", None)
+                or str(getattr(s, "field_type", "single_line_text"))
+            )
+            sub_types[getattr(s, "key", "")] = (st or "single_line_text").lower()
         rows = []
         for row_idx in range(2):
             row = {}
             for k in sub_keys:
-                if sub_types.get(k, False):
+                st = sub_types.get(k, "single_line_text")
+                if st == "number":
                     row[k] = 85 + row_idx * 5
+                elif st == "boolean":
+                    row[k] = row_idx == 0
+                elif st == "date":
+                    row[k] = "2026-01-15" if row_idx == 0 else "2026-06-30"
+                elif st == "reference":
+                    row[k] = "example_ref_token_alpha" if row_idx == 0 else "example_ref_token_beta"
+                elif st == "multi_reference":
+                    row[k] = ["Alpha", "Beta"] if row_idx == 0 else ["Gamma"]
+                elif st == "mixed_list":
+                    row[k] = ["Sample text", 123, "2026-04-01"] if row_idx == 0 else ["Other", 456, "2026-05-10"]
+                elif st == "attachment":
+                    row[k] = None
+                elif st == "multi_line_text":
+                    row[k] = "First paragraph.\n\nSecond line." if row_idx == 0 else "Another block\nof text."
                 else:
                     row[k] = ("Alice", "Bob")[row_idx]
             rows.append(row)
@@ -784,6 +803,8 @@ async def get_kpi_api_contract(
                 sub_keys.append(getattr(s, "key", ""))
         ex = _example_value_for_field(f)  # None for formula
         accepted_hint = "true, false, 1, or 0" if ft_str == "boolean" else None
+        if ft_str == "mixed_list":
+            accepted_hint = "Send a JSON array (preferred) or a ';' separated string; items may be text, numbers, or ISO dates (YYYY-MM-DD)."
         contract_fields.append(
             KPIApiContractField(
                 key=f.key,

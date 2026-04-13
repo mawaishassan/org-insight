@@ -218,7 +218,10 @@ class KPIApiContractField(BaseModel):
 
     key: str = Field(..., description="Field key – use this in response values")
     name: str = Field(..., description="Display name of the field")
-    field_type: str = Field(..., description="single_line_text, multi_line_text, number, date, boolean, multi_line_items (formula omitted)")
+    field_type: str = Field(
+        ...,
+        description="single_line_text, multi_line_text, number, date, boolean, reference, multi_reference, mixed_list, multi_line_items (formula omitted)",
+    )
     sub_field_keys: list[str] = Field(default_factory=list, description="For multi_line_items: keys for each row object")
     example_value: str | int | float | bool | list[dict] | None = Field(
         None, description="Concrete example to return in response values"

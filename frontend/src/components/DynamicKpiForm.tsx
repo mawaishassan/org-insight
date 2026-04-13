@@ -6,6 +6,7 @@
  */
 
 import { useFormContext } from "react-hook-form";
+import MixedListInput from "@/components/MixedListInput";
 
 export type FieldType =
   | "single_line_text"
@@ -13,6 +14,7 @@ export type FieldType =
   | "number"
   | "date"
   | "boolean"
+  | "mixed_list"
   | "multi_line_items"
   | "formula";
 
@@ -33,7 +35,7 @@ interface Props {
 }
 
 export default function DynamicKpiForm({ fields, disabled }: Props) {
-  const { register, formState: { errors } } = useFormContext();
+  const { register, setValue, watch, formState: { errors } } = useFormContext();
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
@@ -142,6 +144,26 @@ export default function DynamicKpiForm({ fields, disabled }: Props) {
                 {...register(`${name}.value_text`)}
                 disabled={disabled}
                 rows={4}
+              />
+              {err && <p className="form-error">{(err as { message?: string }).message}</p>}
+            </div>
+          );
+        }
+
+        if (f.field_type === "mixed_list") {
+          const current = watch(`${name}.value_json`) as unknown;
+          const arr = Array.isArray(current) ? (current as (string | number)[]) : [];
+          return (
+            <div key={f.id} className="form-group">
+              <label htmlFor={name}>{f.name}{f.is_required ? " *" : ""}</label>
+              <MixedListInput
+                value={arr}
+                disabled={disabled}
+                onChange={(next) => {
+                  setValue(`${name}.value_text`, null, { shouldDirty: true });
+                  setValue(`${name}.value_json`, next, { shouldDirty: true });
+                }}
+                placeholder="Type a value and click Add"
               />
               {err && <p className="form-error">{(err as { message?: string }).message}</p>}
             </div>

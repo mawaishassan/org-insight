@@ -145,6 +145,9 @@ function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
   if (f.field_type === "multi_reference" && Array.isArray(v.value_json)) {
     return (v.value_json as string[]).join(", ") || "—";
   }
+  if (f.field_type === "mixed_list" && Array.isArray(v.value_json)) {
+    return (v.value_json as (string | number)[]).map((x) => String(x)).join(", ") || "—";
+  }
   if (f.field_type === "attachment" && v.value_text != null) {
     const p = parseScalarAttachmentValueText(v.value_text);
     if (p.url) return p.filename?.trim() || "Attached file";
@@ -299,7 +302,7 @@ export default function DomainKpiDetailPage() {
     value_boolean?: boolean;
     value_date?: string;
     /** multi_line_items rows or multi_reference string[] */
-    value_json?: Record<string, unknown>[] | string[];
+    value_json?: Record<string, unknown>[] | (string | number)[];
   };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
 
@@ -887,6 +890,8 @@ export default function DomainKpiDetailPage() {
         out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [] };
       } else if (f.field_type === "multi_reference") {
         out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as string[]) : [] };
+      } else if (f.field_type === "mixed_list") {
+        out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as (string | number)[]) : [] };
       } else {
         out[f.id] = {};
         if (v?.value_text != null) {
@@ -989,7 +994,7 @@ export default function DomainKpiDetailPage() {
             value_number?: number | null;
             value_boolean?: boolean | null;
             value_date?: string | null;
-            value_json?: Record<string, unknown>[] | string[] | null;
+            value_json?: Record<string, unknown>[] | (string | number)[] | null;
           } = {
             field_id: f.id,
             value_text: v.value_text ?? null,
@@ -1001,6 +1006,10 @@ export default function DomainKpiDetailPage() {
           if (f.field_type === "multi_reference") {
             payload.value_text = null;
             payload.value_json = Array.isArray(v.value_json) ? (v.value_json as string[]) : [];
+          }
+          if (f.field_type === "mixed_list") {
+            payload.value_text = null;
+            payload.value_json = Array.isArray(v.value_json) ? (v.value_json as (string | number)[]) : [];
           }
           return payload;
         });
@@ -1936,8 +1945,199 @@ export default function DomainKpiDetailPage() {
                   Fields you can edit
                 </h3>
             {isEditing ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                {[...formulaFields, ...scalarFieldsEdit].map((f) => {
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                {(() => {
+                  const mixedListFields = scalarFieldsEdit.filter((f) => f.field_type === "mixed_list");
+                  const otherFields = [...formulaFields, ...scalarFieldsEdit.filter((f) => f.field_type !== "mixed_list")];
+
+                  const inferMixedAtom = (raw: string): string | number | null => {
+                    const t = (raw ?? "").trim();
+                    if (!t) return null;
+                    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t; // ISO date
+                    const num = Number(t.replace(/,/g, ""));
+                    if (!Number.isNaN(num) && Number.isFinite(num) && /^[+-]?\d[\d,]*(\.\d+)?$/.test(t)) {
+                      return Number.isInteger(num) ? Math.trunc(num) : num;
+                    }
+                    return t;
+                  };
+
+                  const MixedListEditor = ({
+                    fieldId,
+                    fieldName,
+                    isRequired,
+                    items,
+                  }: {
+                    fieldId: number;
+                    fieldName: string;
+                    isRequired: boolean;
+                    items: (string | number)[];
+                  }) => {
+                    const [newDraft, setNewDraft] = useState("");
+                    const [editIndex, setEditIndex] = useState<number | null>(null);
+                    const [editDraft, setEditDraft] = useState<string>("");
+
+                    const addItem = () => {
+                      const atom = inferMixedAtom(newDraft);
+                      if (atom == null) return;
+                      updateField(fieldId, "value_text", null);
+                      updateField(fieldId, "value_json", [...items, atom]);
+                      setNewDraft("");
+                    };
+
+                    const removeItem = (idx: number) => {
+                      updateField(fieldId, "value_text", null);
+                      updateField(fieldId, "value_json", items.filter((_, i) => i !== idx));
+                      if (editIndex === idx) {
+                        setEditIndex(null);
+                        setEditDraft("");
+                      }
+                    };
+
+                    const startEdit = (idx: number) => {
+                      setEditIndex(idx);
+                      setEditDraft(String(items[idx] ?? ""));
+                    };
+
+                    const saveEdit = () => {
+                      if (editIndex == null) return;
+                      const atom = inferMixedAtom(editDraft);
+                      const next = [...items];
+                      if (atom == null) {
+                        // Treat empty as delete
+                        next.splice(editIndex, 1);
+                      } else {
+                        next[editIndex] = atom;
+                      }
+                      updateField(fieldId, "value_text", null);
+                      updateField(fieldId, "value_json", next);
+                      setEditIndex(null);
+                      setEditDraft("");
+                    };
+
+                    return (
+                      <div
+                        className="card"
+                        style={{
+                          padding: "0.85rem",
+                          border: "1px solid var(--border)",
+                          borderRadius: 10,
+                          background: "var(--surface)",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: "0.75rem", alignItems: "center", marginBottom: "0.6rem" }}>
+                          <div style={{ fontWeight: 600 }}>
+                            {fieldName}
+                            {isRequired ? " *" : ""}
+                            <span style={{ marginLeft: "0.5rem", fontWeight: 400, color: "var(--muted)", fontSize: "0.85rem" }}>
+                              (Mixed list)
+                            </span>
+                          </div>
+                        </div>
+
+                        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "0.75rem" }}>
+                          <input
+                            type="text"
+                            value={newDraft}
+                            onChange={(e) => setNewDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                addItem();
+                              }
+                            }}
+                            placeholder="Add item (text, number, or YYYY-MM-DD)"
+                            style={{
+                              flex: "1 1 260px",
+                              minWidth: 200,
+                              padding: "0.5rem",
+                              border: "1px solid var(--border)",
+                              borderRadius: 8,
+                            }}
+                          />
+                          <button type="button" className="btn btn-primary" disabled={!newDraft.trim()} onClick={addItem}>
+                            Add
+                          </button>
+                        </div>
+
+                        {items.length === 0 ? (
+                          <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No items yet.</div>
+                        ) : (
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                            <thead>
+                              <tr>
+                                <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 48 }}>#</th>
+                                <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)" }}>Item</th>
+                                <th style={{ textAlign: "right", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 160 }}>Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {items.map((it, idx) => {
+                                const isEditingRow = editIndex === idx;
+                                return (
+                                  <tr key={`${String(it)}:${idx}`}>
+                                    <td style={{ padding: "0.4rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
+                                      {idx + 1}
+                                    </td>
+                                    <td style={{ padding: "0.4rem", borderBottom: "1px solid var(--border)" }}>
+                                      {isEditingRow ? (
+                                        <input
+                                          type="text"
+                                          value={editDraft}
+                                          onChange={(e) => setEditDraft(e.target.value)}
+                                          style={{
+                                            width: "100%",
+                                            padding: "0.45rem 0.5rem",
+                                            borderRadius: 8,
+                                            border: "1px solid var(--border)",
+                                          }}
+                                          autoFocus
+                                        />
+                                      ) : (
+                                        <span>{String(it)}</span>
+                                      )}
+                                    </td>
+                                    <td style={{ padding: "0.4rem", borderBottom: "1px solid var(--border)", textAlign: "right", whiteSpace: "nowrap" }}>
+                                      {isEditingRow ? (
+                                        <>
+                                          <button type="button" className="btn btn-primary" onClick={saveEdit} style={{ marginRight: "0.35rem" }}>
+                                            Save
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() => {
+                                              setEditIndex(null);
+                                              setEditDraft("");
+                                            }}
+                                          >
+                                            Cancel
+                                          </button>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <button type="button" className="btn" onClick={() => startEdit(idx)} style={{ marginRight: "0.35rem" }}>
+                                            Edit
+                                          </button>
+                                          <button type="button" className="btn" onClick={() => removeItem(idx)} style={{ color: "var(--error)" }}>
+                                            Delete
+                                          </button>
+                                        </>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    );
+                  };
+
+                  return (
+                    <>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                        {otherFields.map((f) => {
                     if (f.field_type === "formula") {
                       return (
                         <div key={f.id} style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
@@ -2126,7 +2326,32 @@ export default function DomainKpiDetailPage() {
                       );
                     }
                     return null;
-                  })}
+                        })}
+                      </div>
+
+                      {mixedListFields.length > 0 && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                          <h4 style={{ fontSize: "0.95rem", fontWeight: 650, margin: "0.25rem 0 0", color: "var(--text)" }}>
+                            Mixed list fields
+                          </h4>
+                          {mixedListFields.map((f) => {
+                            const val = formValues[f.id];
+                            const items = Array.isArray(val?.value_json) ? (val!.value_json as (string | number)[]) : [];
+                            return (
+                              <MixedListEditor
+                                key={f.id}
+                                fieldId={f.id}
+                                fieldName={f.name}
+                                isRequired={!!f.is_required}
+                                items={items}
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             ) : (
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>

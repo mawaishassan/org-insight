@@ -1517,6 +1517,13 @@ export default function FullPageMultiItems() {
                           if (arr.length === 0) return "—";
                           return arr.map((x) => String(x)).join("; ");
                         }
+                        if (sf.field_type === "mixed_list") {
+                          const arr = Array.isArray(cellVal)
+                            ? (cellVal as unknown[]).filter((x) => x != null && String(x).trim() !== "")
+                            : [];
+                          if (arr.length === 0) return "—";
+                          return arr.map((x) => String(x)).join("; ");
+                        }
                         if (sf.field_type === "attachment") {
                           const url = getAttachmentUrl(cellVal);
                           if (!url) return "—";
