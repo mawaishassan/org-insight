@@ -189,6 +189,84 @@ def coerce_multi_reference_raw(raw: Any) -> list[Any]:
     return [raw]
 
 
+_ISO_DATE_RE = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _infer_mixed_list_atom(val: Any) -> Any | None:
+    """Infer a JSON-storable atom for mixed_list: number, ISO date string, or string. Returns None for empty."""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        # Keep booleans as strings to avoid ambiguity in UI and Excel ("true"/"false" tokens are common labels).
+        return "true" if val else "false"
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        if isinstance(val, float):
+            if math.isfinite(val) and val == int(val):
+                return int(val)
+            return float(val)
+        return int(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        # ISO date detection (as typed date)
+        if _ISO_DATE_RE.match(s):
+            return s
+        # Numeric detection (accept thousands separators)
+        try:
+            num = float(s.replace(",", ""))
+            if math.isfinite(num) and num == int(num):
+                return int(num)
+            if math.isfinite(num):
+                return num
+        except ValueError:
+            pass
+        return s
+    # Fallback: stringify unknown objects
+    s = str(val).strip()
+    return s or None
+
+
+def coerce_mixed_list_raw(raw: Any) -> list[Any]:
+    """
+    Normalize input into a heterogeneous JSON list of atoms:
+    - Accept list inputs directly.
+    - Accept strings with ';' separated tokens (primary) and ',' as fallback.
+    - Infer numbers and ISO dates (YYYY-MM-DD) per token; otherwise keep as string.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        out: list[Any] = []
+        for x in raw:
+            atom = _infer_mixed_list_atom(x)
+            if atom is not None:
+                out.append(atom)
+        return out
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        # JSON list payload in string form
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return coerce_mixed_list_raw(parsed)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        parts = [p.strip() for p in (s.split(";") if ";" in s else s.split(",")) if p.strip()]
+        out: list[Any] = []
+        for p in parts:
+            atom = _infer_mixed_list_atom(p)
+            if atom is not None:
+                out.append(atom)
+        return out
+    # Single scalar: wrap
+    atom = _infer_mixed_list_atom(raw)
+    return [atom] if atom is not None else []
+
+
 def _canonical_by_normalized_reference(allowed: list[str]) -> dict[str, str]:
     """Map normalized token -> first canonical display string from allowed list."""
     out: dict[str, str] = {}
@@ -1004,6 +1082,13 @@ async def save_entry_values(
         f = next((x for x in kpi.fields if x.id == v.field_id), None)
         if not f:
             continue
+        if f.field_type == FieldType.mixed_list:
+            # Accept value_text (semicolon separated), value_json (list), or raw scalars; store in value_json only.
+            raw_in = v.value_json if v.value_json is not None else v.value_text
+            coerced = coerce_mixed_list_raw(raw_in)
+            v.value_text = None
+            v.value_json = coerced if coerced else None
+            continue
         if f.field_type == FieldType.reference:
             config = getattr(f, "config", None) or {}
             sid = config.get("reference_source_kpi_id")
@@ -1045,6 +1130,12 @@ async def save_entry_values(
                 skey = config.get("reference_source_field_key")
                 sub_key = config.get("reference_source_sub_field_key")
                 if not sid or not skey:
+                    # Still allow normalization for non-reference types.
+                    if ft == FieldType.mixed_list:
+                        for row in v.value_json:
+                            if not isinstance(row, dict):
+                                continue
+                            row[sub.key] = coerce_mixed_list_raw(row.get(sub.key)) or None
                     continue
                 if ft == FieldType.reference:
                     allowed = await get_reference_allowed_values(db, int(sid), str(skey), org_id, source_sub_field_key=sub_key)
@@ -1071,6 +1162,11 @@ async def save_entry_values(
                         cell = row.get(sub.key)
                         cleaned = filter_multi_reference_to_allowed(cell, allowed)
                         row[sub.key] = cleaned if cleaned else None
+                elif ft == FieldType.mixed_list:
+                    for row in v.value_json:
+                        if not isinstance(row, dict):
+                            continue
+                        row[sub.key] = coerce_mixed_list_raw(row.get(sub.key)) or None
 
     if validation_errors:
         raise EntryValidationError(validation_errors)

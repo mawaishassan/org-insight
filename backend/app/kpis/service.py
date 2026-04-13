@@ -40,6 +40,7 @@ from app.entries.service import (
     save_entry_values,
     _upsert_merge_multi_line_items,
     _is_multi_items_row_effectively_empty,
+    coerce_mixed_list_raw,
 )
 from app.entries.schemas import FieldValueInput
 
@@ -1497,8 +1498,13 @@ async def sync_kpi_entry_from_api(
                 value_inputs.append(FieldValueInput(field_id=f.id, value_json=incoming))
                 _log("    -> ADD value_json len=%s (override)", len(incoming))
         else:
-            value_inputs.append(FieldValueInput(field_id=f.id, value_text=str(raw) if raw is not None else None))
-            _log("    -> ADD value_text=%s", (str(raw)[:80] if raw is not None else None))
+            if ft_norm == "mixed_list":
+                coerced = coerce_mixed_list_raw(raw)
+                value_inputs.append(FieldValueInput(field_id=f.id, value_json=coerced if coerced else None))
+                _log("    -> ADD value_json(mixed_list) len=%s", len(coerced))
+            else:
+                value_inputs.append(FieldValueInput(field_id=f.id, value_text=str(raw) if raw is not None else None))
+                _log("    -> ADD value_text=%s", (str(raw)[:80] if raw is not None else None))
 
     _log("value_inputs count=%s (will save=%s)", len(value_inputs), bool(value_inputs))
     if value_inputs:

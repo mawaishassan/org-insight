@@ -42,6 +42,7 @@ class FieldType(str, enum.Enum):
     date = "date"
     boolean = "boolean"
     attachment = "attachment"  # URL to an attachment (this KPI or other KPIs)
+    mixed_list = "mixed_list"  # JSON list that may contain strings, numbers, and ISO date strings
     multi_line_items = "multi_line_items"
     formula = "formula"
     reference = "reference"  # Reference/Lookup: values from another KPI field

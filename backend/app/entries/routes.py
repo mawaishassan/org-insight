@@ -55,6 +55,7 @@ from app.entries.service import (
     _upsert_merge_multi_line_items,
     _is_multi_items_row_effectively_empty,
     parse_upsert_match_keys_json,
+    coerce_mixed_list_raw,
 )
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
@@ -172,6 +173,11 @@ def _serialize_multi_item_cell_for_xlsx(val: Any, field_type: FieldType | str | 
             parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
             return "; ".join(parts)
         return str(val).strip() if str(val).strip() else ""
+    if ft == FieldType.mixed_list.value or ft == "mixed_list":
+        if isinstance(val, list):
+            parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
+            return "; ".join(parts)
+        return str(val).strip() if val is not None and str(val).strip() else ""
     if isinstance(val, list):
         parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
         return "; ".join(parts)
@@ -185,6 +191,10 @@ def _serialize_multi_item_cell_for_csv(val: Any, field_type: FieldType | str | N
         return ""
     ft = field_type.value if isinstance(field_type, FieldType) else field_type
     if ft == FieldType.multi_reference.value or ft == "multi_reference":
+        if isinstance(val, list):
+            return "; ".join(str(x).strip() for x in val if x is not None and str(x).strip() != "")
+        return val
+    if ft == FieldType.mixed_list.value or ft == "mixed_list":
         if isinstance(val, list):
             return "; ".join(str(x).strip() for x in val if x is not None and str(x).strip() != "")
         return val
@@ -297,6 +307,9 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
             elif sf.field_type == FieldType.multi_reference:
                 # Semicolon (or comma) separated in Excel; validated on upload.
                 item[key] = str(raw).strip() if raw is not None else ""
+            elif sf.field_type == FieldType.mixed_list:
+                # Semicolon separated values in Excel; infer number/date/string.
+                item[key] = coerce_mixed_list_raw(str(raw) if raw is not None else "") or None
             else:
                 # Text / reference / attachment: Excel often stores numeric ids as float (e.g. 42.0).
                 if isinstance(raw, (int, float)) and not isinstance(raw, bool):
@@ -816,12 +829,21 @@ async def add_multi_items_row(
         db.add(fv)
     if not isinstance(fv.value_json, list):
         fv.value_json = []
-    fv.value_json.append(row)
+    # Normalize special sub-field types (e.g. mixed_list) for consistent storage.
+    normalized_row = row if isinstance(row, dict) else {}
+    key_to_sub = {getattr(s, "key", None): s for s in (field.sub_fields or []) if getattr(s, "key", None)}
+    for k, v in list(normalized_row.items()):
+        sub = key_to_sub.get(k)
+        if not sub:
+            continue
+        if getattr(sub, "field_type", None) == FieldType.mixed_list:
+            normalized_row[k] = coerce_mixed_list_raw(v) or None
+    fv.value_json.append(normalized_row)
     flag_modified(fv, "value_json")
     await db.flush()
     await db.commit()
     index = len(fv.value_json) - 1
-    return MultiItemsRow(index=index, data=row)
+    return MultiItemsRow(index=index, data=normalized_row)
 
 
 @router.put("/multi-items/rows/{row_index}", response_model=MultiItemsRow)
@@ -867,7 +889,10 @@ async def update_multi_items_row(
         if sub is None:
             continue
         if await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, getattr(sub, "id", None)):
-            existing_row[col_key] = col_value
+            if getattr(sub, "field_type", None) == FieldType.mixed_list:
+                existing_row[col_key] = coerce_mixed_list_raw(col_value) or None
+            else:
+                existing_row[col_key] = col_value
     fv.value_json[row_index] = existing_row
     flag_modified(fv, "value_json")
     await db.flush()
@@ -926,7 +951,10 @@ async def update_multi_items_row_cell(
         row = {}
         fv.value_json[row_index] = row
 
-    row[key] = value
+    if getattr(sub, "field_type", None) == FieldType.mixed_list:
+        row[key] = coerce_mixed_list_raw(value) or None
+    else:
+        row[key] = value
     flag_modified(fv, "value_json")  # SQLAlchemy does not track in-place JSON mutations
     await db.flush()
     await db.commit()
@@ -1552,6 +1580,7 @@ def _build_kpi_entry_xlsx(
         FieldType.formula,
         FieldType.reference,
         FieldType.multi_reference,
+        FieldType.mixed_list,
     )
     scalar_fields = [f for f in fields if getattr(f, "field_type", None) in scalar_types]
     ws_scalar = wb.active
@@ -1564,6 +1593,8 @@ def _build_kpi_entry_xlsx(
             continue
         ft = getattr(f, "field_type", None)
         if ft == FieldType.multi_reference and isinstance(fv.value_json, list):
+            val = "; ".join(str(x) for x in fv.value_json)
+        elif ft == FieldType.mixed_list and isinstance(fv.value_json, list):
             val = "; ".join(str(x) for x in fv.value_json)
         elif fv.value_text is not None:
             val = fv.value_text
@@ -1603,6 +1634,8 @@ def _build_kpi_entry_xlsx(
                 raw = row.get(col_key, "")
                 sf = key_to_sf.get(col_key)
                 if sf and getattr(sf, "field_type", None) == FieldType.multi_reference and isinstance(raw, list):
+                    return "; ".join(str(x) for x in raw)
+                if sf and getattr(sf, "field_type", None) == FieldType.mixed_list and isinstance(raw, list):
                     return "; ".join(str(x) for x in raw)
                 return raw if raw is not None else ""
 
@@ -1730,6 +1763,9 @@ def _parse_kpi_entry_xlsx(
             elif ft == FieldType.multi_reference:
                 parsed = coerce_multi_reference_raw(str(raw_value) if raw_value is not None else "")
                 val["value_json"] = parsed if parsed else None
+            elif ft == FieldType.mixed_list:
+                parsed = coerce_mixed_list_raw(str(raw_value) if raw_value is not None else "")
+                val["value_json"] = parsed if parsed else None
             else:
                 val["value_text"] = str(raw_value) if raw_value is not None else None
             result[field.id] = val
@@ -1802,6 +1838,9 @@ def _parse_kpi_entry_xlsx(
                         item[key] = str(raw)
                 elif sf_type == FieldType.multi_reference or sf_type == "multi_reference":
                     parsed = coerce_multi_reference_raw(str(raw) if raw is not None else "")
+                    item[key] = parsed if parsed else None
+                elif sf_type == FieldType.mixed_list or sf_type == "mixed_list":
+                    parsed = coerce_mixed_list_raw(str(raw) if raw is not None else "")
                     item[key] = parsed if parsed else None
                 else:
                     item[key] = str(raw)

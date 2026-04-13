@@ -27,11 +27,12 @@ const FIELD_TYPES = [
   "attachment",
   "reference",
   "multi_reference",
+  "mixed_list",
   "multi_line_items",
   "formula",
 ] as const;
 
-const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference", "attachment"] as const;
+const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference", "attachment", "mixed_list"] as const;
 
 function slugifyKey(name: string): string {
   if (!name) return "";
@@ -2003,7 +2004,7 @@ function ReferenceConfigUI({
       .then((list) => setSourceFields(list))
       .catch(() => setSourceFields([]));
   }, [token, organizationId, value.reference_source_kpi_id]);
-  const scalarFieldTypes = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference"];
+  const scalarFieldTypes = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference", "mixed_list"];
   const sourceFieldOptions: { value: string; label: string }[] = [];
   sourceFields.forEach((f) => {
     if (scalarFieldTypes.includes(f.field_type)) {

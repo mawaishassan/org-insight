@@ -10,6 +10,180 @@ import { AttachmentFieldControl } from "@/components/AttachmentFieldControl";
 import { toast } from "react-toastify";
 import MultiReferenceInput from "@/components/MultiReferenceInput";
 
+type MixedAtom = string | number;
+
+function inferMixedAtom(raw: string): MixedAtom | null {
+  const t = (raw ?? "").trim();
+  if (!t) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t; // ISO date
+  const num = Number(t.replace(/,/g, ""));
+  if (!Number.isNaN(num) && Number.isFinite(num) && /^[+-]?\d[\d,]*(\.\d+)?$/.test(t)) {
+    return Number.isInteger(num) ? Math.trunc(num) : num;
+  }
+  return t;
+}
+
+function MixedListCellEditor({
+  label,
+  required,
+  items,
+  onChange,
+  disabled,
+}: {
+  label?: string;
+  required?: boolean;
+  items: MixedAtom[];
+  onChange: (next: MixedAtom[]) => void;
+  disabled?: boolean;
+}) {
+  const [newDraft, setNewDraft] = useState("");
+  const [editIndex, setEditIndex] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+
+  const addItem = () => {
+    const atom = inferMixedAtom(newDraft);
+    if (atom == null) return;
+    onChange([...(Array.isArray(items) ? items : []), atom]);
+    setNewDraft("");
+  };
+
+  const removeItem = (idx: number) => {
+    onChange(items.filter((_, i) => i !== idx));
+    if (editIndex === idx) {
+      setEditIndex(null);
+      setEditDraft("");
+    }
+  };
+
+  const startEdit = (idx: number) => {
+    setEditIndex(idx);
+    setEditDraft(String(items[idx] ?? ""));
+  };
+
+  const saveEdit = () => {
+    if (editIndex == null) return;
+    const atom = inferMixedAtom(editDraft);
+    const next = [...items];
+    if (atom == null) {
+      next.splice(editIndex, 1);
+    } else {
+      next[editIndex] = atom;
+    }
+    onChange(next);
+    setEditIndex(null);
+    setEditDraft("");
+  };
+
+  return (
+    <div className="form-group">
+      {label ? (
+        <label>
+          {label}
+          {required ? " *" : ""}
+        </label>
+      ) : null}
+
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "0.6rem" }}>
+        <input
+          type="text"
+          value={newDraft}
+          disabled={disabled}
+          onChange={(e) => setNewDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              if (!disabled) addItem();
+            }
+          }}
+          placeholder="Add item (text, number, or YYYY-MM-DD)"
+          style={{
+            flex: "1 1 260px",
+            minWidth: 200,
+            padding: "0.5rem",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+          }}
+        />
+        <button type="button" className="btn btn-primary" disabled={disabled || !newDraft.trim()} onClick={addItem}>
+          Add
+        </button>
+      </div>
+
+      {items.length === 0 ? (
+        <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No items yet.</div>
+      ) : (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 48 }}>#</th>
+              <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)" }}>Item</th>
+              <th style={{ textAlign: "right", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 160 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it, idx) => {
+              const isEditingRow = editIndex === idx;
+              return (
+                <tr key={`${String(it)}:${idx}`}>
+                  <td style={{ padding: "0.4rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>{idx + 1}</td>
+                  <td style={{ padding: "0.4rem", borderBottom: "1px solid var(--border)" }}>
+                    {isEditingRow ? (
+                      <input
+                        type="text"
+                        value={editDraft}
+                        disabled={disabled}
+                        onChange={(e) => setEditDraft(e.target.value)}
+                        style={{
+                          width: "100%",
+                          padding: "0.45rem 0.5rem",
+                          borderRadius: 8,
+                          border: "1px solid var(--border)",
+                        }}
+                        autoFocus
+                      />
+                    ) : (
+                      <span>{String(it)}</span>
+                    )}
+                  </td>
+                  <td style={{ padding: "0.4rem", borderBottom: "1px solid var(--border)", textAlign: "right", whiteSpace: "nowrap" }}>
+                    {isEditingRow ? (
+                      <>
+                        <button type="button" className="btn btn-primary" disabled={disabled} onClick={saveEdit} style={{ marginRight: "0.35rem" }}>
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={disabled}
+                          onClick={() => {
+                            setEditIndex(null);
+                            setEditDraft("");
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button type="button" className="btn" disabled={disabled} onClick={() => startEdit(idx)} style={{ marginRight: "0.35rem" }}>
+                          Edit
+                        </button>
+                        <button type="button" className="btn" disabled={disabled} onClick={() => removeItem(idx)} style={{ color: "var(--error)" }}>
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 type SubField = {
   key: string;
   name: string;
@@ -473,6 +647,9 @@ export default function MultiItemRowDetail() {
                   } else if (sf.field_type === "multi_reference") {
                     const arr = Array.isArray(val) ? (val as unknown[]).filter((x) => x != null && String(x).trim() !== "") : [];
                     display = arr.length > 0 ? arr.map((x) => String(x)).join("; ") : "—";
+                  } else if (sf.field_type === "mixed_list") {
+                    const arr = Array.isArray(val) ? (val as unknown[]).filter((x) => x != null && String(x).trim() !== "") : [];
+                    display = arr.length > 0 ? arr.map((x) => String(x)).join("; ") : "—";
                   } else {
                     display = val != null && String(val).trim() !== "" ? String(val) : "—";
                   }
@@ -556,7 +733,10 @@ export default function MultiItemRowDetail() {
                 }}
               >
                 {(() => {
-                  const compactFields = group.fields.filter((sf) => sf.field_type !== "multi_line_text");
+                  const mixedListFields = group.fields.filter((sf) => sf.field_type === "mixed_list");
+                  const compactFields = group.fields.filter(
+                    (sf) => sf.field_type !== "multi_line_text" && sf.field_type !== "mixed_list"
+                  );
                   const multiLineFields = group.fields.filter((sf) => sf.field_type === "multi_line_text");
 
                   // Place multi-line textareas into two columns, 1 textarea per column cell (balanced).
@@ -775,6 +955,34 @@ export default function MultiItemRowDetail() {
                           </div>
                         </div>
                       )}
+
+                      {mixedListFields.map((sf) => {
+                        const key = sf.key;
+                        const val = editData[key];
+                        return (
+                          <div
+                            key={key}
+                            style={{
+                              padding: "0.85rem",
+                              border: "1px solid var(--border)",
+                              borderRadius: 10,
+                              background: "var(--surface)",
+                            }}
+                          >
+                            <div style={{ fontSize: "0.95rem", fontWeight: 650, marginBottom: "0.6rem" }}>
+                              {sf.name}
+                              {sf.is_required ? " *" : ""}
+                            </div>
+                            <MixedListCellEditor
+                              label=""  // heading is rendered by the card title above
+                              required={false}
+                              items={Array.isArray(val) ? (val as MixedAtom[]) : []}
+                              onChange={(next) => handleChangeCell(key, next)}
+                              disabled={sf.can_edit === false}
+                            />
+                          </div>
+                        );
+                      })}
 
                       {multiLineFields.length > 0 && (
                         <div
