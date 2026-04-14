@@ -184,6 +184,176 @@ function MixedListCellEditor({
   );
 }
 
+function MultiReferenceListEditor({
+  label,
+  required,
+  items,
+  options,
+  onChange,
+  disabled,
+}: {
+  label?: string;
+  required?: boolean;
+  items: string[];
+  options: string[];
+  onChange: (next: string[]) => void;
+  disabled?: boolean;
+}) {
+  const [newDraft, setNewDraft] = useState("");
+  const [editIndex, setEditIndex] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+
+  const addItem = () => {
+    const v = (newDraft ?? "").trim();
+    if (!v) return;
+    onChange([...(Array.isArray(items) ? items : []), v]);
+    setNewDraft("");
+  };
+
+  const removeItem = (idx: number) => {
+    onChange(items.filter((_, i) => i !== idx));
+    if (editIndex === idx) {
+      setEditIndex(null);
+      setEditDraft("");
+    }
+  };
+
+  const startEdit = (idx: number) => {
+    setEditIndex(idx);
+    setEditDraft(String(items[idx] ?? ""));
+  };
+
+  const saveEdit = () => {
+    if (editIndex == null) return;
+    const v = (editDraft ?? "").trim();
+    const next = [...items];
+    if (!v) {
+      next.splice(editIndex, 1);
+    } else {
+      next[editIndex] = v;
+    }
+    onChange(next);
+    setEditIndex(null);
+    setEditDraft("");
+  };
+
+  return (
+    <div className="form-group">
+      {label ? (
+        <label>
+          {label}
+          {required ? " *" : ""}
+        </label>
+      ) : null}
+
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "0.6rem" }}>
+        <select
+          value={newDraft}
+          disabled={disabled}
+          onChange={(e) => setNewDraft(e.target.value)}
+          style={{
+            flex: "1 1 260px",
+            minWidth: 200,
+            padding: "0.5rem",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--surface)",
+          }}
+        >
+          <option value="">— Select value —</option>
+          {options.map((opt) => (
+            <option key={opt} value={opt}>
+              {opt}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="btn btn-primary" disabled={disabled || !newDraft.trim()} onClick={addItem}>
+          Add
+        </button>
+      </div>
+
+      {items.length === 0 ? (
+        <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No values yet.</div>
+      ) : (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 48 }}>#</th>
+              <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)" }}>Value</th>
+              <th style={{ textAlign: "right", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 160 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it, idx) => {
+              const isEditingRow = editIndex === idx;
+              return (
+                <tr key={`${String(it)}:${idx}`}>
+                  <td style={{ padding: "0.4rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>{idx + 1}</td>
+                  <td style={{ padding: "0.4rem", borderBottom: "1px solid var(--border)" }}>
+                    {isEditingRow ? (
+                      <select
+                        value={editDraft}
+                        disabled={disabled}
+                        onChange={(e) => setEditDraft(e.target.value)}
+                        style={{
+                          width: "100%",
+                          padding: "0.45rem 0.5rem",
+                          borderRadius: 8,
+                          border: "1px solid var(--border)",
+                          background: "var(--surface)",
+                        }}
+                        autoFocus
+                      >
+                        <option value="">—</option>
+                        {options.map((opt) => (
+                          <option key={opt} value={opt}>
+                            {opt}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span>{String(it)}</span>
+                    )}
+                  </td>
+                  <td style={{ padding: "0.4rem", borderBottom: "1px solid var(--border)", textAlign: "right", whiteSpace: "nowrap" }}>
+                    {isEditingRow ? (
+                      <>
+                        <button type="button" className="btn btn-primary" disabled={disabled} onClick={saveEdit} style={{ marginRight: "0.35rem" }}>
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={disabled}
+                          onClick={() => {
+                            setEditIndex(null);
+                            setEditDraft("");
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button type="button" className="btn" disabled={disabled} onClick={() => startEdit(idx)} style={{ marginRight: "0.35rem" }}>
+                          Edit
+                        </button>
+                        <button type="button" className="btn" disabled={disabled} onClick={() => removeItem(idx)} style={{ color: "var(--error)" }}>
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 type SubField = {
   key: string;
   name: string;
@@ -239,6 +409,8 @@ export default function MultiItemRowDetail() {
   const [error, setError] = useState<string | null>(null);
   const [refAllowedValues, setRefAllowedValues] = useState<Record<string, string[]>>({});
   const [activeSectionTab, setActiveSectionTab] = useState<string>("");
+  const [activeMixedListTabByGroup, setActiveMixedListTabByGroup] = useState<Record<string, string>>({});
+  const [activeListLikeTabByGroup, setActiveListLikeTabByGroup] = useState<Record<string, string>>({});
 
   const rowPageContextLoadGenRef = useRef(0);
 
@@ -721,9 +893,11 @@ export default function MultiItemRowDetail() {
 
             {sectionGroups
               .filter((g) => !hasSectionTabs || activeSectionTab === g.label)
-              .map((group, groupIdx) => (
+              .map((group, groupIdx) => {
+              const groupKey = `${group.label || "default"}:${groupIdx}`;
+              return (
               <div
-                key={`${group.label || "default"}:${groupIdx}`}
+                key={groupKey}
                 style={{
                   marginTop: groupIdx === 0 ? 0 : "1rem",
                   padding: "0.9rem",
@@ -734,8 +908,12 @@ export default function MultiItemRowDetail() {
               >
                 {(() => {
                   const mixedListFields = group.fields.filter((sf) => sf.field_type === "mixed_list");
+                  const multiRefFields = group.fields.filter((sf) => sf.field_type === "multi_reference");
                   const compactFields = group.fields.filter(
-                    (sf) => sf.field_type !== "multi_line_text" && sf.field_type !== "mixed_list"
+                    (sf) =>
+                      sf.field_type !== "multi_line_text" &&
+                      sf.field_type !== "mixed_list" &&
+                      sf.field_type !== "multi_reference"
                   );
                   const multiLineFields = group.fields.filter((sf) => sf.field_type === "multi_line_text");
 
@@ -743,6 +921,17 @@ export default function MultiItemRowDetail() {
                   const mlLeft: SubField[] = [];
                   const mlRight: SubField[] = [];
                   multiLineFields.forEach((sf, idx) => (idx % 2 === 0 ? mlLeft : mlRight).push(sf));
+
+                  const listLikeTabs = [
+                    ...mixedListFields.map((sf) => ({ kind: "mixed_list" as const, sf })),
+                    ...multiRefFields.map((sf) => ({ kind: "multi_reference" as const, sf })),
+                  ];
+                  const listLikeKeys = listLikeTabs.map((t) => `${t.kind}:${t.sf.key}`);
+                  const activeListLikeKey = (() => {
+                    const current = activeListLikeTabByGroup[groupKey] || activeMixedListTabByGroup[groupKey];
+                    if (current && listLikeKeys.includes(current)) return current;
+                    return listLikeKeys[0] || "";
+                  })();
 
                   return (
                     <div style={{ display: "grid", gap: "1rem" }}>
@@ -956,33 +1145,108 @@ export default function MultiItemRowDetail() {
                         </div>
                       )}
 
-                      {mixedListFields.map((sf) => {
-                        const key = sf.key;
-                        const val = editData[key];
-                        return (
-                          <div
-                            key={key}
-                            style={{
-                              padding: "0.85rem",
-                              border: "1px solid var(--border)",
-                              borderRadius: 10,
-                              background: "var(--surface)",
-                            }}
-                          >
-                            <div style={{ fontSize: "0.95rem", fontWeight: 650, marginBottom: "0.6rem" }}>
-                              {sf.name}
-                              {sf.is_required ? " *" : ""}
+                      {listLikeTabs.length > 0 && (
+                        <div
+                          style={{
+                            padding: "0.85rem",
+                            border: "1px solid var(--border)",
+                            borderRadius: 10,
+                            background: "var(--surface)",
+                          }}
+                        >
+                          {listLikeTabs.length > 1 && (
+                            <div
+                              style={{
+                                display: "flex",
+                                flexWrap: "wrap",
+                                gap: "0.5rem",
+                                marginBottom: "0.9rem",
+                                paddingBottom: "0.75rem",
+                                borderBottom: "1px solid var(--border)",
+                              }}
+                            >
+                              {listLikeTabs.map(({ kind, sf }) => {
+                                const tabKey = `${kind}:${sf.key}`;
+                                const isActive = activeListLikeKey === tabKey;
+                                return (
+                                  <button
+                                    key={tabKey}
+                                    type="button"
+                                    className={isActive ? "btn btn-primary" : "btn"}
+                                    onClick={() =>
+                                      setActiveListLikeTabByGroup((prev) => ({ ...prev, [groupKey]: tabKey }))
+                                    }
+                                    style={{
+                                      padding: "0.4rem 0.7rem",
+                                      fontSize: "0.9rem",
+                                      borderRadius: 999,
+                                    }}
+                                  >
+                                    {sf.name}
+                                  </button>
+                                );
+                              })}
                             </div>
-                            <MixedListCellEditor
-                              label=""  // heading is rendered by the card title above
-                              required={false}
-                              items={Array.isArray(val) ? (val as MixedAtom[]) : []}
-                              onChange={(next) => handleChangeCell(key, next)}
-                              disabled={sf.can_edit === false}
-                            />
-                          </div>
-                        );
-                      })}
+                          )}
+
+                          {listLikeTabs
+                            .filter(({ kind, sf }) => listLikeTabs.length <= 1 || `${kind}:${sf.key}` === activeListLikeKey)
+                            .map(({ kind, sf }) => {
+                              const key = sf.key;
+                              const val = editData[key];
+
+                              if (kind === "mixed_list") {
+                                return (
+                                  <div key={`${kind}:${key}`}>
+                                    <div style={{ fontSize: "0.95rem", fontWeight: 650, marginBottom: "0.6rem" }}>
+                                      {sf.name}
+                                      {sf.is_required ? " *" : ""}
+                                    </div>
+                                    <MixedListCellEditor
+                                      label="" // heading is rendered by the card title above
+                                      required={false}
+                                      items={Array.isArray(val) ? (val as MixedAtom[]) : []}
+                                      onChange={(next) => handleChangeCell(key, next)}
+                                      disabled={sf.can_edit === false}
+                                    />
+                                  </div>
+                                );
+                              }
+
+                              const cfg = (sf as any).config as
+                                | {
+                                    reference_source_kpi_id?: number;
+                                    reference_source_field_key?: string;
+                                    reference_source_sub_field_key?: string;
+                                  }
+                                | undefined;
+                              const refKey =
+                                cfg?.reference_source_kpi_id && cfg?.reference_source_field_key
+                                  ? `${cfg.reference_source_kpi_id}-${cfg.reference_source_field_key}${
+                                      cfg.reference_source_sub_field_key ? `-${cfg.reference_source_sub_field_key}` : ""
+                                    }`
+                                  : "";
+                              const options = refAllowedValues[refKey] ?? [];
+                              const arr = Array.isArray(val) ? (val as string[]) : [];
+                              return (
+                                <div key={`${kind}:${key}`}>
+                                  <div style={{ fontSize: "0.95rem", fontWeight: 650, marginBottom: "0.6rem" }}>
+                                    {sf.name}
+                                    {sf.is_required ? " *" : ""}
+                                  </div>
+                                  <MultiReferenceListEditor
+                                    label="" // heading is rendered by the card title above
+                                    required={false}
+                                    items={arr}
+                                    options={options}
+                                    onChange={(next) => handleChangeCell(key, next)}
+                                    disabled={sf.can_edit === false}
+                                  />
+                                </div>
+                              );
+                            })}
+                        </div>
+                      )}
 
                       {multiLineFields.length > 0 && (
                         <div
@@ -1067,7 +1331,8 @@ export default function MultiItemRowDetail() {
                   );
                 })()}
               </div>
-            ))}
+            );
+              })}
             <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem", justifyContent: "flex-end", alignItems: "center" }}>
               {!entryId && (
                 <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Loading entry…</span>
