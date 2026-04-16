@@ -209,10 +209,22 @@ export default function KpiFieldsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [cardDisplayFieldIds, setCardDisplayFieldIds] = useState<number[]>([]);
-  const [savingCardDisplay, setSavingCardDisplay] = useState(false);
-  const [cardDisplaySaved, setCardDisplaySaved] = useState(false);
-  const [cardDisplaySaveError, setCardDisplaySaveError] = useState<string | null>(null);
   const autosaveTimerRef = useRef<number | null>(null);
+  const [superAdminFieldsTab, setSuperAdminFieldsTab] = useState<string>("scalar");
+  const [activeSubSectionByMultiFieldId, setActiveSubSectionByMultiFieldId] = useState<Record<number, string>>({});
+  const [multiFieldSettingsOpenById, setMultiFieldSettingsOpenById] = useState<Record<number, boolean>>({});
+  const [multiFieldEditDraftById, setMultiFieldEditDraftById] = useState<
+    Record<
+      number,
+      {
+        data: UpdateFormData;
+        subFields: SubFieldDef[];
+      }
+    >
+  >({});
+  const [multiFieldKeyTouchedById, setMultiFieldKeyTouchedById] = useState<Record<number, boolean>>({});
+  const [multiFieldEditingPanelById, setMultiFieldEditingPanelById] = useState<Record<number, "general" | "subfields" | null>>({});
+  const [multiFieldSubSectionSnapshotById, setMultiFieldSubSectionSnapshotById] = useState<Record<number, Record<number, string>>>({});
   const [kpiSaveError, setKpiSaveError] = useState<string | null>(null);
   const [kpiSaving, setKpiSaving] = useState(false);
   const [orgTimeDimension, setOrgTimeDimension] = useState<string>("yearly");
@@ -248,6 +260,20 @@ export default function KpiFieldsPage() {
     () => list.filter((f) => f.field_type === "multi_line_items" && (f.sub_fields?.length ?? 0) > 0),
     [list]
   );
+
+  const scalarFields = useMemo(() => list.filter((f) => f.field_type !== "multi_line_items"), [list]);
+  const multiLineFields = useMemo(() => list.filter((f) => f.field_type === "multi_line_items"), [list]);
+
+  useEffect(() => {
+    if (userRole !== "SUPER_ADMIN") return;
+    setSuperAdminFieldsTab((prev) => {
+      if (prev === "scalar") return "scalar";
+      const match = /^multi:(\d+)$/.exec(prev);
+      if (!match) return "scalar";
+      const id = Number(match[1]);
+      return multiLineFields.some((f) => f.id === id) ? prev : "scalar";
+    });
+  }, [userRole, multiLineFields]);
 
   useEffect(() => {
     if (tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings") {
@@ -380,6 +406,7 @@ export default function KpiFieldsPage() {
   type CreateSubFieldRow = { name: string; key: string; field_type: string; is_required: boolean; sort_order: number; keyTouched?: boolean; config?: ReferenceConfig };
   const [createSubFields, setCreateSubFields] = useState<CreateSubFieldRow[]>([]);
   const [createRefConfig, setCreateRefConfig] = useState<ReferenceConfig>({});
+  const [activeCreateSubSection, setActiveCreateSubSection] = useState<string>("Other");
 
   const createForm = useForm<CreateFormData>({
     resolver: zodResolver(createSchema),
@@ -395,6 +422,25 @@ export default function KpiFieldsPage() {
       multi_items_api_endpoint_url: "",
     },
   });
+
+  const createSubSections = useMemo(() => {
+    const set = new Set<string>();
+    createSubFields.forEach((s) => {
+      const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
+      set.add(sec || "Other");
+    });
+    if (set.size === 0) set.add("Other");
+    const arr = Array.from(set);
+    // Keep "Other" last for readability
+    arr.sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+    return arr;
+  }, [createSubFields]);
+
+  useEffect(() => {
+    if (!createSubSections.includes(activeCreateSubSection)) {
+      setActiveCreateSubSection(createSubSections[0] || "Other");
+    }
+  }, [createSubSections, activeCreateSubSection]);
 
   const onCreateSubmit = async (data: CreateFormData) => {
     if (!token || !kpiId) {
@@ -591,8 +637,6 @@ export default function KpiFieldsPage() {
 
   const onSaveCardDisplayFields = async (ids: number[]) => {
     if (!token || !kpiId) return;
-    setSavingCardDisplay(true);
-    setCardDisplaySaveError(null);
     try {
       const orderedIds = list.filter((f) => ids.includes(f.id)).map((f) => f.id);
       const query = orgId != null ? `?organization_id=${orgId}` : "";
@@ -603,11 +647,8 @@ export default function KpiFieldsPage() {
       });
       setKpi((prev) => (prev ? { ...prev, card_display_field_ids: orderedIds } : null));
       setCardDisplayFieldIds(orderedIds);
-      setCardDisplaySaved(true);
     } catch (e) {
-      setCardDisplaySaveError(e instanceof Error ? e.message : "Failed to save");
-    } finally {
-      setSavingCardDisplay(false);
+      toast.error(e instanceof Error ? e.message : "Failed to save KPI card fields");
     }
   };
 
@@ -616,8 +657,6 @@ export default function KpiFieldsPage() {
       ? [...cardDisplayFieldIds, fieldId]
       : cardDisplayFieldIds.filter((id) => id !== fieldId);
     setCardDisplayFieldIds(next);
-    setCardDisplaySaved(false);
-    setCardDisplaySaveError(null);
     if (autosaveTimerRef.current != null) window.clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = window.setTimeout(() => {
       onSaveCardDisplayFields(next);
@@ -1373,29 +1412,19 @@ export default function KpiFieldsPage() {
 
       {(!isOrgContext || activeEditTab === "fields") && (
         <>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
-            <div>
-              <h2 style={{ fontSize: isOrgContext ? "1.15rem" : "1.5rem", margin: 0 }}>
-                {isOrgContext ? "Fields" : `Fields for ${kpi ? kpi.name : `KPI #${kpiId}`}`}
-              </h2>
-              {userRole === "SUPER_ADMIN" && (
-                <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
-                  Use &quot;Show on card&quot; next to each field to choose which fields appear on this KPI&apos;s card on the domain page.
-                </p>
-              )}
-            </div>
+          {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "1rem" }}>
             <button
               type="button"
-              className="btn btn-primary"
+              className={showCreate ? "btn" : "btn btn-primary"}
               onClick={() => setShowCreate((s) => !s)}
             >
               {showCreate ? "Cancel" : "Add field"}
             </button>
           </div>
 
-          {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
-
-      {showCreate && (
+          {showCreate && (
         <div className="card" style={{ marginBottom: "1rem" }}>
           <h2 style={{ marginBottom: "0.75rem", fontSize: "1.1rem" }}>Create field</h2>
           <form
@@ -1555,6 +1584,24 @@ export default function KpiFieldsPage() {
                 <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
                   Define columns so data entry uses a table instead of raw JSON.
                 </p>
+                {createSubSections.length > 1 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                    {createSubSections.map((sec) => {
+                      const isActive = sec === activeCreateSubSection;
+                      return (
+                        <button
+                          key={sec}
+                          type="button"
+                          className={isActive ? "btn btn-primary" : "btn"}
+                          onClick={() => setActiveCreateSubSection(sec)}
+                          style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
+                        >
+                          {sec}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                     <thead>
@@ -1563,18 +1610,30 @@ export default function KpiFieldsPage() {
                         <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
                         <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
                         <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (reference / multi reference)</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Section (UI)</th>
                         <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
                         <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
                       </tr>
                     </thead>
                     <tbody>
-                      {createSubFields.length === 0 ? (
+                      {createSubFields.filter((s) => {
+                        const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
+                        const label = sec || "Other";
+                        return createSubSections.length <= 1 ? true : label === activeCreateSubSection;
+                      }).length === 0 ? (
                         <tr>
-                          <td colSpan={6} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
-                            No sub-fields yet. Click &quot;Add sub-field&quot; below.
+                          <td colSpan={7} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                            No sub-fields in this section yet. Click &quot;Add sub-field&quot; below.
                           </td>
                         </tr>
-                      ) : createSubFields.map((s, idx) => (
+                      ) : createSubFields
+                        .map((s, idx) => ({ s, idx }))
+                        .filter(({ s }) => {
+                          const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
+                          const label = sec || "Other";
+                          return createSubSections.length <= 1 ? true : label === activeCreateSubSection;
+                        })
+                        .map(({ s, idx }) => (
                         <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
                           <td style={{ padding: "0.4rem 0.5rem" }}>
                             <input
@@ -1629,6 +1688,37 @@ export default function KpiFieldsPage() {
                               <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
                             )}
                           </td>
+                          <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                            {userRole === "SUPER_ADMIN" ? (
+                              <input
+                                placeholder="e.g. Program details"
+                                value={s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "") : ""}
+                                onChange={(e) => {
+                                  const section = e.target.value;
+                                  setCreateSubFields((prev) =>
+                                    prev.map((x, i) =>
+                                      i === idx
+                                        ? {
+                                            ...x,
+                                            config: {
+                                              ...(x.config ?? {}),
+                                              ui_section: section,
+                                            },
+                                          }
+                                        : x
+                                    )
+                                  );
+                                }}
+                                style={{ width: "100%" }}
+                              />
+                            ) : (
+                              <div style={{ padding: "0.35rem 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                                {s.config && typeof s.config === "object" && "ui_section" in s.config && (s.config as any).ui_section
+                                  ? String((s.config as any).ui_section)
+                                  : "—"}
+                              </div>
+                            )}
+                          </td>
                           <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
                             <input
                               type="checkbox"
@@ -1652,121 +1742,738 @@ export default function KpiFieldsPage() {
               </div>
             )}
             {createForm.watch("field_type") === "multi_line_items" && (
-              <>
-                <div style={{ marginTop: "-0.25rem", marginBottom: "0.5rem", color: "var(--muted)", fontSize: "0.85rem" }}>
-                  Tip: Enable <strong>Full-page editor</strong> above for large datasets (search, paging, bulk delete, bulk upload).
-                </div>
-                <div className="form-group">
-                  <label>Multi-line API endpoint URL (optional)</label>
-                  <input
-                    type="url"
-                    placeholder="https://example.com/multi-items-api"
-                    {...createForm.register("multi_items_api_endpoint_url")}
-                    style={{ width: "100%" }}
-                  />
-                  <p style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
-                    When set, Org Admins can sync this multi-line field from API on the full-page editor.
-                  </p>
-                </div>
-              </>
+              <div
+                className="form-group"
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}
+              >
+                <label style={{ margin: 0, whiteSpace: "nowrap" }}>API URL</label>
+                <input
+                  type="url"
+                  placeholder="https://example.com/multi-items-api"
+                  {...createForm.register("multi_items_api_endpoint_url")}
+                  style={{ flex: "1 1 220px", minWidth: 0 }}
+                />
+              </div>
             )}
             <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem" }}>
               <button type="submit" className="btn btn-primary" disabled={createForm.formState.isSubmitting}>
                 {createForm.formState.isSubmitting ? "Creating..." : "Create"}
               </button>
-              <button type="button" className="btn" onClick={() => setShowCreate(false)}>Cancel</button>
+              <button type="button" className="btn" onClick={() => setShowCreate(false)}>
+                Cancel
+              </button>
             </div>
           </form>
         </div>
-      )}
+          )}
 
       <div className="card">
         {list.length === 0 ? (
-          <p style={{ color: "var(--muted)" }}>No fields yet. Add one above to build the data entry form for this KPI.</p>
+          <p style={{ color: "var(--muted)" }}>No fields yet. Click &quot;Add field&quot; to create one.</p>
         ) : (
           <ul style={{ listStyle: "none" }}>
-            {userRole === "SUPER_ADMIN" && (
-              <li style={{ padding: "0 0 0.75rem 0", borderBottom: "1px solid var(--border)", marginBottom: "0.75rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
-                  <div>
-                    <strong>Shown on domain KPI card</strong>
-                    <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
-                      Tick fields below to show on KPI cards on the domain page.
-                    </p>
-                    {savingCardDisplay && (
-                      <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>Saving…</p>
-                    )}
-                    {!savingCardDisplay && cardDisplaySaved && !cardDisplaySaveError && (
-                      <p style={{ color: "var(--success)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>Saved</p>
-                    )}
-                    {cardDisplaySaveError && (
-                      <p className="form-error" style={{ margin: "0.25rem 0 0" }}>{cardDisplaySaveError}</p>
-                    )}
-                  </div>
+            {userRole === "SUPER_ADMIN" ? (
+              <li style={{ padding: "0.75rem 0 0 0" }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.9rem" }}>
+                  <button
+                    type="button"
+                    className={superAdminFieldsTab === "scalar" ? "btn btn-primary" : "btn"}
+                    onClick={() => setSuperAdminFieldsTab("scalar")}
+                    style={{ borderRadius: 999, padding: "0.35rem 0.65rem" }}
+                  >
+                    Scalar fields <span style={{ opacity: 0.8 }}>({scalarFields.length})</span>
+                  </button>
+                  {multiLineFields.map((mf) => {
+                    const tabKey = `multi:${mf.id}`;
+                    const active = superAdminFieldsTab === tabKey;
+                    return (
+                      <button
+                        key={mf.id}
+                        type="button"
+                        className={active ? "btn btn-primary" : "btn"}
+                        onClick={() => setSuperAdminFieldsTab(tabKey)}
+                        style={{ borderRadius: 999, padding: "0.35rem 0.65rem" }}
+                        title={mf.key}
+                      >
+                        {mf.name}
+                      </button>
+                    );
+                  })}
                 </div>
-              </li>
-            )}
-            {list.map((f) => (
-              <li key={f.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
-                {editingId === f.id ? (
-                  <FieldEditForm
-                    field={f}
-                    list={list}
-                    onSave={(data, subFields, refConfig) => onUpdateSubmit(f.id, data, subFields, refConfig)}
-                    onCancel={() => setEditingId(null)}
-                    organizationId={kpi?.organization_id}
-                    currentKpiId={kpiId}
-                    userRole={userRole}
-                  />
-                ) : (
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
-                    <div>
-                      <strong
+
+                {superAdminFieldsTab === "scalar" ? (
+                  <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                    {scalarFields.map((f) => (
+                      <li key={f.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
+                        {editingId === f.id ? (
+                          <FieldEditForm
+                            field={f}
+                            list={list}
+                            onSave={(data, subFields, refConfig) => onUpdateSubmit(f.id, data, subFields, refConfig)}
+                            onCancel={() => setEditingId(null)}
+                            organizationId={kpi?.organization_id}
+                            currentKpiId={kpiId}
+                            userRole={userRole}
+                          />
+                        ) : (
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
+                            <div>
+                              <strong>{f.name}</strong>
+                              <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>({f.key})</span>
+                              <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}> - {f.field_type.replace(/_/g, " ")}</span>
+                              {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
+                              {f.field_type === "formula" && f.formula_expression && (
+                                <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                                  Formula: {f.formula_expression}
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                              <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", color: "var(--muted)" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={cardDisplayFieldIds.includes(f.id)}
+                                  onChange={(e) => onToggleCardDisplayField(f.id, e.target.checked)}
+                                />
+                                Show on card
+                              </label>
+                              <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
+                              <button type="button" className="btn" onClick={() => onDelete(f.id)} style={{ color: "var(--error)" }}>Delete</button>
+                            </div>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (() => {
+                  const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
+                  const fieldId = match ? Number(match[1]) : null;
+                  const f = fieldId ? multiLineFields.find((x) => x.id === fieldId) : null;
+                  if (!f) return null;
+
+                  const subs = f.sub_fields ?? [];
+                  const editingPanel = multiFieldEditingPanelById[f.id] ?? null;
+                  const sections = (() => {
+                    // When editing sub-fields, keep grouping stable until Save to avoid "moving row while typing".
+                    const snap = multiFieldSubSectionSnapshotById[f.id];
+                    if (editingId === f.id && editingPanel === "subfields" && snap) {
+                      const uniq = new Set<string>(Object.values(snap).map((x) => x || "Other"));
+                      if (uniq.size === 0) uniq.add("Other");
+                      return Array.from(uniq).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+                    }
+                    const uniq = new Set<string>();
+                    subs.forEach((s) => {
+                      const sec = (s as any)?.config?.ui_section;
+                      const label = typeof sec === "string" ? sec.trim() : "";
+                      uniq.add(label || "Other");
+                    });
+                    if (uniq.size === 0) uniq.add("Other");
+                    return Array.from(uniq).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+                  })();
+
+                  const activeSection = (() => {
+                    const current = activeSubSectionByMultiFieldId[f.id];
+                    if (current && sections.includes(current)) return current;
+                    return sections[0] || "Other";
+                  })();
+
+                  const isEditing = editingId === f.id;
+                  const draft = multiFieldEditDraftById[f.id];
+                  const effectiveDraft = draft ?? {
+                    data: {
+                      name: f.name,
+                      key: f.key,
+                      field_type: f.field_type as any,
+                      formula_expression: f.formula_expression ?? "",
+                      is_required: f.is_required,
+                      sort_order: (f as any).sort_order ?? 0,
+                      carry_forward_data: (f as any).carry_forward_data ?? false,
+                      full_page_multi_items: (f as any).full_page_multi_items ?? false,
+                      multi_items_api_endpoint_url: ((f as any).config as any)?.multi_items_api_endpoint_url ?? "",
+                    } as UpdateFormData,
+                    subFields: (f.sub_fields ?? []).map((s) => ({
+                      ...(s as any),
+                      name: s.name,
+                      key: s.key,
+                      field_type: s.field_type as any,
+                      is_required: (s as any).is_required ?? false,
+                      sort_order: (s as any).sort_order ?? 0,
+                      config: (s as any).config ?? undefined,
+                      keyTouched: false,
+                    })) as SubFieldDef[],
+                  };
+
+                  return (
+                    <div style={{ padding: "0.25rem 0 0.75rem 0" }}>
+                      <div
                         style={{
-                          cursor: f.field_type === "multi_line_items" ? "pointer" : "default",
-                          textDecoration: f.field_type === "multi_line_items" ? "underline" : "none",
-                        }}
-                        onClick={() => {
-                          if (f.field_type !== "multi_line_items") return;
-                          const resolvedOrgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
-                          const year = new Date().getFullYear();
-                          if (!resolvedOrgId) return;
-                          router.push(
-                            `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
-                              organization_id: resolvedOrgId,
-                            })}`
-                          );
+                          marginTop: "-0.15rem",
+                          marginBottom: "0.6rem",
+                          padding: "0.6rem",
+                          border: "1px solid var(--border)",
+                          borderRadius: 10,
+                          background: "var(--bg-subtle, #f9fafb)",
                         }}
                       >
-                        {f.name}
-                      </strong>
-                      <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>({f.key})</span>
-                      <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}> - {f.field_type.replace(/_/g, " ")}</span>
-                      {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
-                      {f.field_type === "formula" && f.formula_expression && (
-                        <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
-                          Formula: {f.formula_expression}
-                        </span>
-                      )}
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+                          <div style={{ fontWeight: 650, color: "var(--muted)" }}>Settings</div>
+                          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                            {isEditing && editingPanel === "general" ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  onClick={async () => {
+                                    const payload = effectiveDraft.data as any;
+                                    const update: UpdateFormData = { ...payload };
+                                    await onUpdateSubmit(f.id, update, effectiveDraft.subFields, undefined);
+                                    setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
+                                    setEditingId(null);
+                                    setMultiFieldEditDraftById((prev) => {
+                                      const { [f.id]: _, ...rest } = prev;
+                                      return rest;
+                                    });
+                                  }}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  onClick={() => {
+                                    setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
+                                    setEditingId(null);
+                                    setMultiFieldEditDraftById((prev) => {
+                                      const { [f.id]: _, ...rest } = prev;
+                                      return rest;
+                                    });
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => {
+                                  setMultiFieldEditDraftById((prev) => (prev[f.id] ? prev : { ...prev, [f.id]: effectiveDraft }));
+                                  setMultiFieldKeyTouchedById((prev) => (prev[f.id] != null ? prev : { ...prev, [f.id]: false }));
+                                  setEditingId(f.id);
+                                  setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: "general" }));
+                                }}
+                              >
+                                Edit
+                              </button>
+                            )}
+                            <button type="button" className="btn" onClick={() => onDelete(f.id)} style={{ color: "var(--error)" }}>
+                              Delete
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              onClick={() => {
+                                const resolvedOrgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
+                                const year = new Date().getFullYear();
+                                if (!resolvedOrgId) return;
+                                router.push(
+                                  `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
+                                    organization_id: resolvedOrgId,
+                                  })}`
+                                );
+                              }}
+                            >
+                              Open data entry
+                            </button>
+                          </div>
+                        </div>
+
+                        {isEditing && editingPanel === "general" ? (
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0.5rem 1rem" }}>
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Name *</label>
+                              <input
+                                value={effectiveDraft.data.name ?? ""}
+                                onChange={(e) =>
+                                  setMultiFieldEditDraftById((prev) => {
+                                    const nextName = e.target.value;
+                                    const touched = !!multiFieldKeyTouchedById[f.id];
+                                    return {
+                                      ...prev,
+                                      [f.id]: {
+                                        ...effectiveDraft,
+                                        data: {
+                                          ...effectiveDraft.data,
+                                          name: nextName,
+                                          ...(touched ? {} : { key: slugifyKey(nextName) }),
+                                        },
+                                      },
+                                    };
+                                  })
+                                }
+                              />
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Key *</label>
+                              <input
+                                value={effectiveDraft.data.key ?? ""}
+                                onChange={(e) => {
+                                  const nextKey = e.target.value;
+                                  setMultiFieldKeyTouchedById((prev) => ({ ...prev, [f.id]: true }));
+                                  setMultiFieldEditDraftById((prev) => ({
+                                    ...prev,
+                                    [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, key: nextKey } },
+                                  }));
+                                }}
+                              />
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Type *</label>
+                              <select
+                                value={effectiveDraft.data.field_type as any}
+                                onChange={(e) =>
+                                  setMultiFieldEditDraftById((prev) => ({
+                                    ...prev,
+                                    [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, field_type: e.target.value as any } },
+                                  }))
+                                }
+                              >
+                                {FIELD_TYPES.map((t) => (
+                                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div
+                              className="form-group"
+                              style={{
+                                margin: 0,
+                                gridColumn: "1 / -1",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "0.5rem",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <label style={{ margin: 0, whiteSpace: "nowrap" }}>API URL</label>
+                              <input
+                                type="url"
+                                placeholder="https://example.com/multi-items-api"
+                                value={(effectiveDraft.data as any).multi_items_api_endpoint_url ?? ""}
+                                onChange={(e) =>
+                                  setMultiFieldEditDraftById((prev) => ({
+                                    ...prev,
+                                    [f.id]: {
+                                      ...effectiveDraft,
+                                      data: { ...(effectiveDraft.data as any), multi_items_api_endpoint_url: e.target.value },
+                                    },
+                                  }))
+                                }
+                                style={{ flex: "1 1 220px", minWidth: 0 }}
+                              />
+                            </div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 1.25rem", alignItems: "center", gridColumn: "1 / -1" }}>
+                              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!effectiveDraft.data.is_required}
+                                  onChange={(e) =>
+                                    setMultiFieldEditDraftById((prev) => ({
+                                      ...prev,
+                                      [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, is_required: e.target.checked } },
+                                    }))
+                                  }
+                                />
+                                Required
+                              </label>
+                              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!(effectiveDraft.data as any).carry_forward_data}
+                                  onChange={(e) =>
+                                    setMultiFieldEditDraftById((prev) => ({
+                                      ...prev,
+                                      [f.id]: {
+                                        ...effectiveDraft,
+                                        data: { ...(effectiveDraft.data as any), carry_forward_data: e.target.checked },
+                                      },
+                                    }))
+                                  }
+                                />
+                                Carry forward
+                              </label>
+                              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!(effectiveDraft.data as any).full_page_multi_items}
+                                  onChange={(e) =>
+                                    setMultiFieldEditDraftById((prev) => ({
+                                      ...prev,
+                                      [f.id]: {
+                                        ...effectiveDraft,
+                                        data: { ...(effectiveDraft.data as any), full_page_multi_items: e.target.checked },
+                                      },
+                                    }))
+                                  }
+                                />
+                                Full-page
+                              </label>
+                              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                                <label>Sort</label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={Number(effectiveDraft.data.sort_order ?? 0)}
+                                  onChange={(e) =>
+                                    setMultiFieldEditDraftById((prev) => ({
+                                      ...prev,
+                                      [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, sort_order: Number(e.target.value || 0) } },
+                                    }))
+                                  }
+                                  style={{ width: "5rem" }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0.4rem 0.9rem" }}>
+                            <div><strong>Type</strong><div style={{ color: "var(--muted)" }}>{f.field_type.replace(/_/g, " ")}</div></div>
+                            <div><strong>Required</strong><div style={{ color: "var(--muted)" }}>{f.is_required ? "Yes" : "No"}</div></div>
+                            <div><strong>Carry forward</strong><div style={{ color: "var(--muted)" }}>{(f as any).carry_forward_data ? "Yes" : "No"}</div></div>
+                            <div><strong>Full-page</strong><div style={{ color: "var(--muted)" }}>{(f as any).full_page_multi_items ? "Yes" : "No"}</div></div>
+                            <div><strong>Sort</strong><div style={{ color: "var(--muted)" }}>{String((f as any).sort_order ?? "—")}</div></div>
+                            <div
+                              style={{
+                                gridColumn: "1 / -1",
+                                display: "flex",
+                                alignItems: "baseline",
+                                gap: "0.5rem",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <strong style={{ whiteSpace: "nowrap" }}>API URL</strong>
+                              <span style={{ color: "var(--muted)", wordBreak: "break-all", flex: "1 1 200px", minWidth: 0 }}>
+                                {((f as any).config as any)?.multi_items_api_endpoint_url
+                                  ? String(((f as any).config as any).multi_items_api_endpoint_url)
+                                  : "—"}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div
+                        style={{
+                          border: "1px solid var(--border)",
+                          borderRadius: 10,
+                          padding: "0.75rem",
+                          background: "var(--surface)",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+                          <div style={{ fontWeight: 750 }}>Sub-fields</div>
+                          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                            {isEditing && editingPanel === "subfields" ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  onClick={async () => {
+                                    const payload = effectiveDraft.data as any;
+                                    const update: UpdateFormData = { ...payload };
+                                    await onUpdateSubmit(f.id, update, effectiveDraft.subFields, undefined);
+                                    setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
+                                    setEditingId(null);
+                                    setMultiFieldEditDraftById((prev) => {
+                                      const { [f.id]: _, ...rest } = prev;
+                                      return rest;
+                                    });
+                                  }}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  onClick={() => {
+                                    setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
+                                    setEditingId(null);
+                                    setMultiFieldEditDraftById((prev) => {
+                                      const { [f.id]: _, ...rest } = prev;
+                                      return rest;
+                                    });
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => {
+                                  setMultiFieldEditDraftById((prev) => (prev[f.id] ? prev : { ...prev, [f.id]: effectiveDraft }));
+                                  setEditingId(f.id);
+                                  setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: "subfields" }));
+                                  setMultiFieldSubSectionSnapshotById((prev) => {
+                                    if (prev[f.id]) return prev;
+                                    const snap: Record<number, string> = {};
+                                    effectiveDraft.subFields.forEach((sf, idx) => {
+                                      const sec = (sf as any)?.config?.ui_section;
+                                      const label = typeof sec === "string" ? sec.trim() : "";
+                                      snap[idx] = label || "Other";
+                                    });
+                                    return { ...prev, [f.id]: snap };
+                                  });
+                                }}
+                              >
+                                Edit
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {sections.length > 1 && (
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                            {sections.map((sec) => {
+                              const isActive = sec === activeSection;
+                              return (
+                                <button
+                                  key={sec}
+                                  type="button"
+                                  className={isActive ? "btn btn-primary" : "btn"}
+                                  onClick={() =>
+                                    setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: sec }))
+                                  }
+                                  style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
+                                >
+                                  {sec}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                            <thead>
+                              <tr>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source</th>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>UI section</th>
+                                <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(() => {
+                                const rows = (isEditing && editingPanel === "subfields" ? effectiveDraft.subFields : subs).map((s, i) => ({ s, i }));
+                                const filtered = rows.filter(({ s, i }) => {
+                                  const snap = multiFieldSubSectionSnapshotById[f.id];
+                                  const group =
+                                    isEditing && editingPanel === "subfields" && snap
+                                      ? (snap[i] || "Other")
+                                      : (() => {
+                                          const sec = (s as any)?.config?.ui_section;
+                                          const label = typeof sec === "string" ? sec.trim() : "";
+                                          return label || "Other";
+                                        })();
+                                  return sections.length <= 1 ? true : group === activeSection;
+                                });
+                                return filtered.map(({ s, i }) => {
+                                  const fieldType = String((s as any).field_type ?? "");
+                                  const isRef = fieldType === "reference" || fieldType === "multi_reference";
+                                  const uiSectionVal = typeof (s as any)?.config?.ui_section === "string" ? String((s as any).config.ui_section) : "";
+                                  const keyForRow = (s as any).id ?? `${(s as any).key}:${i}`;
+                                  return (
+                                    <tr key={keyForRow} style={{ borderBottom: "1px solid var(--border)" }}>
+                                      {isEditing && editingPanel === "subfields" ? (
+                                        <>
+                                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                                            <input
+                                              value={(s as any).name ?? ""}
+                                              onChange={(e) => {
+                                                const nextName = e.target.value;
+                                                setMultiFieldEditDraftById((prev) => {
+                                                  const base = prev[f.id] ?? effectiveDraft;
+                                                  const nextSubs = base.subFields.map((x, idx) => {
+                                                    if (idx !== i) return x;
+                                                    const touched = !!(x as any).keyTouched;
+                                                    return {
+                                                      ...(x as any),
+                                                      name: nextName,
+                                                      ...(touched ? {} : { key: slugifyKey(nextName) }),
+                                                    } as any;
+                                                  });
+                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
+                                                });
+                                              }}
+                                              style={{ width: "100%" }}
+                                            />
+                                          </td>
+                                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                                            <input
+                                              value={(s as any).key ?? ""}
+                                              onChange={(e) => {
+                                                const nextKey = e.target.value;
+                                                setMultiFieldEditDraftById((prev) => {
+                                                  const base = prev[f.id] ?? effectiveDraft;
+                                                  const nextSubs = base.subFields.map((x, idx) =>
+                                                    idx === i ? ({ ...(x as any), key: nextKey, keyTouched: true } as any) : x
+                                                  );
+                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
+                                                });
+                                              }}
+                                              style={{ width: "100%" }}
+                                            />
+                                          </td>
+                                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                                            <select
+                                              value={fieldType}
+                                              onChange={(e) => {
+                                                const nextType = e.target.value;
+                                                setMultiFieldEditDraftById((prev) => {
+                                                  const base = prev[f.id] ?? effectiveDraft;
+                                                  const nextSubs = base.subFields.map((x, idx) => (idx === i ? ({ ...(x as any), field_type: nextType } as any) : x));
+                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
+                                                });
+                                              }}
+                                            >
+                                              {SUB_FIELD_TYPES.map((t) => (
+                                                <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                                              ))}
+                                            </select>
+                                          </td>
+                                          <td style={{ padding: "0.4rem 0.5rem", minWidth: 260 }}>
+                                            {isRef ? (
+                                              <ReferenceConfigUI
+                                                organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                                                currentKpiId={kpiId}
+                                                value={((s as any).config ?? {}) as any}
+                                                onChange={(c) =>
+                                                  setMultiFieldEditDraftById((prev) => {
+                                                    const base = prev[f.id] ?? effectiveDraft;
+                                                    const nextSubs = base.subFields.map((x, idx) =>
+                                                      idx === i ? ({ ...(x as any), config: { ...(x as any).config, ...c } } as any) : x
+                                                    );
+                                                    return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
+                                                  })
+                                                }
+                                                labelPrefix="Source"
+                                              />
+                                            ) : (
+                                              <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
+                                            )}
+                                          </td>
+                                          <td style={{ padding: "0.4rem 0.5rem", minWidth: 160 }}>
+                                            <input
+                                              value={uiSectionVal}
+                                              onChange={(e) => {
+                                                const nextSection = e.target.value;
+                                                setMultiFieldEditDraftById((prev) => {
+                                                  const base = prev[f.id] ?? effectiveDraft;
+                                                  const nextSubs = base.subFields.map((x, idx) =>
+                                                    idx === i
+                                                      ? ({ ...(x as any), config: { ...(x as any).config, ui_section: nextSection } } as any)
+                                                      : x
+                                                  );
+                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
+                                                });
+                                              }}
+                                              placeholder="e.g. Program"
+                                              style={{ width: "100%" }}
+                                            />
+                                          </td>
+                                          <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                                            <input
+                                              type="checkbox"
+                                              checked={!!(s as any).is_required}
+                                              onChange={(e) => {
+                                                const nextReq = e.target.checked;
+                                                setMultiFieldEditDraftById((prev) => {
+                                                  const base = prev[f.id] ?? effectiveDraft;
+                                                  const nextSubs = base.subFields.map((x, idx) => (idx === i ? ({ ...(x as any), is_required: nextReq } as any) : x));
+                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
+                                                });
+                                              }}
+                                            />
+                                          </td>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <td style={{ padding: "0.4rem 0.5rem" }}>{(s as any).name}</td>
+                                          <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{(s as any).key}</td>
+                                          <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{fieldType.replace(/_/g, " ")}</td>
+                                          <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>—</td>
+                                          <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>
+                                            {uiSectionVal.trim() ? uiSectionVal : "—"}
+                                          </td>
+                                          <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>{(s as any).is_required ? "Yes" : "No"}</td>
+                                        </>
+                                      )}
+                                    </tr>
+                                  );
+                                });
+                              })()}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
                     </div>
-                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-                      {userRole === "SUPER_ADMIN" && (
-                        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", color: "var(--muted)" }}>
-                          <input
-                            type="checkbox"
-                            checked={cardDisplayFieldIds.includes(f.id)}
-                            onChange={(e) => onToggleCardDisplayField(f.id, e.target.checked)}
-                          />
-                          Show on card
-                        </label>
-                      )}
-                      <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
-                      <button type="button" className="btn" onClick={() => onDelete(f.id)} style={{ color: "var(--error)" }}>Delete</button>
-                    </div>
-                  </div>
-                )}
+                  );
+                })()}
               </li>
-            ))}
+            ) : (
+              list.map((f) => (
+                <li key={f.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
+                  {editingId === f.id ? (
+                    <FieldEditForm
+                      field={f}
+                      list={list}
+                      onSave={(data, subFields, refConfig) => onUpdateSubmit(f.id, data, subFields, refConfig)}
+                      onCancel={() => setEditingId(null)}
+                      organizationId={kpi?.organization_id}
+                      currentKpiId={kpiId}
+                      userRole={userRole}
+                    />
+                  ) : (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
+                      <div>
+                        <strong
+                          style={{
+                            cursor: f.field_type === "multi_line_items" ? "pointer" : "default",
+                            textDecoration: f.field_type === "multi_line_items" ? "underline" : "none",
+                          }}
+                          onClick={() => {
+                            if (f.field_type !== "multi_line_items") return;
+                            const resolvedOrgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
+                            const year = new Date().getFullYear();
+                            if (!resolvedOrgId) return;
+                            router.push(
+                              `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
+                                organization_id: resolvedOrgId,
+                              })}`
+                            );
+                          }}
+                        >
+                          {f.name}
+                        </strong>
+                        <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>({f.key})</span>
+                        <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}> - {f.field_type.replace(/_/g, " ")}</span>
+                        {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
+                        {f.field_type === "formula" && f.formula_expression && (
+                          <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                            Formula: {f.formula_expression}
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                        <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
+                        <button type="button" className="btn" onClick={() => onDelete(f.id)} style={{ color: "var(--error)" }}>Delete</button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              ))
+            )}
           </ul>
         )}
       </div>
@@ -2012,7 +2719,7 @@ function ReferenceConfigUI({
     }
     if (f.field_type === "multi_line_items" && f.sub_fields?.length) {
       f.sub_fields.forEach((s) => {
-        sourceFieldOptions.push({ value: `${f.key}|${s.key}`, label: `${f.name} → ${s.name} (${s.key})` });
+        sourceFieldOptions.push({ value: `${f.key}|${s.key}`, label: `${f.name} → ${s.key}` });
       });
     }
   });
@@ -2439,6 +3146,34 @@ function FieldEditForm({
     },
   });
   const currentFieldType = watch("field_type");
+  const [activeEditSubSection, setActiveEditSubSection] = useState<string>("Other");
+  const [multiLineSettingsOpen, setMultiLineSettingsOpen] = useState<boolean>(true);
+
+  const editSubSections = useMemo(() => {
+    const set = new Set<string>();
+    editSubFields.forEach((s) => {
+      const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
+      set.add(sec || "Other");
+    });
+    if (set.size === 0) set.add("Other");
+    const arr = Array.from(set);
+    arr.sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+    return arr;
+  }, [editSubFields]);
+
+  useEffect(() => {
+    if (!editSubSections.includes(activeEditSubSection)) {
+      setActiveEditSubSection(editSubSections[0] || "Other");
+    }
+  }, [editSubSections, activeEditSubSection]);
+
+  useEffect(() => {
+    if (currentFieldType !== "multi_line_items") return;
+    // If the current active section disappears, fall back to first.
+    if (!editSubSections.includes(activeEditSubSection)) {
+      setActiveEditSubSection(editSubSections[0] || "Other");
+    }
+  }, [currentFieldType, editSubSections, activeEditSubSection]);
 
   return (
     <form
@@ -2453,123 +3188,138 @@ function FieldEditForm({
       )}
       style={{ width: "100%" }}
     >
-      {/* Row 1: Name, Key, Type — aligned with create field layout */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-          gap: "0.75rem 1rem",
-          alignItems: "flex-start",
-          marginBottom: "0.75rem",
-        }}
-      >
-        <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
-          <label>Name *</label>
-          <input
-            style={{ width: "100%" }}
-            value={watch("name") ?? ""}
-            onChange={(e) => {
-              const name = e.target.value;
-              setValue("name", name, { shouldValidate: true });
-              if (!editKeyTouched) {
-                setValue("key", slugifyKey(name), { shouldValidate: false, shouldDirty: true });
-              }
+      {(currentFieldType !== "multi_line_items" || multiLineSettingsOpen) && (
+        <>
+          {/* Row 1: Name, Key, Type — aligned with create field layout */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+              gap: "0.75rem 1rem",
+              alignItems: "flex-start",
+              marginBottom: "0.75rem",
             }}
-          />
-          {errors.name && (
-            <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
-              {errors.name.message}
-            </p>
-          )}
-        </div>
-        <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
-          <label>Key * <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.8rem" }}>(auto from name)</span></label>
-          <input
-            {...register("key", { onChange: () => setEditKeyTouched(true) })}
-            placeholder="key_name (auto from name)"
-            style={{ width: "100%" }}
-          />
-          {errors.key && (
-            <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
-              {errors.key.message}
-            </p>
-          )}
-        </div>
-        <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
-          <label>Type *</label>
-          <select {...register("field_type")} style={{ width: "100%" }}>
-            {FIELD_TYPES.map((t) => (
-              <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-      {/* Row 2: Required, Sort order */}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: "1rem 1.5rem",
-          marginBottom: "0.75rem",
-        }}
-      >
-        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
-          <input type="checkbox" {...register("is_required")} />
-          Required
-        </label>
-        {userRole === "SUPER_ADMIN" && (
-          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
-            <input type="checkbox" {...register("carry_forward_data")} />
-            Carry forward (non-cyclic)
-          </label>
-        )}
-        {currentFieldType === "multi_line_items" && (
-          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
-            <span style={{ fontWeight: 500 }}>Full-page editor</span>
-            <span
-              style={{
-                position: "relative",
-                width: 40,
-                height: 22,
-                borderRadius: 999,
-                background: watch("full_page_multi_items") ? "var(--accent)" : "var(--border)",
-                display: "inline-flex",
-                alignItems: "center",
-                padding: 2,
-                transition: "background 120ms ease",
-              }}
-            >
-              <span
-                style={{
-                  width: 18,
-                  height: 18,
-                  borderRadius: "50%",
-                  background: "var(--surface)",
-                  transform: watch("full_page_multi_items") ? "translateX(18px)" : "translateX(0)",
-                  transition: "transform 120ms ease",
-                  boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+          >
+            <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+              <label>Name *</label>
+              <input
+                style={{ width: "100%" }}
+                value={watch("name") ?? ""}
+                onChange={(e) => {
+                  const name = e.target.value;
+                  setValue("name", name, { shouldValidate: true });
+                  if (!editKeyTouched) {
+                    setValue("key", slugifyKey(name), { shouldValidate: false, shouldDirty: true });
+                  }
                 }}
               />
-            </span>
-            <input
-              type="checkbox"
-              {...register("full_page_multi_items")}
-              style={{ display: "none" }}
-              aria-label="Use full-page editor for this multi-line field"
-            />
-          </label>
-        )}
-        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-          <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
-          <input
-            type="number"
-            min={0}
-            {...register("sort_order")}
-            style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }}
-          />
-        </div>
-      </div>
+              {errors.name && (
+                <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+                  {errors.name.message}
+                </p>
+              )}
+            </div>
+            <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+              <label>Key * <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.8rem" }}>(auto from name)</span></label>
+              <input
+                {...register("key", { onChange: () => setEditKeyTouched(true) })}
+                placeholder="key_name (auto from name)"
+                style={{ width: "100%" }}
+              />
+              {errors.key && (
+                <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+                  {errors.key.message}
+                </p>
+              )}
+            </div>
+            <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+              <label>Type *</label>
+              <select {...register("field_type")} style={{ width: "100%" }}>
+                {FIELD_TYPES.map((t) => (
+                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {/* Row 2: Required, Sort order */}
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: "1rem 1.5rem",
+              marginBottom: "0.75rem",
+            }}
+          >
+            {currentFieldType === "multi_line_items" && (
+              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", flex: "1 1 320px", minWidth: 260 }}>
+                <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>API URL</label>
+                <input
+                  type="url"
+                  placeholder="https://example.com/multi-items-api"
+                  {...register("multi_items_api_endpoint_url")}
+                  style={{ flex: 1, minWidth: 220, padding: "0.35rem 0.5rem" }}
+                />
+              </div>
+            )}
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+              <input type="checkbox" {...register("is_required")} />
+              Required
+            </label>
+            {userRole === "SUPER_ADMIN" && (
+              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                <input type="checkbox" {...register("carry_forward_data")} />
+                Carry forward (non-cyclic)
+              </label>
+            )}
+            {currentFieldType === "multi_line_items" && (
+              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                <span style={{ fontWeight: 500 }}>Full-page editor</span>
+                <span
+                  style={{
+                    position: "relative",
+                    width: 40,
+                    height: 22,
+                    borderRadius: 999,
+                    background: watch("full_page_multi_items") ? "var(--accent)" : "var(--border)",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    padding: 2,
+                    transition: "background 120ms ease",
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 18,
+                      height: 18,
+                      borderRadius: "50%",
+                      background: "var(--surface)",
+                      transform: watch("full_page_multi_items") ? "translateX(18px)" : "translateX(0)",
+                      transition: "transform 120ms ease",
+                      boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                    }}
+                  />
+                </span>
+                <input
+                  type="checkbox"
+                  {...register("full_page_multi_items")}
+                  style={{ display: "none" }}
+                  aria-label="Use full-page editor for this multi-line field"
+                />
+              </label>
+            )}
+            <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+              <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
+              <input
+                type="number"
+                min={0}
+                {...register("sort_order")}
+                style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }}
+              />
+            </div>
+          </div>
+        </>
+      )}
       {(currentFieldType === "reference" || currentFieldType === "multi_reference") && (
         <div className="form-group">
           <label>Reference source</label>
@@ -2601,10 +3351,34 @@ function FieldEditForm({
       )}
       {currentFieldType === "multi_line_items" && (
         <div className="form-group">
-          <label>Sub-fields (columns for each row)</label>
-          <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
-            Define columns so data entry uses a table instead of raw JSON.
-          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", margin: "0.25rem 0 0.75rem" }}>
+            <button
+              type="button"
+              className={activeEditSubSection === (editSubSections[0] || "Other") ? "btn btn-primary" : "btn"}
+              onClick={() => setActiveEditSubSection(editSubSections[0] || "Other")}
+              style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
+            >
+              {editSubSections[0] || "Other"}
+            </button>
+            {editSubSections.slice(1).map((sec) => {
+              const isActive = activeEditSubSection === sec;
+              return (
+                <button
+                  key={sec}
+                  type="button"
+                  className={isActive ? "btn btn-primary" : "btn"}
+                  onClick={() => setActiveEditSubSection(sec)}
+                  style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
+                >
+                  {sec}
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+            Sub-fields (columns) for UI section: <strong>{activeEditSubSection}</strong>
+          </div>
           <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
               <thead>
@@ -2619,110 +3393,125 @@ function FieldEditForm({
                 </tr>
               </thead>
               <tbody>
-                {editSubFields.length === 0 ? (
+                {editSubFields
+                  .map((s, idx) => ({ s, idx }))
+                  .filter(({ s }) => {
+                    const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
+                    const label = sec || "Other";
+                    return label === activeEditSubSection;
+                  }).length === 0 ? (
                   <tr>
                     <td colSpan={7} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
-                      No sub-fields yet. Click &quot;Add sub-field&quot; below.
+                      No sub-fields in this section yet. Click &quot;Add sub-field&quot; below.
                     </td>
                   </tr>
-                ) : editSubFields.map((s, idx) => (
-                  <tr key={s.id ?? idx} style={{ borderBottom: "1px solid var(--border)" }}>
-                    <td style={{ padding: "0.4rem 0.5rem" }}>
-                      <input
-                        placeholder="Display name"
-                        value={s.name}
-                        onChange={(e) => {
-                          const name = e.target.value;
-                          setEditSubFields((prev) =>
-                            prev.map((x, i) =>
-                              i === idx ? { ...x, name, key: x.keyTouched ? x.key : slugifyKey(name) } : x
-                            )
-                          );
-                        }}
-                        style={{ width: "100%", minWidth: "100px" }}
-                      />
-                    </td>
-                    <td style={{ padding: "0.4rem 0.5rem" }}>
-                      <input
-                        placeholder="key_name (auto from name)"
-                        value={s.key}
-                        onChange={(e) =>
-                          setEditSubFields((prev) =>
-                            prev.map((x, i) => (i === idx ? { ...x, key: e.target.value, keyTouched: true } : x))
-                          )
-                        }
-                        style={{ width: "100%", minWidth: "90px" }}
-                      />
-                    </td>
-                    <td style={{ padding: "0.4rem 0.5rem" }}>
-                      <select
-                        value={s.field_type}
-                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
-                        style={{ minWidth: "120px" }}
-                      >
-                        {SUB_FIELD_TYPES.map((t) => (
-                          <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-                        ))}
-                      </select>
-                    </td>
-                    <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
-                      {s.field_type === "reference" || s.field_type === "multi_reference" ? (
-                        <ReferenceConfigUI
-                          organizationId={organizationId}
-                          currentKpiId={currentKpiId}
-                          value={s.config ?? {}}
-                          onChange={(c) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, config: c } : x)))}
-                          labelPrefix="Source"
-                        />
-                      ) : (
-                        <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
-                      )}
-                    </td>
-                    <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
-                      {userRole === "SUPER_ADMIN" ? (
-                        <input
-                          placeholder="e.g. Program details"
-                          value={typeof s.config === "object" && s.config && "ui_section" in s.config ? String((s.config as any).ui_section ?? "") : ""}
-                          onChange={(e) => {
-                            const section = e.target.value;
-                            setEditSubFields((prev) =>
-                              prev.map((x, i) =>
-                                i === idx
-                                  ? {
-                                      ...x,
-                                      config: {
-                                        ...(x.config ?? {}),
-                                        ui_section: section,
-                                      },
-                                    }
-                                  : x
+                ) : (
+                  editSubFields
+                    .map((s, idx) => ({ s, idx }))
+                    .filter(({ s }) => {
+                      const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
+                      const label = sec || "Other";
+                      return label === activeEditSubSection;
+                    })
+                    .map(({ s, idx }) => (
+                      <tr key={s.id ?? idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                        <td style={{ padding: "0.4rem 0.5rem" }}>
+                          <input
+                            placeholder="Display name"
+                            value={s.name}
+                            onChange={(e) => {
+                              const name = e.target.value;
+                              setEditSubFields((prev) =>
+                                prev.map((x, i) =>
+                                  i === idx ? { ...x, name, key: x.keyTouched ? x.key : slugifyKey(name) } : x
+                                )
+                              );
+                            }}
+                            style={{ width: "100%", minWidth: "100px" }}
+                          />
+                        </td>
+                        <td style={{ padding: "0.4rem 0.5rem" }}>
+                          <input
+                            placeholder="key_name (auto from name)"
+                            value={s.key}
+                            onChange={(e) =>
+                              setEditSubFields((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, key: e.target.value, keyTouched: true } : x))
                               )
-                            );
-                          }}
-                          style={{ width: "100%" }}
-                        />
-                      ) : (
-                        <div style={{ padding: "0.35rem 0", fontSize: "0.85rem", color: "var(--muted)" }}>
-                          {typeof s.config === "object" && s.config && "ui_section" in s.config && (s.config as any).ui_section
-                            ? String((s.config as any).ui_section)
-                            : "—"}
-                        </div>
-                      )}
-                    </td>
-                    <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
-                      <input
-                        type="checkbox"
-                        checked={s.is_required}
-                        onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
-                        title="Required"
-                      />
-                      {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
-                    </td>
-                    <td style={{ padding: "0.4rem 0.5rem" }}>
-                      <button type="button" className="btn" onClick={() => setEditSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
-                    </td>
-                  </tr>
-                ))}
+                            }
+                            style={{ width: "100%", minWidth: "90px" }}
+                          />
+                        </td>
+                        <td style={{ padding: "0.4rem 0.5rem" }}>
+                          <select
+                            value={s.field_type}
+                            onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+                            style={{ minWidth: "120px" }}
+                          >
+                            {SUB_FIELD_TYPES.map((t) => (
+                              <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                          {s.field_type === "reference" || s.field_type === "multi_reference" ? (
+                            <ReferenceConfigUI
+                              organizationId={organizationId}
+                              currentKpiId={currentKpiId}
+                              value={s.config ?? {}}
+                              onChange={(c) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, config: c } : x)))}
+                              labelPrefix="Source"
+                            />
+                          ) : (
+                            <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
+                          )}
+                        </td>
+                        <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                          {userRole === "SUPER_ADMIN" ? (
+                            <input
+                              placeholder="e.g. Program details"
+                              value={typeof s.config === "object" && s.config && "ui_section" in s.config ? String((s.config as any).ui_section ?? "") : ""}
+                              onChange={(e) => {
+                                const section = e.target.value;
+                                setEditSubFields((prev) =>
+                                  prev.map((x, i) =>
+                                    i === idx
+                                      ? {
+                                          ...x,
+                                          config: {
+                                            ...(x.config ?? {}),
+                                            ui_section: section,
+                                          },
+                                        }
+                                      : x
+                                  )
+                                );
+                              }}
+                              style={{ width: "100%" }}
+                            />
+                          ) : (
+                            <div style={{ padding: "0.35rem 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                              {typeof s.config === "object" && s.config && "ui_section" in s.config && (s.config as any).ui_section
+                                ? String((s.config as any).ui_section)
+                                : "—"}
+                            </div>
+                          )}
+                        </td>
+                        <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={s.is_required}
+                            onChange={(e) => setEditSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                            title="Required"
+                          />
+                          {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
+                        </td>
+                        <td style={{ padding: "0.4rem 0.5rem" }}>
+                          <button type="button" className="btn" onClick={() => setEditSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
+                        </td>
+                      </tr>
+                    ))
+                )}
               </tbody>
             </table>
           </div>
@@ -2732,27 +3521,12 @@ function FieldEditForm({
             onClick={() =>
               setEditSubFields((prev) => [
                 ...prev,
-                { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, config: undefined, keyTouched: false },
+                { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, config: { ui_section: activeEditSubSection }, keyTouched: false },
               ])
             }
           >
             Add sub-field
           </button>
-          <div style={{ marginTop: "0.5rem", color: "var(--muted)", fontSize: "0.85rem" }}>
-            Tip: Enable <strong>Full-page editor</strong> above for large datasets (search, paging, bulk delete, bulk upload).
-          </div>
-          <div className="form-group" style={{ marginTop: "0.75rem" }}>
-            <label>Multi-line API endpoint URL (optional)</label>
-            <input
-              type="url"
-              placeholder="https://example.com/multi-items-api"
-              {...register("multi_items_api_endpoint_url")}
-              style={{ width: "100%" }}
-            />
-            <p style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
-              When set, Org Admins can sync this multi-line field from API on the full-page editor.
-            </p>
-          </div>
         </div>
       )}
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
