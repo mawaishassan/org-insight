@@ -478,19 +478,10 @@ export default function DomainKpiDetailPage() {
     () => fields.filter((f) => f.field_type === "multi_line_items"),
     [fields]
   );
-  const inlineMultiLineFields = useMemo(
-    () =>
-      multiLineFields.filter(
-        (f) => !(f as any).full_page_multi_items && (f.sub_fields?.length ?? 0) > 0
-      ),
-    [multiLineFields]
-  );
-  /** Multi-line fields that use full-page view only (no inline table). Tab shows column access + link to full page. */
+  // We always use the full-page multi-line editor, regardless of config.
+  const inlineMultiLineFields = useMemo(() => [] as FieldDef[], []);
   const fullPageMultiLineFields = useMemo(
-    () =>
-      multiLineFields.filter(
-        (f) => (f as any).full_page_multi_items && (f.sub_fields?.length ?? 0) > 0
-      ),
+    () => multiLineFields.filter((f) => (f.sub_fields?.length ?? 0) > 0),
     [multiLineFields]
   );
   /** Fields the user can edit (scalar only; formula is always view). When can_edit is undefined, treat as true for backward compat. */
@@ -1869,7 +1860,7 @@ export default function DomainKpiDetailPage() {
             Scalar Fields
           </button>
           {multiLineFields
-            .filter((f) => (f as any).full_page_multi_items || (f.sub_fields?.length ?? 0) > 0)
+            .filter((f) => (f.sub_fields?.length ?? 0) > 0)
             .map((f) => (
             <button
               key={f.id}
@@ -1879,8 +1870,7 @@ export default function DomainKpiDetailPage() {
                 ...(activeTab === f.id ? { background: "var(--accent)", color: "var(--on-muted)" } : {}),
               }}
               onClick={() => {
-                const isFullPage = Boolean((f as any).full_page_multi_items);
-                if (isFullPage && effectiveOrgId != null) {
+                if (effectiveOrgId != null) {
                   const fullPageUrl = `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${new URLSearchParams({
                     organization_id: String(effectiveOrgId),
                     ...(periodKeyFromUrl ? { period_key: periodKeyFromUrl } : {}),
@@ -1979,14 +1969,14 @@ export default function DomainKpiDetailPage() {
                     const addItem = () => {
                       const atom = inferMixedAtom(newDraft);
                       if (atom == null) return;
-                      updateField(fieldId, "value_text", null);
-                      updateField(fieldId, "value_json", [...items, atom]);
+                      updateField(fieldId, "value_text", undefined);
+                      updateField(fieldId, "value_json", [...items, atom] as any);
                       setNewDraft("");
                     };
 
                     const removeItem = (idx: number) => {
-                      updateField(fieldId, "value_text", null);
-                      updateField(fieldId, "value_json", items.filter((_, i) => i !== idx));
+                      updateField(fieldId, "value_text", undefined);
+                      updateField(fieldId, "value_json", items.filter((_, i) => i !== idx) as any);
                       if (editIndex === idx) {
                         setEditIndex(null);
                         setEditDraft("");
@@ -2008,8 +1998,8 @@ export default function DomainKpiDetailPage() {
                       } else {
                         next[editIndex] = atom;
                       }
-                      updateField(fieldId, "value_text", null);
-                      updateField(fieldId, "value_json", next);
+                      updateField(fieldId, "value_text", undefined);
+                      updateField(fieldId, "value_json", next as any);
                       setEditIndex(null);
                       setEditDraft("");
                     };

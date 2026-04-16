@@ -43,6 +43,12 @@ function slugifyKey(name: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
+function truncateLabel(label: string, max = 48): string {
+  const s = String(label ?? "");
+  if (s.length <= max) return s;
+  return s.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
+}
+
 const GROUP_FUNCTIONS = [
   { value: "SUM_ITEMS", label: "SUM (total)" },
   { value: "AVG_ITEMS", label: "AVG (average)" },
@@ -212,6 +218,8 @@ export default function KpiFieldsPage() {
   const autosaveTimerRef = useRef<number | null>(null);
   const [superAdminFieldsTab, setSuperAdminFieldsTab] = useState<string>("scalar");
   const [activeSubSectionByMultiFieldId, setActiveSubSectionByMultiFieldId] = useState<Record<number, string>>({});
+  const [uiSectionCustomByMultiFieldId, setUiSectionCustomByMultiFieldId] = useState<Record<number, string[]>>({});
+  const [uiSectionRenameDraft, setUiSectionRenameDraft] = useState<{ fieldId: number; from: string; to: string } | null>(null);
   const [multiFieldSettingsOpenById, setMultiFieldSettingsOpenById] = useState<Record<number, boolean>>({});
   const [multiFieldEditDraftById, setMultiFieldEditDraftById] = useState<
     Record<
@@ -224,7 +232,33 @@ export default function KpiFieldsPage() {
   >({});
   const [multiFieldKeyTouchedById, setMultiFieldKeyTouchedById] = useState<Record<number, boolean>>({});
   const [multiFieldEditingPanelById, setMultiFieldEditingPanelById] = useState<Record<number, "general" | "subfields" | null>>({});
-  const [multiFieldSubSectionSnapshotById, setMultiFieldSubSectionSnapshotById] = useState<Record<number, Record<number, string>>>({});
+  const [addSubFieldModal, setAddSubFieldModal] = useState<{ fieldId: number; activeSection: string } | null>(null);
+  const [editSubFieldModal, setEditSubFieldModal] = useState<{ fieldId: number; subIndex: number } | null>(null);
+  const [deleteSubFieldModal, setDeleteSubFieldModal] = useState<{ fieldId: number; subIndex: number; name: string; key: string } | null>(null);
+  const [deleteSubFieldConfirm, setDeleteSubFieldConfirm] = useState<{ name: string; key: string }>({ name: "", key: "" });
+  const [deleteFieldModal, setDeleteFieldModal] = useState<{ fieldId: number; name: string; key: string } | null>(null);
+  const [deleteFieldConfirm, setDeleteFieldConfirm] = useState<{ name: string; key: string }>({ name: "", key: "" });
+  const [deleteFieldSummary, setDeleteFieldSummary] = useState<{ field_values_count: number; report_template_fields_count: number } | null>(null);
+  const [deleteFieldSummaryLoading, setDeleteFieldSummaryLoading] = useState(false);
+  const [deleteFieldSummaryError, setDeleteFieldSummaryError] = useState<string | null>(null);
+  const [editSubFieldDraft, setEditSubFieldDraft] = useState<{
+    name: string;
+    key: string;
+    keyTouched: boolean;
+    field_type: string;
+    is_required: boolean;
+    ui_section: string;
+    config: ReferenceConfig;
+  }>({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: "", config: {} });
+  const [addSubFieldDraft, setAddSubFieldDraft] = useState<{
+    name: string;
+    key: string;
+    keyTouched: boolean;
+    field_type: string;
+    is_required: boolean;
+    ui_section: string;
+    config: ReferenceConfig;
+  }>({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: "", config: {} });
   const [kpiSaveError, setKpiSaveError] = useState<string | null>(null);
   const [kpiSaving, setKpiSaving] = useState(false);
   const [orgTimeDimension, setOrgTimeDimension] = useState<string>("yearly");
@@ -664,18 +698,30 @@ export default function KpiFieldsPage() {
     }, 500);
   };
 
-  const onDelete = async (fieldId: number) => {
+  const openDeleteFieldModal = async (field: { id: number; name: string; key: string }) => {
+    if (!token || orgId == null) return;
+    setDeleteFieldConfirm({ name: "", key: "" });
+    setDeleteFieldSummary(null);
+    setDeleteFieldSummaryError(null);
+    setDeleteFieldSummaryLoading(true);
+    setDeleteFieldModal({ fieldId: field.id, name: field.name, key: field.key });
+    try {
+      const summary = await api<{ has_child_data: boolean; field_values_count: number; report_template_fields_count: number }>(
+        `/fields/${field.id}/child_data_summary?${fieldsQuery()}`,
+        { token }
+      );
+      setDeleteFieldSummary({ field_values_count: summary.field_values_count ?? 0, report_template_fields_count: summary.report_template_fields_count ?? 0 });
+    } catch (e) {
+      setDeleteFieldSummaryError(e instanceof Error ? e.message : "Failed to load delete summary");
+    } finally {
+      setDeleteFieldSummaryLoading(false);
+    }
+  };
+
+  const performDeleteField = async (fieldId: number) => {
     if (!token || orgId == null) return;
     setError(null);
     try {
-      const summary = await api<{ has_child_data: boolean; field_values_count: number; report_template_fields_count: number }>(
-        `/fields/${fieldId}/child_data_summary?${fieldsQuery()}`,
-        { token }
-      );
-      const message = summary.has_child_data
-        ? `This field has ${summary.field_values_count} stored value(s) and ${summary.report_template_fields_count} report template reference(s). Deleting will remove them. Continue?`
-        : "Delete this field?";
-      if (!confirm(message)) return;
       await api(`/fields/${fieldId}?${fieldsQuery()}`, { method: "DELETE", token });
       setEditingId(null);
       loadList();
@@ -822,6 +868,18 @@ export default function KpiFieldsPage() {
 
   const isOrgContext = orgIdFromUrl != null && kpi != null;
 
+  const buildMultiLineUpdateFromField = (field: any): UpdateFormData => ({
+    name: String(field?.name ?? ""),
+    key: String(field?.key ?? ""),
+    field_type: "multi_line_items" as any,
+    formula_expression: String(field?.formula_expression ?? ""),
+    is_required: !!field?.is_required,
+    sort_order: Number(field?.sort_order ?? 0),
+    carry_forward_data: !!field?.carry_forward_data,
+    full_page_multi_items: !!field?.full_page_multi_items,
+    multi_items_api_endpoint_url: (field?.config as any)?.multi_items_api_endpoint_url ?? "",
+  });
+
   const tabBarStyle = {
     display: "flex",
     gap: "0.25rem",
@@ -830,19 +888,18 @@ export default function KpiFieldsPage() {
     paddingBottom: 0,
   } as const;
 
-  const tabButtonStyle = (active: boolean) =>
-    ({
-      padding: "0.6rem 1rem",
-      fontSize: "0.95rem",
-      fontWeight: 500,
-      border: "none",
-      borderBottom: active ? "2px solid var(--primary)" : "2px solid transparent",
-      background: "none",
-      color: active ? "var(--primary)" : "var(--muted)",
-      cursor: "pointer",
-      marginBottom: "-1px",
-      borderRadius: "6px 6px 0 0",
-    }) as const;
+  const tabButtonStyle = (active: boolean) => ({
+    padding: "0.6rem 1rem",
+    fontSize: "0.95rem",
+    fontWeight: 500,
+    border: "none",
+    borderBottom: active ? "2px solid var(--primary)" : "2px solid transparent",
+    background: "none",
+    color: active ? "var(--primary)" : "var(--muted)",
+    cursor: "pointer",
+    marginBottom: "-1px",
+    borderRadius: "6px 6px 0 0",
+  });
 
   const content = (
     <>
@@ -1838,7 +1895,7 @@ export default function KpiFieldsPage() {
                                 Show on card
                               </label>
                               <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
-                              <button type="button" className="btn" onClick={() => onDelete(f.id)} style={{ color: "var(--error)" }}>Delete</button>
+                              <button type="button" className="btn" onClick={() => openDeleteFieldModal(f)} style={{ color: "var(--error)" }}>Delete</button>
                             </div>
                           </div>
                         )}
@@ -1854,18 +1911,15 @@ export default function KpiFieldsPage() {
                   const subs = f.sub_fields ?? [];
                   const editingPanel = multiFieldEditingPanelById[f.id] ?? null;
                   const sections = (() => {
-                    // When editing sub-fields, keep grouping stable until Save to avoid "moving row while typing".
-                    const snap = multiFieldSubSectionSnapshotById[f.id];
-                    if (editingId === f.id && editingPanel === "subfields" && snap) {
-                      const uniq = new Set<string>(Object.values(snap).map((x) => x || "Other"));
-                      if (uniq.size === 0) uniq.add("Other");
-                      return Array.from(uniq).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
-                    }
                     const uniq = new Set<string>();
                     subs.forEach((s) => {
                       const sec = (s as any)?.config?.ui_section;
                       const label = typeof sec === "string" ? sec.trim() : "";
                       uniq.add(label || "Other");
+                    });
+                    (uiSectionCustomByMultiFieldId[f.id] ?? []).forEach((s) => {
+                      const label = typeof s === "string" ? s.trim() : "";
+                      if (label) uniq.add(label);
                     });
                     if (uniq.size === 0) uniq.add("Other");
                     return Array.from(uniq).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
@@ -1966,7 +2020,7 @@ export default function KpiFieldsPage() {
                                 Edit
                               </button>
                             )}
-                            <button type="button" className="btn" onClick={() => onDelete(f.id)} style={{ color: "var(--error)" }}>
+                            <button type="button" className="btn" onClick={() => openDeleteFieldModal(f)} style={{ color: "var(--error)" }}>
                               Delete
                             </button>
                             <button
@@ -2171,86 +2225,148 @@ export default function KpiFieldsPage() {
                       >
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
                           <div style={{ fontWeight: 750 }}>Sub-fields</div>
-                          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                            {isEditing && editingPanel === "subfields" ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="btn btn-primary"
-                                  onClick={async () => {
-                                    const payload = effectiveDraft.data as any;
-                                    const update: UpdateFormData = { ...payload };
-                                    await onUpdateSubmit(f.id, update, effectiveDraft.subFields, undefined);
-                                    setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
-                                    setEditingId(null);
-                                    setMultiFieldEditDraftById((prev) => {
-                                      const { [f.id]: _, ...rest } = prev;
-                                      return rest;
-                                    });
-                                  }}
-                                >
-                                  Save
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  onClick={() => {
-                                    setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
-                                    setEditingId(null);
-                                    setMultiFieldEditDraftById((prev) => {
-                                      const { [f.id]: _, ...rest } = prev;
-                                      return rest;
-                                    });
-                                  }}
-                                >
-                                  Cancel
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                className="btn"
-                                onClick={() => {
-                                  setMultiFieldEditDraftById((prev) => (prev[f.id] ? prev : { ...prev, [f.id]: effectiveDraft }));
-                                  setEditingId(f.id);
-                                  setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: "subfields" }));
-                                  setMultiFieldSubSectionSnapshotById((prev) => {
-                                    if (prev[f.id]) return prev;
-                                    const snap: Record<number, string> = {};
-                                    effectiveDraft.subFields.forEach((sf, idx) => {
-                                      const sec = (sf as any)?.config?.ui_section;
-                                      const label = typeof sec === "string" ? sec.trim() : "";
-                                      snap[idx] = label || "Other";
-                                    });
-                                    return { ...prev, [f.id]: snap };
-                                  });
-                                }}
-                              >
-                                Edit
-                              </button>
-                            )}
-                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => {
+                              const nextUiSection = activeSection === "Other" ? "" : activeSection;
+                              setAddSubFieldDraft({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: nextUiSection, config: {} });
+                              setAddSubFieldModal({ fieldId: f.id, activeSection });
+                            }}
+                          >
+                            Add Sub Field
+                          </button>
                         </div>
-                        {sections.length > 1 && (
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
-                            {sections.map((sec) => {
-                              const isActive = sec === activeSection;
-                              return (
-                                <button
-                                  key={sec}
-                                  type="button"
-                                  className={isActive ? "btn btn-primary" : "btn"}
-                                  onClick={() =>
-                                    setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: sec }))
-                                  }
-                                  style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
-                                >
-                                  {sec}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                          {sections.map((sec) => {
+                            const isActive = sec === activeSection;
+                            const isRenaming = uiSectionRenameDraft?.fieldId === f.id && uiSectionRenameDraft.from === sec;
+                            const canDelete = sec !== "Other";
+                            return (
+                              <div key={sec} style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem" }}>
+                                {isRenaming ? (
+                                  <>
+                                    <input
+                                      value={uiSectionRenameDraft.to}
+                                      onChange={(e) => setUiSectionRenameDraft((p) => (p ? { ...p, to: e.target.value } : p))}
+                                      onKeyDown={async (e) => {
+                                        if (e.key === "Escape") setUiSectionRenameDraft(null);
+                                        if (e.key !== "Enter") return;
+                                        const to = uiSectionRenameDraft.to.trim();
+                                        const from = uiSectionRenameDraft.from;
+                                        if (!to || to === "Other" || to === from) {
+                                          setUiSectionRenameDraft(null);
+                                          return;
+                                        }
+                                        const field = list.find((x) => x.id === f.id) as any;
+                                        if (!field) return;
+                                        const nextSubs = (field.sub_fields ?? []).map((sf: any) => {
+                                          const raw = sf?.config?.ui_section;
+                                          const label = typeof raw === "string" ? raw.trim() : "";
+                                          if ((label || "Other") !== from) return sf;
+                                          return { ...sf, config: { ...(sf.config ?? {}), ui_section: to } };
+                                        });
+                                        setUiSectionCustomByMultiFieldId((prev) => {
+                                          const current = prev[f.id] ?? [];
+                                          const mapped = current.map((x) => (x === from ? to : x));
+                                          const unique = Array.from(new Set(mapped.filter((x) => x && x !== "Other")));
+                                          return { ...prev, [f.id]: unique };
+                                        });
+                                        if (activeSection === from) setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: to }));
+                                        setUiSectionRenameDraft(null);
+                                        await onUpdateSubmit(f.id, buildMultiLineUpdateFromField(field), nextSubs as any, undefined);
+                                      }}
+                                      onBlur={() => setUiSectionRenameDraft(null)}
+                                      style={{
+                                        padding: "0.32rem 0.55rem",
+                                        borderRadius: 999,
+                                        border: "1px solid var(--border)",
+                                        minWidth: 120,
+                                        fontSize: "0.9rem",
+                                      }}
+                                      autoFocus
+                                    />
+                                    {canDelete && (
+                                      <button
+                                        type="button"
+                                        className="btn"
+                                        style={{ borderRadius: 999, padding: "0.25rem 0.45rem", color: "var(--error)" }}
+                                        title="Delete section (move fields to Other)"
+                                        onMouseDown={(e) => e.preventDefault()}
+                                        onClick={async (e) => {
+                                          e.stopPropagation();
+                                          const field = list.find((x) => x.id === f.id) as any;
+                                          if (!field) return;
+                                          const affected = (field.sub_fields ?? []).filter((sf: any) => {
+                                            const raw = sf?.config?.ui_section;
+                                            const label = typeof raw === "string" ? raw.trim() : "";
+                                            return (label || "Other") === sec;
+                                          }).length;
+                                          const ok = window.confirm(
+                                            `Delete UI section "${sec}"?\n\n` +
+                                              `This will move ${affected} sub-field(s) to "Other".`
+                                          );
+                                          if (!ok) return;
+                                          const nextSubs = (field.sub_fields ?? []).map((sf: any) => {
+                                            const raw = sf?.config?.ui_section;
+                                            const label = typeof raw === "string" ? raw.trim() : "";
+                                            if ((label || "Other") !== sec) return sf;
+                                            const cfg = { ...(sf.config ?? {}) } as any;
+                                            delete cfg.ui_section;
+                                            return { ...sf, config: cfg };
+                                          });
+                                          setUiSectionCustomByMultiFieldId((prev) => {
+                                            const current = prev[f.id] ?? [];
+                                            return { ...prev, [f.id]: current.filter((x) => x !== sec) };
+                                          });
+                                          if (activeSection === sec) setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: "Other" }));
+                                          setUiSectionRenameDraft(null);
+                                          await onUpdateSubmit(f.id, buildMultiLineUpdateFromField(field), nextSubs as any, undefined);
+                                        }}
+                                      >
+                                        ×
+                                      </button>
+                                    )}
+                                  </>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className={isActive ? "btn btn-primary" : "btn"}
+                                    onClick={() => setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: sec }))}
+                                    onDoubleClick={() => {
+                                      if (sec === "Other") return;
+                                      setUiSectionRenameDraft({ fieldId: f.id, from: sec, to: sec });
+                                    }}
+                                    title={sec === "Other" ? undefined : "Double-click to rename"}
+                                    style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
+                                  >
+                                    {sec}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
+                            onClick={() => {
+                              const name = window.prompt("New UI section name");
+                              const trimmed = (name ?? "").trim();
+                              if (!trimmed || trimmed === "Other") return;
+                              setUiSectionCustomByMultiFieldId((prev) => {
+                                const current = prev[f.id] ?? [];
+                                const next = Array.from(new Set([...current, trimmed].filter((x) => x && x !== "Other")));
+                                return { ...prev, [f.id]: next };
+                              });
+                              setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: trimmed }));
+                            }}
+                            title="Add UI section"
+                          >
+                            + Add section
+                          </button>
+                        </div>
                         <div style={{ overflowX: "auto" }}>
                           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                             <thead>
@@ -2261,154 +2377,79 @@ export default function KpiFieldsPage() {
                                 <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source</th>
                                 <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>UI section</th>
                                 <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                                <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600, width: 140 }}>Actions</th>
                               </tr>
                             </thead>
                             <tbody>
                               {(() => {
-                                const rows = (isEditing && editingPanel === "subfields" ? effectiveDraft.subFields : subs).map((s, i) => ({ s, i }));
+                                const rows = subs.map((s, i) => ({ s, i }));
                                 const filtered = rows.filter(({ s, i }) => {
-                                  const snap = multiFieldSubSectionSnapshotById[f.id];
-                                  const group =
-                                    isEditing && editingPanel === "subfields" && snap
-                                      ? (snap[i] || "Other")
-                                      : (() => {
-                                          const sec = (s as any)?.config?.ui_section;
-                                          const label = typeof sec === "string" ? sec.trim() : "";
-                                          return label || "Other";
-                                        })();
+                                  const sec = (s as any)?.config?.ui_section;
+                                  const label = typeof sec === "string" ? sec.trim() : "";
+                                  const group = label || "Other";
                                   return sections.length <= 1 ? true : group === activeSection;
                                 });
                                 return filtered.map(({ s, i }) => {
                                   const fieldType = String((s as any).field_type ?? "");
-                                  const isRef = fieldType === "reference" || fieldType === "multi_reference";
                                   const uiSectionVal = typeof (s as any)?.config?.ui_section === "string" ? String((s as any).config.ui_section) : "";
                                   const keyForRow = (s as any).id ?? `${(s as any).key}:${i}`;
+                                  const cfg = ((s as any).config ?? {}) as any;
+                                  const refLabel =
+                                    (fieldType === "reference" || fieldType === "multi_reference") &&
+                                    (cfg.reference_source_kpi_id || cfg.reference_source_field_key)
+                                      ? `${cfg.reference_source_kpi_id ?? "?"} • ${String(cfg.reference_source_field_key ?? "—")}${cfg.reference_source_sub_field_key ? ` • ${String(cfg.reference_source_sub_field_key)}` : ""}`
+                                      : "—";
                                   return (
                                     <tr key={keyForRow} style={{ borderBottom: "1px solid var(--border)" }}>
-                                      {isEditing && editingPanel === "subfields" ? (
-                                        <>
-                                          <td style={{ padding: "0.4rem 0.5rem" }}>
-                                            <input
-                                              value={(s as any).name ?? ""}
-                                              onChange={(e) => {
-                                                const nextName = e.target.value;
-                                                setMultiFieldEditDraftById((prev) => {
-                                                  const base = prev[f.id] ?? effectiveDraft;
-                                                  const nextSubs = base.subFields.map((x, idx) => {
-                                                    if (idx !== i) return x;
-                                                    const touched = !!(x as any).keyTouched;
-                                                    return {
-                                                      ...(x as any),
-                                                      name: nextName,
-                                                      ...(touched ? {} : { key: slugifyKey(nextName) }),
-                                                    } as any;
-                                                  });
-                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
-                                                });
-                                              }}
-                                              style={{ width: "100%" }}
-                                            />
-                                          </td>
-                                          <td style={{ padding: "0.4rem 0.5rem" }}>
-                                            <input
-                                              value={(s as any).key ?? ""}
-                                              onChange={(e) => {
-                                                const nextKey = e.target.value;
-                                                setMultiFieldEditDraftById((prev) => {
-                                                  const base = prev[f.id] ?? effectiveDraft;
-                                                  const nextSubs = base.subFields.map((x, idx) =>
-                                                    idx === i ? ({ ...(x as any), key: nextKey, keyTouched: true } as any) : x
-                                                  );
-                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
-                                                });
-                                              }}
-                                              style={{ width: "100%" }}
-                                            />
-                                          </td>
-                                          <td style={{ padding: "0.4rem 0.5rem" }}>
-                                            <select
-                                              value={fieldType}
-                                              onChange={(e) => {
-                                                const nextType = e.target.value;
-                                                setMultiFieldEditDraftById((prev) => {
-                                                  const base = prev[f.id] ?? effectiveDraft;
-                                                  const nextSubs = base.subFields.map((x, idx) => (idx === i ? ({ ...(x as any), field_type: nextType } as any) : x));
-                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
-                                                });
-                                              }}
-                                            >
-                                              {SUB_FIELD_TYPES.map((t) => (
-                                                <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-                                              ))}
-                                            </select>
-                                          </td>
-                                          <td style={{ padding: "0.4rem 0.5rem", minWidth: 260 }}>
-                                            {isRef ? (
-                                              <ReferenceConfigUI
-                                                organizationId={kpi?.organization_id ?? orgId ?? undefined}
-                                                currentKpiId={kpiId}
-                                                value={((s as any).config ?? {}) as any}
-                                                onChange={(c) =>
-                                                  setMultiFieldEditDraftById((prev) => {
-                                                    const base = prev[f.id] ?? effectiveDraft;
-                                                    const nextSubs = base.subFields.map((x, idx) =>
-                                                      idx === i ? ({ ...(x as any), config: { ...(x as any).config, ...c } } as any) : x
-                                                    );
-                                                    return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
-                                                  })
-                                                }
-                                                labelPrefix="Source"
-                                              />
-                                            ) : (
-                                              <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
-                                            )}
-                                          </td>
-                                          <td style={{ padding: "0.4rem 0.5rem", minWidth: 160 }}>
-                                            <input
-                                              value={uiSectionVal}
-                                              onChange={(e) => {
-                                                const nextSection = e.target.value;
-                                                setMultiFieldEditDraftById((prev) => {
-                                                  const base = prev[f.id] ?? effectiveDraft;
-                                                  const nextSubs = base.subFields.map((x, idx) =>
-                                                    idx === i
-                                                      ? ({ ...(x as any), config: { ...(x as any).config, ui_section: nextSection } } as any)
-                                                      : x
-                                                  );
-                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
-                                                });
-                                              }}
-                                              placeholder="e.g. Program"
-                                              style={{ width: "100%" }}
-                                            />
-                                          </td>
-                                          <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
-                                            <input
-                                              type="checkbox"
-                                              checked={!!(s as any).is_required}
-                                              onChange={(e) => {
-                                                const nextReq = e.target.checked;
-                                                setMultiFieldEditDraftById((prev) => {
-                                                  const base = prev[f.id] ?? effectiveDraft;
-                                                  const nextSubs = base.subFields.map((x, idx) => (idx === i ? ({ ...(x as any), is_required: nextReq } as any) : x));
-                                                  return { ...prev, [f.id]: { ...base, subFields: nextSubs } };
-                                                });
-                                              }}
-                                            />
-                                          </td>
-                                        </>
-                                      ) : (
-                                        <>
-                                          <td style={{ padding: "0.4rem 0.5rem" }}>{(s as any).name}</td>
-                                          <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{(s as any).key}</td>
-                                          <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{fieldType.replace(/_/g, " ")}</td>
-                                          <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>—</td>
-                                          <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>
-                                            {uiSectionVal.trim() ? uiSectionVal : "—"}
-                                          </td>
-                                          <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>{(s as any).is_required ? "Yes" : "No"}</td>
-                                        </>
-                                      )}
+                                      <>
+                                        <td style={{ padding: "0.4rem 0.5rem" }}>{(s as any).name}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{(s as any).key}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{fieldType.replace(/_/g, " ")}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{refLabel}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>
+                                          {uiSectionVal.trim() ? uiSectionVal : "—"}
+                                        </td>
+                                        <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>{(s as any).is_required ? "Yes" : "No"}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", textAlign: "right", whiteSpace: "nowrap" }}>
+                                          <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() => {
+                                              const cfgObj = ((s as any).config ?? {}) as any;
+                                              const uiSec = typeof cfgObj.ui_section === "string" ? String(cfgObj.ui_section) : "";
+                                              setEditSubFieldDraft({
+                                                name: String((s as any).name ?? ""),
+                                                key: String((s as any).key ?? ""),
+                                                keyTouched: true,
+                                                field_type: fieldType || "single_line_text",
+                                                is_required: !!(s as any).is_required,
+                                                ui_section: uiSec,
+                                                config: {
+                                                  reference_source_kpi_id: cfgObj.reference_source_kpi_id,
+                                                  reference_source_field_key: cfgObj.reference_source_field_key,
+                                                  reference_source_sub_field_key: cfgObj.reference_source_sub_field_key,
+                                                },
+                                              });
+                                              setEditSubFieldModal({ fieldId: f.id, subIndex: i });
+                                            }}
+                                          >
+                                            Edit
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="btn"
+                                            style={{ color: "var(--error)", marginLeft: "0.35rem" }}
+                                            onClick={() => {
+                                              const n = String((s as any).name ?? "");
+                                              const k = String((s as any).key ?? "");
+                                              setDeleteSubFieldConfirm({ name: "", key: "" });
+                                              setDeleteSubFieldModal({ fieldId: f.id, subIndex: i, name: n, key: k });
+                                            }}
+                                          >
+                                            Delete
+                                          </button>
+                                        </td>
+                                      </>
                                     </tr>
                                   );
                                 });
@@ -2467,7 +2508,7 @@ export default function KpiFieldsPage() {
                       </div>
                       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
                         <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
-                        <button type="button" className="btn" onClick={() => onDelete(f.id)} style={{ color: "var(--error)" }}>Delete</button>
+                        <button type="button" className="btn" onClick={() => openDeleteFieldModal(f)} style={{ color: "var(--error)" }}>Delete</button>
                       </div>
                     </div>
                   )}
@@ -2480,6 +2521,598 @@ export default function KpiFieldsPage() {
         </>
       )}
     </div>
+
+    {addSubFieldModal && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setAddSubFieldModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add sub field"
+      >
+        <div
+          className="card"
+          style={{ width: "min(680px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {(() => {
+            const field = list.find((x) => x.id === addSubFieldModal.fieldId) as any;
+            const secs = new Set<string>();
+            (field?.sub_fields ?? []).forEach((sf: any) => {
+              const raw = sf?.config?.ui_section;
+              const label = typeof raw === "string" ? raw.trim() : "";
+              secs.add(label || "Other");
+            });
+            secs.add("Other");
+            const uiSectionOptions = Array.from(secs).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+            return (
+              <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
+            <h2 style={{ fontSize: "1.1rem", margin: 0 }}>Add Sub Field</h2>
+            <button type="button" className="btn" onClick={() => setAddSubFieldModal(null)}>Close</button>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "0.75rem 1rem", marginTop: "1rem" }}>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Name *</label>
+              <input
+                value={addSubFieldDraft.name}
+                onChange={(e) => {
+                  const nextName = e.target.value;
+                  setAddSubFieldDraft((p) => ({ ...p, name: nextName, ...(p.keyTouched ? {} : { key: slugifyKey(nextName) }) }));
+                }}
+                placeholder="e.g. Campus"
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+                autoFocus
+              />
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Key *</label>
+              <input
+                value={addSubFieldDraft.key}
+                onChange={(e) => setAddSubFieldDraft((p) => ({ ...p, key: e.target.value, keyTouched: true }))}
+                placeholder="campus"
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+              />
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Type *</label>
+              <select
+                value={addSubFieldDraft.field_type}
+                onChange={(e) => {
+                  const nextType = e.target.value;
+                  setAddSubFieldDraft((p) => ({
+                    ...p,
+                    field_type: nextType,
+                    config: nextType === "reference" || nextType === "multi_reference" ? p.config : {},
+                  }));
+                }}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+              >
+                {SUB_FIELD_TYPES.map((t) => (
+                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>UI section</label>
+              <select
+                value={addSubFieldDraft.ui_section.trim() ? addSubFieldDraft.ui_section : "Other"}
+                onChange={(e) => setAddSubFieldDraft((p) => ({ ...p, ui_section: e.target.value === "Other" ? "" : e.target.value }))}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, maxWidth: "100%" }}
+              >
+                {uiSectionOptions.map((sec) => (
+                  <option key={sec} value={sec}>{truncateLabel(sec, 40)}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 1.25rem", alignItems: "center", marginTop: "0.75rem" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={addSubFieldDraft.is_required}
+                onChange={(e) => setAddSubFieldDraft((p) => ({ ...p, is_required: e.target.checked }))}
+              />
+              Required
+            </label>
+          </div>
+
+          {(addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") && (
+            <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
+              <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Reference source</div>
+              <ReferenceConfigUI
+                organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                currentKpiId={kpiId}
+                value={addSubFieldDraft.config}
+                onChange={(c) => setAddSubFieldDraft((p) => ({ ...p, config: c }))}
+                labelPrefix="Source"
+              />
+            </div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+            <button type="button" className="btn" onClick={() => setAddSubFieldModal(null)}>Cancel</button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={async () => {
+                const modal = addSubFieldModal;
+                if (!modal) return;
+                const name = addSubFieldDraft.name.trim();
+                const key = addSubFieldDraft.key.trim();
+                if (!name || !key) {
+                  toast.error("Name and key are required.");
+                  return;
+                }
+                if (
+                  (addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") &&
+                  (!addSubFieldDraft.config.reference_source_kpi_id || !addSubFieldDraft.config.reference_source_field_key)
+                ) {
+                  toast.error("Please select a source KPI and field.");
+                  return;
+                }
+                const field = list.find((x) => x.id === modal.fieldId) as any;
+                if (!field) return;
+                const sectionLabel = addSubFieldDraft.ui_section.trim();
+                const existingSubs = (field.sub_fields ?? []) as any[];
+                const nextIndex = existingSubs.length;
+                const cfg: Record<string, unknown> = {};
+                if (sectionLabel) cfg.ui_section = sectionLabel;
+                if (addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") {
+                  cfg.reference_source_kpi_id = addSubFieldDraft.config.reference_source_kpi_id;
+                  cfg.reference_source_field_key = addSubFieldDraft.config.reference_source_field_key;
+                  if (addSubFieldDraft.config.reference_source_sub_field_key) cfg.reference_source_sub_field_key = addSubFieldDraft.config.reference_source_sub_field_key;
+                }
+                const nextSub = {
+                  name,
+                  key,
+                  field_type: addSubFieldDraft.field_type,
+                  is_required: addSubFieldDraft.is_required,
+                  sort_order: nextIndex,
+                  config: cfg,
+                } as any;
+                const update: UpdateFormData = {
+                  name: String(field.name ?? ""),
+                  key: String(field.key ?? ""),
+                  field_type: "multi_line_items" as any,
+                  formula_expression: String(field.formula_expression ?? ""),
+                  is_required: !!field.is_required,
+                  sort_order: Number(field.sort_order ?? 0),
+                  carry_forward_data: !!field.carry_forward_data,
+                  full_page_multi_items: !!field.full_page_multi_items,
+                  multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
+                };
+                await onUpdateSubmit(modal.fieldId, update, [...existingSubs, nextSub] as any, undefined);
+                setAddSubFieldModal(null);
+              }}
+            >
+              Add
+            </button>
+          </div>
+              </>
+            );
+          })()}
+        </div>
+      </div>
+    )}
+
+    {editSubFieldModal && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setEditSubFieldModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit sub field"
+      >
+        <div
+          className="card"
+          style={{ width: "min(720px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {(() => {
+            const field = list.find((x) => x.id === editSubFieldModal.fieldId) as any;
+            const secs = new Set<string>();
+            (field?.sub_fields ?? []).forEach((sf: any) => {
+              const raw = sf?.config?.ui_section;
+              const label = typeof raw === "string" ? raw.trim() : "";
+              secs.add(label || "Other");
+            });
+            secs.add("Other");
+            const uiSectionOptions = Array.from(secs).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+            return (
+              <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
+            <h2 style={{ fontSize: "1.1rem", margin: 0 }}>Edit Sub Field</h2>
+            <button type="button" className="btn" onClick={() => setEditSubFieldModal(null)}>Close</button>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "0.75rem 1rem", marginTop: "1rem" }}>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Name *</label>
+              <input
+                value={editSubFieldDraft.name}
+                onChange={(e) => {
+                  const nextName = e.target.value;
+                  setEditSubFieldDraft((p) => ({ ...p, name: nextName, ...(p.keyTouched ? {} : { key: slugifyKey(nextName) }) }));
+                }}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+                autoFocus
+              />
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Key *</label>
+              <input
+                value={editSubFieldDraft.key}
+                onChange={(e) => setEditSubFieldDraft((p) => ({ ...p, key: e.target.value, keyTouched: true }))}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+              />
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Type *</label>
+              <select
+                value={editSubFieldDraft.field_type}
+                onChange={(e) => {
+                  const nextType = e.target.value;
+                  setEditSubFieldDraft((p) => ({
+                    ...p,
+                    field_type: nextType,
+                    config: nextType === "reference" || nextType === "multi_reference" ? p.config : {},
+                  }));
+                }}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+              >
+                {SUB_FIELD_TYPES.map((t) => (
+                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>UI section</label>
+              <select
+                value={editSubFieldDraft.ui_section.trim() ? editSubFieldDraft.ui_section : "Other"}
+                onChange={(e) => setEditSubFieldDraft((p) => ({ ...p, ui_section: e.target.value === "Other" ? "" : e.target.value }))}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, maxWidth: "100%" }}
+              >
+                {uiSectionOptions.map((sec) => (
+                  <option key={sec} value={sec}>{truncateLabel(sec, 40)}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 1.25rem", alignItems: "center", marginTop: "0.75rem" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={editSubFieldDraft.is_required}
+                onChange={(e) => setEditSubFieldDraft((p) => ({ ...p, is_required: e.target.checked }))}
+              />
+              Required
+            </label>
+          </div>
+
+          {(editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") && (
+            <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
+              <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Reference source</div>
+              <ReferenceConfigUI
+                organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                currentKpiId={kpiId}
+                value={editSubFieldDraft.config}
+                onChange={(c) => setEditSubFieldDraft((p) => ({ ...p, config: c }))}
+                labelPrefix="Source"
+              />
+            </div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+            <button type="button" className="btn" onClick={() => setEditSubFieldModal(null)}>Cancel</button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={async () => {
+                const modal = editSubFieldModal;
+                if (!modal) return;
+                const name = editSubFieldDraft.name.trim();
+                const key = editSubFieldDraft.key.trim();
+                if (!name || !key) {
+                  toast.error("Name and key are required.");
+                  return;
+                }
+                if (
+                  (editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") &&
+                  (!editSubFieldDraft.config.reference_source_kpi_id || !editSubFieldDraft.config.reference_source_field_key)
+                ) {
+                  toast.error("Please select a source KPI and field.");
+                  return;
+                }
+                const field = list.find((x) => x.id === modal.fieldId) as any;
+                if (!field) return;
+                const existingSubs = (field.sub_fields ?? []) as any[];
+                if (modal.subIndex < 0 || modal.subIndex >= existingSubs.length) {
+                  toast.error("Sub-field no longer exists. Please refresh.");
+                  return;
+                }
+                const uiSection = editSubFieldDraft.ui_section.trim();
+                const cfg: Record<string, unknown> = {};
+                if (uiSection) cfg.ui_section = uiSection;
+                if (editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") {
+                  cfg.reference_source_kpi_id = editSubFieldDraft.config.reference_source_kpi_id;
+                  cfg.reference_source_field_key = editSubFieldDraft.config.reference_source_field_key;
+                  if (editSubFieldDraft.config.reference_source_sub_field_key) cfg.reference_source_sub_field_key = editSubFieldDraft.config.reference_source_sub_field_key;
+                }
+                const nextSub = {
+                  ...existingSubs[modal.subIndex],
+                  name,
+                  key,
+                  field_type: editSubFieldDraft.field_type,
+                  is_required: editSubFieldDraft.is_required,
+                  config: cfg,
+                } as any;
+                const nextSubs = existingSubs.map((s, idx) => (idx === modal.subIndex ? nextSub : s));
+                const update: UpdateFormData = {
+                  name: String(field.name ?? ""),
+                  key: String(field.key ?? ""),
+                  field_type: "multi_line_items" as any,
+                  formula_expression: String(field.formula_expression ?? ""),
+                  is_required: !!field.is_required,
+                  sort_order: Number(field.sort_order ?? 0),
+                  carry_forward_data: !!field.carry_forward_data,
+                  full_page_multi_items: !!field.full_page_multi_items,
+                  multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
+                };
+                await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
+                setEditSubFieldModal(null);
+              }}
+            >
+              Save
+            </button>
+          </div>
+              </>
+            );
+          })()}
+        </div>
+      </div>
+    )}
+
+    {deleteSubFieldModal && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setDeleteSubFieldModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Delete sub field"
+      >
+        <div
+          className="card"
+          style={{ width: "min(620px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
+            <h2 style={{ fontSize: "1.1rem", margin: 0, color: "var(--error)" }}>Delete Sub Field</h2>
+            <button type="button" className="btn" onClick={() => setDeleteSubFieldModal(null)}>Close</button>
+          </div>
+
+          <div style={{ marginTop: "0.75rem", color: "var(--muted)", fontSize: "0.95rem" }}>
+            You are about to delete the sub-field <strong>{deleteSubFieldModal.name}</strong>{" "}
+            (<span style={{ fontFamily: "monospace" }}>{deleteSubFieldModal.key}</span>) from this multi-line field.
+          </div>
+          <div style={{ marginTop: "0.5rem", color: "var(--muted)", fontSize: "0.9rem" }}>
+            This is permanent. Existing multi-line rows may lose this column&apos;s values after deletion.
+          </div>
+
+          <div style={{ marginTop: "0.75rem", padding: "0.75rem", borderRadius: 10, border: "1px solid var(--border)", background: "rgba(239, 68, 68, 0.04)" }}>
+            <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Type to confirm</div>
+            <div style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
+              Enter the exact <strong>name</strong> and <strong>key</strong> to enable deletion.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0.75rem 1rem" }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Name</label>
+                <input
+                  value={deleteSubFieldConfirm.name}
+                  onChange={(e) => setDeleteSubFieldConfirm((p) => ({ ...p, name: e.target.value }))}
+                  placeholder={deleteSubFieldModal.name}
+                  style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+                />
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Key</label>
+                <input
+                  value={deleteSubFieldConfirm.key}
+                  onChange={(e) => setDeleteSubFieldConfirm((p) => ({ ...p, key: e.target.value }))}
+                  placeholder={deleteSubFieldModal.key}
+                  style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+            <button type="button" className="btn" onClick={() => setDeleteSubFieldModal(null)}>Cancel</button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ background: "var(--error)", borderColor: "var(--error)" }}
+              disabled={
+                deleteSubFieldConfirm.name.trim() !== deleteSubFieldModal.name.trim() ||
+                deleteSubFieldConfirm.key.trim() !== deleteSubFieldModal.key.trim()
+              }
+              onClick={async () => {
+                const modal = deleteSubFieldModal;
+                if (!modal) return;
+                const ok = window.confirm(
+                  `Permanently delete this sub-field?\n\n` +
+                    `Name: ${modal.name}\n` +
+                    `Key: ${modal.key}\n\n` +
+                    `This may remove existing stored values for this column.`
+                );
+                if (!ok) return;
+                const field = list.find((x) => x.id === modal.fieldId) as any;
+                if (!field) return;
+                const existingSubs = (field.sub_fields ?? []) as any[];
+                if (modal.subIndex < 0 || modal.subIndex >= existingSubs.length) {
+                  toast.error("Sub-field no longer exists. Please refresh.");
+                  return;
+                }
+                const nextSubs = existingSubs.filter((_, idx) => idx !== modal.subIndex);
+                const update: UpdateFormData = {
+                  name: String(field.name ?? ""),
+                  key: String(field.key ?? ""),
+                  field_type: "multi_line_items" as any,
+                  formula_expression: String(field.formula_expression ?? ""),
+                  is_required: !!field.is_required,
+                  sort_order: Number(field.sort_order ?? 0),
+                  carry_forward_data: !!field.carry_forward_data,
+                  full_page_multi_items: !!field.full_page_multi_items,
+                  multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
+                };
+                await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
+                setDeleteSubFieldModal(null);
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {deleteFieldModal && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setDeleteFieldModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Delete field"
+      >
+        <div
+          className="card"
+          style={{ width: "min(680px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
+            <h2 style={{ fontSize: "1.1rem", margin: 0, color: "var(--error)" }}>Delete Field</h2>
+            <button type="button" className="btn" onClick={() => setDeleteFieldModal(null)}>Close</button>
+          </div>
+
+          <div style={{ marginTop: "0.75rem", color: "var(--muted)", fontSize: "0.95rem" }}>
+            You are about to delete the field <strong>{deleteFieldModal.name}</strong> (
+            <span style={{ fontFamily: "monospace" }}>{deleteFieldModal.key}</span>).
+          </div>
+
+          <div style={{ marginTop: "0.5rem", color: "var(--muted)", fontSize: "0.9rem" }}>
+            This is permanent. Existing entries may lose stored values for this field.
+          </div>
+
+          <div style={{ marginTop: "0.75rem", padding: "0.75rem", borderRadius: 10, border: "1px solid var(--border)", background: "rgba(239, 68, 68, 0.04)" }}>
+            <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Type to confirm</div>
+            <div style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
+              Enter the exact <strong>name</strong> and <strong>key</strong> to enable deletion.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "0.75rem 1rem" }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Name</label>
+                <input
+                  value={deleteFieldConfirm.name}
+                  onChange={(e) => setDeleteFieldConfirm((p) => ({ ...p, name: e.target.value }))}
+                  placeholder={deleteFieldModal.name}
+                  style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+                />
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Key</label>
+                <input
+                  value={deleteFieldConfirm.key}
+                  onChange={(e) => setDeleteFieldConfirm((p) => ({ ...p, key: e.target.value }))}
+                  placeholder={deleteFieldModal.key}
+                  style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div style={{ marginTop: "0.75rem", padding: "0.75rem", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-subtle, #f8f9fa)" }}>
+            <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Impact</div>
+            {deleteFieldSummaryLoading ? (
+              <div style={{ color: "var(--muted)" }}>Loading…</div>
+            ) : deleteFieldSummaryError ? (
+              <div className="form-error">{deleteFieldSummaryError}</div>
+            ) : (
+              <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+                Stored values: <strong>{deleteFieldSummary?.field_values_count ?? "—"}</strong> · Report template references:{" "}
+                <strong>{deleteFieldSummary?.report_template_fields_count ?? "—"}</strong>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+            <button type="button" className="btn" onClick={() => setDeleteFieldModal(null)}>Cancel</button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ background: "var(--error)", borderColor: "var(--error)" }}
+              disabled={
+                deleteFieldConfirm.name.trim() !== deleteFieldModal.name.trim() ||
+                deleteFieldConfirm.key.trim() !== deleteFieldModal.key.trim()
+              }
+              onClick={async () => {
+                const modal = deleteFieldModal;
+                if (!modal) return;
+                const ok = window.confirm(
+                  `Permanently delete this field?\n\n` +
+                    `Name: ${modal.name}\n` +
+                    `Key: ${modal.key}\n\n` +
+                    `This may remove existing stored values for this field.`
+                );
+                if (!ok) return;
+                await performDeleteField(modal.fieldId);
+                setDeleteFieldModal(null);
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
 
     {addModal && kpi && (
       <div
@@ -2733,11 +3366,13 @@ function ReferenceConfigUI({
         <select
           value={value.reference_source_kpi_id ?? ""}
           onChange={(e) => onChange({ reference_source_kpi_id: e.target.value ? Number(e.target.value) : undefined, reference_source_field_key: undefined, reference_source_sub_field_key: undefined })}
-          style={{ minWidth: "180px" }}
+          style={{ minWidth: 0, width: "100%", maxWidth: 320 }}
         >
           <option value="">— Select KPI —</option>
           {kpis.filter((k) => k.id !== currentKpiId).map((k) => (
-            <option key={k.id} value={k.id}>{k.name}</option>
+            <option key={k.id} value={k.id}>
+              {truncateLabel(k.name, 52)}
+            </option>
           ))}
         </select>
       </div>
@@ -2754,12 +3389,14 @@ function ReferenceConfigUI({
               onChange({ ...value, reference_source_field_key: raw || undefined, reference_source_sub_field_key: undefined });
             }
           }}
-          style={{ minWidth: "220px" }}
+          style={{ minWidth: 0, width: "100%", maxWidth: 420 }}
           disabled={!value.reference_source_kpi_id}
         >
           <option value="">— Select field —</option>
           {sourceFieldOptions.map((opt) => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
+            <option key={opt.value} value={opt.value}>
+              {truncateLabel(opt.label, 64)}
+            </option>
           ))}
         </select>
       </div>
