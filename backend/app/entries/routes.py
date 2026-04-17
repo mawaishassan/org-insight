@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, distinct
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 import httpx

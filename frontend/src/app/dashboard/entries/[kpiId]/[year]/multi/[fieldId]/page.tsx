@@ -94,6 +94,9 @@ export default function FullPageMultiItems() {
     const y = new Date().getFullYear();
     return y - 1;
   });
+  const [availableSourceYears, setAvailableSourceYears] = useState<number[]>([]);
+  const [availableSourceYearsLoading, setAvailableSourceYearsLoading] = useState(false);
+  const [availableSourceYearsError, setAvailableSourceYearsError] = useState<string | null>(null);
   const [apiUrlOverride, setApiUrlOverride] = useState<string>("");
   const [showApiExampleJson, setShowApiExampleJson] = useState(false);
   const [showFilterPanel, setShowFilterPanel] = useState(false);
@@ -419,6 +422,40 @@ export default function FullPageMultiItems() {
       toast.error(e instanceof Error ? e.message : "Bulk delete failed");
     }
   };
+
+  // Load available source years when "Previous year" channel is selected.
+  useEffect(() => {
+    if (!token || effectiveOrgId == null || !entryId || !fieldId || !kpiId) return;
+    if (bulkChannel !== "previous_year") return;
+    const controller = new AbortController();
+    setAvailableSourceYearsLoading(true);
+    setAvailableSourceYearsError(null);
+    api<{ years: number[] }>(
+      `/entries/multi-items/available-source-years?${new URLSearchParams({
+        kpi_id: String(kpiId),
+        field_id: String(fieldId),
+        target_year: String(year),
+        organization_id: String(effectiveOrgId),
+        ...(periodKey ? { period_key: periodKey } : {}),
+      }).toString()}`,
+      { token }
+    )
+      .then((r) => {
+        const yearsList = Array.isArray(r?.years) ? r.years.filter((y) => typeof y === "number" && y < year) : [];
+        yearsList.sort((a, b) => b - a);
+        setAvailableSourceYears(yearsList);
+        if (yearsList.length > 0) setImportFromYear(yearsList[0]);
+      })
+      .catch((e) => {
+        if (controller.signal.aborted) return;
+        setAvailableSourceYears([]);
+        setAvailableSourceYearsError(e instanceof Error ? e.message : "Failed to load years");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setAvailableSourceYearsLoading(false);
+      });
+    return () => controller.abort();
+  }, [bulkChannel, token, effectiveOrgId, entryId, fieldId, kpiId, year, periodKey]);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -1244,17 +1281,24 @@ export default function FullPageMultiItems() {
                   value={String(importFromYear)}
                   onChange={(e) => setImportFromYear(Number(e.target.value))}
                   style={{ maxWidth: 180, padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                  disabled={availableSourceYearsLoading || availableSourceYears.length === 0}
                 >
-                  {Array.from({ length: 10 }).map((_, i) => {
-                    const y = year - 1 - i;
-                    if (y < 1900) return null;
-                    return (
+                  {availableSourceYears.length === 0 ? (
+                    <option value="">— No previous uploads found —</option>
+                  ) : (
+                    availableSourceYears.map((y) => (
                       <option key={y} value={String(y)}>
                         {y}
                       </option>
-                    );
-                  })}
+                    ))
+                  )}
                 </select>
+                {availableSourceYearsLoading && (
+                  <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Loading years…</div>
+                )}
+                {availableSourceYearsError && (
+                  <div className="form-error" style={{ fontSize: "0.85rem" }}>{availableSourceYearsError}</div>
+                )}
                 <div style={{ fontSize: "0.8rem", color: "var(--muted)", maxWidth: 520 }}>
                   Copies rows from the selected year into this year using Step 1 mode above (Append/Override/Update-or-add). This option is available even if carry-forward is disabled.
                 </div>
@@ -1268,6 +1312,7 @@ export default function FullPageMultiItems() {
                   uploading ||
                   !token ||
                   effectiveOrgId == null ||
+                  availableSourceYears.length === 0 ||
                   (uploadOption === "upsert" && !upsertMatchSubFieldKey.trim())
                 }
                 onClick={async () => {
