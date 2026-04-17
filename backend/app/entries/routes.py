@@ -1205,6 +1205,183 @@ async def sync_multi_items_from_api(
     return out
 
 
+@router.post("/multi-items/import-from-year")
+async def import_multi_items_from_year(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    source_year: int = Query(..., ge=1900, le=3000),
+    source_period_key: str | None = Query(
+        None,
+        description="Optional: period_key of source entry. Defaults to target entry's period_key.",
+    ),
+    import_mode: str | None = Query(
+        None,
+        description="replace (default), append, or upsert (requires match_sub_field_key)",
+        pattern="^(replace|append|upsert)$",
+    ),
+    match_sub_field_key: str | None = Query(
+        None,
+        description="Sub-field key used to match rows when import_mode=upsert (same normalized value => update row)",
+    ),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Import multi_line_items rows from a selected year's entry into this entry+field."""
+    org_id = _org_id(current_user, organization_id)
+
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    if entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry is locked")
+
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
+    if not can_add:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to add rows to this field")
+
+    can_edit = await user_can_edit_multi_line_field(db, current_user.id, entry.kpi_id, field)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this field")
+
+    src_period = (source_period_key if source_period_key is not None else (getattr(entry, "period_key", "") or "")).strip()
+    src_entry_res = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.kpi_id == entry.kpi_id,
+            KPIEntry.organization_id == org_id,
+            KPIEntry.year == int(source_year),
+            KPIEntry.period_key == src_period,
+        )
+    )
+    src_entry = src_entry_res.scalar_one_or_none()
+    if not src_entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source entry not found for selected year/period")
+
+    src_fv_res = await db.execute(
+        select(KPIFieldValue).where(
+            KPIFieldValue.entry_id == src_entry.id,
+            KPIFieldValue.field_id == field.id,
+        )
+    )
+    src_fv = src_fv_res.scalar_one_or_none()
+    incoming_items = list(src_fv.value_json) if src_fv and isinstance(src_fv.value_json, list) else []
+    incoming_items = [
+        dict(x)
+        for x in incoming_items
+        if isinstance(x, dict) and not _is_multi_items_row_effectively_empty(dict(x))
+    ]
+
+    mode = _resolve_multi_items_import_mode(import_mode, append_legacy=False)
+    if mode == "upsert":
+        mk = (match_sub_field_key or "").strip()
+        if not mk:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="match_sub_field_key is required when import_mode=upsert")
+        sub_by_key = {s.key: s for s in (field.sub_fields or [])}
+        if mk not in sub_by_key:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="match_sub_field_key must be a defined sub-field key for this multi-line field")
+        match_ft = getattr(sub_by_key[mk], "field_type", None)
+    else:
+        mk = None
+        match_ft = None
+
+    fv_res = await db.execute(
+        select(KPIFieldValue).where(
+            KPIFieldValue.entry_id == entry.id,
+            KPIFieldValue.field_id == field.id,
+        )
+    )
+    fv = fv_res.scalar_one_or_none()
+    if fv is None:
+        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id)
+        db.add(fv)
+    prev_count = len(fv.value_json) if isinstance(fv.value_json, list) else 0
+    existing_list = list(fv.value_json) if isinstance(fv.value_json, list) else []
+
+    rows_updated = 0
+    if mode == "append":
+        fv.value_json = existing_list + incoming_items
+        rows_added = len(incoming_items)
+        rows_overridden = 0
+    elif mode == "upsert":
+        merged, rows_updated, rows_added = _upsert_merge_multi_line_items(existing_list, incoming_items, mk, match_ft)
+        fv.value_json = merged
+        rows_overridden = 0
+    else:
+        fv.value_json = incoming_items
+        rows_added = len(incoming_items)
+        rows_overridden = prev_count
+
+    entry.user_id = current_user.id
+    flag_modified(fv, "value_json")
+    await db.flush()
+    await db.commit()
+
+    out: dict = {
+        "entry_id": entry.id,
+        "field_id": field.id,
+        "source_entry_id": src_entry.id,
+        "source_year": int(source_year),
+        "source_period_key": src_period,
+        "import_mode": mode,
+        "rows_imported": len(incoming_items),
+    }
+    if mode == "upsert":
+        out["rows_updated"] = rows_updated
+        out["rows_appended"] = rows_added
+    else:
+        out["rows_added"] = rows_added
+        out["rows_overridden"] = rows_overridden
+    return out
+
+
+@router.get("/multi-items/available-source-years")
+async def list_multi_items_available_source_years(
+    kpi_id: int = Query(...),
+    field_id: int = Query(...),
+    target_year: int = Query(..., ge=1900, le=3000),
+    period_key: str | None = Query(None, description="Optional: period_key to match. If omitted, any period_key is allowed."),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return previous years (< target_year) that have any stored rows for this multi_line_items field."""
+    org_id = _org_id(current_user, organization_id)
+
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != int(kpi_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    # Any user who can view this KPI should be able to see available years.
+    can_view = await user_can_view_kpi(db, current_user.id, int(kpi_id))
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+
+    stmt = (
+        select(distinct(KPIEntry.year))
+        .select_from(KPIEntry)
+        .join(KPIFieldValue, KPIFieldValue.entry_id == KPIEntry.id)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == int(kpi_id),
+            KPIEntry.year < int(target_year),
+            KPIFieldValue.field_id == int(field_id),
+            KPIFieldValue.value_json.isnot(None),
+        )
+    )
+    if period_key is not None:
+        stmt = stmt.where(KPIEntry.period_key == str(period_key))
+    res = await db.execute(stmt)
+    years = sorted({int(r[0]) for r in res.all() if r and r[0] is not None}, reverse=True)
+    return {"years": years}
+
+
 @router.get("/multi-items/export")
 async def export_multi_items_csv(
     entry_id: int = Query(...),

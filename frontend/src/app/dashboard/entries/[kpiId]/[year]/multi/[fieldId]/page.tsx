@@ -89,7 +89,11 @@ export default function FullPageMultiItems() {
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [filtersDraft, setFiltersDraft] = useState<Record<string, string>>({});
   const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
-  const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | null>(null);
+  const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | "previous_year" | null>(null);
+  const [importFromYear, setImportFromYear] = useState<number>(() => {
+    const y = new Date().getFullYear();
+    return y - 1;
+  });
   const [apiUrlOverride, setApiUrlOverride] = useState<string>("");
   const [showApiExampleJson, setShowApiExampleJson] = useState(false);
   const [showFilterPanel, setShowFilterPanel] = useState(false);
@@ -863,6 +867,16 @@ export default function FullPageMultiItems() {
                   />
                   API
                 </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    name="uploadChannel"
+                    checked={bulkChannel === "previous_year"}
+                    onChange={() => setBulkChannel("previous_year")}
+                    disabled={!entryId}
+                  />
+                  Previous year
+                </label>
               </div>
             </div>
           </div>
@@ -1218,6 +1232,94 @@ export default function FullPageMultiItems() {
                   </p>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Import from previous year */}
+          {bulkChannel === "previous_year" && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "flex-end", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+                <label style={{ fontWeight: 600, fontSize: "0.85rem" }}>Import rows from year</label>
+                <select
+                  value={String(importFromYear)}
+                  onChange={(e) => setImportFromYear(Number(e.target.value))}
+                  style={{ maxWidth: 180, padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                >
+                  {Array.from({ length: 10 }).map((_, i) => {
+                    const y = year - 1 - i;
+                    if (y < 1900) return null;
+                    return (
+                      <option key={y} value={String(y)}>
+                        {y}
+                      </option>
+                    );
+                  })}
+                </select>
+                <div style={{ fontSize: "0.8rem", color: "var(--muted)", maxWidth: 520 }}>
+                  Copies rows from the selected year into this year using Step 1 mode above (Append/Override/Update-or-add). This option is available even if carry-forward is disabled.
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={
+                  !entryId ||
+                  !uploadOption ||
+                  uploading ||
+                  !token ||
+                  effectiveOrgId == null ||
+                  (uploadOption === "upsert" && !upsertMatchSubFieldKey.trim())
+                }
+                onClick={async () => {
+                  if (!token || !entryId || !fieldId || effectiveOrgId == null || !uploadOption) return;
+                  if (uploadOption === "upsert" && !upsertMatchSubFieldKey.trim()) {
+                    toast.error("Select which sub-field to use for matching.");
+                    return;
+                  }
+                  if (uploadOption === "override") {
+                    const ok = window.confirm(
+                      "Override will replace all existing rows for this field in the current year. Continue?"
+                    );
+                    if (!ok) return;
+                  }
+                  setUploading(true);
+                  try {
+                    const mode = uploadOption === "override" ? "replace" : uploadOption;
+                    const params = new URLSearchParams({
+                      entry_id: String(entryId),
+                      field_id: String(fieldId),
+                      organization_id: String(effectiveOrgId),
+                      source_year: String(importFromYear),
+                      import_mode: mode,
+                      ...(periodKey ? { source_period_key: periodKey } : {}),
+                    });
+                    if (mode === "upsert") params.set("match_sub_field_key", upsertMatchSubFieldKey.trim());
+                    const res = await api<any>(`/entries/multi-items/import-from-year?${params.toString()}`, {
+                      method: "POST",
+                      token,
+                    });
+                    if (mode === "upsert") {
+                      const updated = Number(res?.rows_updated ?? 0);
+                      const added = Number(res?.rows_appended ?? 0);
+                      toast.success(`Update or add: ${updated} row(s) updated, ${added} new row(s) added`);
+                    } else {
+                      const added = Number(res?.rows_added ?? 0);
+                      const overridden = Number(res?.rows_overridden ?? 0);
+                      const label = uploadOption === "append" ? "Appended" : "Replaced";
+                      toast.success(overridden > 0 ? `${label}: ${added} rows imported (overrode ${overridden} existing)` : `${label}: ${added} rows imported`);
+                    }
+                    await loadRows();
+                    setBulkPanelOpen(false);
+                    setUploadOption(null);
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : "Import from previous year failed");
+                  } finally {
+                    setUploading(false);
+                  }
+                }}
+              >
+                {uploading ? "Importing…" : "Import"}
+              </button>
             </div>
           )}
         </div>
