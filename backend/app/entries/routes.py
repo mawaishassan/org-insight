@@ -674,8 +674,14 @@ async def list_multi_items_rows(
                     "is_required": getattr(sf, "is_required", False),
                 }
             )
-    # Filter row data to viewable columns only (keep original index)
-    rows = [(i, {k: v for k, v in r.items() if k in viewable_keys}) for i, r in rows]
+    # Keep all defined sub-field keys for search / sort / filters. Reference-chain resolution must read
+    # stored reference cells even when this column is not in the user's viewable set (field ACL).
+    # Strip to viewable_keys only when building each row's `data` in the response.
+    subfield_key_set = {str(getattr(s, "key", "")) for s in (field.sub_fields or []) if getattr(s, "key", None)}
+    rows = [
+        (i, {k: v for k, v in r.items() if k in subfield_key_set})
+        for i, r in rows
+    ]
 
     # Filter by search
     if search:
@@ -806,7 +812,8 @@ async def list_multi_items_rows(
             can_edit = can_edit_common
             can_delete = can_delete_common
 
-        out_rows.append(MultiItemsRow(index=orig_index, data=r, can_edit=can_edit, can_delete=can_delete))
+        r_visible = {k: v for k, v in r.items() if k in viewable_keys}
+        out_rows.append(MultiItemsRow(index=orig_index, data=r_visible, can_edit=can_edit, can_delete=can_delete))
 
     return MultiItemsListResponse(
         total=total,

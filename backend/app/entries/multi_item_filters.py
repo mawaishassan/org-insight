@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from app.formula_engine.evaluator import match_cell_value
+from app.entries.reference_filter_resolve import _extract_ref_label, _multi_raw_pieces
 from app.entries.service import _normalize_reference_value
 
 
@@ -14,28 +14,6 @@ def normalize_filter_op(op: Any) -> str:
     if s.startswith("op_"):
         return s[3:]
     return s
-
-
-def _multi_reference_cell_parts(cell: Any) -> list[str]:
-    if cell is None:
-        return []
-    if isinstance(cell, list):
-        return [str(x) for x in cell if x is not None and str(x).strip() != ""]
-    s = str(cell).strip()
-    if not s:
-        return []
-    if s.startswith("["):
-        try:
-            parsed = json.loads(s)
-            if isinstance(parsed, list):
-                return [str(x) for x in parsed if x is not None]
-        except (json.JSONDecodeError, TypeError):
-            pass
-    if ";" in s:
-        return [p.strip() for p in s.split(";") if p.strip()]
-    if "," in s:
-        return [p.strip() for p in s.split(",") if p.strip()]
-    return [s]
 
 
 def eval_v2_condition_row(
@@ -58,18 +36,18 @@ def eval_v2_condition_row(
     if isinstance(rr, dict) and resolution_maps is not None:
         cmp_vals = lambda resolved: _eval_compare_ops(resolved, op, cond)
 
+        # Keys must match build_reference_resolution_map: normalized _extract_ref_label (not str(dict)).
         if ft == "multi_reference":
-            parts = _multi_reference_cell_parts(cell)
-            if not parts:
-                return cmp_vals(None)
             results = []
-            for p in parts:
-                lab = _normalize_reference_value(p)
+            for tok in _multi_raw_pieces(cell):
+                lab = _normalize_reference_value(_extract_ref_label(tok))
+                if not lab:
+                    continue
                 resolved = resolution_maps.get((cond_idx, lab))
                 results.append(cmp_vals(resolved))
             return any(results) if results else cmp_vals(None)
 
-        lab = _normalize_reference_value(str(cell) if cell is not None else "")
+        lab = _normalize_reference_value(_extract_ref_label(cell))
         resolved = resolution_maps.get((cond_idx, lab))
         return cmp_vals(resolved)
 

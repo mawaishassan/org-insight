@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken, clearTokens } from "@/lib/auth";
@@ -63,10 +63,11 @@ type MultiItemsFilterPayloadV2 = {
     op: string;
     value?: unknown;
     values?: string[];
-    /** When set, filter compares this source KPI field (not the configured label field). */
+    /** Walk reference fields then read the final scalar field (chain) or legacy single compare. */
     reference_resolution?: {
-      compare_field_key: string;
+      compare_field_key?: string;
       compare_sub_field_key?: string;
+      chain?: Array<{ compare_field_key: string; compare_sub_field_key?: string }>;
     };
   }>;
 };
@@ -77,9 +78,88 @@ type MultiFilterConditionRow = {
   value: string;
   multiValues: string[];
   logicWithPrev: "and" | "or";
-  /** Source KPI field path: `fieldKey` or `fieldKey|subKey` for multi-line source columns. */
-  referenceComparePath: string;
+  /** Paths on each KPI in the reference chain: `fieldKey` or `fieldKey|subKey`. Empty = use configured default label path only. */
+  referenceChainPaths: string[];
 };
+
+function isReferenceLikeFieldType(ft: string | undefined): boolean {
+  return ft === "reference" || ft === "multi_reference";
+}
+
+function getNextSourceKpiIdForPath(fields: FieldSummary[], path: string): number | undefined {
+  const { fieldKey, subKey } = parseComparePath(path);
+  const f = fields.find((x) => x.key === fieldKey);
+  if (!f) return undefined;
+  if (subKey && f.field_type === "multi_line_items" && f.sub_fields?.length) {
+    const sub = f.sub_fields.find((s) => s.key === subKey);
+    if (!sub) return undefined;
+    if (!isReferenceLikeFieldType(sub.field_type ?? undefined)) return undefined;
+    const cfg = (sub.config ?? {}) as { reference_source_kpi_id?: number };
+    return cfg.reference_source_kpi_id;
+  }
+  if (isReferenceLikeFieldType(f.field_type)) {
+    const cfg = (f.config ?? {}) as { reference_source_kpi_id?: number };
+    return cfg.reference_source_kpi_id;
+  }
+  return undefined;
+}
+
+function getFieldTypeAtPath(fields: FieldSummary[], path: string): string | undefined {
+  const { fieldKey, subKey } = parseComparePath(path);
+  const f = fields.find((x) => x.key === fieldKey);
+  if (!f) return undefined;
+  if (subKey && f.field_type === "multi_line_items" && f.sub_fields?.length) {
+    return f.sub_fields.find((s) => s.key === subKey)?.field_type ?? undefined;
+  }
+  return f.field_type;
+}
+
+/** KPI id at step 0, 1, … when walking `paths` (length = paths.length + 1). */
+function computeChainKpiIds(
+  startKpiId: number,
+  paths: string[],
+  cache: Record<number, FieldSummary[]>
+): number[] {
+  const ids: number[] = [startKpiId];
+  for (let i = 0; i < paths.length; i++) {
+    const flds = cache[ids[i]] ?? [];
+    const nextId = getNextSourceKpiIdForPath(flds, paths[i]);
+    if (nextId == null) break;
+    ids.push(nextId);
+  }
+  return ids;
+}
+
+/** Paths used for chain resolution / terminal value; empty draft → configured default path. */
+function pathsForChainComputation(row: MultiFilterConditionRow, sub: SubField | undefined): string[] {
+  const raw = row.referenceChainPaths ?? [];
+  const def = sub ? defaultReferenceComparePath(sub) : "";
+  if (raw.length === 0) return def ? [def] : [];
+  return [...raw];
+}
+
+function shouldOmitReferenceResolution(paths: string[], sub: SubField | undefined): boolean {
+  const def = sub ? defaultReferenceComparePath(sub) : "";
+  return paths.length === 1 && paths[0] === def;
+}
+
+function terminalRefAllowedValuesKey(
+  chainKpiIds: number[],
+  pathsComp: string[],
+  fieldCache: Record<number, FieldSummary[]>
+): { cacheKey: string } | null {
+  if (!chainKpiIds.length || !pathsComp.length) return null;
+  const last = pathsComp.length - 1;
+  const kpiId = chainKpiIds[last];
+  const path = pathsComp[last];
+  const fields = fieldCache[kpiId] ?? [];
+  const ft = getFieldTypeAtPath(fields, path);
+  if (isReferenceLikeFieldType(ft)) return null;
+  const { fieldKey, subKey } = parseComparePath(path);
+  if (!fieldKey) return null;
+  const cacheKey = `${kpiId}-${fieldKey}${subKey ? `-${subKey}` : ""}`;
+  return { cacheKey };
+}
 
 function parseComparePath(path: string): { fieldKey: string; subKey?: string } {
   const p = path.trim();
@@ -100,7 +180,21 @@ function defaultReferenceComparePath(sub: SubField): string {
 }
 
 function emptyMultiFilterRow(): MultiFilterConditionRow {
-  return { field: "", op: "eq", value: "", multiValues: [], logicWithPrev: "and", referenceComparePath: "" };
+  return { field: "", op: "eq", value: "", multiValues: [], logicWithPrev: "and", referenceChainPaths: [] };
+}
+
+function rrToPathStrings(rr: MultiItemsFilterPayloadV2["conditions"][0]["reference_resolution"]): string[] {
+  if (!rr) return [];
+  const ch = rr.chain;
+  if (Array.isArray(ch) && ch.length > 0) {
+    return ch.map((s) =>
+      s.compare_sub_field_key ? `${s.compare_field_key}|${s.compare_sub_field_key}` : s.compare_field_key
+    );
+  }
+  if (rr.compare_field_key) {
+    return [rr.compare_sub_field_key ? `${rr.compare_field_key}|${rr.compare_sub_field_key}` : rr.compare_field_key];
+  }
+  return [];
 }
 
 function payloadToFilterDraft(payload: MultiItemsFilterPayloadV2 | null): MultiFilterConditionRow[] {
@@ -114,20 +208,13 @@ function payloadToFilterDraft(payload: MultiItemsFilterPayloadV2 | null): MultiF
       if (typeof c.value === "boolean") valueStr = c.value ? "true" : "false";
       else valueStr = String(c.value);
     }
-    const rr = c.reference_resolution;
-    let referenceComparePath = "";
-    if (rr?.compare_field_key) {
-      referenceComparePath = rr.compare_sub_field_key
-        ? `${rr.compare_field_key}|${rr.compare_sub_field_key}`
-        : rr.compare_field_key;
-    }
     return {
       field: String(c.field ?? ""),
       op: String(c.op ?? "eq"),
       value: valueStr,
       multiValues: multiVals,
       logicWithPrev: i === 0 ? "and" : c.logic === "or" ? "or" : "and",
-      referenceComparePath,
+      referenceChainPaths: rrToPathStrings(c.reference_resolution),
     };
   });
 }
@@ -170,16 +257,17 @@ function filterDraftToPayload(rows: MultiFilterConditionRow[], subFields: SubFie
     if (i > 0) base.logic = r.logicWithPrev;
 
     if (ft === "reference" || ft === "multi_reference") {
-      const defPath = sf ? defaultReferenceComparePath(sf) : "";
-      const sel = (r.referenceComparePath || "").trim() || defPath;
-      if (sel && defPath && sel !== defPath) {
-        const { fieldKey, subKey } = parseComparePath(sel);
-        if (fieldKey) {
-          base.reference_resolution = {
-            compare_field_key: fieldKey,
-            ...(subKey ? { compare_sub_field_key: subKey } : {}),
-          };
-        }
+      const rawPaths = r.referenceChainPaths ?? [];
+      if (rawPaths.length > 0 && !shouldOmitReferenceResolution(rawPaths, sf)) {
+        base.reference_resolution = {
+          chain: rawPaths.map((p) => {
+            const { fieldKey, subKey } = parseComparePath(p);
+            return {
+              compare_field_key: fieldKey,
+              ...(subKey ? { compare_sub_field_key: subKey } : {}),
+            };
+          }),
+        };
       }
     }
     const hasValue =
@@ -203,12 +291,18 @@ function removeConditionFromPayload(payload: MultiItemsFilterPayloadV2, idx: num
       op: String(c.op),
       ...(Array.isArray(c.values) && c.values.length > 0 ? { values: [...c.values] } : { value: c.value }),
     };
-    if (c.reference_resolution?.compare_field_key) {
+    const rr = c.reference_resolution;
+    if (rr?.chain && Array.isArray(rr.chain) && rr.chain.length > 0) {
       row.reference_resolution = {
-        compare_field_key: String(c.reference_resolution.compare_field_key),
-        ...(c.reference_resolution.compare_sub_field_key
-          ? { compare_sub_field_key: String(c.reference_resolution.compare_sub_field_key) }
-          : {}),
+        chain: rr.chain.map((s) => ({
+          compare_field_key: String(s.compare_field_key),
+          ...(s.compare_sub_field_key ? { compare_sub_field_key: String(s.compare_sub_field_key) } : {}),
+        })),
+      };
+    } else if (rr?.compare_field_key) {
+      row.reference_resolution = {
+        compare_field_key: String(rr.compare_field_key),
+        ...(rr.compare_sub_field_key ? { compare_sub_field_key: String(rr.compare_sub_field_key) } : {}),
       };
     }
     if (i > 0) row.logic = c.logic === "or" ? "or" : "and";
@@ -244,6 +338,30 @@ function buildReferenceAttributeOptions(fields: FieldSummary[]): { value: string
     }
   }
   return out;
+}
+
+function formatComparePathLabel(fields: FieldSummary[], path: string): string {
+  const { fieldKey, subKey } = parseComparePath(path);
+  const f = fields.find((x) => x.key === fieldKey);
+  if (!f) return path;
+  if (subKey && f.field_type === "multi_line_items" && f.sub_fields?.length) {
+    const s = f.sub_fields.find((x) => x.key === subKey);
+    if (!s) return `${f.name} → ${subKey}`;
+    return `${f.name} → ${s.name}`;
+  }
+  return f.name || fieldKey;
+}
+
+function appliedReferencePathsForChip(cond: MultiItemsFilterPayloadV2["conditions"][0], sub: SubField | undefined): string[] {
+  const rr = cond.reference_resolution;
+  if (rr?.chain && Array.isArray(rr.chain) && rr.chain.length > 0) {
+    return rr.chain.map((s) => (s.compare_sub_field_key ? `${s.compare_field_key}|${s.compare_sub_field_key}` : s.compare_field_key));
+  }
+  if (rr?.compare_field_key) {
+    return [rr.compare_sub_field_key ? `${rr.compare_field_key}|${rr.compare_sub_field_key}` : rr.compare_field_key];
+  }
+  const def = sub ? defaultReferenceComparePath(sub) : "";
+  return def ? [def] : [];
 }
 
 interface MultiItemsRow {
@@ -501,7 +619,10 @@ export default function FullPageMultiItems() {
         (sub?.field_type === "reference" || sub?.field_type === "multi_reference") &&
         cfg?.reference_source_kpi_id
       ) {
-        needed.add(cfg.reference_source_kpi_id);
+        const sid = cfg.reference_source_kpi_id;
+        const pc = pathsForChainComputation(row, sub);
+        const chainIds = computeChainKpiIds(sid, pc, sourceKpiFieldsById);
+        chainIds.forEach((id) => needed.add(id));
       }
     });
     needed.forEach((kid) => {
@@ -527,24 +648,29 @@ export default function FullPageMultiItems() {
       const cfg = sub.config as { reference_source_kpi_id?: number } | undefined;
       const sid = cfg?.reference_source_kpi_id;
       if (!sid) return;
-      const effPath = (row.referenceComparePath || "").trim() || defaultReferenceComparePath(sub);
-      const { fieldKey, subKey } = parseComparePath(effPath);
+      const pc = pathsForChainComputation(row, sub);
+      const chainIds = computeChainKpiIds(sid, pc, sourceKpiFieldsById);
+      const term = terminalRefAllowedValuesKey(chainIds, pc, sourceKpiFieldsById);
+      if (!term) return;
+      if (refFilterOptions[term.cacheKey] !== undefined) return;
+      const last = pc.length - 1;
+      const kpiId = chainIds[last];
+      const path = pc[last];
+      const { fieldKey, subKey } = parseComparePath(path);
       if (!fieldKey) return;
-      const cacheKey = `${sid}-${fieldKey}${subKey ? `-${subKey}` : ""}`;
-      if (refFilterOptions[cacheKey] !== undefined) return;
       const params = new URLSearchParams({
-        source_kpi_id: String(sid),
+        source_kpi_id: String(kpiId),
         source_field_key: fieldKey,
         organization_id: String(effectiveOrgId),
       });
       if (subKey) params.set("source_sub_field_key", subKey);
       api<{ values: string[] }>(`/fields/reference-allowed-values?${params.toString()}`, { token })
         .then((r) =>
-          setRefFilterOptions((prev) => ({ ...prev, [cacheKey]: r.values ?? [] }))
+          setRefFilterOptions((prev) => ({ ...prev, [term.cacheKey]: r.values ?? [] }))
         )
-        .catch(() => setRefFilterOptions((prev) => ({ ...prev, [cacheKey]: [] })));
+        .catch(() => setRefFilterOptions((prev) => ({ ...prev, [term.cacheKey]: [] })));
     });
-  }, [token, effectiveOrgId, showFilterPanel, filterDraft, subFields, refFilterOptions]);
+  }, [token, effectiveOrgId, showFilterPanel, filterDraft, subFields, refFilterOptions, sourceKpiFieldsById]);
 
   const fieldApiResponseExampleJson = useMemo(() => {
     const actualData = rows.slice(0, 2).map((r) => r.data);
@@ -984,10 +1110,27 @@ export default function FullPageMultiItems() {
         {appliedFilter && appliedFilter.conditions.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginTop: "0.25rem", alignItems: "center" }}>
             {appliedFilter.conditions.map((cond, idx) => {
-              const label = subFields.find((s) => s.key === cond.field)?.name ?? cond.field;
+              const sf = subFields.find((s) => s.key === cond.field);
+              const label = sf?.name ?? cond.field;
               const val =
                 Array.isArray(cond.values) && cond.values.length ? cond.values.join(", ") : String(cond.value ?? "");
-              const summary = `${label} ${cond.op} ${val}`.trim();
+              let refPathText = "";
+              if (sf && (sf.field_type === "reference" || sf.field_type === "multi_reference")) {
+                const cfg = (sf.config ?? {}) as { reference_source_kpi_id?: number };
+                const sid = cfg.reference_source_kpi_id;
+                if (sid != null) {
+                  const paths = appliedReferencePathsForChip(cond, sf);
+                  const chainIds = computeChainKpiIds(sid, paths, sourceKpiFieldsById);
+                  const parts: string[] = [];
+                  for (let i = 0; i < paths.length; i++) {
+                    const kpiAt = chainIds[i];
+                    if (kpiAt == null) break;
+                    parts.push(formatComparePathLabel(sourceKpiFieldsById[kpiAt] ?? [], paths[i]));
+                  }
+                  if (parts.length > 0) refPathText = parts.join(" → ");
+                }
+              }
+              const summary = `${label}${refPathText ? ` (${refPathText})` : ""} ${cond.op} ${val}`.trim();
               return (
                 <span
                   key={`${idx}-${cond.field}-${cond.op}-${val}`}
@@ -1010,6 +1153,11 @@ export default function FullPageMultiItems() {
                       </span>
                     )}
                     <strong>{label}</strong>
+                    {refPathText && (
+                      <span style={{ color: "var(--muted)" }}>
+                        {`(${refPathText})`}
+                      </span>
+                    )}
                     <span style={{ color: "var(--muted)" }}>{cond.op}</span>
                     <span>{val}</span>
                   </span>
@@ -1078,19 +1226,14 @@ export default function FullPageMultiItems() {
               const opSelectValue = opChoices.some((o) => o.value === c.op) ? c.op : (opChoices[0]?.value ?? "eq");
               const refCfg = sfCond?.config as { reference_source_kpi_id?: number } | undefined;
               const sourceKpiIdForRef = refCfg?.reference_source_kpi_id;
-              const comparePathEff = sfCond
-                ? (c.referenceComparePath || "").trim() || defaultReferenceComparePath(sfCond)
-                : "";
-              const { fieldKey: refSourceFk, subKey: refSourceSk } = parseComparePath(comparePathEff);
-              const refCacheKey =
-                sourceKpiIdForRef && refSourceFk
-                  ? `${sourceKpiIdForRef}-${refSourceFk}${refSourceSk ? `-${refSourceSk}` : ""}`
-                  : "";
-              const refOptions = refCacheKey ? refFilterOptions[refCacheKey] ?? [] : [];
-              const sourceAttributeOptions =
+              const pcComp = sfCond ? pathsForChainComputation(c, sfCond) : [];
+              const chainIdsForRef =
                 sourceKpiIdForRef != null
-                  ? buildReferenceAttributeOptions(sourceKpiFieldsById[sourceKpiIdForRef] ?? [])
+                  ? computeChainKpiIds(sourceKpiIdForRef, pcComp, sourceKpiFieldsById)
                   : [];
+              const termKey = terminalRefAllowedValuesKey(chainIdsForRef, pcComp, sourceKpiFieldsById);
+              const refCacheKey = termKey?.cacheKey ?? "";
+              const refOptions = refCacheKey ? refFilterOptions[refCacheKey] ?? [] : [];
               const showMultiRefPick =
                 ftCond === "multi_reference" && (c.op === "eq" || c.op === "neq") && refOptions.length > 0;
               const setRow = (patch: Partial<MultiFilterConditionRow>) =>
@@ -1133,16 +1276,12 @@ export default function FullPageMultiItems() {
                         const key = e.target.value;
                         const sf = subFields.find((s) => s.key === key);
                         const nextOps = operatorsForMultiItemSubField(sf?.field_type ?? undefined);
-                        const refInit =
-                          sf && (sf.field_type === "reference" || sf.field_type === "multi_reference")
-                            ? defaultReferenceComparePath(sf)
-                            : "";
                         setRow({
                           field: key,
                           op: nextOps[0]?.value ?? "eq",
                           value: "",
                           multiValues: [],
-                          referenceComparePath: refInit,
+                          referenceChainPaths: [],
                         });
                       }}
                       style={{ minWidth: "200px", maxWidth: "min(100%, 320px)", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
@@ -1155,6 +1294,91 @@ export default function FullPageMultiItems() {
                       ))}
                     </select>
                   </div>
+                  {(ftCond === "reference" || ftCond === "multi_reference") &&
+                    sfCond &&
+                    sourceKpiIdForRef != null &&
+                    (() => {
+                      const pcCompInner = pathsForChainComputation(c, sfCond);
+                      const chainIds = computeChainKpiIds(sourceKpiIdForRef, pcCompInner, sourceKpiFieldsById);
+                      const nodes: ReactNode[] = [];
+                      for (let L = 0; L < 16; L++) {
+                        const kpiAtL = chainIds[L];
+                        if (kpiAtL == null) break;
+                        if (L > 0) {
+                          const prevPath = pcCompInner[L - 1];
+                          if (!prevPath) break;
+                          const prevFt = getFieldTypeAtPath(sourceKpiFieldsById[chainIds[L - 1]] ?? [], prevPath);
+                          if (!isReferenceLikeFieldType(prevFt)) break;
+                        }
+                        const pathSel = pcCompInner[L] ?? "";
+                        const opts = buildReferenceAttributeOptions(sourceKpiFieldsById[kpiAtL] ?? []);
+                        nodes.push(
+                          <div key={L} style={{ minWidth: "200px", maxWidth: "min(100%, 340px)" }}>
+                            <label
+                              style={{
+                                display: "block",
+                                fontSize: "0.8rem",
+                                color: "var(--muted)",
+                                marginBottom: "0.25rem",
+                              }}
+                            >
+                              {L === 0 ? "Reference attribute" : `Linked field (${L + 1})`}
+                            </label>
+                            <select
+                              value={pathSel}
+                              onChange={(e) => {
+                                const v = e.target.value.trim();
+                                setFilterDraft((prev) =>
+                                  prev.map((x, i) => {
+                                    if (i !== idx) return x;
+                                    if (!v) {
+                                      return {
+                                        ...x,
+                                        referenceChainPaths: (x.referenceChainPaths ?? []).slice(0, L),
+                                        value: "",
+                                        multiValues: [],
+                                      };
+                                    }
+                                    const next = [...(x.referenceChainPaths ?? [])];
+                                    next[L] = v;
+                                    return {
+                                      ...x,
+                                      referenceChainPaths: next.slice(0, L + 1),
+                                      value: "",
+                                      multiValues: [],
+                                    };
+                                  })
+                                );
+                              }}
+                              style={{
+                                width: "100%",
+                                padding: "0.35rem 0.5rem",
+                                borderRadius: 6,
+                                border: "1px solid var(--border)",
+                              }}
+                            >
+                              <option value="">— Select column —</option>
+                              {opts.length === 0 ? (
+                                <option value="" disabled>
+                                  Loading…
+                                </option>
+                              ) : (
+                                opts.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))
+                              )}
+                            </select>
+                          </div>
+                        );
+                        const sel = pcCompInner[L];
+                        if (!sel) break;
+                        const cft = getFieldTypeAtPath(sourceKpiFieldsById[kpiAtL] ?? [], sel);
+                        if (!isReferenceLikeFieldType(cft)) break;
+                      }
+                      return <>{nodes}</>;
+                    })()}
                   <div>
                     <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Operator</label>
                     <select
@@ -1182,41 +1406,6 @@ export default function FullPageMultiItems() {
                       ))}
                     </select>
                   </div>
-                  {(ftCond === "reference" || ftCond === "multi_reference") &&
-                    sfCond &&
-                    sourceKpiIdForRef != null && (
-                      <div style={{ minWidth: "200px", maxWidth: "min(100%, 340px)" }}>
-                        <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>
-                          Reference attribute
-                        </label>
-                        <select
-                          value={comparePathEff}
-                          onChange={(e) =>
-                            setRow({
-                              referenceComparePath: e.target.value,
-                              value: "",
-                              multiValues: [],
-                            })
-                          }
-                          style={{
-                            width: "100%",
-                            padding: "0.35rem 0.5rem",
-                            borderRadius: 6,
-                            border: "1px solid var(--border)",
-                          }}
-                        >
-                          {sourceAttributeOptions.length === 0 ? (
-                            <option value="">Loading attributes…</option>
-                          ) : (
-                            sourceAttributeOptions.map((opt) => (
-                              <option key={opt.value} value={opt.value}>
-                                {opt.label}
-                              </option>
-                            ))
-                          )}
-                        </select>
-                      </div>
-                    )}
                   <div style={{ flex: "1 1 200px", minWidth: 0 }}>
                     <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value</label>
                     {!c.field ? (
@@ -1249,87 +1438,99 @@ export default function FullPageMultiItems() {
                         onChange={(e) => setRow({ value: e.target.value })}
                         style={{ maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
                       />
-                    ) : ftCond === "reference" && sourceKpiIdForRef && refSourceFk ? (
-                      refOptions.length > 0 ? (
-                        !c.value || refOptions.includes(c.value) ? (
-                          <select
-                            value={refOptions.includes(c.value) ? c.value : ""}
-                            onChange={(e) => setRow({ value: e.target.value })}
-                            style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                          >
-                            <option value="">— Select value —</option>
-                            {refOptions.map((v) => (
-                              <option key={v} value={v}>{truncateLabel(v, 72)}</option>
-                            ))}
-                          </select>
+                    ) : ftCond === "reference" && sourceKpiIdForRef ? (
+                      termKey ? (
+                        refOptions.length > 0 ? (
+                          !c.value || refOptions.includes(c.value) ? (
+                            <select
+                              value={refOptions.includes(c.value) ? c.value : ""}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              <option value="">— Select value —</option>
+                              {refOptions.map((v) => (
+                                <option key={v} value={v}>{truncateLabel(v, 72)}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              value={c.value}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                              placeholder="Custom value"
+                            />
+                          )
                         ) : (
                           <input
                             type="text"
                             value={c.value}
                             onChange={(e) => setRow({ value: e.target.value })}
                             style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                            placeholder="Custom value"
+                            placeholder="Loading values… or type manually"
                           />
                         )
                       ) : (
-                        <input
-                          type="text"
-                          value={c.value}
-                          onChange={(e) => setRow({ value: e.target.value })}
-                          style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                          placeholder="Loading values… or type manually"
-                        />
+                        <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
+                          Choose linked columns until a non-reference field is selected; values load for that field.
+                        </span>
                       )
-                    ) : ftCond === "multi_reference" && sourceKpiIdForRef && refSourceFk ? (
-                      showMultiRefPick ? (
-                        <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", minWidth: "200px", maxWidth: "420px" }}>
-                          <select
-                            multiple
-                            size={Math.min(8, Math.max(3, refOptions.length))}
-                            value={c.multiValues ?? []}
-                            onChange={(e) => {
-                              const sel = Array.from(e.target.selectedOptions, (o) => o.value);
-                              setRow({ multiValues: sel, value: sel[0] ?? "" });
-                            }}
-                            style={{ width: "100%", padding: "0.25rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                          >
-                            {refOptions.map((v) => (
-                              <option key={v} value={v}>{truncateLabel(v, 80)}</option>
-                            ))}
-                          </select>
-                          <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
-                            {c.op === "eq" ? "Any selected value matches (OR)." : "None of the selected values (AND)."} Use Ctrl/Cmd or Shift for multiple.
-                          </span>
-                        </div>
-                      ) : refOptions.length > 0 ? (
-                        !c.value || refOptions.includes(c.value) ? (
-                          <select
-                            value={refOptions.includes(c.value) ? c.value : ""}
-                            onChange={(e) => setRow({ value: e.target.value })}
-                            style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                          >
-                            <option value="">— Select value —</option>
-                            {refOptions.map((v) => (
-                              <option key={v} value={v}>{truncateLabel(v, 72)}</option>
-                            ))}
-                          </select>
+                    ) : ftCond === "multi_reference" && sourceKpiIdForRef ? (
+                      termKey ? (
+                        showMultiRefPick ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", minWidth: "200px", maxWidth: "420px" }}>
+                            <select
+                              multiple
+                              size={Math.min(8, Math.max(3, refOptions.length))}
+                              value={c.multiValues ?? []}
+                              onChange={(e) => {
+                                const sel = Array.from(e.target.selectedOptions, (o) => o.value);
+                                setRow({ multiValues: sel, value: sel[0] ?? "" });
+                              }}
+                              style={{ width: "100%", padding: "0.25rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              {refOptions.map((v) => (
+                                <option key={v} value={v}>{truncateLabel(v, 80)}</option>
+                              ))}
+                            </select>
+                            <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
+                              {c.op === "eq" ? "Any selected value matches (OR)." : "None of the selected values (AND)."} Use Ctrl/Cmd or Shift for multiple.
+                            </span>
+                          </div>
+                        ) : refOptions.length > 0 ? (
+                          !c.value || refOptions.includes(c.value) ? (
+                            <select
+                              value={refOptions.includes(c.value) ? c.value : ""}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              <option value="">— Select value —</option>
+                              {refOptions.map((v) => (
+                                <option key={v} value={v}>{truncateLabel(v, 72)}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              value={c.value}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                              placeholder="Custom value"
+                            />
+                          )
                         ) : (
                           <input
                             type="text"
                             value={c.value}
                             onChange={(e) => setRow({ value: e.target.value })}
                             style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                            placeholder="Custom value"
+                            placeholder="Type a value"
                           />
                         )
                       ) : (
-                        <input
-                          type="text"
-                          value={c.value}
-                          onChange={(e) => setRow({ value: e.target.value })}
-                          style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                          placeholder="Type a value"
-                        />
+                        <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
+                          Choose linked columns until a non-reference field is selected; values load for that field.
+                        </span>
                       )
                     ) : (
                       <input

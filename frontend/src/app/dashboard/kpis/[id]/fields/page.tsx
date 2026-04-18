@@ -49,6 +49,25 @@ function truncateLabel(label: string, max = 48): string {
   return s.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
 }
 
+/** Sub-field UI section dropdowns: merge saved sub_fields with in-session sections from "+ Add section" (not yet on any column). */
+function mergeUiSectionLabelsForMultiField(
+  subFields: SubFieldDef[] | undefined,
+  customSections: string[] | undefined
+): string[] {
+  const uniq = new Set<string>();
+  (subFields ?? []).forEach((s) => {
+    const sec = (s as { config?: { ui_section?: string } })?.config?.ui_section;
+    const label = typeof sec === "string" ? sec.trim() : "";
+    uniq.add(label || "Other");
+  });
+  (customSections ?? []).forEach((raw) => {
+    const label = typeof raw === "string" ? raw.trim() : "";
+    if (label && label !== "Other") uniq.add(label);
+  });
+  if (uniq.size === 0) uniq.add("Other");
+  return Array.from(uniq).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+}
+
 const GROUP_FUNCTIONS = [
   { value: "SUM_ITEMS", label: "SUM (total)" },
   { value: "AVG_ITEMS", label: "AVG (average)" },
@@ -2495,6 +2514,7 @@ export default function KpiFieldsPage() {
                       organizationId={kpi?.organization_id}
                       currentKpiId={kpiId}
                       userRole={userRole}
+                      extraUiSections={f.field_type === "multi_line_items" ? uiSectionCustomByMultiFieldId[f.id] ?? [] : undefined}
                     />
                   ) : (
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -2567,14 +2587,10 @@ export default function KpiFieldsPage() {
         >
           {(() => {
             const field = list.find((x) => x.id === addSubFieldModal.fieldId) as any;
-            const secs = new Set<string>();
-            (field?.sub_fields ?? []).forEach((sf: any) => {
-              const raw = sf?.config?.ui_section;
-              const label = typeof raw === "string" ? raw.trim() : "";
-              secs.add(label || "Other");
-            });
-            secs.add("Other");
-            const uiSectionOptions = Array.from(secs).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+            const uiSectionOptions = mergeUiSectionLabelsForMultiField(
+              field?.sub_fields as SubFieldDef[] | undefined,
+              uiSectionCustomByMultiFieldId[addSubFieldModal.fieldId] ?? []
+            );
             return (
               <>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
@@ -2752,14 +2768,10 @@ export default function KpiFieldsPage() {
         >
           {(() => {
             const field = list.find((x) => x.id === editSubFieldModal.fieldId) as any;
-            const secs = new Set<string>();
-            (field?.sub_fields ?? []).forEach((sf: any) => {
-              const raw = sf?.config?.ui_section;
-              const label = typeof raw === "string" ? raw.trim() : "";
-              secs.add(label || "Other");
-            });
-            secs.add("Other");
-            const uiSectionOptions = Array.from(secs).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+            const uiSectionOptions = mergeUiSectionLabelsForMultiField(
+              field?.sub_fields as SubFieldDef[] | undefined,
+              uiSectionCustomByMultiFieldId[editSubFieldModal.fieldId] ?? []
+            );
             return (
               <>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
@@ -3906,6 +3918,7 @@ function FieldEditForm({
   organizationId,
   currentKpiId,
   userRole,
+  extraUiSections,
 }: {
   field: KpiField;
   list: KpiField[];
@@ -3914,6 +3927,8 @@ function FieldEditForm({
   organizationId?: number;
   currentKpiId?: number;
   userRole?: UserRole | null;
+  /** In-session UI section names from "+ Add section" on the fields list (merged into section tabs / dropdowns). */
+  extraUiSections?: string[];
 }) {
   type EditSubFieldRow = SubFieldDef & { keyTouched?: boolean };
   const [editKeyTouched, setEditKeyTouched] = useState(false);
@@ -3940,16 +3955,8 @@ function FieldEditForm({
   const [multiLineSettingsOpen, setMultiLineSettingsOpen] = useState<boolean>(true);
 
   const editSubSections = useMemo(() => {
-    const set = new Set<string>();
-    editSubFields.forEach((s) => {
-      const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
-      set.add(sec || "Other");
-    });
-    if (set.size === 0) set.add("Other");
-    const arr = Array.from(set);
-    arr.sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
-    return arr;
-  }, [editSubFields]);
+    return mergeUiSectionLabelsForMultiField(editSubFields, extraUiSections);
+  }, [editSubFields, extraUiSections]);
 
   useEffect(() => {
     if (!editSubSections.includes(activeEditSubSection)) {
