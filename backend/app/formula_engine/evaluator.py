@@ -141,6 +141,14 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
     return False
 
 
+def match_cell_value(cell: Any, op: str, filter_value: Any) -> bool:
+    """Compare a stored cell value to filter_value using the same rules as formula WHERE clauses."""
+    op_norm = str(op).strip().lower()
+    if op_norm.startswith("op_"):
+        op_norm = op_norm[3:]
+    return _row_matches({"__cell": cell}, "__cell", op_norm, filter_value)
+
+
 def _items_values_where(
     data: MultiLineItemsData,
     field_key: str,

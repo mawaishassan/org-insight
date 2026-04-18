@@ -59,6 +59,7 @@ from app.entries.service import (
 )
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
+from app.entries.multi_item_filters import row_passes_filters
 
 router = APIRouter(prefix="/entries", tags=["entries"])
 
@@ -598,7 +599,9 @@ async def list_multi_items_rows(
     page_size: int = Query(20, ge=1, le=200),
     filters: str | None = Query(
         None,
-        description='Optional JSON object of column filters, e.g. {"program_name": "MBA"} (case-insensitive substring).',
+        description='Legacy: JSON object {"col_key":"substring"} (case-insensitive AND). '
+        'Structured: {"_version":2,"conditions":[{"field":"col","op":"eq","value":"x"},{"logic":"and","field":"y","op":"gte","value":"10"}]} '
+        '(ops: eq, neq, gt, gte, lt, lte, contains, not_contains, starts_with, ends_with).',
     ),
     editable_only: bool = Query(
         False,
@@ -686,23 +689,12 @@ async def list_multi_items_rows(
             return False
         rows = [(i, r) for i, r in rows if matches(r)]
 
-    # Advanced column filters (JSON: key -> value, case-insensitive substring)
+    # Advanced column filters (legacy substring map or structured _version 2)
     if filters:
         try:
             raw_filters = json.loads(filters)
             if isinstance(raw_filters, dict):
-                def passes_filters(row: dict) -> bool:
-                    for fk, fv in raw_filters.items():
-                        if fv is None or fv == "":
-                            continue
-                        cell = row.get(fk)
-                        if cell is None:
-                            return False
-                        if str(fv).strip().lower() not in str(cell).lower():
-                            return False
-                    return True
-
-                rows = [(i, r) for i, r in rows if passes_filters(r)]
+                rows = [(i, r) for i, r in rows if row_passes_filters(r, raw_filters)]
         except json.JSONDecodeError:
             # Ignore invalid filters payload
             pass
@@ -1429,24 +1421,12 @@ async def export_multi_items_csv(
 
         rows = [r for r in rows if isinstance(r, dict) and matches(r)]
 
-    # Advanced filters
+    # Advanced filters (same payload as list_multi_items_rows)
     if filters:
         try:
             raw_filters = json.loads(filters)
             if isinstance(raw_filters, dict):
-
-                def passes_filters(row: dict) -> bool:
-                    for fk, fv in raw_filters.items():
-                        if fv is None or fv == "":
-                            continue
-                        cell = row.get(fk)
-                        if cell is None:
-                            return False
-                        if str(fv).strip().lower() not in str(cell).lower():
-                            return False
-                    return True
-
-                rows = [r for r in rows if isinstance(r, dict) and passes_filters(r)]
+                rows = [r for r in rows if isinstance(r, dict) and row_passes_filters(r, raw_filters)]
         except json.JSONDecodeError:
             pass
 

@@ -78,6 +78,27 @@ const WHERE_OPERATORS = [
   { value: "op_ends_with", label: "ends with" },
 ] as const;
 
+/** Comparison operators allowed for a multi-line sub-field type (formula WHERE clause). */
+function operatorsForSubFieldType(fieldType: string | undefined): readonly { value: string; label: string }[] {
+  const ft = fieldType ?? "";
+  const cmp = WHERE_OPERATORS.filter((o) =>
+    ["op_eq", "op_neq", "op_gt", "op_gte", "op_lt", "op_lte"].includes(o.value)
+  );
+  const text = WHERE_OPERATORS.filter((o) =>
+    ["op_eq", "op_neq", "op_contains", "op_not_contains", "op_starts_with", "op_ends_with"].includes(o.value)
+  );
+  if (ft === "number" || ft === "date") return cmp;
+  if (ft === "boolean") return WHERE_OPERATORS.filter((o) => ["op_eq", "op_neq"].includes(o.value));
+  if (ft === "reference" || ft === "multi_reference") return text;
+  return text;
+}
+
+function quoteFormulaWhereValue(raw: string): string {
+  const trimmed = raw.trim();
+  const isNumeric = trimmed !== "" && !Number.isNaN(Number(trimmed));
+  return isNumeric ? trimmed : `'${trimmed.replace(/'/g, "\\'")}'`;
+}
+
 interface ReferenceConfig {
   reference_source_kpi_id?: number;
   reference_source_field_key?: string;
@@ -3428,6 +3449,8 @@ function FormulaBuilder({
     filterSubKey: string;
     op: string;
     value: string;
+    /** For multi_reference with equals / not equals: multiple related values (OR / AND expansion). */
+    multiValues: string[];
     logicWithPrev: "op_and" | "op_or";
   };
   const [refFieldId, setRefFieldId] = useState<number | "">("");
@@ -3435,7 +3458,7 @@ function FormulaBuilder({
   const [refGroupFn, setRefGroupFn] = useState<string>("SUM_ITEMS");
   const [useConditional, setUseConditional] = useState(false);
   const [whereConditions, setWhereConditions] = useState<WhereCondition[]>([
-    { filterSubKey: "", op: "op_eq", value: "0", logicWithPrev: "op_and" },
+    { filterSubKey: "", op: "op_eq", value: "", multiValues: [], logicWithPrev: "op_and" },
   ]);
   const [refAllowedValues, setRefAllowedValues] = useState<Record<string, string[]>>({});
   const [otherKpis, setOtherKpis] = useState<FormulaRefKpi[]>([]);
@@ -3506,11 +3529,24 @@ function FormulaBuilder({
       const condArgs: string[] = [];
       whereConditions.forEach((c, idx) => {
         if (!c.filterSubKey) return;
-        const raw = c.value.trim();
-        const isNumeric = raw !== "" && !Number.isNaN(Number(raw));
-        const val = isNumeric ? raw : `'${raw.replace(/'/g, "\\'")}'`;
-        if (idx > 0) condArgs.push(c.logicWithPrev);
-        condArgs.push(c.filterSubKey, c.op, val);
+        const sfRow = subFields.find((s) => s.key === c.filterSubKey);
+        const allowedOps = operatorsForSubFieldType(sfRow?.field_type);
+        const resolvedOp = allowedOps.some((o) => o.value === c.op) ? c.op : (allowedOps[0]?.value ?? "op_eq");
+        const isMultiRef = sfRow?.field_type === "multi_reference";
+        const rawVals: string[] =
+          isMultiRef && (c.multiValues?.length ?? 0) > 0 ? c.multiValues : [c.value];
+        const trimmedVals = rawVals.map((r) => String(r ?? "").trim()).filter((v) => v !== "");
+        if (trimmedVals.length === 0) return;
+        const useInnerChain =
+          isMultiRef && trimmedVals.length > 1 && (resolvedOp === "op_eq" || resolvedOp === "op_neq");
+        const innerLink = useInnerChain ? (resolvedOp === "op_eq" ? "op_or" : "op_and") : null;
+        const valsToEmit = innerLink ? trimmedVals : [trimmedVals[0]!];
+        valsToEmit.forEach((raw, vi) => {
+          if (idx > 0 && vi === 0) condArgs.push(c.logicWithPrev);
+          else if (vi > 0 && innerLink) condArgs.push(innerLink);
+          const val = quoteFormulaWhereValue(raw);
+          condArgs.push(c.filterSubKey, resolvedOp, val);
+        });
       });
       if (condArgs.length < 3) return;
       // When conditional is checked, always use the _WHERE variant (map COUNT_ITEMS -> COUNT_ITEMS_WHERE etc.)
@@ -3536,13 +3572,15 @@ function FormulaBuilder({
             onChange={(e) => {
               setRefFieldId(e.target.value ? Number(e.target.value) : "");
               setRefSubKey("");
-              setWhereConditions((prev) => prev.map((c, i) => (i === 0 ? { ...c, filterSubKey: "" } : c)));
+              setWhereConditions([{ filterSubKey: "", op: "op_eq", value: "", multiValues: [], logicWithPrev: "op_and" }]);
             }}
-            style={{ minWidth: "160px" }}
+            style={{ minWidth: "200px", maxWidth: "min(100%, 360px)" }}
           >
             <option value="">— Select field —</option>
             {fields.map((f) => (
-              <option key={f.id} value={f.id}>{f.name} ({f.key}) — {f.field_type.replace(/_/g, " ")}</option>
+              <option key={f.id} value={f.id}>
+                {truncateLabel(`${f.name} (${f.key})`, 72)}
+              </option>
             ))}
           </select>
         </div>
@@ -3574,7 +3612,20 @@ function FormulaBuilder({
             </label>
             {useConditional && (
               <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", width: "100%" }}>
-                {whereConditions.map((c, idx) => (
+                {whereConditions.map((c, idx) => {
+                  const sfCond = subFields.find((s) => s.key === c.filterSubKey);
+                  const ftCond = sfCond?.field_type ?? "";
+                  const opChoices = operatorsForSubFieldType(ftCond);
+                  const opSelectValue = opChoices.some((o) => o.value === c.op) ? c.op : (opChoices[0]?.value ?? "op_eq");
+                  const refMetaRow = getRefSourceFromSubKey(c.filterSubKey);
+                  const refOptions = refMetaRow ? refAllowedValues[refMetaRow.cacheKey] || [] : [];
+                  const showMultiRefPick =
+                    ftCond === "multi_reference" && (c.op === "op_eq" || c.op === "op_neq") && refOptions.length > 0;
+
+                  const setRow = (patch: Partial<WhereCondition>) =>
+                    setWhereConditions((prev) => prev.map((x, i) => (i === idx ? { ...x, ...patch } : x)));
+
+                  return (
                   <div key={idx} style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "flex-end" }}>
                     {idx > 0 && (
                       <div>
@@ -3594,81 +3645,182 @@ function FormulaBuilder({
                       </div>
                     )}
                     <div>
-                      <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Filter sub-field</label>
+                      <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Field</label>
                       <select
                         value={c.filterSubKey}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const key = e.target.value;
+                          const sf = subFields.find((s) => s.key === key);
+                          const nextOps = operatorsForSubFieldType(sf?.field_type);
+                          const nextOp = nextOps[0]?.value ?? "op_eq";
                           setWhereConditions((prev) =>
-                            prev.map((x, i) => (i === idx ? { ...x, filterSubKey: e.target.value } : x))
-                          )
-                        }
-                        style={{ minWidth: "140px" }}
+                            prev.map((x, i) =>
+                              i === idx ? { ...x, filterSubKey: key, op: nextOp, value: "", multiValues: [] } : x
+                            )
+                          );
+                        }}
+                        style={{ minWidth: "200px", maxWidth: "min(100%, 320px)" }}
                       >
-                        <option value="">— Select —</option>
+                        <option value="">— Select field —</option>
                         {subFields.map((s) => (
-                          <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
+                          <option key={s.id ?? s.key} value={s.key}>
+                            {truncateLabel(`${s.name} — ${s.key}`, 56)}
+                          </option>
                         ))}
                       </select>
                     </div>
                     <div>
                       <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Operator</label>
                       <select
-                        value={c.op}
-                        onChange={(e) =>
+                        value={opSelectValue}
+                        onChange={(e) => {
+                          const next = e.target.value;
                           setWhereConditions((prev) =>
-                            prev.map((x, i) => (i === idx ? { ...x, op: e.target.value } : x))
-                          )
-                        }
-                        style={{ minWidth: "120px" }}
+                            prev.map((x, i) => {
+                              if (i !== idx) return x;
+                              const collapseMulti =
+                                next !== "op_eq" && next !== "op_neq" && (x.multiValues?.length ?? 0) > 0;
+                              return {
+                                ...x,
+                                op: next,
+                                ...(collapseMulti
+                                  ? { value: x.multiValues?.[0] ?? x.value, multiValues: [] }
+                                  : {}),
+                              };
+                            })
+                          );
+                        }}
+                        style={{ minWidth: "140px", maxWidth: "220px" }}
                       >
-                        {WHERE_OPERATORS.map((o) => (
+                        {opChoices.map((o) => (
                           <option key={o.value} value={o.value}>{o.label}</option>
                         ))}
                       </select>
                     </div>
-                    <div>
+                    <div style={{ flex: "1 1 200px", minWidth: 0 }}>
                       <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value</label>
-                      {(() => {
-                        const refMeta = getRefSourceFromSubKey(c.filterSubKey);
-                        const options = refMeta ? (refAllowedValues[refMeta.cacheKey] || []) : [];
-                        if (refMeta) {
-                          const listId = `formula-ref-values-${idx}`;
-                          return (
-                            <>
-                              <input
-                                type="text"
-                                list={listId}
-                                value={c.value}
-                                onChange={(e) =>
-                                  setWhereConditions((prev) =>
-                                    prev.map((x, i) => (i === idx ? { ...x, value: e.target.value } : x))
-                                  )
-                                }
-                                style={{ minWidth: "180px" }}
-                                placeholder={options.length ? "Type or select value" : "No values available"}
-                              />
-                              <datalist id={listId}>
-                                {options.map((v) => (
-                                  <option key={v} value={v} />
-                                ))}
-                              </datalist>
-                            </>
-                          );
-                        }
-                        return (
+                      {!c.filterSubKey ? (
+                        <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>Select a field first</span>
+                      ) : ftCond === "boolean" ? (
+                        <select
+                          value={c.value === "True" || c.value === "False" ? c.value : ""}
+                          onChange={(e) => setRow({ value: e.target.value })}
+                          style={{ minWidth: "140px", maxWidth: "100%" }}
+                        >
+                          <option value="">—</option>
+                          <option value="True">Yes</option>
+                          <option value="False">No</option>
+                        </select>
+                      ) : ftCond === "number" ? (
+                        <input
+                          type="number"
+                          step="any"
+                          value={c.value}
+                          onChange={(e) => setRow({ value: e.target.value })}
+                          style={{ width: "100%", maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                          placeholder="Number"
+                        />
+                      ) : ftCond === "date" ? (
+                        <input
+                          type="date"
+                          value={c.value.length >= 10 ? c.value.slice(0, 10) : c.value}
+                          onChange={(e) => setRow({ value: e.target.value })}
+                          style={{ maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                        />
+                      ) : ftCond === "reference" && refMetaRow ? (
+                        refOptions.length > 0 ? (
+                          !c.value || refOptions.includes(c.value) ? (
+                            <select
+                              value={refOptions.includes(c.value) ? c.value : ""}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              <option value="">— Select value —</option>
+                              {refOptions.map((v) => (
+                                <option key={v} value={v}>{truncateLabel(v, 72)}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              value={c.value}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                              placeholder="Custom value"
+                            />
+                          )
+                        ) : (
                           <input
                             type="text"
                             value={c.value}
-                            onChange={(e) =>
-                              setWhereConditions((prev) =>
-                                prev.map((x, i) => (i === idx ? { ...x, value: e.target.value } : x))
-                              )
-                            }
-                            style={{ width: "120px" }}
-                            placeholder="e.g. 100 or A"
+                            onChange={(e) => setRow({ value: e.target.value })}
+                            style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            placeholder="Loading values… or type manually"
                           />
-                        );
-                      })()}
+                        )
+                      ) : ftCond === "multi_reference" && refMetaRow ? (
+                        showMultiRefPick ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", minWidth: "200px", maxWidth: "420px" }}>
+                            <select
+                              multiple
+                              size={Math.min(8, Math.max(3, refOptions.length))}
+                              value={c.multiValues ?? []}
+                              onChange={(e) => {
+                                const sel = Array.from(e.target.selectedOptions, (o) => o.value);
+                                setRow({ multiValues: sel, value: sel[0] ?? "" });
+                              }}
+                              style={{ width: "100%", padding: "0.25rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              {refOptions.map((v) => (
+                                <option key={v} value={v}>{truncateLabel(v, 80)}</option>
+                              ))}
+                            </select>
+                            <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
+                              {c.op === "op_eq"
+                                ? "Matches any selected value (combined with OR)."
+                                : "Matches none of the selected values (combined with AND)."}
+                              {" "}Use Ctrl/Cmd or Shift to pick multiple.
+                            </span>
+                          </div>
+                        ) : refOptions.length > 0 ? (
+                          !c.value || refOptions.includes(c.value) ? (
+                            <select
+                              value={refOptions.includes(c.value) ? c.value : ""}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              <option value="">— Select value —</option>
+                              {refOptions.map((v) => (
+                                <option key={v} value={v}>{truncateLabel(v, 72)}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              value={c.value}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                              placeholder="Custom value"
+                            />
+                          )
+                        ) : (
+                          <input
+                            type="text"
+                            value={c.value}
+                            onChange={(e) => setRow({ value: e.target.value })}
+                            style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            placeholder="Type a value"
+                          />
+                        )
+                      ) : (
+                        <input
+                          type="text"
+                          value={c.value}
+                          onChange={(e) => setRow({ value: e.target.value })}
+                          style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                          placeholder={ftCond === "multi_line_text" ? "Text…" : "Value"}
+                        />
+                      )}
                     </div>
                     {whereConditions.length > 1 && (
                       <button
@@ -3681,7 +3833,8 @@ function FormulaBuilder({
                       </button>
                     )}
                   </div>
-                ))}
+                  );
+                })}
                 <div>
                   <button
                     type="button"
@@ -3689,7 +3842,7 @@ function FormulaBuilder({
                     onClick={() =>
                       setWhereConditions((prev) => [
                         ...prev,
-                        { filterSubKey: "", op: "op_eq", value: "0", logicWithPrev: "op_and" },
+                        { filterSubKey: "", op: "op_eq", value: "", multiValues: [], logicWithPrev: "op_and" },
                       ])
                     }
                     style={{ fontSize: "0.85rem" }}
