@@ -63,6 +63,11 @@ type MultiItemsFilterPayloadV2 = {
     op: string;
     value?: unknown;
     values?: string[];
+    /** When set, filter compares this source KPI field (not the configured label field). */
+    reference_resolution?: {
+      compare_field_key: string;
+      compare_sub_field_key?: string;
+    };
   }>;
 };
 
@@ -72,10 +77,30 @@ type MultiFilterConditionRow = {
   value: string;
   multiValues: string[];
   logicWithPrev: "and" | "or";
+  /** Source KPI field path: `fieldKey` or `fieldKey|subKey` for multi-line source columns. */
+  referenceComparePath: string;
 };
 
+function parseComparePath(path: string): { fieldKey: string; subKey?: string } {
+  const p = path.trim();
+  if (!p) return { fieldKey: "" };
+  const idx = p.indexOf("|");
+  if (idx === -1) return { fieldKey: p };
+  return { fieldKey: p.slice(0, idx), subKey: p.slice(idx + 1).trim() || undefined };
+}
+
+function defaultReferenceComparePath(sub: SubField): string {
+  const cfg = (sub.config ?? {}) as {
+    reference_source_field_key?: string;
+    reference_source_sub_field_key?: string;
+  };
+  const fk = cfg.reference_source_field_key ?? "";
+  const sk = cfg.reference_source_sub_field_key;
+  return sk ? `${fk}|${sk}` : fk;
+}
+
 function emptyMultiFilterRow(): MultiFilterConditionRow {
-  return { field: "", op: "eq", value: "", multiValues: [], logicWithPrev: "and" };
+  return { field: "", op: "eq", value: "", multiValues: [], logicWithPrev: "and", referenceComparePath: "" };
 }
 
 function payloadToFilterDraft(payload: MultiItemsFilterPayloadV2 | null): MultiFilterConditionRow[] {
@@ -89,12 +114,20 @@ function payloadToFilterDraft(payload: MultiItemsFilterPayloadV2 | null): MultiF
       if (typeof c.value === "boolean") valueStr = c.value ? "true" : "false";
       else valueStr = String(c.value);
     }
+    const rr = c.reference_resolution;
+    let referenceComparePath = "";
+    if (rr?.compare_field_key) {
+      referenceComparePath = rr.compare_sub_field_key
+        ? `${rr.compare_field_key}|${rr.compare_sub_field_key}`
+        : rr.compare_field_key;
+    }
     return {
       field: String(c.field ?? ""),
       op: String(c.op ?? "eq"),
       value: valueStr,
       multiValues: multiVals,
       logicWithPrev: i === 0 ? "and" : c.logic === "or" ? "or" : "and",
+      referenceComparePath,
     };
   });
 }
@@ -135,6 +168,20 @@ function filterDraftToPayload(rows: MultiFilterConditionRow[], subFields: SubFie
       ...(valuesOut ? { values: valuesOut } : { value: valueOut }),
     };
     if (i > 0) base.logic = r.logicWithPrev;
+
+    if (ft === "reference" || ft === "multi_reference") {
+      const defPath = sf ? defaultReferenceComparePath(sf) : "";
+      const sel = (r.referenceComparePath || "").trim() || defPath;
+      if (sel && defPath && sel !== defPath) {
+        const { fieldKey, subKey } = parseComparePath(sel);
+        if (fieldKey) {
+          base.reference_resolution = {
+            compare_field_key: fieldKey,
+            ...(subKey ? { compare_sub_field_key: subKey } : {}),
+          };
+        }
+      }
+    }
     const hasValue =
       valuesOut != null ||
       (typeof valueOut === "boolean") ||
@@ -156,30 +203,47 @@ function removeConditionFromPayload(payload: MultiItemsFilterPayloadV2, idx: num
       op: String(c.op),
       ...(Array.isArray(c.values) && c.values.length > 0 ? { values: [...c.values] } : { value: c.value }),
     };
+    if (c.reference_resolution?.compare_field_key) {
+      row.reference_resolution = {
+        compare_field_key: String(c.reference_resolution.compare_field_key),
+        ...(c.reference_resolution.compare_sub_field_key
+          ? { compare_sub_field_key: String(c.reference_resolution.compare_sub_field_key) }
+          : {}),
+      };
+    }
     if (i > 0) row.logic = c.logic === "or" ? "or" : "and";
     return row;
   });
   return { _version: 2, conditions: normalized };
 }
 
-function getRefSourceForMultiFilter(sub: SubField | undefined): {
-  cacheKey: string;
-  sid: number;
-  skey: string;
-  sourceSubKey?: string;
-} | null {
-  if (!sub || (sub.field_type !== "reference" && sub.field_type !== "multi_reference")) return null;
-  const cfg = (sub.config ?? {}) as {
-    reference_source_kpi_id?: number;
-    reference_source_field_key?: string;
-    reference_source_sub_field_key?: string;
-  };
-  const sid = cfg.reference_source_kpi_id;
-  const skey = cfg.reference_source_field_key;
-  if (!sid || !skey) return null;
-  const sourceSubKey = cfg.reference_source_sub_field_key;
-  const cacheKey = `${sid}-${skey}${sourceSubKey ? `-${sourceSubKey}` : ""}`;
-  return { cacheKey, sid, skey, sourceSubKey };
+function buildReferenceAttributeOptions(fields: FieldSummary[]): { value: string; label: string }[] {
+  const scalarTypes = [
+    "single_line_text",
+    "multi_line_text",
+    "number",
+    "date",
+    "boolean",
+    "reference",
+    "multi_reference",
+    "mixed_list",
+  ];
+  const out: { value: string; label: string }[] = [];
+  for (const f of fields) {
+    if (!f?.key) continue;
+    if (scalarTypes.includes(f.field_type)) {
+      out.push({ value: f.key, label: truncateLabel(`${f.name} (${f.key})`, 56) });
+    }
+    if (f.field_type === "multi_line_items" && f.sub_fields?.length) {
+      for (const s of f.sub_fields) {
+        out.push({
+          value: `${f.key}|${s.key}`,
+          label: truncateLabel(`${f.name} → ${s.name} (${s.key})`, 56),
+        });
+      }
+    }
+  }
+  return out;
 }
 
 interface MultiItemsRow {
@@ -256,6 +320,7 @@ export default function FullPageMultiItems() {
   const [appliedFilter, setAppliedFilter] = useState<MultiItemsFilterPayloadV2 | null>(null);
   const [filterDraft, setFilterDraft] = useState<MultiFilterConditionRow[]>(() => [emptyMultiFilterRow()]);
   const [refFilterOptions, setRefFilterOptions] = useState<Record<string, string[]>>({});
+  const [sourceKpiFieldsById, setSourceKpiFieldsById] = useState<Record<number, FieldSummary[]>>({});
   const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
   const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | "previous_year" | null>(null);
   const [importFromYear, setImportFromYear] = useState<number>(() => {
@@ -427,24 +492,57 @@ export default function FullPageMultiItems() {
 
   useEffect(() => {
     if (!token || effectiveOrgId == null || !showFilterPanel) return;
+    const needed = new Set<number>();
     filterDraft.forEach((row) => {
       if (!row.field) return;
       const sub = subFields.find((s) => s.key === row.field);
-      const meta = getRefSourceForMultiFilter(sub);
-      if (!meta || refFilterOptions[meta.cacheKey] !== undefined) return;
+      const cfg = sub?.config as { reference_source_kpi_id?: number } | undefined;
+      if (
+        (sub?.field_type === "reference" || sub?.field_type === "multi_reference") &&
+        cfg?.reference_source_kpi_id
+      ) {
+        needed.add(cfg.reference_source_kpi_id);
+      }
+    });
+    needed.forEach((kid) => {
+      if (sourceKpiFieldsById[kid]?.length) return;
+      api<FieldSummary[]>(
+        `/entries/fields?${new URLSearchParams({
+          kpi_id: String(kid),
+          organization_id: String(effectiveOrgId),
+        }).toString()}`,
+        { token }
+      )
+        .then((list) => setSourceKpiFieldsById((prev) => ({ ...prev, [kid]: list })))
+        .catch(() => setSourceKpiFieldsById((prev) => ({ ...prev, [kid]: [] })));
+    });
+  }, [token, effectiveOrgId, showFilterPanel, filterDraft, subFields, sourceKpiFieldsById]);
+
+  useEffect(() => {
+    if (!token || effectiveOrgId == null || !showFilterPanel) return;
+    filterDraft.forEach((row) => {
+      if (!row.field) return;
+      const sub = subFields.find((s) => s.key === row.field);
+      if (!sub || (sub.field_type !== "reference" && sub.field_type !== "multi_reference")) return;
+      const cfg = sub.config as { reference_source_kpi_id?: number } | undefined;
+      const sid = cfg?.reference_source_kpi_id;
+      if (!sid) return;
+      const effPath = (row.referenceComparePath || "").trim() || defaultReferenceComparePath(sub);
+      const { fieldKey, subKey } = parseComparePath(effPath);
+      if (!fieldKey) return;
+      const cacheKey = `${sid}-${fieldKey}${subKey ? `-${subKey}` : ""}`;
+      if (refFilterOptions[cacheKey] !== undefined) return;
       const params = new URLSearchParams({
-        source_kpi_id: String(meta.sid),
-        source_field_key: meta.skey,
+        source_kpi_id: String(sid),
+        source_field_key: fieldKey,
         organization_id: String(effectiveOrgId),
       });
-      if (meta.sourceSubKey) params.set("source_sub_field_key", meta.sourceSubKey);
+      if (subKey) params.set("source_sub_field_key", subKey);
       api<{ values: string[] }>(`/fields/reference-allowed-values?${params.toString()}`, { token })
         .then((r) =>
-          setRefFilterOptions((prev) => ({ ...prev, [meta.cacheKey]: r.values ?? [] }))
+          setRefFilterOptions((prev) => ({ ...prev, [cacheKey]: r.values ?? [] }))
         )
-        .catch(() =>
-          setRefFilterOptions((prev) => ({ ...prev, [meta.cacheKey]: [] }))
-        );
+        .catch(() => setRefFilterOptions((prev) => ({ ...prev, [cacheKey]: [] })));
     });
   }, [token, effectiveOrgId, showFilterPanel, filterDraft, subFields, refFilterOptions]);
 
@@ -972,17 +1070,27 @@ export default function FullPageMultiItems() {
               Close
             </button>
           </div>
-          <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0 }}>
-            Choose a column, comparison, and value. Add multiple conditions and combine them with AND or OR.
-          </p>
           <div style={{ display: "flex", flexDirection: "column", gap: "0.65rem" }}>
             {filterDraft.map((c, idx) => {
               const sfCond = subFields.find((s) => s.key === c.field);
               const ftCond = sfCond?.field_type ?? "";
               const opChoices = operatorsForMultiItemSubField(ftCond);
               const opSelectValue = opChoices.some((o) => o.value === c.op) ? c.op : (opChoices[0]?.value ?? "eq");
-              const refMetaRow = getRefSourceForMultiFilter(sfCond);
-              const refOptions = refMetaRow ? refFilterOptions[refMetaRow.cacheKey] ?? [] : [];
+              const refCfg = sfCond?.config as { reference_source_kpi_id?: number } | undefined;
+              const sourceKpiIdForRef = refCfg?.reference_source_kpi_id;
+              const comparePathEff = sfCond
+                ? (c.referenceComparePath || "").trim() || defaultReferenceComparePath(sfCond)
+                : "";
+              const { fieldKey: refSourceFk, subKey: refSourceSk } = parseComparePath(comparePathEff);
+              const refCacheKey =
+                sourceKpiIdForRef && refSourceFk
+                  ? `${sourceKpiIdForRef}-${refSourceFk}${refSourceSk ? `-${refSourceSk}` : ""}`
+                  : "";
+              const refOptions = refCacheKey ? refFilterOptions[refCacheKey] ?? [] : [];
+              const sourceAttributeOptions =
+                sourceKpiIdForRef != null
+                  ? buildReferenceAttributeOptions(sourceKpiFieldsById[sourceKpiIdForRef] ?? [])
+                  : [];
               const showMultiRefPick =
                 ftCond === "multi_reference" && (c.op === "eq" || c.op === "neq") && refOptions.length > 0;
               const setRow = (patch: Partial<MultiFilterConditionRow>) =>
@@ -1025,11 +1133,16 @@ export default function FullPageMultiItems() {
                         const key = e.target.value;
                         const sf = subFields.find((s) => s.key === key);
                         const nextOps = operatorsForMultiItemSubField(sf?.field_type ?? undefined);
+                        const refInit =
+                          sf && (sf.field_type === "reference" || sf.field_type === "multi_reference")
+                            ? defaultReferenceComparePath(sf)
+                            : "";
                         setRow({
                           field: key,
                           op: nextOps[0]?.value ?? "eq",
                           value: "",
                           multiValues: [],
+                          referenceComparePath: refInit,
                         });
                       }}
                       style={{ minWidth: "200px", maxWidth: "min(100%, 320px)", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
@@ -1069,6 +1182,41 @@ export default function FullPageMultiItems() {
                       ))}
                     </select>
                   </div>
+                  {(ftCond === "reference" || ftCond === "multi_reference") &&
+                    sfCond &&
+                    sourceKpiIdForRef != null && (
+                      <div style={{ minWidth: "200px", maxWidth: "min(100%, 340px)" }}>
+                        <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>
+                          Reference attribute
+                        </label>
+                        <select
+                          value={comparePathEff}
+                          onChange={(e) =>
+                            setRow({
+                              referenceComparePath: e.target.value,
+                              value: "",
+                              multiValues: [],
+                            })
+                          }
+                          style={{
+                            width: "100%",
+                            padding: "0.35rem 0.5rem",
+                            borderRadius: 6,
+                            border: "1px solid var(--border)",
+                          }}
+                        >
+                          {sourceAttributeOptions.length === 0 ? (
+                            <option value="">Loading attributes…</option>
+                          ) : (
+                            sourceAttributeOptions.map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                      </div>
+                    )}
                   <div style={{ flex: "1 1 200px", minWidth: 0 }}>
                     <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value</label>
                     {!c.field ? (
@@ -1101,7 +1249,7 @@ export default function FullPageMultiItems() {
                         onChange={(e) => setRow({ value: e.target.value })}
                         style={{ maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
                       />
-                    ) : ftCond === "reference" && refMetaRow ? (
+                    ) : ftCond === "reference" && sourceKpiIdForRef && refSourceFk ? (
                       refOptions.length > 0 ? (
                         !c.value || refOptions.includes(c.value) ? (
                           <select
@@ -1132,7 +1280,7 @@ export default function FullPageMultiItems() {
                           placeholder="Loading values… or type manually"
                         />
                       )
-                    ) : ftCond === "multi_reference" && refMetaRow ? (
+                    ) : ftCond === "multi_reference" && sourceKpiIdForRef && refSourceFk ? (
                       showMultiRefPick ? (
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", minWidth: "200px", maxWidth: "420px" }}>
                           <select

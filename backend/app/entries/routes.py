@@ -60,6 +60,7 @@ from app.entries.service import (
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
 from app.entries.multi_item_filters import row_passes_filters
+from app.entries.reference_filter_resolve import build_reference_resolution_map
 
 router = APIRouter(prefix="/entries", tags=["entries"])
 
@@ -694,7 +695,35 @@ async def list_multi_items_rows(
         try:
             raw_filters = json.loads(filters)
             if isinstance(raw_filters, dict):
-                rows = [(i, r) for i, r in rows if row_passes_filters(r, raw_filters)]
+                resolution_maps = None
+                reference_field_types: dict[str, str] = {}
+                for sf in field.sub_fields or []:
+                    k = getattr(sf, "key", "")
+                    ft = getattr(sf.field_type, "value", sf.field_type)
+                    reference_field_types[str(k)] = str(ft)
+                if raw_filters.get("_version") == 2:
+                    conds = raw_filters.get("conditions")
+                    if isinstance(conds, list):
+                        resolution_maps = await build_reference_resolution_map(
+                            db,
+                            org_id,
+                            entry.year,
+                            field,
+                            conds,
+                            [r for _, r in rows],
+                        )
+                    rows = [
+                        (i, r)
+                        for i, r in rows
+                        if row_passes_filters(
+                            r,
+                            raw_filters,
+                            resolution_maps=resolution_maps,
+                            reference_field_types=reference_field_types,
+                        )
+                    ]
+                else:
+                    rows = [(i, r) for i, r in rows if row_passes_filters(r, raw_filters)]
         except json.JSONDecodeError:
             # Ignore invalid filters payload
             pass
@@ -1426,7 +1455,36 @@ async def export_multi_items_csv(
         try:
             raw_filters = json.loads(filters)
             if isinstance(raw_filters, dict):
-                rows = [r for r in rows if isinstance(r, dict) and row_passes_filters(r, raw_filters)]
+                resolution_maps = None
+                reference_field_types: dict[str, str] = {}
+                for sf in field.sub_fields or []:
+                    k = getattr(sf, "key", "")
+                    ft = getattr(sf.field_type, "value", sf.field_type)
+                    reference_field_types[str(k)] = str(ft)
+                if raw_filters.get("_version") == 2:
+                    conds = raw_filters.get("conditions")
+                    if isinstance(conds, list):
+                        resolution_maps = await build_reference_resolution_map(
+                            db,
+                            org_id,
+                            entry.year,
+                            field,
+                            conds,
+                            [r for r in rows if isinstance(r, dict)],
+                        )
+                    rows = [
+                        r
+                        for r in rows
+                        if isinstance(r, dict)
+                        and row_passes_filters(
+                            r,
+                            raw_filters,
+                            resolution_maps=resolution_maps,
+                            reference_field_types=reference_field_types,
+                        )
+                    ]
+                else:
+                    rows = [r for r in rows if isinstance(r, dict) and row_passes_filters(r, raw_filters)]
         except json.JSONDecodeError:
             pass
 
