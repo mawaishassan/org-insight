@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken, clearTokens } from "@/lib/auth";
@@ -13,7 +13,356 @@ import {
   stringifyApiExample,
 } from "@/lib/multiItemsApiExample";
 
-type SubField = { key: string; name: string; field_type?: string | null; is_required?: boolean };
+type SubField = {
+  id?: number;
+  key: string;
+  name: string;
+  field_type?: string | null;
+  is_required?: boolean;
+  config?: { reference_source_kpi_id?: number; reference_source_field_key?: string; reference_source_sub_field_key?: string } | null;
+};
+
+function truncateLabel(label: string, max = 48): string {
+  const s = String(label ?? "");
+  if (s.length <= max) return s;
+  return s.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
+}
+
+const MULTI_ITEM_WHERE_OPS = [
+  { value: "eq", label: "equals (=)" },
+  { value: "neq", label: "not equals (≠)" },
+  { value: "gt", label: "greater than (>)" },
+  { value: "gte", label: "greater or equal (≥)" },
+  { value: "lt", label: "less than (<)" },
+  { value: "lte", label: "less or equal (≤)" },
+  { value: "contains", label: "contains" },
+  { value: "not_contains", label: "does not contain" },
+  { value: "starts_with", label: "starts with" },
+  { value: "ends_with", label: "ends with" },
+] as const;
+
+function operatorsForMultiItemSubField(fieldType: string | undefined): readonly { value: string; label: string }[] {
+  const ft = fieldType ?? "";
+  const cmp = MULTI_ITEM_WHERE_OPS.filter((o) =>
+    ["eq", "neq", "gt", "gte", "lt", "lte"].includes(o.value)
+  );
+  const text = MULTI_ITEM_WHERE_OPS.filter((o) =>
+    ["eq", "neq", "contains", "not_contains", "starts_with", "ends_with"].includes(o.value)
+  );
+  if (ft === "number" || ft === "date") return cmp;
+  if (ft === "boolean") return MULTI_ITEM_WHERE_OPS.filter((o) => ["eq", "neq"].includes(o.value));
+  if (ft === "reference" || ft === "multi_reference") return text;
+  return text;
+}
+
+type MultiItemsFilterPayloadV2 = {
+  _version: 2;
+  conditions: Array<{
+    logic?: "and" | "or";
+    field: string;
+    op: string;
+    value?: unknown;
+    values?: string[];
+    /** Walk reference fields then read the final scalar field (chain) or legacy single compare. */
+    reference_resolution?: {
+      compare_field_key?: string;
+      compare_sub_field_key?: string;
+      chain?: Array<{ compare_field_key: string; compare_sub_field_key?: string }>;
+    };
+  }>;
+};
+
+type MultiFilterConditionRow = {
+  field: string;
+  op: string;
+  value: string;
+  multiValues: string[];
+  logicWithPrev: "and" | "or";
+  /** Paths on each KPI in the reference chain: `fieldKey` or `fieldKey|subKey`. Empty = use configured default label path only. */
+  referenceChainPaths: string[];
+};
+
+function isReferenceLikeFieldType(ft: string | undefined): boolean {
+  return ft === "reference" || ft === "multi_reference";
+}
+
+function getNextSourceKpiIdForPath(fields: FieldSummary[], path: string): number | undefined {
+  const { fieldKey, subKey } = parseComparePath(path);
+  const f = fields.find((x) => x.key === fieldKey);
+  if (!f) return undefined;
+  if (subKey && f.field_type === "multi_line_items" && f.sub_fields?.length) {
+    const sub = f.sub_fields.find((s) => s.key === subKey);
+    if (!sub) return undefined;
+    if (!isReferenceLikeFieldType(sub.field_type ?? undefined)) return undefined;
+    const cfg = (sub.config ?? {}) as { reference_source_kpi_id?: number };
+    return cfg.reference_source_kpi_id;
+  }
+  if (isReferenceLikeFieldType(f.field_type)) {
+    const cfg = (f.config ?? {}) as { reference_source_kpi_id?: number };
+    return cfg.reference_source_kpi_id;
+  }
+  return undefined;
+}
+
+function getFieldTypeAtPath(fields: FieldSummary[], path: string): string | undefined {
+  const { fieldKey, subKey } = parseComparePath(path);
+  const f = fields.find((x) => x.key === fieldKey);
+  if (!f) return undefined;
+  if (subKey && f.field_type === "multi_line_items" && f.sub_fields?.length) {
+    return f.sub_fields.find((s) => s.key === subKey)?.field_type ?? undefined;
+  }
+  return f.field_type;
+}
+
+/** KPI id at step 0, 1, … when walking `paths` (length = paths.length + 1). */
+function computeChainKpiIds(
+  startKpiId: number,
+  paths: string[],
+  cache: Record<number, FieldSummary[]>
+): number[] {
+  const ids: number[] = [startKpiId];
+  for (let i = 0; i < paths.length; i++) {
+    const flds = cache[ids[i]] ?? [];
+    const nextId = getNextSourceKpiIdForPath(flds, paths[i]);
+    if (nextId == null) break;
+    ids.push(nextId);
+  }
+  return ids;
+}
+
+/** Paths used for chain resolution / terminal value; empty draft → configured default path. */
+function pathsForChainComputation(row: MultiFilterConditionRow, sub: SubField | undefined): string[] {
+  const raw = row.referenceChainPaths ?? [];
+  const def = sub ? defaultReferenceComparePath(sub) : "";
+  if (raw.length === 0) return def ? [def] : [];
+  return [...raw];
+}
+
+function shouldOmitReferenceResolution(paths: string[], sub: SubField | undefined): boolean {
+  const def = sub ? defaultReferenceComparePath(sub) : "";
+  return paths.length === 1 && paths[0] === def;
+}
+
+function terminalRefAllowedValuesKey(
+  chainKpiIds: number[],
+  pathsComp: string[],
+  fieldCache: Record<number, FieldSummary[]>
+): { cacheKey: string } | null {
+  if (!chainKpiIds.length || !pathsComp.length) return null;
+  const last = pathsComp.length - 1;
+  const kpiId = chainKpiIds[last];
+  const path = pathsComp[last];
+  const fields = fieldCache[kpiId] ?? [];
+  const ft = getFieldTypeAtPath(fields, path);
+  if (isReferenceLikeFieldType(ft)) return null;
+  const { fieldKey, subKey } = parseComparePath(path);
+  if (!fieldKey) return null;
+  const cacheKey = `${kpiId}-${fieldKey}${subKey ? `-${subKey}` : ""}`;
+  return { cacheKey };
+}
+
+function parseComparePath(path: string): { fieldKey: string; subKey?: string } {
+  const p = path.trim();
+  if (!p) return { fieldKey: "" };
+  const idx = p.indexOf("|");
+  if (idx === -1) return { fieldKey: p };
+  return { fieldKey: p.slice(0, idx), subKey: p.slice(idx + 1).trim() || undefined };
+}
+
+function defaultReferenceComparePath(sub: SubField): string {
+  const cfg = (sub.config ?? {}) as {
+    reference_source_field_key?: string;
+    reference_source_sub_field_key?: string;
+  };
+  const fk = cfg.reference_source_field_key ?? "";
+  const sk = cfg.reference_source_sub_field_key;
+  return sk ? `${fk}|${sk}` : fk;
+}
+
+function emptyMultiFilterRow(): MultiFilterConditionRow {
+  return { field: "", op: "eq", value: "", multiValues: [], logicWithPrev: "and", referenceChainPaths: [] };
+}
+
+function rrToPathStrings(rr: MultiItemsFilterPayloadV2["conditions"][0]["reference_resolution"]): string[] {
+  if (!rr) return [];
+  const ch = rr.chain;
+  if (Array.isArray(ch) && ch.length > 0) {
+    return ch.map((s) =>
+      s.compare_sub_field_key ? `${s.compare_field_key}|${s.compare_sub_field_key}` : s.compare_field_key
+    );
+  }
+  if (rr.compare_field_key) {
+    return [rr.compare_sub_field_key ? `${rr.compare_field_key}|${rr.compare_sub_field_key}` : rr.compare_field_key];
+  }
+  return [];
+}
+
+function payloadToFilterDraft(payload: MultiItemsFilterPayloadV2 | null): MultiFilterConditionRow[] {
+  if (!payload?.conditions?.length) return [emptyMultiFilterRow()];
+  return payload.conditions.map((c, i) => {
+    const vals = Array.isArray(c.values) ? c.values.map(String) : [];
+    const multiVals = vals.length > 1 ? [...vals] : [];
+    let valueStr = "";
+    if (vals.length === 1) valueStr = vals[0] ?? "";
+    else if (!multiVals.length && c.value !== undefined && c.value !== null) {
+      if (typeof c.value === "boolean") valueStr = c.value ? "true" : "false";
+      else valueStr = String(c.value);
+    }
+    return {
+      field: String(c.field ?? ""),
+      op: String(c.op ?? "eq"),
+      value: valueStr,
+      multiValues: multiVals,
+      logicWithPrev: i === 0 ? "and" : c.logic === "or" ? "or" : "and",
+      referenceChainPaths: rrToPathStrings(c.reference_resolution),
+    };
+  });
+}
+
+function filterDraftToPayload(rows: MultiFilterConditionRow[], subFields: SubField[]): MultiItemsFilterPayloadV2 | null {
+  const conditions: MultiItemsFilterPayloadV2["conditions"] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const fk = r.field.trim();
+    if (!fk) continue;
+    const sf = subFields.find((s) => s.key === fk);
+    const ft = sf?.field_type ?? "";
+    let valueOut: unknown = r.value.trim();
+    let valuesOut: string[] | undefined;
+
+    if (ft === "number" && String(valueOut) !== "") {
+      const n = Number(valueOut);
+      valueOut = Number.isNaN(n) ? valueOut : n;
+    }
+    if (ft === "boolean") {
+      const vs = String(valueOut).trim().toLowerCase();
+      if (vs === "true") valueOut = true;
+      else if (vs === "false") valueOut = false;
+    }
+
+    const allowedOps = operatorsForMultiItemSubField(ft);
+    const resolvedOp = allowedOps.some((o) => o.value === r.op) ? r.op : (allowedOps[0]?.value ?? "eq");
+
+    const isMultiRef = ft === "multi_reference";
+    const multi = (r.multiValues ?? []).map((x) => String(x).trim()).filter(Boolean);
+    if (isMultiRef && multi.length > 1 && (resolvedOp === "eq" || resolvedOp === "neq")) {
+      valuesOut = multi;
+    }
+
+    const base: MultiItemsFilterPayloadV2["conditions"][0] = {
+      field: fk,
+      op: resolvedOp,
+      ...(valuesOut ? { values: valuesOut } : { value: valueOut }),
+    };
+    if (i > 0) base.logic = r.logicWithPrev;
+
+    if (ft === "reference" || ft === "multi_reference") {
+      const rawPaths = r.referenceChainPaths ?? [];
+      if (rawPaths.length > 0 && !shouldOmitReferenceResolution(rawPaths, sf)) {
+        base.reference_resolution = {
+          chain: rawPaths.map((p) => {
+            const { fieldKey, subKey } = parseComparePath(p);
+            return {
+              compare_field_key: fieldKey,
+              ...(subKey ? { compare_sub_field_key: subKey } : {}),
+            };
+          }),
+        };
+      }
+    }
+    const hasValue =
+      valuesOut != null ||
+      (typeof valueOut === "boolean") ||
+      (typeof valueOut === "number" && !Number.isNaN(valueOut)) ||
+      (typeof valueOut === "string" && valueOut !== "");
+    if (!hasValue) continue;
+    conditions.push(base);
+  }
+  if (conditions.length === 0) return null;
+  return { _version: 2, conditions };
+}
+
+function removeConditionFromPayload(payload: MultiItemsFilterPayloadV2, idx: number): MultiItemsFilterPayloadV2 | null {
+  const next = payload.conditions.filter((_, i) => i !== idx);
+  if (next.length === 0) return null;
+  const normalized: MultiItemsFilterPayloadV2["conditions"] = next.map((c, i) => {
+    const row: MultiItemsFilterPayloadV2["conditions"][0] = {
+      field: String(c.field),
+      op: String(c.op),
+      ...(Array.isArray(c.values) && c.values.length > 0 ? { values: [...c.values] } : { value: c.value }),
+    };
+    const rr = c.reference_resolution;
+    if (rr?.chain && Array.isArray(rr.chain) && rr.chain.length > 0) {
+      row.reference_resolution = {
+        chain: rr.chain.map((s) => ({
+          compare_field_key: String(s.compare_field_key),
+          ...(s.compare_sub_field_key ? { compare_sub_field_key: String(s.compare_sub_field_key) } : {}),
+        })),
+      };
+    } else if (rr?.compare_field_key) {
+      row.reference_resolution = {
+        compare_field_key: String(rr.compare_field_key),
+        ...(rr.compare_sub_field_key ? { compare_sub_field_key: String(rr.compare_sub_field_key) } : {}),
+      };
+    }
+    if (i > 0) row.logic = c.logic === "or" ? "or" : "and";
+    return row;
+  });
+  return { _version: 2, conditions: normalized };
+}
+
+function buildReferenceAttributeOptions(fields: FieldSummary[]): { value: string; label: string }[] {
+  const scalarTypes = [
+    "single_line_text",
+    "multi_line_text",
+    "number",
+    "date",
+    "boolean",
+    "reference",
+    "multi_reference",
+    "mixed_list",
+  ];
+  const out: { value: string; label: string }[] = [];
+  for (const f of fields) {
+    if (!f?.key) continue;
+    if (scalarTypes.includes(f.field_type)) {
+      out.push({ value: f.key, label: truncateLabel(`${f.name} (${f.key})`, 56) });
+    }
+    if (f.field_type === "multi_line_items" && f.sub_fields?.length) {
+      for (const s of f.sub_fields) {
+        out.push({
+          value: `${f.key}|${s.key}`,
+          label: truncateLabel(`${f.name} → ${s.name} (${s.key})`, 56),
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function formatComparePathLabel(fields: FieldSummary[], path: string): string {
+  const { fieldKey, subKey } = parseComparePath(path);
+  const f = fields.find((x) => x.key === fieldKey);
+  if (!f) return path;
+  if (subKey && f.field_type === "multi_line_items" && f.sub_fields?.length) {
+    const s = f.sub_fields.find((x) => x.key === subKey);
+    if (!s) return `${f.name} → ${subKey}`;
+    return `${f.name} → ${s.name}`;
+  }
+  return f.name || fieldKey;
+}
+
+function appliedReferencePathsForChip(cond: MultiItemsFilterPayloadV2["conditions"][0], sub: SubField | undefined): string[] {
+  const rr = cond.reference_resolution;
+  if (rr?.chain && Array.isArray(rr.chain) && rr.chain.length > 0) {
+    return rr.chain.map((s) => (s.compare_sub_field_key ? `${s.compare_field_key}|${s.compare_sub_field_key}` : s.compare_field_key));
+  }
+  if (rr?.compare_field_key) {
+    return [rr.compare_sub_field_key ? `${rr.compare_field_key}|${rr.compare_sub_field_key}` : rr.compare_field_key];
+  }
+  const def = sub ? defaultReferenceComparePath(sub) : "";
+  return def ? [def] : [];
+}
 
 interface MultiItemsRow {
   index: number;
@@ -86,8 +435,10 @@ export default function FullPageMultiItems() {
   const [uploadOption, setUploadOption] = useState<"append" | "override" | "upsert" | null>(null);
   const [upsertMatchSubFieldKey, setUpsertMatchSubFieldKey] = useState<string>("");
   const [uploading, setUploading] = useState(false);
-  const [filters, setFilters] = useState<Record<string, string>>({});
-  const [filtersDraft, setFiltersDraft] = useState<Record<string, string>>({});
+  const [appliedFilter, setAppliedFilter] = useState<MultiItemsFilterPayloadV2 | null>(null);
+  const [filterDraft, setFilterDraft] = useState<MultiFilterConditionRow[]>(() => [emptyMultiFilterRow()]);
+  const [refFilterOptions, setRefFilterOptions] = useState<Record<string, string[]>>({});
+  const [sourceKpiFieldsById, setSourceKpiFieldsById] = useState<Record<number, FieldSummary[]>>({});
   const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
   const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | "previous_year" | null>(null);
   const [importFromYear, setImportFromYear] = useState<number>(() => {
@@ -220,12 +571,8 @@ export default function FullPageMultiItems() {
       if (search.trim()) params.set("search", search.trim());
       if (sortBy) params.set("sort_by", sortBy);
       if (showEditableOnly) params.set("editable_only", "true");
-      const activeFilters: Record<string, string> = {};
-      Object.entries(filters).forEach(([k, v]) => {
-        if (v && v.trim() !== "") activeFilters[k] = v.trim();
-      });
-      if (Object.keys(activeFilters).length > 0) {
-        params.set("filters", JSON.stringify(activeFilters));
+      if (appliedFilter && appliedFilter.conditions.length > 0) {
+        params.set("filters", JSON.stringify(appliedFilter));
       }
       const res = await api<MultiItemsListResponse>(`/entries/multi-items/rows?${params.toString()}`, { token });
       if (
@@ -261,6 +608,70 @@ export default function FullPageMultiItems() {
 
   const subFields = field?.sub_fields ?? [];
 
+  useEffect(() => {
+    if (!token || effectiveOrgId == null || !showFilterPanel) return;
+    const needed = new Set<number>();
+    filterDraft.forEach((row) => {
+      if (!row.field) return;
+      const sub = subFields.find((s) => s.key === row.field);
+      const cfg = sub?.config as { reference_source_kpi_id?: number } | undefined;
+      if (
+        (sub?.field_type === "reference" || sub?.field_type === "multi_reference") &&
+        cfg?.reference_source_kpi_id
+      ) {
+        const sid = cfg.reference_source_kpi_id;
+        const pc = pathsForChainComputation(row, sub);
+        const chainIds = computeChainKpiIds(sid, pc, sourceKpiFieldsById);
+        chainIds.forEach((id) => needed.add(id));
+      }
+    });
+    needed.forEach((kid) => {
+      if (sourceKpiFieldsById[kid]?.length) return;
+      api<FieldSummary[]>(
+        `/entries/fields?${new URLSearchParams({
+          kpi_id: String(kid),
+          organization_id: String(effectiveOrgId),
+        }).toString()}`,
+        { token }
+      )
+        .then((list) => setSourceKpiFieldsById((prev) => ({ ...prev, [kid]: list })))
+        .catch(() => setSourceKpiFieldsById((prev) => ({ ...prev, [kid]: [] })));
+    });
+  }, [token, effectiveOrgId, showFilterPanel, filterDraft, subFields, sourceKpiFieldsById]);
+
+  useEffect(() => {
+    if (!token || effectiveOrgId == null || !showFilterPanel) return;
+    filterDraft.forEach((row) => {
+      if (!row.field) return;
+      const sub = subFields.find((s) => s.key === row.field);
+      if (!sub || (sub.field_type !== "reference" && sub.field_type !== "multi_reference")) return;
+      const cfg = sub.config as { reference_source_kpi_id?: number } | undefined;
+      const sid = cfg?.reference_source_kpi_id;
+      if (!sid) return;
+      const pc = pathsForChainComputation(row, sub);
+      const chainIds = computeChainKpiIds(sid, pc, sourceKpiFieldsById);
+      const term = terminalRefAllowedValuesKey(chainIds, pc, sourceKpiFieldsById);
+      if (!term) return;
+      if (refFilterOptions[term.cacheKey] !== undefined) return;
+      const last = pc.length - 1;
+      const kpiId = chainIds[last];
+      const path = pc[last];
+      const { fieldKey, subKey } = parseComparePath(path);
+      if (!fieldKey) return;
+      const params = new URLSearchParams({
+        source_kpi_id: String(kpiId),
+        source_field_key: fieldKey,
+        organization_id: String(effectiveOrgId),
+      });
+      if (subKey) params.set("source_sub_field_key", subKey);
+      api<{ values: string[] }>(`/fields/reference-allowed-values?${params.toString()}`, { token })
+        .then((r) =>
+          setRefFilterOptions((prev) => ({ ...prev, [term.cacheKey]: r.values ?? [] }))
+        )
+        .catch(() => setRefFilterOptions((prev) => ({ ...prev, [term.cacheKey]: [] })));
+    });
+  }, [token, effectiveOrgId, showFilterPanel, filterDraft, subFields, refFilterOptions, sourceKpiFieldsById]);
+
   const fieldApiResponseExampleJson = useMemo(() => {
     const actualData = rows.slice(0, 2).map((r) => r.data);
     return stringifyApiExample(
@@ -294,7 +705,7 @@ export default function FullPageMultiItems() {
   useEffect(() => {
     if (!entryId) return;
     loadRows().catch(() => undefined);
-  }, [entryId, page, pageSize, search, sortBy, sortDir, filters, showEditableOnly]);
+  }, [entryId, page, pageSize, search, sortBy, sortDir, appliedFilter, showEditableOnly]);
 
   // Toast when returning from row edit page with success param
   useEffect(() => {
@@ -653,10 +1064,10 @@ export default function FullPageMultiItems() {
             type="button"
             className="btn"
             onClick={() => {
-              setShowFilterPanel((open) => !open);
               if (!showFilterPanel) {
-                setFiltersDraft(filters);
+                setFilterDraft(payloadToFilterDraft(appliedFilter));
               }
+              setShowFilterPanel((open) => !open);
             }}
           >
             Advanced filters
@@ -696,49 +1107,93 @@ export default function FullPageMultiItems() {
           )}
         </div>
         {/* Active filters badges */}
-        {Object.keys(filters).filter((k) => filters[k]?.trim()).length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginTop: "0.25rem" }}>
-            {Object.entries(filters)
-              .filter(([, v]) => v && v.trim())
-              .map(([key, value]) => (
+        {appliedFilter && appliedFilter.conditions.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginTop: "0.25rem", alignItems: "center" }}>
+            {appliedFilter.conditions.map((cond, idx) => {
+              const sf = subFields.find((s) => s.key === cond.field);
+              const label = sf?.name ?? cond.field;
+              const val =
+                Array.isArray(cond.values) && cond.values.length ? cond.values.join(", ") : String(cond.value ?? "");
+              let refPathText = "";
+              if (sf && (sf.field_type === "reference" || sf.field_type === "multi_reference")) {
+                const cfg = (sf.config ?? {}) as { reference_source_kpi_id?: number };
+                const sid = cfg.reference_source_kpi_id;
+                if (sid != null) {
+                  const paths = appliedReferencePathsForChip(cond, sf);
+                  const chainIds = computeChainKpiIds(sid, paths, sourceKpiFieldsById);
+                  const parts: string[] = [];
+                  for (let i = 0; i < paths.length; i++) {
+                    const kpiAt = chainIds[i];
+                    if (kpiAt == null) break;
+                    parts.push(formatComparePathLabel(sourceKpiFieldsById[kpiAt] ?? [], paths[i]));
+                  }
+                  if (parts.length > 0) refPathText = parts.join(" → ");
+                }
+              }
+              const summary = `${label}${refPathText ? ` (${refPathText})` : ""} ${cond.op} ${val}`.trim();
+              return (
                 <span
-                  key={key}
+                  key={`${idx}-${cond.field}-${cond.op}-${val}`}
                   style={{
                     display: "inline-flex",
-                    alignItems: "center",
-                    gap: "0.25rem",
-                    padding: "0.15rem 0.45rem",
+                    alignItems: "flex-start",
+                    gap: "0.35rem",
+                    padding: "0.25rem 0.45rem",
+                    paddingRight: "0.35rem",
                     borderRadius: 999,
                     background: "var(--accent-muted, #eef2ff)",
                     fontSize: "0.8rem",
+                    maxWidth: "100%",
                   }}
                 >
-                  <strong>{key}</strong>: <span>{value}</span>
+                  <span style={{ display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: "0.25rem", flex: "1 1 auto", minWidth: 0 }}>
+                    {idx > 0 && (
+                      <span style={{ fontWeight: 700, color: "var(--muted)", fontSize: "0.7rem" }}>
+                        {cond.logic === "or" ? "OR" : "AND"}
+                      </span>
+                    )}
+                    <strong>{label}</strong>
+                    {refPathText && (
+                      <span style={{ color: "var(--muted)" }}>
+                        {`(${refPathText})`}
+                      </span>
+                    )}
+                    <span style={{ color: "var(--muted)" }}>{cond.op}</span>
+                    <span>{val}</span>
+                  </span>
                   <button
                     type="button"
                     onClick={() => {
-                      const next = { ...filters };
-                      delete next[key];
-                      setFilters(next);
+                      if (!appliedFilter) return;
+                      const next = removeConditionFromPayload(appliedFilter, idx);
+                      setAppliedFilter(next);
                       setPage(1);
                     }}
+                    aria-label={`Remove filter: ${summary}`}
+                    title="Remove this filter"
                     style={{
+                      flex: "0 0 auto",
+                      alignSelf: "flex-start",
+                      marginTop: "-0.05rem",
                       border: "none",
                       background: "transparent",
                       cursor: "pointer",
-                      fontSize: "0.85rem",
+                      fontSize: "1.05rem",
+                      lineHeight: 1,
+                      padding: "0 0.15rem",
+                      color: "var(--muted)",
                     }}
-                    aria-label={`Remove filter ${key}`}
                   >
                     ×
                   </button>
                 </span>
-              ))}
+              );
+            })}
             <button
               type="button"
               className="btn"
               onClick={() => {
-                setFilters({});
+                setAppliedFilter(null);
                 setPage(1);
               }}
               style={{ fontSize: "0.8rem", padding: "0.1rem 0.5rem" }}
@@ -751,7 +1206,7 @@ export default function FullPageMultiItems() {
 
       {/* Advanced filter panel */}
       {showFilterPanel && subFields.length > 0 && (
-        <div className="card" style={{ padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+        <div className="card" style={{ padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontSize: "0.9rem", fontWeight: 600 }}>Advanced filters</span>
             <button
@@ -763,32 +1218,361 @@ export default function FullPageMultiItems() {
               Close
             </button>
           </div>
-          <div style={{ display: "grid", gap: "0.5rem", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
-            {subFields.map((sf) => (
-              <div key={sf.key} className="form-group">
-                <label style={{ fontSize: "0.8rem" }}>{sf.name}</label>
-                <input
-                  type="text"
-                  value={filtersDraft[sf.key] ?? ""}
-                  onChange={(e) =>
-                    setFiltersDraft((prev) => ({
-                      ...prev,
-                      [sf.key]: e.target.value,
-                    }))
-                  }
-                  placeholder="Contains..."
-                  style={{ width: "100%", padding: "0.3rem 0.4rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                />
-              </div>
-            ))}
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.65rem" }}>
+            {filterDraft.map((c, idx) => {
+              const sfCond = subFields.find((s) => s.key === c.field);
+              const ftCond = sfCond?.field_type ?? "";
+              const opChoices = operatorsForMultiItemSubField(ftCond);
+              const opSelectValue = opChoices.some((o) => o.value === c.op) ? c.op : (opChoices[0]?.value ?? "eq");
+              const refCfg = sfCond?.config as { reference_source_kpi_id?: number } | undefined;
+              const sourceKpiIdForRef = refCfg?.reference_source_kpi_id;
+              const pcComp = sfCond ? pathsForChainComputation(c, sfCond) : [];
+              const chainIdsForRef =
+                sourceKpiIdForRef != null
+                  ? computeChainKpiIds(sourceKpiIdForRef, pcComp, sourceKpiFieldsById)
+                  : [];
+              const termKey = terminalRefAllowedValuesKey(chainIdsForRef, pcComp, sourceKpiFieldsById);
+              const refCacheKey = termKey?.cacheKey ?? "";
+              const refOptions = refCacheKey ? refFilterOptions[refCacheKey] ?? [] : [];
+              const showMultiRefPick =
+                ftCond === "multi_reference" && (c.op === "eq" || c.op === "neq") && refOptions.length > 0;
+              const setRow = (patch: Partial<MultiFilterConditionRow>) =>
+                setFilterDraft((prev) => prev.map((x, i) => (i === idx ? { ...x, ...patch } : x)));
+
+              return (
+                <div
+                  key={idx}
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: "0.5rem",
+                    alignItems: "flex-end",
+                    paddingBottom: "0.5rem",
+                    borderBottom: idx < filterDraft.length - 1 ? "1px solid var(--border)" : "none",
+                  }}
+                >
+                  {idx > 0 && (
+                    <div>
+                      <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>
+                        Logical
+                      </label>
+                      <select
+                        value={c.logicWithPrev}
+                        onChange={(e) =>
+                          setRow({ logicWithPrev: e.target.value === "or" ? "or" : "and" })
+                        }
+                        style={{ minWidth: "110px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                      >
+                        <option value="and">AND</option>
+                        <option value="or">OR</option>
+                      </select>
+                    </div>
+                  )}
+                  <div>
+                    <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Field</label>
+                    <select
+                      value={c.field}
+                      onChange={(e) => {
+                        const key = e.target.value;
+                        const sf = subFields.find((s) => s.key === key);
+                        const nextOps = operatorsForMultiItemSubField(sf?.field_type ?? undefined);
+                        setRow({
+                          field: key,
+                          op: nextOps[0]?.value ?? "eq",
+                          value: "",
+                          multiValues: [],
+                          referenceChainPaths: [],
+                        });
+                      }}
+                      style={{ minWidth: "200px", maxWidth: "min(100%, 320px)", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                    >
+                      <option value="">— Select field —</option>
+                      {subFields.map((s) => (
+                        <option key={s.key} value={s.key}>
+                          {truncateLabel(`${s.name} — ${s.key}`, 56)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {(ftCond === "reference" || ftCond === "multi_reference") &&
+                    sfCond &&
+                    sourceKpiIdForRef != null &&
+                    (() => {
+                      const pcCompInner = pathsForChainComputation(c, sfCond);
+                      const chainIds = computeChainKpiIds(sourceKpiIdForRef, pcCompInner, sourceKpiFieldsById);
+                      const nodes: ReactNode[] = [];
+                      for (let L = 0; L < 16; L++) {
+                        const kpiAtL = chainIds[L];
+                        if (kpiAtL == null) break;
+                        if (L > 0) {
+                          const prevPath = pcCompInner[L - 1];
+                          if (!prevPath) break;
+                          const prevFt = getFieldTypeAtPath(sourceKpiFieldsById[chainIds[L - 1]] ?? [], prevPath);
+                          if (!isReferenceLikeFieldType(prevFt)) break;
+                        }
+                        const pathSel = pcCompInner[L] ?? "";
+                        const opts = buildReferenceAttributeOptions(sourceKpiFieldsById[kpiAtL] ?? []);
+                        nodes.push(
+                          <div key={L} style={{ minWidth: "200px", maxWidth: "min(100%, 340px)" }}>
+                            <label
+                              style={{
+                                display: "block",
+                                fontSize: "0.8rem",
+                                color: "var(--muted)",
+                                marginBottom: "0.25rem",
+                              }}
+                            >
+                              {L === 0 ? "Reference attribute" : `Linked field (${L + 1})`}
+                            </label>
+                            <select
+                              value={pathSel}
+                              onChange={(e) => {
+                                const v = e.target.value.trim();
+                                setFilterDraft((prev) =>
+                                  prev.map((x, i) => {
+                                    if (i !== idx) return x;
+                                    if (!v) {
+                                      return {
+                                        ...x,
+                                        referenceChainPaths: (x.referenceChainPaths ?? []).slice(0, L),
+                                        value: "",
+                                        multiValues: [],
+                                      };
+                                    }
+                                    const next = [...(x.referenceChainPaths ?? [])];
+                                    next[L] = v;
+                                    return {
+                                      ...x,
+                                      referenceChainPaths: next.slice(0, L + 1),
+                                      value: "",
+                                      multiValues: [],
+                                    };
+                                  })
+                                );
+                              }}
+                              style={{
+                                width: "100%",
+                                padding: "0.35rem 0.5rem",
+                                borderRadius: 6,
+                                border: "1px solid var(--border)",
+                              }}
+                            >
+                              <option value="">— Select column —</option>
+                              {opts.length === 0 ? (
+                                <option value="" disabled>
+                                  Loading…
+                                </option>
+                              ) : (
+                                opts.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))
+                              )}
+                            </select>
+                          </div>
+                        );
+                        const sel = pcCompInner[L];
+                        if (!sel) break;
+                        const cft = getFieldTypeAtPath(sourceKpiFieldsById[kpiAtL] ?? [], sel);
+                        if (!isReferenceLikeFieldType(cft)) break;
+                      }
+                      return <>{nodes}</>;
+                    })()}
+                  <div>
+                    <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Operator</label>
+                    <select
+                      value={opSelectValue}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        const collapseMulti =
+                          next !== "eq" && next !== "neq" && (c.multiValues?.length ?? 0) > 0;
+                        setFilterDraft((prev) =>
+                          prev.map((x, i) =>
+                            i === idx
+                              ? {
+                                  ...x,
+                                  op: next,
+                                  ...(collapseMulti ? { value: x.multiValues?.[0] ?? x.value, multiValues: [] } : {}),
+                                }
+                              : x
+                          )
+                        );
+                      }}
+                      style={{ minWidth: "140px", maxWidth: "220px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                    >
+                      {opChoices.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+                    <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value</label>
+                    {!c.field ? (
+                      <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
+                        Select a field first
+                      </span>
+                    ) : ftCond === "boolean" ? (
+                      <select
+                        value={c.value === "true" || c.value === "false" ? c.value : ""}
+                        onChange={(e) => setRow({ value: e.target.value })}
+                        style={{ minWidth: "140px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                      >
+                        <option value="">—</option>
+                        <option value="true">Yes</option>
+                        <option value="false">No</option>
+                      </select>
+                    ) : ftCond === "number" ? (
+                      <input
+                        type="number"
+                        step="any"
+                        value={c.value}
+                        onChange={(e) => setRow({ value: e.target.value })}
+                        style={{ width: "100%", maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                        placeholder="Number"
+                      />
+                    ) : ftCond === "date" ? (
+                      <input
+                        type="date"
+                        value={c.value.length >= 10 ? c.value.slice(0, 10) : c.value}
+                        onChange={(e) => setRow({ value: e.target.value })}
+                        style={{ maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                      />
+                    ) : ftCond === "reference" && sourceKpiIdForRef ? (
+                      termKey ? (
+                        refOptions.length > 0 ? (
+                          !c.value || refOptions.includes(c.value) ? (
+                            <select
+                              value={refOptions.includes(c.value) ? c.value : ""}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              <option value="">— Select value —</option>
+                              {refOptions.map((v) => (
+                                <option key={v} value={v}>{truncateLabel(v, 72)}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              value={c.value}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                              placeholder="Custom value"
+                            />
+                          )
+                        ) : (
+                          <input
+                            type="text"
+                            value={c.value}
+                            onChange={(e) => setRow({ value: e.target.value })}
+                            style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            placeholder="Loading values… or type manually"
+                          />
+                        )
+                      ) : (
+                        <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
+                          Choose linked columns until a non-reference field is selected; values load for that field.
+                        </span>
+                      )
+                    ) : ftCond === "multi_reference" && sourceKpiIdForRef ? (
+                      termKey ? (
+                        showMultiRefPick ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", minWidth: "200px", maxWidth: "420px" }}>
+                            <select
+                              multiple
+                              size={Math.min(8, Math.max(3, refOptions.length))}
+                              value={c.multiValues ?? []}
+                              onChange={(e) => {
+                                const sel = Array.from(e.target.selectedOptions, (o) => o.value);
+                                setRow({ multiValues: sel, value: sel[0] ?? "" });
+                              }}
+                              style={{ width: "100%", padding: "0.25rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              {refOptions.map((v) => (
+                                <option key={v} value={v}>{truncateLabel(v, 80)}</option>
+                              ))}
+                            </select>
+                            <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
+                              {c.op === "eq" ? "Any selected value matches (OR)." : "None of the selected values (AND)."} Use Ctrl/Cmd or Shift for multiple.
+                            </span>
+                          </div>
+                        ) : refOptions.length > 0 ? (
+                          !c.value || refOptions.includes(c.value) ? (
+                            <select
+                              value={refOptions.includes(c.value) ? c.value : ""}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              <option value="">— Select value —</option>
+                              {refOptions.map((v) => (
+                                <option key={v} value={v}>{truncateLabel(v, 72)}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              value={c.value}
+                              onChange={(e) => setRow({ value: e.target.value })}
+                              style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                              placeholder="Custom value"
+                            />
+                          )
+                        ) : (
+                          <input
+                            type="text"
+                            value={c.value}
+                            onChange={(e) => setRow({ value: e.target.value })}
+                            style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            placeholder="Type a value"
+                          />
+                        )
+                      ) : (
+                        <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
+                          Choose linked columns until a non-reference field is selected; values load for that field.
+                        </span>
+                      )
+                    ) : (
+                      <input
+                        type="text"
+                        value={c.value}
+                        onChange={(e) => setRow({ value: e.target.value })}
+                        style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                        placeholder="Value"
+                      />
+                    )}
+                  </div>
+                  {filterDraft.length > 1 && (
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ fontSize: "0.85rem", alignSelf: "flex-end" }}
+                      onClick={() => setFilterDraft((prev) => prev.filter((_, i) => i !== idx))}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "0.5rem" }}>
+          <div>
+            <button
+              type="button"
+              className="btn"
+              style={{ fontSize: "0.85rem" }}
+              onClick={() => setFilterDraft((prev) => [...prev, emptyMultiFilterRow()])}
+            >
+              + Add condition
+            </button>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "0.25rem" }}>
             <button
               type="button"
               className="btn"
               onClick={() => {
-                setFiltersDraft({});
-                setFilters({});
+                setFilterDraft([emptyMultiFilterRow()]);
+                setAppliedFilter(null);
                 setPage(1);
               }}
             >
@@ -798,7 +1582,8 @@ export default function FullPageMultiItems() {
               type="button"
               className="btn btn-primary"
               onClick={() => {
-                setFilters(filtersDraft);
+                const payload = filterDraftToPayload(filterDraft, subFields);
+                setAppliedFilter(payload);
                 setPage(1);
                 setShowFilterPanel(false);
               }}
@@ -1891,12 +2676,8 @@ export default function FullPageMultiItems() {
                     });
                     if (search.trim()) params.set("search", search.trim());
                     if (sortBy) params.set("sort_by", sortBy);
-                    const activeFilters: Record<string, string> = {};
-                    Object.entries(filters).forEach(([k, v]) => {
-                      if (v && v.trim() !== "") activeFilters[k] = v.trim();
-                    });
-                    if (Object.keys(activeFilters).length > 0) {
-                      params.set("filters", JSON.stringify(activeFilters));
+                    if (appliedFilter && appliedFilter.conditions.length > 0) {
+                      params.set("filters", JSON.stringify(appliedFilter));
                     }
                     const url = getApiUrl(`/entries/multi-items/export?${params.toString()}`);
                     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });

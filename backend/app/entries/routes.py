@@ -59,6 +59,8 @@ from app.entries.service import (
 )
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
+from app.entries.multi_item_filters import row_passes_filters
+from app.entries.reference_filter_resolve import build_reference_resolution_map
 
 router = APIRouter(prefix="/entries", tags=["entries"])
 
@@ -598,7 +600,9 @@ async def list_multi_items_rows(
     page_size: int = Query(20, ge=1, le=200),
     filters: str | None = Query(
         None,
-        description='Optional JSON object of column filters, e.g. {"program_name": "MBA"} (case-insensitive substring).',
+        description='Legacy: JSON object {"col_key":"substring"} (case-insensitive AND). '
+        'Structured: {"_version":2,"conditions":[{"field":"col","op":"eq","value":"x"},{"logic":"and","field":"y","op":"gte","value":"10"}]} '
+        '(ops: eq, neq, gt, gte, lt, lte, contains, not_contains, starts_with, ends_with).',
     ),
     editable_only: bool = Query(
         False,
@@ -670,8 +674,14 @@ async def list_multi_items_rows(
                     "is_required": getattr(sf, "is_required", False),
                 }
             )
-    # Filter row data to viewable columns only (keep original index)
-    rows = [(i, {k: v for k, v in r.items() if k in viewable_keys}) for i, r in rows]
+    # Keep all defined sub-field keys for search / sort / filters. Reference-chain resolution must read
+    # stored reference cells even when this column is not in the user's viewable set (field ACL).
+    # Strip to viewable_keys only when building each row's `data` in the response.
+    subfield_key_set = {str(getattr(s, "key", "")) for s in (field.sub_fields or []) if getattr(s, "key", None)}
+    rows = [
+        (i, {k: v for k, v in r.items() if k in subfield_key_set})
+        for i, r in rows
+    ]
 
     # Filter by search
     if search:
@@ -686,23 +696,40 @@ async def list_multi_items_rows(
             return False
         rows = [(i, r) for i, r in rows if matches(r)]
 
-    # Advanced column filters (JSON: key -> value, case-insensitive substring)
+    # Advanced column filters (legacy substring map or structured _version 2)
     if filters:
         try:
             raw_filters = json.loads(filters)
             if isinstance(raw_filters, dict):
-                def passes_filters(row: dict) -> bool:
-                    for fk, fv in raw_filters.items():
-                        if fv is None or fv == "":
-                            continue
-                        cell = row.get(fk)
-                        if cell is None:
-                            return False
-                        if str(fv).strip().lower() not in str(cell).lower():
-                            return False
-                    return True
-
-                rows = [(i, r) for i, r in rows if passes_filters(r)]
+                resolution_maps = None
+                reference_field_types: dict[str, str] = {}
+                for sf in field.sub_fields or []:
+                    k = getattr(sf, "key", "")
+                    ft = getattr(sf.field_type, "value", sf.field_type)
+                    reference_field_types[str(k)] = str(ft)
+                if raw_filters.get("_version") == 2:
+                    conds = raw_filters.get("conditions")
+                    if isinstance(conds, list):
+                        resolution_maps = await build_reference_resolution_map(
+                            db,
+                            org_id,
+                            entry.year,
+                            field,
+                            conds,
+                            [r for _, r in rows],
+                        )
+                    rows = [
+                        (i, r)
+                        for i, r in rows
+                        if row_passes_filters(
+                            r,
+                            raw_filters,
+                            resolution_maps=resolution_maps,
+                            reference_field_types=reference_field_types,
+                        )
+                    ]
+                else:
+                    rows = [(i, r) for i, r in rows if row_passes_filters(r, raw_filters)]
         except json.JSONDecodeError:
             # Ignore invalid filters payload
             pass
@@ -785,7 +812,8 @@ async def list_multi_items_rows(
             can_edit = can_edit_common
             can_delete = can_delete_common
 
-        out_rows.append(MultiItemsRow(index=orig_index, data=r, can_edit=can_edit, can_delete=can_delete))
+        r_visible = {k: v for k, v in r.items() if k in viewable_keys}
+        out_rows.append(MultiItemsRow(index=orig_index, data=r_visible, can_edit=can_edit, can_delete=can_delete))
 
     return MultiItemsListResponse(
         total=total,
@@ -1429,24 +1457,41 @@ async def export_multi_items_csv(
 
         rows = [r for r in rows if isinstance(r, dict) and matches(r)]
 
-    # Advanced filters
+    # Advanced filters (same payload as list_multi_items_rows)
     if filters:
         try:
             raw_filters = json.loads(filters)
             if isinstance(raw_filters, dict):
-
-                def passes_filters(row: dict) -> bool:
-                    for fk, fv in raw_filters.items():
-                        if fv is None or fv == "":
-                            continue
-                        cell = row.get(fk)
-                        if cell is None:
-                            return False
-                        if str(fv).strip().lower() not in str(cell).lower():
-                            return False
-                    return True
-
-                rows = [r for r in rows if isinstance(r, dict) and passes_filters(r)]
+                resolution_maps = None
+                reference_field_types: dict[str, str] = {}
+                for sf in field.sub_fields or []:
+                    k = getattr(sf, "key", "")
+                    ft = getattr(sf.field_type, "value", sf.field_type)
+                    reference_field_types[str(k)] = str(ft)
+                if raw_filters.get("_version") == 2:
+                    conds = raw_filters.get("conditions")
+                    if isinstance(conds, list):
+                        resolution_maps = await build_reference_resolution_map(
+                            db,
+                            org_id,
+                            entry.year,
+                            field,
+                            conds,
+                            [r for r in rows if isinstance(r, dict)],
+                        )
+                    rows = [
+                        r
+                        for r in rows
+                        if isinstance(r, dict)
+                        and row_passes_filters(
+                            r,
+                            raw_filters,
+                            resolution_maps=resolution_maps,
+                            reference_field_types=reference_field_types,
+                        )
+                    ]
+                else:
+                    rows = [r for r in rows if isinstance(r, dict) and row_passes_filters(r, raw_filters)]
         except json.JSONDecodeError:
             pass
 
