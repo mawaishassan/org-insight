@@ -832,6 +832,8 @@ function KpiLineChartWidget({
   const [points, setPoints] = useState<Array<{ year: number; value: number | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [hoverPt, setHoverPt] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -877,7 +879,102 @@ function KpiLineChartWidget({
         <p style={{ color: "var(--muted)", margin: 0 }}>No numeric data for this field in the selected years.</p>
       ) : (
         <div style={{ width: "100%", maxWidth: 720 }}>
-          <svg viewBox="0 0 640 240" role="img" aria-label="Line chart" style={{ width: "100%", height: "auto", display: "block" }}>
+          <svg
+            viewBox="0 0 640 240"
+            role="img"
+            aria-label="Line chart"
+            style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+            onMouseLeave={() => {
+              setHoverIdx(null);
+              setHoverPt(null);
+            }}
+            onMouseMove={(e) => {
+              const W = 640;
+              const H = 240;
+              const left = 44;
+              const right = 16;
+              const top = 16;
+              const bottom = 36;
+              const innerW = W - left - right;
+              const innerH = H - top - bottom;
+              const span = Math.max(maxV - minV, 1e-9);
+              const n = numeric.length;
+              if (!n) return;
+              const rect = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
+              const sx = ((e.clientX - rect.left) / Math.max(rect.width, 1)) * W;
+              const idx =
+                n === 1
+                  ? 0
+                  : Math.min(
+                      n - 1,
+                      Math.max(0, Math.round(((sx - left) / Math.max(innerW, 1)) * (n - 1)))
+                    );
+              const x = left + (n === 1 ? innerW / 2 : (idx / (n - 1)) * innerW);
+              const y = top + innerH - ((numeric[idx].value - minV) / span) * innerH;
+              setHoverIdx(idx);
+              setHoverPt({ x, y });
+            }}
+            onTouchStart={(e) => {
+              const t = e.touches[0];
+              if (!t) return;
+              const W = 640;
+              const H = 240;
+              const left = 44;
+              const right = 16;
+              const top = 16;
+              const bottom = 36;
+              const innerW = W - left - right;
+              const innerH = H - top - bottom;
+              const span = Math.max(maxV - minV, 1e-9);
+              const n = numeric.length;
+              if (!n) return;
+              const rect = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
+              const sx = ((t.clientX - rect.left) / Math.max(rect.width, 1)) * W;
+              const idx =
+                n === 1
+                  ? 0
+                  : Math.min(
+                      n - 1,
+                      Math.max(0, Math.round(((sx - left) / Math.max(innerW, 1)) * (n - 1)))
+                    );
+              const x = left + (n === 1 ? innerW / 2 : (idx / (n - 1)) * innerW);
+              const y = top + innerH - ((numeric[idx].value - minV) / span) * innerH;
+              setHoverIdx(idx);
+              setHoverPt({ x, y });
+            }}
+            onTouchMove={(e) => {
+              const t = e.touches[0];
+              if (!t) return;
+              const W = 640;
+              const H = 240;
+              const left = 44;
+              const right = 16;
+              const top = 16;
+              const bottom = 36;
+              const innerW = W - left - right;
+              const innerH = H - top - bottom;
+              const span = Math.max(maxV - minV, 1e-9);
+              const n = numeric.length;
+              if (!n) return;
+              const rect = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
+              const sx = ((t.clientX - rect.left) / Math.max(rect.width, 1)) * W;
+              const idx =
+                n === 1
+                  ? 0
+                  : Math.min(
+                      n - 1,
+                      Math.max(0, Math.round(((sx - left) / Math.max(innerW, 1)) * (n - 1)))
+                    );
+              const x = left + (n === 1 ? innerW / 2 : (idx / (n - 1)) * innerW);
+              const y = top + innerH - ((numeric[idx].value - minV) / span) * innerH;
+              setHoverIdx(idx);
+              setHoverPt({ x, y });
+            }}
+            onTouchEnd={() => {
+              setHoverIdx(null);
+              setHoverPt(null);
+            }}
+          >
             <rect x="0" y="0" width="640" height="240" fill="var(--bg)" rx="6" />
             {(() => {
               const W = 640;
@@ -893,6 +990,9 @@ function KpiLineChartWidget({
               const xs = numeric.map((_, i) => left + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW));
               const ys = numeric.map((p) => top + innerH - ((p.value - minV) / span) * innerH);
               const pathD = xs.map((x, i) => `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${ys[i].toFixed(2)}`).join(" ");
+              const minIdx = numeric.reduce((best, p, i) => (p.value < numeric[best].value ? i : best), 0);
+              const maxIdx = numeric.reduce((best, p, i) => (p.value > numeric[best].value ? i : best), 0);
+              const tooltipIdx = hoverIdx != null ? Math.min(Math.max(hoverIdx, 0), n - 1) : null;
               return (
                 <>
                   <text x={left} y={H - 10} fontSize="11" fill="var(--muted)">
@@ -911,6 +1011,53 @@ function KpiLineChartWidget({
                   {xs.map((x, i) => (
                     <circle key={numeric[i].year} cx={x} cy={ys[i]} r={4} fill="var(--accent)" stroke="var(--surface)" strokeWidth="1" />
                   ))}
+                  {/* Always show labels for extreme points (min/max) */}
+                  <g>
+                    <text
+                      x={xs[maxIdx]}
+                      y={Math.max(12, ys[maxIdx] - 10)}
+                      fontSize="11"
+                      fill="var(--text)"
+                      textAnchor="middle"
+                      style={{ paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3 }}
+                    >
+                      {numeric[maxIdx].value.toLocaleString()}
+                    </text>
+                    <text
+                      x={xs[minIdx]}
+                      y={Math.min(H - 44, ys[minIdx] + 18)}
+                      fontSize="11"
+                      fill="var(--text)"
+                      textAnchor="middle"
+                      style={{ paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3 }}
+                    >
+                      {numeric[minIdx].value.toLocaleString()}
+                    </text>
+                  </g>
+                  {/* Hover/touch tooltip */}
+                  {tooltipIdx != null && hoverPt ? (
+                    <g>
+                      <line x1={hoverPt.x} y1={top} x2={hoverPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
+                      <circle cx={hoverPt.x} cy={hoverPt.y} r={6} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
+                      {(() => {
+                        const label = `${numeric[tooltipIdx].year}: ${numeric[tooltipIdx].value.toLocaleString()}`;
+                        const padX = 8;
+                        const boxW = Math.min(260, 12 + label.length * 6.2);
+                        const boxH = 26;
+                        const preferLeft = hoverPt.x > W * 0.55;
+                        const x = preferLeft ? Math.max(8, hoverPt.x - boxW - 10) : Math.min(W - boxW - 8, hoverPt.x + 10);
+                        const y = Math.max(8, Math.min(H - boxH - 8, hoverPt.y - boxH - 10));
+                        return (
+                          <g>
+                            <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                            <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                              {label}
+                            </text>
+                          </g>
+                        );
+                      })()}
+                    </g>
+                  ) : null}
                 </>
               );
             })()}
@@ -994,6 +1141,10 @@ function KpiBarChartWidgetInner({
   const [hiddenSeriesKeys, setHiddenSeriesKeys] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [hoverBarKey, setHoverBarKey] = useState<string | null>(null);
+  const [hoverBarPt, setHoverBarPt] = useState<{ x: number; y: number; label: string; value: number } | null>(null);
+  const [hoverPieKey, setHoverPieKey] = useState<string | null>(null);
+  const [hoverPiePt, setHoverPiePt] = useState<{ x: number; y: number; label: string; value: number } | null>(null);
 
   useEffect(() => {
     setViewerChartType(widget.chart_type || "bar");
@@ -1512,7 +1663,20 @@ function KpiBarChartWidgetInner({
             <p style={{ color: "var(--muted)", margin: 0 }}>No grouped data available for this multi-line field.</p>
           ) : chartType === "pie" ? (
             <div style={{ width: "100%", maxWidth: 720 }}>
-              <svg viewBox="0 0 640 300" role="img" aria-label="Pie chart" style={{ width: "100%", height: "auto", display: "block" }}>
+              <svg
+                viewBox="0 0 640 300"
+                role="img"
+                aria-label="Pie chart"
+                style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+                onMouseLeave={() => {
+                  setHoverPieKey(null);
+                  setHoverPiePt(null);
+                }}
+                onTouchEnd={() => {
+                  setHoverPieKey(null);
+                  setHoverPiePt(null);
+                }}
+              >
                 <rect x="0" y="0" width="640" height="300" fill="var(--bg)" rx="6" />
                 {(() => {
                   const total = visibleGroups.reduce((s, g) => s + g.value, 0) || 1;
@@ -1527,9 +1691,56 @@ function KpiBarChartWidgetInner({
                         const frac = g.value / total;
                         const next = a + frac * Math.PI * 2;
                         const d = pieArcPath(cx, cy, r, a, next);
+                        const mid = (a + next) / 2;
+                        const p = polarToCartesian(cx, cy, r * 0.72, mid);
                         a = next;
-                        return <path key={g.label} d={d} fill={colors[i % colors.length]} stroke="var(--surface)" strokeWidth="1" />;
+                        return (
+                          <path
+                            key={g.label}
+                            d={d}
+                            fill={colors[i % colors.length]}
+                            stroke="var(--surface)"
+                            strokeWidth="1"
+                            onMouseEnter={() => {
+                              setHoverPieKey(g.label);
+                              setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                            }}
+                            onMouseMove={() => {
+                              setHoverPieKey(g.label);
+                              setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                            }}
+                            onTouchStart={() => {
+                              setHoverPieKey(g.label);
+                              setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                            }}
+                            onTouchMove={() => {
+                              setHoverPieKey(g.label);
+                              setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                            }}
+                          />
+                        );
                       })}
+                      {hoverPiePt && hoverPieKey ? (
+                        <g>
+                          <circle cx={hoverPiePt.x} cy={hoverPiePt.y} r={4} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
+                          {(() => {
+                            const label = `${hoverPiePt.label}: ${hoverPiePt.value.toLocaleString()}`;
+                            const padX = 8;
+                            const boxW = Math.min(320, 12 + label.length * 6.2);
+                            const boxH = 26;
+                            const x = Math.min(640 - boxW - 8, Math.max(8, hoverPiePt.x + 12));
+                            const y = Math.min(300 - boxH - 8, Math.max(8, hoverPiePt.y - boxH - 10));
+                            return (
+                              <g>
+                                <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                                <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                                  {label}
+                                </text>
+                              </g>
+                            );
+                          })()}
+                        </g>
+                      ) : null}
                       <text x="420" y="34" fontSize="12" fill="var(--muted)">
                         Top groups
                       </text>
@@ -1548,7 +1759,20 @@ function KpiBarChartWidgetInner({
             </div>
           ) : (
             <div style={{ width: "100%", maxWidth: 720 }}>
-              <svg viewBox="0 0 640 260" role="img" aria-label="Bar chart" style={{ width: "100%", height: "auto", display: "block" }}>
+              <svg
+                viewBox="0 0 640 260"
+                role="img"
+                aria-label="Bar chart"
+                style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+                onMouseLeave={() => {
+                  setHoverBarKey(null);
+                  setHoverBarPt(null);
+                }}
+                onTouchEnd={() => {
+                  setHoverBarKey(null);
+                  setHoverBarPt(null);
+                }}
+              >
                 <rect x="0" y="0" width="640" height="260" fill="var(--bg)" rx="6" />
                 {(() => {
                   const W = 640;
@@ -1563,6 +1787,8 @@ function KpiBarChartWidgetInner({
                   const n = data.length;
                   const gap = 8;
                   const barW = n > 0 ? Math.max(10, (innerW - gap * (n - 1)) / n) : 10;
+                  const minIdx = data.reduce((best, b, i) => (b.value < data[best].value ? i : best), 0);
+                  const maxIdx = data.reduce((best, b, i) => (b.value > data[best].value ? i : best), 0);
                   return (
                     <>
                       <text x={8} y={top + 12} fontSize="11" fill="var(--muted)">
@@ -1574,13 +1800,71 @@ function KpiBarChartWidgetInner({
                         const y = top + innerH - h;
                         return (
                           <g key={b.label}>
-                            <rect x={x} y={y} width={barW} height={h} fill="var(--accent)" opacity={0.85} rx={2} />
+                            <rect
+                              x={x}
+                              y={y}
+                              width={barW}
+                              height={h}
+                              fill="var(--accent)"
+                              opacity={0.85}
+                              rx={2}
+                              onMouseEnter={() => {
+                                setHoverBarKey(b.label);
+                                setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
+                              }}
+                              onMouseMove={() => {
+                                setHoverBarKey(b.label);
+                                setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
+                              }}
+                              onTouchStart={() => {
+                                setHoverBarKey(b.label);
+                                setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
+                              }}
+                              onTouchMove={() => {
+                                setHoverBarKey(b.label);
+                                setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
+                              }}
+                            />
+                            {(i === minIdx || i === maxIdx) && h > 0 ? (
+                              <text
+                                x={x + barW / 2}
+                                y={Math.max(12, y - 6)}
+                                fontSize="11"
+                                fill="var(--text)"
+                                textAnchor="middle"
+                                style={{ paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3 }}
+                              >
+                                {b.value.toLocaleString()}
+                              </text>
+                            ) : null}
                             <text x={x + barW / 2} y={H - 10} fontSize="9" fill="var(--muted)" textAnchor="middle">
                               {b.label.length > 12 ? `${b.label.slice(0, 10)}…` : b.label}
                             </text>
                           </g>
                         );
                       })}
+                      {hoverBarPt && hoverBarKey ? (
+                        <g>
+                          <line x1={hoverBarPt.x} y1={top} x2={hoverBarPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
+                          {(() => {
+                            const label = `${hoverBarPt.label}: ${hoverBarPt.value.toLocaleString()}`;
+                            const padX = 8;
+                            const boxW = Math.min(300, 12 + label.length * 6.2);
+                            const boxH = 26;
+                            const preferLeft = hoverBarPt.x > W * 0.55;
+                            const x = preferLeft ? Math.max(8, hoverBarPt.x - boxW - 10) : Math.min(W - boxW - 8, hoverBarPt.x + 10);
+                            const y = Math.max(8, Math.min(H - boxH - 8, hoverBarPt.y - boxH - 10));
+                            return (
+                              <g>
+                                <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                                <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                                  {label}
+                                </text>
+                              </g>
+                            );
+                          })()}
+                        </g>
+                      ) : null}
                     </>
                   );
                 })()}
@@ -1593,7 +1877,20 @@ function KpiBarChartWidgetInner({
       ) : (
         <div style={{ width: "100%", maxWidth: 720 }}>
           {chartType === "pie" ? (
-            <svg viewBox="0 0 640 300" role="img" aria-label="Pie chart" style={{ width: "100%", height: "auto", display: "block" }}>
+            <svg
+              viewBox="0 0 640 300"
+              role="img"
+              aria-label="Pie chart"
+              style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+              onMouseLeave={() => {
+                setHoverPieKey(null);
+                setHoverPiePt(null);
+              }}
+              onTouchEnd={() => {
+                setHoverPieKey(null);
+                setHoverPiePt(null);
+              }}
+            >
               <rect x="0" y="0" width="640" height="300" fill="var(--bg)" rx="6" />
               {(() => {
                 const data = visibleNumeric.slice(0, 12);
@@ -1609,9 +1906,56 @@ function KpiBarChartWidgetInner({
                       const frac = b.value / total;
                       const next = a + frac * Math.PI * 2;
                       const d = pieArcPath(cx, cy, r, a, next);
+                      const mid = (a + next) / 2;
+                      const p = polarToCartesian(cx, cy, r * 0.72, mid);
                       a = next;
-                      return <path key={b.key} d={d} fill={colors[i % colors.length]} stroke="var(--surface)" strokeWidth="1" />;
+                      return (
+                        <path
+                          key={b.key}
+                          d={d}
+                          fill={colors[i % colors.length]}
+                          stroke="var(--surface)"
+                          strokeWidth="1"
+                          onMouseEnter={() => {
+                            setHoverPieKey(b.key);
+                            setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
+                          }}
+                          onMouseMove={() => {
+                            setHoverPieKey(b.key);
+                            setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
+                          }}
+                          onTouchStart={() => {
+                            setHoverPieKey(b.key);
+                            setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
+                          }}
+                          onTouchMove={() => {
+                            setHoverPieKey(b.key);
+                            setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
+                          }}
+                        />
+                      );
                     })}
+                    {hoverPiePt && hoverPieKey ? (
+                      <g>
+                        <circle cx={hoverPiePt.x} cy={hoverPiePt.y} r={4} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
+                        {(() => {
+                          const label = `${hoverPiePt.label}: ${hoverPiePt.value.toLocaleString()}`;
+                          const padX = 8;
+                          const boxW = Math.min(320, 12 + label.length * 6.2);
+                          const boxH = 26;
+                          const x = Math.min(640 - boxW - 8, Math.max(8, hoverPiePt.x + 12));
+                          const y = Math.min(300 - boxH - 8, Math.max(8, hoverPiePt.y - boxH - 10));
+                          return (
+                            <g>
+                              <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                              <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                                {label}
+                              </text>
+                            </g>
+                          );
+                        })()}
+                      </g>
+                    ) : null}
                     <text x="420" y="34" fontSize="12" fill="var(--muted)">
                       Top fields
                     </text>
@@ -1628,7 +1972,20 @@ function KpiBarChartWidgetInner({
               })()}
             </svg>
           ) : (
-            <svg viewBox="0 0 640 260" role="img" aria-label="Bar chart" style={{ width: "100%", height: "auto", display: "block" }}>
+            <svg
+              viewBox="0 0 640 260"
+              role="img"
+              aria-label="Bar chart"
+              style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+              onMouseLeave={() => {
+                setHoverBarKey(null);
+                setHoverBarPt(null);
+              }}
+              onTouchEnd={() => {
+                setHoverBarKey(null);
+                setHoverBarPt(null);
+              }}
+            >
               <rect x="0" y="0" width="640" height="260" fill="var(--bg)" rx="6" />
               {(() => {
                 const W = 640;
@@ -1642,6 +1999,8 @@ function KpiBarChartWidgetInner({
                 const n = visibleNumeric.length;
                 const gap = 8;
                 const barW = n > 0 ? Math.max(8, (innerW - gap * (n - 1)) / n) : 8;
+                const minIdx = visibleNumeric.reduce((best, b, i) => (b.value < visibleNumeric[best].value ? i : best), 0);
+                const maxIdx = visibleNumeric.reduce((best, b, i) => (b.value > visibleNumeric[best].value ? i : best), 0);
                 return (
                   <>
                     <text x={8} y={top + 12} fontSize="11" fill="var(--muted)">
@@ -1653,13 +2012,71 @@ function KpiBarChartWidgetInner({
                       const y = top + innerH - h;
                       return (
                         <g key={b.key}>
-                          <rect x={x} y={y} width={barW} height={h} fill="var(--accent)" opacity={0.85} rx={2} />
+                          <rect
+                            x={x}
+                            y={y}
+                            width={barW}
+                            height={h}
+                            fill="var(--accent)"
+                            opacity={0.85}
+                            rx={2}
+                            onMouseEnter={() => {
+                              setHoverBarKey(b.key);
+                              setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
+                            }}
+                            onMouseMove={() => {
+                              setHoverBarKey(b.key);
+                              setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
+                            }}
+                            onTouchStart={() => {
+                              setHoverBarKey(b.key);
+                              setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
+                            }}
+                            onTouchMove={() => {
+                              setHoverBarKey(b.key);
+                              setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
+                            }}
+                          />
+                          {(i === minIdx || i === maxIdx) && h > 0 ? (
+                            <text
+                              x={x + barW / 2}
+                              y={Math.max(12, y - 6)}
+                              fontSize="11"
+                              fill="var(--text)"
+                              textAnchor="middle"
+                              style={{ paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3 }}
+                            >
+                              {b.value.toLocaleString()}
+                            </text>
+                          ) : null}
                           <text x={x + barW / 2} y={H - 8} fontSize="9" fill="var(--muted)" textAnchor="middle">
                             {b.key.length > 14 ? `${b.key.slice(0, 12)}…` : b.key}
                           </text>
                         </g>
                       );
                     })}
+                    {hoverBarPt && hoverBarKey ? (
+                      <g>
+                        <line x1={hoverBarPt.x} y1={top} x2={hoverBarPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
+                        {(() => {
+                          const label = `${hoverBarPt.label}: ${hoverBarPt.value.toLocaleString()}`;
+                          const padX = 8;
+                          const boxW = Math.min(300, 12 + label.length * 6.2);
+                          const boxH = 26;
+                          const preferLeft = hoverBarPt.x > W * 0.55;
+                          const x = preferLeft ? Math.max(8, hoverBarPt.x - boxW - 10) : Math.min(W - boxW - 8, hoverBarPt.x + 10);
+                          const y = Math.max(8, Math.min(H - boxH - 8, hoverBarPt.y - boxH - 10));
+                          return (
+                            <g>
+                              <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                              <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                                {label}
+                              </text>
+                            </g>
+                          );
+                        })()}
+                      </g>
+                    ) : null}
                   </>
                 );
               })()}
@@ -1725,6 +2142,7 @@ function KpiTrendWidgetInner({
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const mode = widget.mode || "multi_line_items";
   const [viewerView, setViewerView] = useState<"bar" | "line">(widget.view || "bar");
+  const [hoverTrendPt, setHoverTrendPt] = useState<{ x: number; y: number; label: string; value: number; series: string } | null>(null);
   const [selectedYears, setSelectedYears] = useState<number[]>(() => {
     const y = Math.max(widget.start_year, widget.end_year);
     const raw = Array.isArray(widget.default_years) ? widget.default_years : [];
@@ -2241,7 +2659,14 @@ function KpiTrendWidgetInner({
             <p style={{ color: "var(--muted)", margin: 0 }}>No grouped data available.</p>
           ) : viewerView === "bar" ? (
             <div style={{ width: "100%", maxWidth: 840 }}>
-              <svg viewBox="0 0 720 320" role="img" aria-label="Trend bars" style={{ width: "100%", height: "auto", display: "block" }}>
+              <svg
+                viewBox="0 0 720 320"
+                role="img"
+                aria-label="Trend bars"
+                style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+                onMouseLeave={() => setHoverTrendPt(null)}
+                onTouchEnd={() => setHoverTrendPt(null)}
+              >
                 <rect x="0" y="0" width="720" height="320" fill="var(--bg)" rx="6" />
                 {(() => {
                   const W = 720;
@@ -2280,7 +2705,22 @@ function KpiTrendWidgetInner({
                               const h = maxV > 0 ? (v / maxV) * innerH : 0;
                               const x = catX + j * (barW + barGap);
                               const yy = top + innerH - h;
-                              return <rect key={`${c}:${y}`} x={x} y={yy} width={barW} height={h} fill={yearColors[y]} opacity={0.9} rx={2} />;
+                              return (
+                                <rect
+                                  key={`${c}:${y}`}
+                                  x={x}
+                                  y={yy}
+                                  width={barW}
+                                  height={h}
+                                  fill={yearColors[y]}
+                                  opacity={0.9}
+                                  rx={2}
+                                  onMouseEnter={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
+                                  onMouseMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
+                                  onTouchStart={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
+                                  onTouchMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
+                                />
+                              );
                             })}
                             <text x={catX + catW / 2} y={H - 56} fontSize="9" fill="var(--muted)" textAnchor="middle">
                               {c.length > 14 ? `${c.slice(0, 12)}…` : c}
@@ -2288,6 +2728,28 @@ function KpiTrendWidgetInner({
                           </g>
                         );
                       })}
+                      {hoverTrendPt ? (
+                        <g>
+                          <line x1={hoverTrendPt.x} y1={top} x2={hoverTrendPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
+                          {(() => {
+                            const label = `${hoverTrendPt.series} · ${hoverTrendPt.label}: ${hoverTrendPt.value.toLocaleString()}`;
+                            const padX = 8;
+                            const boxW = Math.min(360, 12 + label.length * 6.2);
+                            const boxH = 26;
+                            const preferLeft = hoverTrendPt.x > W * 0.55;
+                            const x = preferLeft ? Math.max(8, hoverTrendPt.x - boxW - 10) : Math.min(W - boxW - 8, hoverTrendPt.x + 10);
+                            const y = Math.max(8, Math.min(H - boxH - 8, hoverTrendPt.y - boxH - 10));
+                            return (
+                              <g>
+                                <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                                <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                                  {label}
+                                </text>
+                              </g>
+                            );
+                          })()}
+                        </g>
+                      ) : null}
                       <g>
                         {years.slice().reverse().map((y, i) => (
                           <g key={y} transform={`translate(${left + i * 96}, ${H - 34})`}>
@@ -2305,7 +2767,14 @@ function KpiTrendWidgetInner({
             </div>
           ) : (
             <div style={{ width: "100%", maxWidth: 840 }}>
-              <svg viewBox="0 0 720 320" role="img" aria-label="Trend lines" style={{ width: "100%", height: "auto", display: "block" }}>
+              <svg
+                viewBox="0 0 720 320"
+                role="img"
+                aria-label="Trend lines"
+                style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+                onMouseLeave={() => setHoverTrendPt(null)}
+                onTouchEnd={() => setHoverTrendPt(null)}
+              >
                 <rect x="0" y="0" width="720" height="320" fill="var(--bg)" rx="6" />
                 {(() => {
                   const W = 720;
@@ -2354,11 +2823,44 @@ function KpiTrendWidgetInner({
                           <g key={c}>
                             <path d={d} fill="none" stroke={catColors[idx % catColors.length]} strokeWidth="2.5" />
                             {pts.map((p, i) => (
-                              <circle key={`${c}:${i}`} cx={p.x} cy={p.y} r="3" fill={catColors[idx % catColors.length]} />
+                              <circle
+                                key={`${c}:${i}`}
+                                cx={p.x}
+                                cy={p.y}
+                                r="3"
+                                fill={catColors[idx % catColors.length]}
+                                onMouseEnter={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
+                                onMouseMove={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
+                                onTouchStart={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
+                                onTouchMove={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
+                              />
                             ))}
                           </g>
                         );
                       })}
+                      {hoverTrendPt ? (
+                        <g>
+                          <line x1={hoverTrendPt.x} y1={top} x2={hoverTrendPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
+                          <circle cx={hoverTrendPt.x} cy={hoverTrendPt.y} r={6} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
+                          {(() => {
+                            const label = `${hoverTrendPt.series} · ${hoverTrendPt.label}: ${hoverTrendPt.value.toLocaleString()}`;
+                            const padX = 8;
+                            const boxW = Math.min(380, 12 + label.length * 6.2);
+                            const boxH = 26;
+                            const preferLeft = hoverTrendPt.x > W * 0.55;
+                            const x = preferLeft ? Math.max(8, hoverTrendPt.x - boxW - 10) : Math.min(W - boxW - 8, hoverTrendPt.x + 10);
+                            const y = Math.max(8, Math.min(H - boxH - 8, hoverTrendPt.y - boxH - 10));
+                            return (
+                              <g>
+                                <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                                <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                                  {label}
+                                </text>
+                              </g>
+                            );
+                          })()}
+                        </g>
+                      ) : null}
                       <g>
                         {topCats.map((c, i) => (
                           <g key={c} transform={`translate(${left + i * 110}, ${top + 12})`}>
@@ -2379,7 +2881,14 @@ function KpiTrendWidgetInner({
       ) : (
         <div style={{ display: "grid", gap: "0.75rem" }}>
           <div style={{ width: "100%", maxWidth: 840 }}>
-            <svg viewBox="0 0 720 320" role="img" aria-label="Field trend" style={{ width: "100%", height: "auto", display: "block" }}>
+            <svg
+              viewBox="0 0 720 320"
+              role="img"
+              aria-label="Field trend"
+              style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+              onMouseLeave={() => setHoverTrendPt(null)}
+              onTouchEnd={() => setHoverTrendPt(null)}
+            >
               <rect x="0" y="0" width="720" height="320" fill="var(--bg)" rx="6" />
               {(() => {
                 const W = 720;
@@ -2419,7 +2928,22 @@ function KpiTrendWidgetInner({
                             const h = maxV > 0 ? (v / maxV) * innerH : 0;
                             const x = catX + j * (barW + barGap);
                             const yy = top + innerH - h;
-                            return <rect key={`${k}:${y}`} x={x} y={yy} width={barW} height={h} fill={yearColors[y]} opacity={0.9} rx={2} />;
+                            return (
+                              <rect
+                                key={`${k}:${y}`}
+                                x={x}
+                                y={yy}
+                                width={barW}
+                                height={h}
+                                fill={yearColors[y]}
+                                opacity={0.9}
+                                rx={2}
+                                onMouseEnter={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
+                                onMouseMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
+                                onTouchStart={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
+                                onTouchMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
+                              />
+                            );
                           })}
                           <text x={catX + catW / 2} y={H - 56} fontSize="9" fill="var(--muted)" textAnchor="middle">
                             {k.length > 14 ? `${k.slice(0, 12)}…` : k}
@@ -2427,6 +2951,28 @@ function KpiTrendWidgetInner({
                         </g>
                       );
                     })}
+                    {hoverTrendPt ? (
+                      <g>
+                        <line x1={hoverTrendPt.x} y1={top} x2={hoverTrendPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
+                        {(() => {
+                          const label = `${hoverTrendPt.series} · ${hoverTrendPt.label}: ${hoverTrendPt.value.toLocaleString()}`;
+                          const padX = 8;
+                          const boxW = Math.min(380, 12 + label.length * 6.2);
+                          const boxH = 26;
+                          const preferLeft = hoverTrendPt.x > W * 0.55;
+                          const x = preferLeft ? Math.max(8, hoverTrendPt.x - boxW - 10) : Math.min(W - boxW - 8, hoverTrendPt.x + 10);
+                          const y = Math.max(8, Math.min(H - boxH - 8, hoverTrendPt.y - boxH - 10));
+                          return (
+                            <g>
+                              <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                              <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                                {label}
+                              </text>
+                            </g>
+                          );
+                        })()}
+                      </g>
+                    ) : null}
                     <g>
                       {years.slice().reverse().map((y, i) => (
                         <g key={y} transform={`translate(${left + i * 96}, ${H - 34})`}>

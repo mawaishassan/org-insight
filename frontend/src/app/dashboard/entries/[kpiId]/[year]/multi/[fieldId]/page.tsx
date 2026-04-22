@@ -780,8 +780,7 @@ export default function FullPageMultiItems() {
     }
   }, [visibleColumns, kpiId, fieldId]);
 
-  const startEdit = (row: MultiItemsRow) => {
-    if (!entryId) return;
+  const openRowView = (row: MultiItemsRow) => {
     const params = new URLSearchParams({
       organization_id: String(effectiveOrgId ?? ""),
       ...(periodKey ? { period_key: periodKey } : {}),
@@ -795,24 +794,7 @@ export default function FullPageMultiItems() {
     // legacy inline save no longer used; kept for compatibility
   };
 
-  const handleDeleteRow = async (rowIndex: number) => {
-    if (!token || !entryId || !fieldId) return;
-    if (!window.confirm("Delete this row?")) return;
-    try {
-      await api(
-        `/entries/multi-items/rows/${rowIndex}?${new URLSearchParams({
-          entry_id: String(entryId),
-          field_id: String(fieldId),
-          organization_id: String(effectiveOrgId ?? ""),
-        }).toString()}`,
-        { method: "DELETE", token }
-      );
-      toast.success("Row deleted");
-      await loadRows();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Delete failed");
-    }
-  };
+  // Single-row delete is now handled on the row detail page.
 
   const handleBulkDelete = async () => {
     if (!token || !entryId || !fieldId || selectedIndices.length === 0) return;
@@ -1044,9 +1026,7 @@ export default function FullPageMultiItems() {
                     organization_id: String(effectiveOrgId ?? ""),
                     ...(periodKey ? { period_key: periodKey } : {}),
                   });
-                  router.push(
-                    `/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/new?${params.toString()}`
-                  );
+                  router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/new?${params.toString()}&mode=edit`);
                 }}
               >
                 Add row
@@ -2437,7 +2417,7 @@ export default function FullPageMultiItems() {
                         cursor: canEditKpi && row.can_edit !== false ? "pointer" : "default",
                       }}
                       onClick={() => {
-                        if (canEditKpi && row.can_edit !== false) startEdit(row);
+                        openRowView(row);
                       }}
                     >
                       {(() => {
@@ -2544,14 +2524,51 @@ export default function FullPageMultiItems() {
                           </svg>
                         </button>
                         )}
-                        {row.can_edit !== false && canEditKpi && (
+                        <button
+                          type="button"
+                          title="View row"
+                          aria-label="View row"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openRowView(row);
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            width: 32,
+                            height: 32,
+                            padding: 0,
+                            border: "1px solid var(--border)",
+                            borderRadius: 6,
+                            background: "var(--bg-subtle, #f5f5f5)",
+                            color: "var(--text)",
+                            cursor: "pointer",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "var(--accent-muted, #e8e8e8)";
+                            e.currentTarget.style.borderColor = "var(--accent)";
+                            e.currentTarget.style.color = "var(--accent)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "var(--bg-subtle, #f5f5f5)";
+                            e.currentTarget.style.borderColor = "var(--border)";
+                            e.currentTarget.style.color = "var(--text)";
+                          }}
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+                            <circle cx="12" cy="12" r="3" />
+                          </svg>
+                        </button>
+                        {false && row.can_edit !== false && canEditKpi && (
                         <button
                           type="button"
                           title="Edit row"
                           aria-label="Edit row"
                           onClick={(e) => {
                             e.stopPropagation();
-                            startEdit(row);
+                              openRowView(row);
                           }}
                           style={{
                             display: "inline-flex",
@@ -2583,14 +2600,14 @@ export default function FullPageMultiItems() {
                           </svg>
                         </button>
                         )}
-                        {row.can_delete !== false && canEditKpi && (
+                        {false && row.can_delete !== false && canEditKpi && (
                         <button
                           type="button"
                           title="Delete row"
                           aria-label="Delete row"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleDeleteRow(row.index);
+                              // handled on row detail page
                           }}
                           style={{
                             display: "inline-flex",
