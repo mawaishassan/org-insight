@@ -3,7 +3,7 @@
 import datetime
 from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from app.core.models import (
@@ -29,6 +29,13 @@ from app.reports.schemas import ReportTemplateCreate, ReportTemplateUpdate, Repo
 from app.formula_engine.evaluator import evaluate_formula
 from app.core.models import FieldType
 from app.entries.service import _load_other_kpi_values
+from app.entries.reference_filter_resolve import (
+    build_reference_resolution_map,
+    _extract_ref_label,
+    _multi_raw_pieces,
+    _normalize_reference_value,
+)
+from app.entries.multi_item_filters import row_passes_filters
 from jinja2 import Environment, BaseLoader, select_autoescape
 from markupsafe import escape as html_escape
 
@@ -69,6 +76,17 @@ async def get_report_template_detail(
     if not rt:
         return None
 
+    # Used by the designer as the default year for previewing KPI values.
+    # Without this, Super Admin often lands on the current year, which may have no submitted entries yet.
+    latest_year_row = await db.execute(
+        select(func.max(KPIEntry.year)).where(KPIEntry.organization_id == org_id)
+    )
+    default_year = latest_year_row.scalar_one_or_none()
+    try:
+        default_year_int = int(default_year) if default_year is not None else None
+    except (TypeError, ValueError):
+        default_year_int = None
+
     # All KPIs in the same organization (no domain attachment required)
     kpis_from_domains = []
     org_row = await db.execute(select(Organization).where(Organization.id == org_id))
@@ -82,6 +100,7 @@ async def get_report_template_detail(
     )
     for kpi in result.unique().scalars().all():
         field_count = len(kpi.fields) if kpi.fields else 0
+        kpi_year = getattr(kpi, "year", None)
         kpi_td_raw = getattr(kpi, "time_dimension", None)
         try:
             kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
@@ -91,6 +110,7 @@ async def get_report_template_detail(
         kpis_from_domains.append({
             "kpi_id": kpi.id,
             "kpi_name": kpi.name,
+            "kpi_year": kpi_year,
             "fields_count": field_count,
             "time_dimension": effective_td.value,
         })
@@ -100,6 +120,8 @@ async def get_report_template_detail(
         "organization_id": rt.organization_id,
         "name": rt.name,
         "description": rt.description,
+        "default_year": default_year_int,
+        "template_mode": getattr(rt, "template_mode", "designer"),
         "body_template": rt.body_template,
         "body_blocks": getattr(rt, "body_blocks", None),
         "attached_domains": [],
@@ -165,6 +187,8 @@ async def update_report_template(
         rt.name = data.name
     if data.description is not None:
         rt.description = data.description
+    if getattr(data, "template_mode", None) is not None:
+        rt.template_mode = data.template_mode
     if data.body_template is not None:
         rt.body_template = data.body_template
     if data.body_blocks is not None:
@@ -609,7 +633,7 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
     domain_kpis, kpi_table, kpi_grid, kpi_list, single_value.
     """
     out: list[str] = []
-    for b in blocks:
+    for bi, b in enumerate(blocks):
         block_type = (b.get("type") or "").strip()
         if not block_type:
             continue
@@ -703,6 +727,20 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                 f"</span>"
             )
         elif block_type == "kpi_table":
+            block_uid = str(b.get("id") or f"__idx_{bi}__")
+            _buid = _jinja_quote_block_uid(block_uid)
+            _ml_prefix_f = (
+                "{% set _eid = (entry.entry_id|string) if entry.entry_id is not none else '__none__' %}"
+                "{% set _by_ent = ((multi_line_block_rows.get('" + _buid + "', {}) | default({})).get((kpi.kpi_id|string), {}) | default({})).get(_eid, {}) | default({}) %}"
+                "{% set _f_rows = _by_ent.get(f.field_key, none) %}"
+                "{% set _vi = _f_rows if _f_rows is not none else f.value_items %}"
+            )
+            _ml_prefix_ef = (
+                "{% set _eid = (entry.entry_id|string) if entry.entry_id is not none else '__none__' %}"
+                "{% set _by_ent = ((multi_line_block_rows.get('" + _buid + "', {}) | default({})).get((kpi.kpi_id|string), {}) | default({})).get(_eid, {}) | default({}) %}"
+                "{% set _ef_rows = _by_ent.get(ef.field_key, none) %}"
+                "{% set _vi = _ef_rows if _ef_rows is not none else ef.value_items %}"
+            )
             kpi_ids = b.get("kpiIds") or []
             field_keys = b.get("fieldKeys") or []
             one_per_kpi = b.get("oneTablePerKpi", True)
@@ -710,7 +748,9 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
             # Explicit False → hide KPI heading; missing or True → show (support both camelCase and snake_case)
             _sth = b.get("showTableHeading") if "showTableHeading" in b else b.get("show_table_heading")
             show_table_heading = _sth is not False
-            show_multi_as_table = b.get("showMultiLineAsTable", True)
+            # For KPI tables, always render multi-line items as standalone tables (not nested in a cell)
+            # to keep the main KPI table readable.
+            show_multi_as_table = True
             # When False, hide the parent multi-line field name; inner table stays
             _sml = b.get("showMultiLineFieldLabel") if "showMultiLineFieldLabel" in b else b.get("show_multi_line_field_label")
             show_multi_line_field_label = _sml is not False
@@ -758,58 +798,73 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
             _td_style_ef = ' style="text-align: {{ column_align.get(ef.field_key, \'left\') }}"'
             _label_f_cond = "{% if show_multi_line_field_label or f.field_type != 'multi_line_items' %}" + _label_f + "{% endif %}"
             _label_key_cond = "{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (((_fl|first)|default({})).field_type != 'multi_line_items') %}" + _label_key + "{% endif %}"
-            if show_multi_as_table:
-                _cell_multi = (
-                    "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
-                    "{% if f.field_type == 'multi_line_items' and f.value_items %}"
-                    "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse; width: 100%;\">"
-                    "<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<th>" + _sub_label_sf_f + "</th>{% endif %}{% endfor %}</tr>"
-                    "{% for item in f.value_items %}<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}</tr>{% endfor %}"
-                    "</table>{% else %}{{ f.value }}{% endif %}"
-                )
-                _cell_multi_ef = (
-                    "{% set show_sub_keys = field_sub_field_keys.get(ef.field_key, []) | default([]) %}"
-                    "{% if ef.field_type == 'multi_line_items' and ef.value_items %}"
-                    "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse; width: 100%;\">"
-                    "<tr>{% for sf in (ef.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<th>" + _sub_label_sf_ef + "</th>{% endif %}{% endfor %}</tr>"
-                    "{% for item in ef.value_items %}<tr>{% for sf in (ef.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}</tr>{% endfor %}"
-                    "</table>{% else %}{{ ef.value }}{% endif %}"
-                )
-            else:
-                _cell_multi = (
-                    "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
-                    "{% if f.field_type == 'multi_line_items' and f.value_items %}"
-                    "<div class=\"report-kpi-multi\">"
-                    "{% for item in f.value_items %}"
-                    "<div class=\"report-kpi-multi-row\">"
-                    "{% for sf in (f.sub_fields | default([])) %}"
-                    "{% if not show_sub_keys or sf.key in show_sub_keys %}"
-                    "<div class=\"report-kpi-multi-cell\"><strong>" + _sub_label_sf_f + ":</strong> {{ item[sf.key] }}</div>"
-                    "{% endif %}"
-                    "{% endfor %}"
-                    "</div>"
-                    "{% endfor %}"
-                    "</div>{% else %}{{ f.value }}{% endif %}"
-                )
-                _cell_multi_ef = (
-                    "{% set show_sub_keys = field_sub_field_keys.get(ef.field_key, []) | default([]) %}"
-                    "{% if ef.field_type == 'multi_line_items' and ef.value_items %}"
-                    "<div class=\"report-kpi-multi\">"
-                    "{% for item in ef.value_items %}"
-                    "<div class=\"report-kpi-multi-row\">"
-                    "{% for sf in (ef.sub_fields | default([])) %}"
-                    "{% if not show_sub_keys or sf.key in show_sub_keys %}"
-                    "<div class=\"report-kpi-multi-cell\"><strong>" + _sub_label_sf_ef + ":</strong> {{ item[sf.key] }}</div>"
-                    "{% endif %}"
-                    "{% endfor %}"
-                    "</div>"
-                    "{% endfor %}"
-                    "</div>{% else %}{{ ef.value }}{% endif %}"
-                )
+            # Scalar cell (main KPI table). Multi-line fields are excluded from the main table.
+            _cell_scalar = "{{ f.value }}"
+            _cell_scalar_ef = "{{ ef.value }}"
+
+            # Standalone multi-line table snippet (rendered beneath the main KPI table).
+            _multi_table_f = (
+                _ml_prefix_f
+                + "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
+                "{% if f.field_type == 'multi_line_items' and _vi %}"
+                "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse; width: 100%;\">"
+                "<tr>"
+                "{% if show_sub_keys and (show_sub_keys|length) > 0 %}"
+                "{% for _sk in show_sub_keys %}{% for sf in (f.sub_fields | default([])) %}{% if sf.key == _sk %}<th>"
+                + _sub_label_sf_f
+                + "</th>{% endif %}{% endfor %}{% endfor %}"
+                "{% else %}"
+                "{% for sf in (f.sub_fields | default([])) %}<th>" + _sub_label_sf_f + "</th>{% endfor %}"
+                "{% endif %}"
+                "</tr>"
+                "{% for item in _vi %}<tr>"
+                "{% if show_sub_keys and (show_sub_keys|length) > 0 %}"
+                "{% for _sk in show_sub_keys %}{% for sf in (f.sub_fields | default([])) %}{% if sf.key == _sk %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}{% endfor %}"
+                "{% else %}"
+                "{% for sf in (f.sub_fields | default([])) %}<td>{{ item[sf.key] }}</td>{% endfor %}"
+                "{% endif %}"
+                "</tr>{% endfor %}"
+                "</table>{% else %}<p style=\"margin:0; color:#666;\">No rows.</p>{% endif %}"
+            )
+            _multi_table_ef = (
+                _ml_prefix_ef
+                + "{% set show_sub_keys = field_sub_field_keys.get(ef.field_key, []) | default([]) %}"
+                "{% if ef.field_type == 'multi_line_items' and _vi %}"
+                "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse; width: 100%;\">"
+                "<tr>"
+                "{% if show_sub_keys and (show_sub_keys|length) > 0 %}"
+                "{% for _sk in show_sub_keys %}{% for sf in (ef.sub_fields | default([])) %}{% if sf.key == _sk %}<th>"
+                + _sub_label_sf_ef
+                + "</th>{% endif %}{% endfor %}{% endfor %}"
+                "{% else %}"
+                "{% for sf in (ef.sub_fields | default([])) %}<th>" + _sub_label_sf_ef + "</th>{% endfor %}"
+                "{% endif %}"
+                "</tr>"
+                "{% for item in _vi %}<tr>"
+                "{% if show_sub_keys and (show_sub_keys|length) > 0 %}"
+                "{% for _sk in show_sub_keys %}{% for sf in (ef.sub_fields | default([])) %}{% if sf.key == _sk %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}{% endfor %}"
+                "{% else %}"
+                "{% for sf in (ef.sub_fields | default([])) %}<td>{{ item[sf.key] }}</td>{% endfor %}"
+                "{% endif %}"
+                "</tr>{% endfor %}"
+                "</table>{% else %}<p style=\"margin:0; color:#666;\">No rows.</p>{% endif %}"
+            )
             heading_html = '<h4>{{ kpi.kpi_name }}</h4>' if show_table_heading else ""
             _td_prefix, _ = _block_time_dimension_vars(b)
             if fields_layout == "rows":
                 if not kpi_ids and not field_keys:
+                    _multi_section = (
+                        "{% for entry in kpi.entries %}"
+                        "{% for f in entry.fields %}"
+                        "{% if f.field_type == 'multi_line_items' %}"
+                        "{% if show_multi_line_field_label %}<div style=\"margin-top: 0.75rem; font-weight: 600;\">"
+                        + _label_f
+                        + "</div>{% endif %}"
+                        + _multi_table_f
+                        + "{% endif %}"
+                        + "{% endfor %}"
+                        + "{% endfor %}"
+                    )
                     _content = (
                         _display_prefix
                         + _sub_display_prefix
@@ -817,27 +872,40 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         + _show_ml_label_prefix
                         + _column_align_prefix
                         + '<div class="report-kpi-table">'
-                        "{% if kpis %}"
-                        "{% for kpi in kpis %}"
+                        + "{% if kpis %}"
+                        + "{% for kpi in kpis %}"
                         + heading_html
                         + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
-                        '<tbody>'
-                        "{% for f in kpi.entries[0].fields if kpi.entries %}"
+                        + '<tbody>'
+                        + "{% for f in kpi.entries[0].fields if kpi.entries %}"
+                        + "{% if f.field_type != 'multi_line_items' %}"
                         "<tr><td" + _td_style_f + ">" + _label_f_cond + "</td>"
-                        "{% for entry in kpi.entries %}"
-                        "{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td" + _td_style_ef + ">" + _cell_multi_ef + "</td>{% endif %}{% endfor %}"
-                        "{% endfor %}"
+                        + "{% for entry in kpi.entries %}"
+                        "{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td" + _td_style_ef + ">" + _cell_scalar_ef + "</td>{% endif %}{% endfor %}"
+                        + "{% endfor %}"
                         "</tr>"
-                        "{% endfor %}"
+                        + "{% endif %}"
+                        + "{% endfor %}"
                         "</tbody></table>"
-                        "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+                        + _multi_section
+                        + "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                     )
                     out.append(_inject_time_dimension_filter(_content, _td_prefix))
                 else:
                     fid_list = ", ".join(str(i) for i in kpi_ids)
                     fkeys_list = ", ".join(repr(k) for k in field_keys)
-                    _cell_by_key = (
-                        "{% for f in entry.fields %}{% if f.field_key == key %}<td" + _td_style_key + ">" + _cell_multi + "</td>{% endif %}{% endfor %}"
+                    _cell_by_key = "{% for f in entry.fields %}{% if f.field_key == key %}<td" + _td_style_key + ">" + _cell_scalar + "</td>{% endif %}{% endfor %}"
+                    _multi_section = (
+                        "{% for entry in kpi.entries %}"
+                        "{% for f in entry.fields %}"
+                        "{% if f.field_type == 'multi_line_items' and f.field_key in field_keys_list %}"
+                        "{% if show_multi_line_field_label %}<div style=\"margin-top: 0.75rem; font-weight: 600;\">"
+                        + _label_f
+                        + "</div>{% endif %}"
+                        + _multi_table_f
+                        + "{% endif %}"
+                        + "{% endfor %}"
+                        + "{% endfor %}"
                     )
                     _content = (
                         _display_prefix
@@ -846,24 +914,40 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         + _show_ml_label_prefix
                         + _column_align_prefix
                         + f"{{% set kpi_ids_set = [{fid_list}] %}}"
-                        f"{{% set field_keys_list = [{fkeys_list}] %}}"
+                        + f"{{% set field_keys_list = [{fkeys_list}] %}}"
                         '<div class="report-kpi-table">'
-                        "{% if kpis %}"
-                        "{% for kpi in kpis %}"
-                        "{% if kpi.kpi_id in kpi_ids_set %}"
+                        + "{% if kpis %}"
+                        + "{% for kpi in kpis %}"
+                        + "{% if kpi.kpi_id in kpi_ids_set %}"
                         + heading_html
                         + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
-                        '<tbody>'
-                        "{% for key in field_keys_list %}"
+                        + '<tbody>'
+                        + "{% for key in field_keys_list %}"
+                        + "{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}"
+                        + "{% if (_fl | length == 0) or (((_fl|first)|default({})).field_type != 'multi_line_items') %}"
                         "<tr><td>" + _label_key_cond + "</td>{% for entry in kpi.entries %}" + _cell_by_key + "{% endfor %}</tr>"
-                        "{% endfor %}"
+                        + "{% endif %}"
+                        + "{% endfor %}"
                         "</tbody></table>"
-                        "{% endif %}"
-                        "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+                        + _multi_section
+                        + "{% endif %}"
+                        + "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                     )
                     out.append(_inject_time_dimension_filter(_content, _td_prefix))
             else:
                 if not kpi_ids and not field_keys:
+                    _multi_section = (
+                        "{% for entry in kpi.entries %}"
+                        "{% for f in entry.fields %}"
+                        "{% if f.field_type == 'multi_line_items' %}"
+                        "{% if show_multi_line_field_label %}<div style=\"margin-top: 0.75rem; font-weight: 600;\">"
+                        + _label_f
+                        + "</div>{% endif %}"
+                        + _multi_table_f
+                        + "{% endif %}"
+                        + "{% endfor %}"
+                        + "{% endfor %}"
+                    )
                     _content = (
                         _display_prefix
                         + _sub_display_prefix
@@ -871,24 +955,35 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         + _show_ml_label_prefix
                         + _column_align_prefix
                         + '<div class="report-kpi-table">'
-                        "{% if kpis %}"
-                        "{% for kpi in kpis %}"
+                        + "{% if kpis %}"
+                        + "{% for kpi in kpis %}"
                         + heading_html
                         + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
-                        '<thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th' + _td_style_f + '>' + _label_f_cond + '</th>{% endfor %}</tr></thead>'
-                        '<tbody>'
-                        "{% for entry in kpi.entries %}"
-                        '<tr>{% for f in entry.fields %}<td' + _td_style_f + '>' + _cell_multi + '</td>{% endfor %}</tr>'
-                        "{% endfor %}"
+                        '<thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}{% if f.field_type != "multi_line_items" %}<th' + _td_style_f + '>' + _label_f + '</th>{% endif %}{% endfor %}</tr></thead>'
+                        + '<tbody>'
+                        + "{% for entry in kpi.entries %}"
+                        '<tr>{% for f in entry.fields %}{% if f.field_type != "multi_line_items" %}<td' + _td_style_f + '>' + _cell_scalar + '</td>{% endif %}{% endfor %}</tr>'
+                        + "{% endfor %}"
                         "</tbody></table>"
-                        "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+                        + _multi_section
+                        + "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                     )
                     out.append(_inject_time_dimension_filter(_content, _td_prefix))
                 else:
                     fid_list = ", ".join(str(i) for i in kpi_ids)
                     fkeys_list = ", ".join(repr(k) for k in field_keys)
-                    _cell_by_key = (
-                        "{% for f in entry.fields %}{% if f.field_key == key %}<td" + _td_style_key + ">" + _cell_multi + "</td>{% endif %}{% endfor %}"
+                    _cell_by_key = "{% for f in entry.fields %}{% if f.field_key == key %}<td" + _td_style_key + ">" + _cell_scalar + "</td>{% endif %}{% endfor %}"
+                    _multi_section = (
+                        "{% for entry in kpi.entries %}"
+                        "{% for f in entry.fields %}"
+                        "{% if f.field_type == 'multi_line_items' and f.field_key in field_keys_list %}"
+                        "{% if show_multi_line_field_label %}<div style=\"margin-top: 0.75rem; font-weight: 600;\">"
+                        + _label_f
+                        + "</div>{% endif %}"
+                        + _multi_table_f
+                        + "{% endif %}"
+                        + "{% endfor %}"
+                        + "{% endfor %}"
                     )
                     _content = (
                         _display_prefix
@@ -897,21 +992,22 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                         + _show_ml_label_prefix
                         + _column_align_prefix
                         + f"{{% set kpi_ids_set = [{fid_list}] %}}"
-                        f"{{% set field_keys_list = [{fkeys_list}] %}}"
+                        + f"{{% set field_keys_list = [{fkeys_list}] %}}"
                         '<div class="report-kpi-table">'
-                        "{% if kpis %}"
-                        "{% for kpi in kpis %}"
-                        "{% if kpi.kpi_id in kpi_ids_set %}"
+                        + "{% if kpis %}"
+                        + "{% for kpi in kpis %}"
+                        + "{% if kpi.kpi_id in kpi_ids_set %}"
                         + heading_html
                         + '<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">'
-                        '<thead><tr>{% for key in field_keys_list %}<th' + _th_style_key + '>' + _label_key_cond + '</th>{% endfor %}</tr></thead>'
-                        '<tbody>'
-                        "{% for entry in kpi.entries %}"
-                        '<tr>{% for key in field_keys_list %}' + _cell_by_key + "{% endfor %}</tr>"
-                        "{% endfor %}"
+                        '<thead><tr>{% for key in field_keys_list %}{% set _fl = (kpi.entries[0].fields | default([]) | selectattr("field_key", "equalto", key) | list) %}{% if (_fl | length == 0) or (((_fl|first)|default({})).field_type != "multi_line_items") %}<th' + _th_style_key + '>' + _label_key + '</th>{% endif %}{% endfor %}</tr></thead>'
+                        + '<tbody>'
+                        + "{% for entry in kpi.entries %}"
+                        '<tr>{% for key in field_keys_list %}{% set _fl = (entry.fields | default([]) | selectattr("field_key", "equalto", key) | list) %}{% if (_fl | length == 0) or (((_fl|first)|default({})).field_type != "multi_line_items") %}' + _cell_by_key + "{% endif %}{% endfor %}</tr>"
+                        + "{% endfor %}"
                         "</tbody></table>"
-                        "{% endif %}"
-                        "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
+                        + _multi_section
+                        + "{% endif %}"
+                        + "{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>"
                     )
                     out.append(_inject_time_dimension_filter(_content, _td_prefix))
         elif block_type == "kpi_multi_table":
@@ -993,6 +1089,14 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                 "<tbody>" + "".join(row_parts) + "</tbody></table></div>"
             )
         elif block_type == "kpi_grid":
+            block_uid = str(b.get("id") or f"__idx_{bi}__")
+            _buid_g = _jinja_quote_block_uid(block_uid)
+            _grid_ml_prefix_f = (
+                "{% set _eid = (entry.entry_id|string) if entry.entry_id is not none else '__none__' %}"
+                "{% set _by_ent = ((multi_line_block_rows.get('" + _buid_g + "', {}) | default({})).get((kpi.kpi_id|string), {}) | default({})).get(_eid, {}) | default({}) %}"
+                "{% set _f_rows = _by_ent.get(f.field_key, none) %}"
+                "{% set _vi = _f_rows if _f_rows is not none else f.value_items %}"
+            )
             kpi_ids = b.get("kpiIds") or []
             field_keys = b.get("fieldKeys") or []
             _field_display = b.get("fieldDisplayNames") or b.get("field_display_names") or {}
@@ -1025,11 +1129,12 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
             ]
             _sub_keys_prefix = "{% set field_sub_field_keys = {" + ", ".join(_sub_keys_parts) + "} %}"
             _grid_cell_multi = (
-                "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
-                "{% if f.field_type == 'multi_line_items' and f.value_items %}"
+                _grid_ml_prefix_f
+                + "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
+                "{% if f.field_type == 'multi_line_items' and _vi %}"
                 "<table border=\"1\" cellpadding=\"4\" style=\"border-collapse: collapse;\">"
                 "<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<th>" + _sub_label_sf_f + "</th>{% endif %}{% endfor %}</tr>"
-                "{% for item in f.value_items %}<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}</tr>{% endfor %}"
+                "{% for item in _vi %}<tr>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}<td>{{ item[sf.key] }}</td>{% endif %}{% endfor %}</tr>{% endfor %}"
                 "</table>{% else %}{{ f.value }}{% endif %}"
             )
             _td_prefix_grid, _ = _block_time_dimension_vars(b)
@@ -1074,6 +1179,14 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
                 )
                 out.append(_inject_time_dimension_filter(_content, _td_prefix_grid))
         elif block_type == "kpi_list":
+            block_uid = str(b.get("id") or f"__idx_{bi}__")
+            _buid_l = _jinja_quote_block_uid(block_uid)
+            _list_ml_prefix_f = (
+                "{% set _eid = (entry.entry_id|string) if entry.entry_id is not none else '__none__' %}"
+                "{% set _by_ent = ((multi_line_block_rows.get('" + _buid_l + "', {}) | default({})).get((kpi.kpi_id|string), {}) | default({})).get(_eid, {}) | default({}) %}"
+                "{% set _f_rows = _by_ent.get(f.field_key, none) %}"
+                "{% set _vi = _f_rows if _f_rows is not none else f.value_items %}"
+            )
             kpi_ids = b.get("kpiIds") or []
             field_keys = b.get("fieldKeys") or []
             _field_display = b.get("fieldDisplayNames") or b.get("field_display_names") or {}
@@ -1106,9 +1219,10 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
             ]
             _sub_keys_prefix = "{% set field_sub_field_keys = {" + ", ".join(_sub_keys_parts) + "} %}"
             _list_cell_multi = (
-                "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
-                "{% if f.field_type == 'multi_line_items' and f.value_items %}"
-                "<ul style=\"margin: 0.25rem 0;\">{% for item in f.value_items %}<li>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}{{ item[sf.key] }}{% if not loop.last %} – {% endif %}{% endif %}{% endfor %}</li>{% endfor %}</ul>"
+                _list_ml_prefix_f
+                + "{% set show_sub_keys = field_sub_field_keys.get(f.field_key, []) | default([]) %}"
+                "{% if f.field_type == 'multi_line_items' and _vi %}"
+                "<ul style=\"margin: 0.25rem 0;\">{% for item in _vi %}<li>{% for sf in (f.sub_fields | default([])) %}{% if not show_sub_keys or sf.key in show_sub_keys %}{{ item[sf.key] }}{% if not loop.last %} – {% endif %}{% endif %}{% endfor %}</li>{% endfor %}</ul>"
                 "{% else %}{{ f.value }}{% endif %}"
             )
             _td_prefix_list, _ = _block_time_dimension_vars(b)
@@ -1155,6 +1269,127 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
     return "\n".join(out)
 
 
+def _jinja_quote_block_uid(s: str) -> str:
+    """Escape a block id for embedding in single-quoted Jinja string literals."""
+    return s.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _multi_line_filter_payload_nonempty(raw: object) -> bool:
+    if raw is None:
+        return False
+    if not isinstance(raw, dict):
+        return False
+    if raw.get("_version") == 2:
+        conds = raw.get("conditions")
+        return isinstance(conds, list) and len(conds) > 0
+    return len(raw) > 0
+
+
+async def _build_multi_line_block_rows(
+    db: AsyncSession,
+    org_id: int,
+    prefer_year: int,
+    body_blocks: list,
+    kpis_payload: list,
+    template_kpis: list,
+) -> dict:
+    """
+    Per visual block, per KPI, per entry, per multi-line field key: filtered row list for report rendering.
+    Keys: block_uid -> kpi_id str -> entry_id str ('__none__' for placeholder) -> field_key -> list[dict].
+    """
+    out: dict[str, dict[str, dict[str, dict[str, list]]]] = {}
+    kpi_field_by_pair: dict[tuple[int, str], KPIField] = {}
+    for kpi in template_kpis:
+        for f in kpi.fields or []:
+            kpi_field_by_pair[(kpi.id, str(f.key))] = f
+    payload_by_kpi_id = {p["kpi_id"]: p for p in kpis_payload if isinstance(p, dict) and p.get("kpi_id") is not None}
+
+    for bi, b in enumerate(body_blocks or []):
+        if not isinstance(b, dict):
+            continue
+        bt = (b.get("type") or "").strip()
+        if bt not in ("kpi_table", "kpi_grid", "kpi_list"):
+            continue
+        block_key = str(b.get("id") or f"__idx_{bi}__")
+        mfilters = b.get("multiLineFilters") or b.get("multi_line_filters") or {}
+        if not isinstance(mfilters, dict):
+            continue
+        kpi_ids_block = b.get("kpiIds") or []
+        if not isinstance(kpi_ids_block, list):
+            kpi_ids_block = []
+
+        for multi_field_key, raw_filter in mfilters.items():
+            if not isinstance(multi_field_key, str) or not multi_field_key.strip():
+                continue
+            if not _multi_line_filter_payload_nonempty(raw_filter):
+                continue
+            raw_filters = raw_filter if isinstance(raw_filter, dict) else {}
+
+            for kpi in template_kpis:
+                if kpi_ids_block and kpi.id not in kpi_ids_block:
+                    continue
+                field_orm = kpi_field_by_pair.get((kpi.id, multi_field_key))
+                if field_orm is None or field_orm.field_type != FieldType.multi_line_items:
+                    continue
+                kpi_payload = payload_by_kpi_id.get(kpi.id)
+                if not kpi_payload:
+                    continue
+                reference_field_types: dict[str, str] = {}
+                for sf in field_orm.sub_fields or []:
+                    fk = getattr(sf, "key", "") or ""
+                    if not fk:
+                        continue
+                    ft = getattr(sf.field_type, "value", sf.field_type)
+                    reference_field_types[str(fk)] = str(ft)
+
+                for entry in kpi_payload.get("entries") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_id = entry.get("entry_id")
+                    eid_key = str(entry_id) if entry_id is not None else "__none__"
+                    field_pl = None
+                    for fp in entry.get("fields") or []:
+                        if isinstance(fp, dict) and fp.get("field_key") == multi_field_key:
+                            field_pl = fp
+                            break
+                    if not field_pl:
+                        continue
+                    raw_items = field_pl.get("value_items")
+                    if not isinstance(raw_items, list):
+                        continue
+                    rows_copy = [dict(r) for r in raw_items if isinstance(r, dict)]
+                    resolution_maps = None
+                    if raw_filters.get("_version") == 2:
+                        conds = raw_filters.get("conditions")
+                        if isinstance(conds, list) and conds:
+                            resolution_maps = await build_reference_resolution_map(
+                                db,
+                                org_id,
+                                prefer_year,
+                                field_orm,
+                                conds,
+                                rows_copy,
+                            )
+                        filtered = [
+                            r
+                            for r in rows_copy
+                            if row_passes_filters(
+                                r,
+                                raw_filters,
+                                resolution_maps=resolution_maps,
+                                reference_field_types=reference_field_types,
+                            )
+                        ]
+                    else:
+                        filtered = [r for r in rows_copy if row_passes_filters(r, raw_filters)]
+
+                    out.setdefault(block_key, {}).setdefault(str(kpi.id), {}).setdefault(eid_key, {})[
+                        multi_field_key
+                    ] = filtered
+
+    return out
+
+
 def _report_period_display(year: int, period_key: str, dimension: TimeDimension) -> str:
     """Human-readable period for report (e.g. '2026 Q1')."""
     if not period_key or not period_key.strip():
@@ -1171,7 +1406,11 @@ def _report_period_display(year: int, period_key: str, dimension: TimeDimension)
 
 
 async def generate_report_data(
-    db: AsyncSession, template_id: int, org_id: int, year: int | None = None
+    db: AsyncSession,
+    template_id: int,
+    org_id: int,
+    year: int | None = None,
+    include_drafts: bool = False,
 ) -> dict | None:
     """
     Compile report data from KPI entries for the template.
@@ -1183,6 +1422,44 @@ async def generate_report_data(
     if not rt:
         return None
     yr = year if year is not None else datetime.date.today().year
+
+    # Collect requested reference-derived columns for multi-line items from designer blocks.
+    # Frontend encodes a reference-derived column key as "__ref__{subKey}__{encodedChain}" where encodedChain is
+    # a ">>"-joined list of paths ("fieldKey" or "fieldKey|subKey") URL-encoded.
+    ref_cols_by_multi_field: dict[str, list[tuple[str, str, list[str]]]] = {}
+    try:
+        blocks = getattr(rt, "body_blocks", None) or []
+        for b in blocks if isinstance(blocks, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if (b.get("type") or "").strip() != "kpi_table":
+                continue
+            ml = b.get("multiLineSubFieldKeys") or b.get("multi_line_sub_field_keys") or {}
+            if not isinstance(ml, dict):
+                continue
+            for multi_field_key, keys in ml.items():
+                if not isinstance(keys, list):
+                    continue
+                for k in keys:
+                    if not isinstance(k, str) or not k.startswith("__ref__"):
+                        continue
+                    # "__ref__{subKey}__{encodedChain}"
+                    parts = k.split("__", 3)
+                    if len(parts) < 4:
+                        continue
+                    sub_key = parts[2]
+                    enc = parts[3]
+                    try:
+                        from urllib.parse import unquote
+                        chain_s = unquote(enc)
+                    except Exception:
+                        chain_s = enc
+                    chain = [p for p in (chain_s.split(">>") if chain_s else []) if p]
+                    if not chain:
+                        continue
+                    ref_cols_by_multi_field.setdefault(str(multi_field_key), []).append((k, sub_key, chain))
+    except Exception:
+        ref_cols_by_multi_field = {}
 
     # All KPIs in the same organization
     result = await db.execute(
@@ -1220,14 +1497,16 @@ async def generate_report_data(
         kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
         effective_td = effective_kpi_time_dimension(kpi_td, org_td)
 
+        entry_filters = [
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi.id,
+            KPIEntry.year == yr,
+        ]
+        if not include_drafts:
+            entry_filters.append(KPIEntry.is_draft == False)
         entries_result = await db.execute(
             select(KPIEntry)
-            .where(
-                KPIEntry.organization_id == org_id,
-                KPIEntry.kpi_id == kpi.id,
-                KPIEntry.year == yr,
-                KPIEntry.is_draft == False,
-            )
+            .where(*entry_filters)
             .options(selectinload(KPIEntry.field_values))
         )
         all_entries = list(entries_result.scalars().all())
@@ -1274,9 +1553,17 @@ async def generate_report_data(
                     fv = fv_by_field.get(f.id)
                     val = None
                     if fv:
-                        val = fv.value_text or fv.value_number or fv.value_json or fv.value_boolean
-                        if fv.value_date:
+                        # IMPORTANT: preserve falsy values like 0, False, and empty list.
+                        if fv.value_date is not None:
                             val = fv.value_date.isoformat() if hasattr(fv.value_date, "isoformat") else str(fv.value_date)
+                        elif fv.value_text is not None:
+                            val = fv.value_text
+                        elif fv.value_number is not None:
+                            val = fv.value_number
+                        elif fv.value_json is not None:
+                            val = fv.value_json
+                        elif fv.value_boolean is not None:
+                            val = fv.value_boolean
                         if f.field_type == FieldType.number and fv.value_number is not None:
                             value_by_key[f.key] = fv.value_number
                         if f.field_type == FieldType.multi_line_items and isinstance(fv.value_json, list):
@@ -1298,9 +1585,87 @@ async def generate_report_data(
                             field_payload["value_items"] = val
                         else:
                             field_payload["value_items"] = []
+                        # Inject reference-derived columns (synthetic keys) into value_items and sub_fields so Jinja can render them.
+                        requested = ref_cols_by_multi_field.get(str(f.key), [])
+                        if requested and isinstance(field_payload.get("value_items"), list):
+                            rows_list = field_payload["value_items"]
+                            # Build conditions for batch resolving (one condition per synthetic column).
+                            conditions: list[dict] = []
+                            syn_meta: list[tuple[str, str, dict]] = []
+                            for syn_key, sub_key, chain in requested:
+                                # reference_resolution chain uses compare_field_key/compare_sub_field_key.
+                                steps = []
+                                for p in chain:
+                                    if "|" in p:
+                                        fk, sk = p.split("|", 1)
+                                        steps.append({"compare_field_key": fk, "compare_sub_field_key": sk})
+                                    else:
+                                        steps.append({"compare_field_key": p})
+                                rr = {"chain": steps}
+                                conditions.append({"field": sub_key, "reference_resolution": rr})
+                                syn_meta.append((syn_key, sub_key, rr))
+                            # Ask resolver to compute values per normalized label.
+                            res_map = await build_reference_resolution_map(
+                                db,
+                                org_id,
+                                prefer_year=yr,
+                                field=f,
+                                conditions=conditions,
+                                row_dicts=[r for r in rows_list if isinstance(r, dict)],
+                            )
+                            # Apply to each row; keep raw ref cell for lookup.
+                            for row in rows_list:
+                                if not isinstance(row, dict):
+                                    continue
+                                for cond_idx, (syn_key, sub_key, _rr) in enumerate(syn_meta):
+                                    cell = row.get(sub_key)
+                                    # multi_reference: resolve each piece; else resolve single.
+                                    ft = None
+                                    sub_obj = next((s for s in (sub_fields_orm or []) if getattr(s, "key", None) == sub_key), None)
+                                    if sub_obj is not None:
+                                        ft = getattr(sub_obj, "field_type", None)
+                                        ft = ft.value if hasattr(ft, "value") else ft
+                                    if ft == "multi_reference":
+                                        vals = []
+                                        for piece in _multi_raw_pieces(cell):
+                                            lab = _normalize_reference_value(_extract_ref_label(piece))
+                                            if not lab:
+                                                continue
+                                            v = res_map.get((cond_idx, lab))
+                                            if v is None:
+                                                continue
+                                            vals.append(v)
+                                        row[syn_key] = ", ".join(str(x) for x in vals) if vals else None
+                                    else:
+                                        lab = _normalize_reference_value(_extract_ref_label(cell))
+                                        row[syn_key] = res_map.get((cond_idx, lab)) if lab else None
+                            # Expose synthetic keys as sub_fields (so the table header can include them)
+                            sub_fields_out = field_payload.get("sub_fields") or []
+                            if isinstance(sub_fields_out, list):
+                                for syn_key, sub_key, chain in requested:
+                                    # Default name: "subKey → <terminal>"
+                                    terminal = chain[-1] if chain else ""
+                                    sub_fields_out.append({"key": syn_key, "name": f"{sub_key} → {terminal}", "field_type": "resolved_reference"})
+                                field_payload["sub_fields"] = sub_fields_out
+                                field_payload["sub_field_keys"] = [sf.get("key") for sf in sub_fields_out if isinstance(sf, dict) and sf.get("key")]
                     field_values_out.append(field_payload)
                     if val is not None and f.field_type == FieldType.number:
                         value_by_key[f.key] = val
+
+                # Seed existing stored formula values as baseline for dependencies.
+                # This mirrors entries.service.recompute_formula_fields_for_kpi and prevents
+                # report formulas that reference other formula fields from evaluating to blank.
+                for f in fields_to_include:
+                    if f.field_type != FieldType.formula:
+                        continue
+                    fv_formula = fv_by_field.get(f.id)
+                    if not fv_formula or fv_formula.value_number is None:
+                        continue
+                    try:
+                        value_by_key[f.key] = float(fv_formula.value_number)
+                    except (TypeError, ValueError):
+                        continue
+
                 # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
                 other_kpi_values = await _load_other_kpi_values(
                     db, entry.year, org_id, kpi.id
@@ -1314,6 +1679,12 @@ async def generate_report_data(
                             multi_line_items_data,
                             other_kpi_values,
                         )
+                        # If evaluation fails (returns None), fall back to the stored formula value
+                        # so reports can still display existing computed values.
+                        if computed is None:
+                            fv_formula = fv_by_field.get(f.id)
+                            if fv_formula and fv_formula.value_number is not None:
+                                computed = fv_formula.value_number
                         card_ids_f = kpi.card_display_field_ids or []
                         show_on_card_f = f.id in card_ids_f if isinstance(card_ids_f, list) else False
                         field_values_out.append({
@@ -1351,6 +1722,15 @@ async def generate_report_data(
             "period_display": _latest_display,
             "time_dimension_used": effective_td.value,
         })
+
+    out["multi_line_block_rows"] = await _build_multi_line_block_rows(
+        db,
+        org_id,
+        yr,
+        getattr(rt, "body_blocks", None) or [],
+        out["kpis"],
+        template_kpis,
+    )
 
     # Build domains → categories → KPIs for template access (all org domains; KPIs in template)
     out["domains"] = []
@@ -1395,7 +1775,11 @@ async def generate_report_data(
 
 
 async def render_report_html(
-    db: AsyncSession, template_id: int, org_id: int, year: int | None = None
+    db: AsyncSession,
+    template_id: int,
+    org_id: int,
+    year: int | None = None,
+    include_drafts: bool = False,
 ) -> str | None:
     """
     Render report using the template's body_template or body_blocks and
@@ -1406,12 +1790,18 @@ async def render_report_html(
     if not rt:
         return None
     body_template = rt.body_template
-    if getattr(rt, "body_blocks", None):
+    mode = (getattr(rt, "template_mode", "designer") or "designer").strip().lower()
+    if mode != "code" and getattr(rt, "body_blocks", None):
         body_template = _blocks_to_jinja(rt.body_blocks)
     if not body_template:
         return None
     return await render_report_html_with_template(
-        db, template_id, org_id, year=year, body_template_override=body_template
+        db,
+        template_id,
+        org_id,
+        year=year,
+        body_template_override=body_template,
+        include_drafts=include_drafts,
     )
 
 
@@ -1421,12 +1811,19 @@ async def render_report_html_with_template(
     org_id: int,
     year: int | None = None,
     body_template_override: str | None = None,
+    include_drafts: bool = False,
 ) -> str | None:
     """
     Render report with given template string (for live preview) or from DB.
     Uses generate_report_data and Jinja2 render.
     """
-    data = await generate_report_data(db, template_id, org_id, year=year)
+    data = await generate_report_data(
+        db,
+        template_id,
+        org_id,
+        year=year,
+        include_drafts=include_drafts,
+    )
     if not data:
         return None
     if body_template_override:
@@ -1435,8 +1832,9 @@ async def render_report_html_with_template(
         rt = await get_report_template(db, template_id, org_id)
         if not rt:
             return None
+        mode = (getattr(rt, "template_mode", "designer") or "designer").strip().lower()
         body_template = rt.body_template or ""
-        if getattr(rt, "body_blocks", None):
+        if mode != "code" and getattr(rt, "body_blocks", None):
             body_template = _blocks_to_jinja(rt.body_blocks)
     if not body_template:
         return None
@@ -1456,6 +1854,7 @@ async def evaluate_report_snippet(
     sub_field_group_fn: str | None = None,
     entry_index: int = 0,
     expression: str | None = None,
+    include_drafts: bool = False,
 ) -> str | int | float | None:
     """
     Evaluate a single KPI value or formula in report context for preview.
@@ -1465,7 +1864,13 @@ async def evaluate_report_snippet(
     if not rt:
         return None
     yr = year if year is not None else datetime.date.today().year
-    data = await generate_report_data(db, template_id, org_id, year=yr)
+    data = await generate_report_data(
+        db,
+        template_id,
+        org_id,
+        year=yr,
+        include_drafts=include_drafts,
+    )
     if not data or "kpis" not in data:
         return None
     kpis = data["kpis"]

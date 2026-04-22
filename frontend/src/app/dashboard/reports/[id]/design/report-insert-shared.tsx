@@ -6,6 +6,7 @@ import React, { useState, useEffect } from "react";
 export interface KpiFromDomainMinimal {
   kpi_id: number;
   kpi_name: string;
+  kpi_year?: number | null;
 }
 
 export interface SubFieldOptionMinimal {
@@ -233,7 +234,9 @@ export function ReportKpiInsertControls(props: PropsInsert | PropsBound) {
             <option value="">No KPIs match</option>
           ) : (
             filteredKpis.map((k) => (
-              <option key={k.kpi_id} value={k.kpi_id}>{k.kpi_name}</option>
+              <option key={k.kpi_id} value={k.kpi_id}>
+                {k.kpi_name}{typeof k.kpi_year === "number" ? ` (year ${k.kpi_year})` : ""}
+              </option>
             ))
           )}
         </select>

@@ -6,6 +6,8 @@ const AUTO_SAVE_DELAY_MS = 45_000; // 45 seconds after last change
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
+import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
+import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { api, getApiUrl } from "@/lib/api";
 import {
   buildReportPrintDocument,
@@ -31,6 +33,7 @@ interface KpiFromDomain {
   kpi_id: number;
   kpi_name: string;
   fields_count: number;
+  kpi_year?: number | null;
   time_dimension?: string | null;
 }
 
@@ -52,6 +55,11 @@ interface FieldOption {
   name: string;
   field_type: string;
   sub_fields: SubFieldOption[];
+  config?: {
+    reference_source_kpi_id?: number;
+    reference_source_field_key?: string;
+    reference_source_sub_field_key?: string;
+  } | null;
 }
 
 interface TemplateDetail {
@@ -59,6 +67,8 @@ interface TemplateDetail {
   organization_id: number;
   name: string;
   description: string | null;
+  default_year?: number | null;
+  template_mode?: "designer" | "code" | null;
   body_template: string | null;
   body_blocks: ReportBlock[] | null;
   attached_domains: AttachedDomain[];
@@ -73,11 +83,11 @@ export type ReportBlock =
   | { type: "domain_list"; id?: string; domainIds?: number[] }
   | { type: "domain_categories"; id?: string; domainIds?: number[] }
   | { type: "domain_kpis"; id?: string; domainIds?: number[] }
-  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean; fieldsLayout?: "columns" | "rows"; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; showTableHeading?: boolean; showMultiLineAsTable?: boolean; showMultiLineFieldLabel?: boolean; columnAlign?: Record<string, CellAlign>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
+  | { type: "kpi_table"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; oneTablePerKpi?: boolean; fieldsLayout?: "columns" | "rows"; multiLineSubFieldKeys?: Record<string, string[]>; multiLineFilters?: Record<string, MultiItemsFilterPayloadV2 | null>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; showTableHeading?: boolean; showMultiLineAsTable?: boolean; showMultiLineFieldLabel?: boolean; columnAlign?: Record<string, CellAlign>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
   | { type: "kpi_multi_table"; id?: string; kpiId?: number; fieldKey?: string }
   | { type: "simple_table"; id?: string; rows?: SimpleTableRow[] }
-  | { type: "kpi_grid"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
-  | { type: "kpi_list"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
+  | { type: "kpi_grid"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; multiLineFilters?: Record<string, MultiItemsFilterPayloadV2 | null>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
+  | { type: "kpi_list"; id?: string; kpiIds?: number[]; fieldKeys?: string[]; multiLineSubFieldKeys?: Record<string, string[]>; multiLineFilters?: Record<string, MultiItemsFilterPayloadV2 | null>; fieldDisplayNames?: Record<string, string>; subFieldDisplayNames?: Record<string, Record<string, string>>; timeDimensionMode?: "latest" | "single_period" | "all_periods"; periodKey?: string }
   | { type: "single_value"; id?: string; kpiId?: number; fieldKey?: string; subFieldKey?: string; entryIndex?: number };
 
 export type CellAlign = "left" | "center" | "right" | "justify";
@@ -678,29 +688,36 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       const displayPrefix = buildFieldDisplayNamesJinja(fieldDisplayNames);
       const subFieldDisplayPrefix = buildSubFieldDisplayNamesJinja(subFieldDisplayNames);
       const subKeysPrefix = buildFieldSubFieldKeysJinja(multiLineSubFieldKeys);
-      const cellMulti = multiLineCellSnippet("f");
-      const cellMultiEf = multiLineCellSnippet("ef");
-      const cellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td${tdStyleKey}>${cellMulti}</td>{% endif %}{% endfor %}`;
+      // Main KPI table should never nest multi-line items inside cells.
+      // Render scalar/formula fields in the main table; render multi-line fields as standalone tables beneath.
+      const cellScalar = "{{ f.value }}";
+      const cellScalarEf = "{{ ef.value }}";
+      const multiTableF = multiLineCellSnippet("f");
+      const cellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td${tdStyleKey}>${cellScalar}</td>{% endif %}{% endfor %}`;
       const tdPrefix = blockTimeDimensionPrefix(b as any);
       if (fieldsLayout === "rows") {
         if (!kpiIds.length && !fieldKeys.length) {
-          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for f in kpi.entries[0].fields if kpi.entries %}<tr><td${tdStyleF}>${fieldLabelFCond}</td>{% for entry in kpi.entries %}{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td${tdStyleEf}>${cellMultiEf}</td>{% endif %}{% endfor %}{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
+          const multiSection = `{% for entry in kpi.entries %}{% for f in entry.fields %}{% if f.field_type == 'multi_line_items' %}{% if show_multi_line_field_label %}<div style="margin-top: 0.75rem; font-weight: 600;">${fieldLabelF}</div>{% endif %}${multiTableF}{% endif %}{% endfor %}{% endfor %}`;
+          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for f in kpi.entries[0].fields if kpi.entries %}{% if f.field_type != 'multi_line_items' %}<tr><td${tdStyleF}>${fieldLabelFCond}</td>{% for entry in kpi.entries %}{% for ef in entry.fields %}{% if ef.field_key == f.field_key %}<td${tdStyleEf}>${cellScalarEf}</td>{% endif %}{% endfor %}{% endfor %}</tr>{% endif %}{% endfor %}</tbody></table>${multiSection}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
           out.push(injectTimeDimensionFilter(raw, tdPrefix));
         } else {
           const fidList = kpiIds.join(", ");
           const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
-          const rowCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td${tdStyleKey}>${cellMulti}</td>{% endif %}{% endfor %}`;
-          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for key in field_keys_list %}<tr><td>${fieldLabelKeyCond}</td>{% for entry in kpi.entries %}${rowCellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
+          const rowCellByKey = `{% for f in entry.fields %}{% if f.field_key == key %}<td${tdStyleKey}>${cellScalar}</td>{% endif %}{% endfor %}`;
+          const multiSection = `{% for entry in kpi.entries %}{% for f in entry.fields %}{% if f.field_type == 'multi_line_items' and f.field_key in field_keys_list %}{% if show_multi_line_field_label %}<div style="margin-top: 0.75rem; font-weight: 600;">${fieldLabelF}</div>{% endif %}${multiTableF}{% endif %}{% endfor %}{% endfor %}`;
+          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><tbody>{% for key in field_keys_list %}{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if (_fl | length == 0) or (((_fl|first)|default({})).field_type != 'multi_line_items') %}<tr><td>${fieldLabelKeyCond}</td>{% for entry in kpi.entries %}${rowCellByKey}{% endfor %}</tr>{% endif %}{% endfor %}</tbody></table>${multiSection}{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
           out.push(injectTimeDimensionFilter(raw, tdPrefix));
         }
       } else {
         if (!kpiIds.length && !fieldKeys.length) {
-          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}<th${tdStyleF}>${fieldLabelFCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for f in entry.fields %}<td${tdStyleF}>${cellMulti}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
+          const multiSection = `{% for entry in kpi.entries %}{% for f in entry.fields %}{% if f.field_type == 'multi_line_items' %}{% if show_multi_line_field_label %}<div style="margin-top: 0.75rem; font-weight: 600;">${fieldLabelF}</div>{% endif %}${multiTableF}{% endif %}{% endfor %}{% endfor %}`;
+          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for f in kpi.entries[0].fields if kpi.entries %}{% if f.field_type != 'multi_line_items' %}<th${tdStyleF}>${fieldLabelF}</th>{% endif %}{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for f in entry.fields %}{% if f.field_type != 'multi_line_items' %}<td${tdStyleF}>${cellScalar}</td>{% endif %}{% endfor %}</tr>{% endfor %}</tbody></table>${multiSection}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
           out.push(injectTimeDimensionFilter(raw, tdPrefix));
         } else {
           const fidList = kpiIds.join(", ");
           const fkeysList = fieldKeys.map((k) => `'${k.replace(/'/g, "\\'")}'`).join(", ");
-          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for key in field_keys_list %}<th${thStyle}>${fieldLabelKeyCond}</th>{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for key in field_keys_list %}${cellByKey}{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
+          const multiSection = `{% for entry in kpi.entries %}{% for f in entry.fields %}{% if f.field_type == 'multi_line_items' and f.field_key in field_keys_list %}{% if show_multi_line_field_label %}<div style="margin-top: 0.75rem; font-weight: 600;">${fieldLabelF}</div>{% endif %}${multiTableF}{% endif %}{% endfor %}{% endfor %}`;
+          const raw = displayPrefix + subFieldDisplayPrefix + subKeysPrefix + showMlLabelPrefix + columnAlignPrefix + `{% set kpi_ids_set = [${fidList}] %}{% set field_keys_list = [${fkeysList}] %}<div class="report-kpi-table">{% if kpis %}{% for kpi in kpis %}{% if kpi.kpi_id in kpi_ids_set %}${headingPart}<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;"><thead><tr>{% for key in field_keys_list %}{% set _fl = (kpi.entries[0].fields | default([]) | selectattr("field_key", "equalto", key) | list) %}{% if (_fl | length == 0) or (((_fl|first)|default({})).field_type != "multi_line_items") %}<th${thStyle}>${fieldLabelKey}</th>{% endif %}{% endfor %}</tr></thead><tbody>{% for entry in kpi.entries %}<tr>{% for key in field_keys_list %}{% set _fl = (entry.fields | default([]) | selectattr("field_key", "equalto", key) | list) %}{% if (_fl | length == 0) or (((_fl|first)|default({})).field_type != "multi_line_items") %}${cellByKey}{% endif %}{% endfor %}</tr>{% endfor %}</tbody></table>${multiSection}{% endif %}{% endfor %}{% else %}<p>No data.</p>{% endif %}</div>`;
           out.push(injectTimeDimensionFilter(raw, tdPrefix));
         }
       }
@@ -819,6 +836,7 @@ export default function ReportDesignPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [bodyTemplate, setBodyTemplate] = useState("");
+  const [templateMode, setTemplateMode] = useState<"designer" | "code">("designer");
 
   const [isDirty, setIsDirty] = useState(false);
   const [lastAutoSavedAt, setLastAutoSavedAt] = useState<number | null>(null);
@@ -841,6 +859,7 @@ export default function ReportDesignPage() {
   const [minimizedBlockIds, setMinimizedBlockIds] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<"both" | "design" | "preview">("both");
   const [reportYear, setReportYear] = useState(() => new Date().getFullYear());
+  const hasInitializedReportYearRef = useRef(false);
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [printModalYear, setPrintModalYear] = useState(() => new Date().getFullYear());
 
@@ -864,6 +883,9 @@ export default function ReportDesignPage() {
         const blocksList = Array.isArray(d.body_blocks) ? d.body_blocks.map(addBlockId) : [];
         setBlocks(blocksList);
         setBodyTemplate(d.body_template || "");
+        const mode: "designer" | "code" =
+          d.template_mode === "code" ? "code" : "designer";
+        setTemplateMode(mode);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
       .finally(() => setLoading(false));
@@ -886,6 +908,16 @@ export default function ReportDesignPage() {
     loadDetail();
   }, [loadDetail, designAllowed]);
 
+  // Initialize the default preview year based on actual data availability.
+  // This avoids the common case where the current year has no entries yet, making KPI tables look empty.
+  useEffect(() => {
+    if (!detail || hasInitializedReportYearRef.current) return;
+    hasInitializedReportYearRef.current = true;
+    if (typeof detail.default_year === "number" && Number.isFinite(detail.default_year)) {
+      setReportYear(detail.default_year);
+    }
+  }, [detail]);
+
   blocksRef.current = blocks;
   bodyTemplateRef.current = bodyTemplate;
 
@@ -896,11 +928,12 @@ export default function ReportDesignPage() {
     setSaving(true);
     setSaveError(null);
     try {
-      if (currentBlocks.length > 0) {
+      if (templateMode === "designer" && currentBlocks.length > 0) {
         await api(`/reports/templates/${id}?${qs({ organization_id: detail.organization_id })}`, {
           method: "PATCH",
           token,
           body: JSON.stringify({
+            template_mode: "designer",
             body_blocks: currentBlocks.map(({ id: _id, ...rest }) => rest),
           }),
         });
@@ -909,6 +942,7 @@ export default function ReportDesignPage() {
           method: "PATCH",
           token,
           body: JSON.stringify({
+            template_mode: "code",
             body_template: currentBodyTemplate,
             body_blocks: null,
           }),
@@ -921,7 +955,7 @@ export default function ReportDesignPage() {
     } finally {
       setSaving(false);
     }
-  }, [id, token, detail]);
+  }, [id, token, detail, templateMode]);
 
   const scheduleAutoSave = useCallback(() => {
     if (!autoSaveRef.current) return;
@@ -1013,6 +1047,7 @@ export default function ReportDesignPage() {
         method: "PATCH",
         token,
         body: JSON.stringify({
+          template_mode: "designer",
           body_blocks: blocks.map(({ id: _id, ...rest }) => rest),
         }),
       });
@@ -1026,13 +1061,13 @@ export default function ReportDesignPage() {
   };
 
   const generatedTemplate = useMemo(() => blocksToJinja(blocks), [blocks]);
-  const templateSourceDisplay = blocks.length > 0 ? generatedTemplate : bodyTemplate;
-  const isTemplateFromBlocks = blocks.length > 0;
+  const isTemplateFromBlocks = templateMode === "designer" && blocks.length > 0;
+  const templateSourceDisplay = isTemplateFromBlocks ? generatedTemplate : bodyTemplate;
   const templateForPreview = templateSourceDisplay;
 
   const PREVIEW_TIMEOUT_MS = 90_000;
   const fetchPreview = useCallback(() => {
-    if (!detail || !token || !templateForPreview.trim()) {
+    if (!detail || !token) {
       setPreviewHtml(null);
       return;
     }
@@ -1046,13 +1081,16 @@ export default function ReportDesignPage() {
     const doRequest = (retry = false): Promise<void> => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), PREVIEW_TIMEOUT_MS);
+      // In designer mode, render preview from saved blocks so backend block-driven features work
+      // (e.g. multi-line row filters). This means you must Save before Refresh preview.
+      const bodyTemplateForPreview = templateMode === "designer" ? "" : templateForPreview;
       return fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ body_template: templateForPreview }),
+        body: JSON.stringify({ body_template: bodyTemplateForPreview }),
         signal: controller.signal,
       })
         .then((res) => {
@@ -1139,15 +1177,17 @@ export default function ReportDesignPage() {
     setSaving(true);
     setSaveError(null);
     try {
-      const templateToSave = isTemplateFromBlocks ? generatedTemplate : bodyTemplate;
+      const templateToSave = bodyTemplate;
       await api(`/reports/templates/${id}?${qs({ organization_id: detail.organization_id })}`, {
         method: "PATCH",
         token,
         body: JSON.stringify({
+          template_mode: "code",
           body_template: templateToSave,
           body_blocks: null,
         }),
       });
+      setTemplateMode("code");
       setIsDirty(false);
       loadDetail();
       fetchPreview();
@@ -1334,7 +1374,7 @@ export default function ReportDesignPage() {
                   if (v === "title") addBlock({ type: "title", useTemplateName: true, customText: "" });
                   else if (v === "section_heading") addBlock({ type: "section_heading", text: "New section", level: 2 });
                   else if (v === "text") addBlock({ type: "text", content: "" });
-                  else if (v === "kpi_table") addBlock({ type: "kpi_table", kpiIds: [], fieldKeys: [], oneTablePerKpi: true, fieldsLayout: "columns", multiLineSubFieldKeys: {}, timeDimensionMode: "latest", periodKey: "" });
+                  else if (v === "kpi_table") addBlock({ type: "kpi_table", kpiIds: [], fieldKeys: [], oneTablePerKpi: true, fieldsLayout: "columns", multiLineSubFieldKeys: {}, multiLineFilters: {}, timeDimensionMode: "latest", periodKey: "" });
                   else if (v === "simple_table") addBlock({ type: "simple_table", rows: [{ cells: [{ type: "text", content: "" }] }] });
                 }}
               >
@@ -1352,8 +1392,8 @@ export default function ReportDesignPage() {
                 else if (v === "domain_list") addBlock({ type: "domain_list", domainIds: [] });
                 else if (v === "domain_categories") addBlock({ type: "domain_categories", domainIds: [] });
                 else if (v === "domain_kpis") addBlock({ type: "domain_kpis", domainIds: [] });
-                else if (v === "kpi_grid") addBlock({ type: "kpi_grid", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {}, timeDimensionMode: "latest", periodKey: "" });
-                else if (v === "kpi_list") addBlock({ type: "kpi_list", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {}, timeDimensionMode: "latest", periodKey: "" });
+                else if (v === "kpi_grid") addBlock({ type: "kpi_grid", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {}, multiLineFilters: {}, timeDimensionMode: "latest", periodKey: "" });
+                else if (v === "kpi_list") addBlock({ type: "kpi_list", kpiIds: [], fieldKeys: [], multiLineSubFieldKeys: {}, multiLineFilters: {}, timeDimensionMode: "latest", periodKey: "" });
                 else if (v === "single_value") addBlock({ type: "single_value", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "", subFieldKey: "", entryIndex: 0 });
                 else if (v === "kpi_multi_table") addBlock({ type: "kpi_multi_table", kpiId: kpis[0]?.kpi_id ?? 0, fieldKey: "" });
               }}
@@ -1579,6 +1619,45 @@ export default function ReportDesignPage() {
         </button>
         {advancedOpen && (
           <div style={{ padding: "1rem" }}>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center", marginBottom: "0.75rem" }}>
+              <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
+                Mode: <strong style={{ color: "var(--text)" }}>{templateMode === "code" ? "Code" : "Designer"}</strong>
+              </span>
+              {templateMode !== "code" && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    // Switch to code mode: start from current generated template and clear blocks
+                    const src = blocks.length > 0 ? generatedTemplate : bodyTemplate;
+                    setBodyTemplate(src);
+                    setBlocks([]);
+                    setTemplateMode("code");
+                    markDirtyAndScheduleAutoSave();
+                  }}
+                  title="Switch to code mode. This disables the designer blocks and enables manual editing."
+                >
+                  Switch to code mode (enable editing)
+                </button>
+              )}
+              {templateMode === "code" && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    const ok = window.confirm(
+                      "Switch to Designer mode?\n\nThis can discard any unsaved changes in the code editor. The visual designer does not use your raw template, so your code will not be represented by blocks.\n\nContinue?"
+                    );
+                    if (!ok) return;
+                    setTemplateMode("designer");
+                    markDirtyAndScheduleAutoSave();
+                  }}
+                  title="Switch back to designer mode. You will need to rebuild blocks; the code template remains saved."
+                >
+                  Switch to designer mode
+                </button>
+              )}
+            </div>
             {isTemplateFromBlocks ? (
               <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginBottom: "0.75rem" }}>
                 This is the template code generated from your blocks above. It updates as you add, edit, or reorder blocks. Save your design with the Save button above to keep changes.
@@ -1592,12 +1671,12 @@ export default function ReportDesignPage() {
               <textarea
                 value={templateSourceDisplay}
                 onChange={(e) => {
-                if (!isTemplateFromBlocks) {
+                if (templateMode === "code") {
                   setBodyTemplate(e.target.value);
                   markDirtyAndScheduleAutoSave();
                 }
               }}
-                readOnly={isTemplateFromBlocks}
+                readOnly={templateMode !== "code"}
                 rows={12}
                 placeholder="HTML + Jinja2..."
                 style={{
@@ -1605,11 +1684,11 @@ export default function ReportDesignPage() {
                   padding: "0.5rem",
                   fontFamily: "monospace",
                   fontSize: "0.85rem",
-                  background: isTemplateFromBlocks ? "var(--bg-muted, #f8f9fa)" : undefined,
+                  background: templateMode !== "code" ? "var(--bg-muted, #f8f9fa)" : undefined,
                 }}
               />
               <button type="submit" className="btn btn-primary" disabled={saving || previewLoading} style={{ marginTop: "0.5rem" }}>
-                {isTemplateFromBlocks ? "Use this as raw template (replace blocks)" : "Save raw template"}
+                Save raw template
               </button>
             </form>
           </div>
@@ -1888,7 +1967,9 @@ function TextBlockWithKpiInsert({
                       style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
                     >
                       {kpis.map((k) => (
-                        <option key={k.kpi_id} value={k.kpi_id}>{k.kpi_name}</option>
+                        <option key={k.kpi_id} value={k.kpi_id}>
+                          {k.kpi_name}{typeof k.kpi_year === "number" ? ` (year ${k.kpi_year})` : ""}
+                        </option>
                       ))}
                     </select>
                   </div>
@@ -1997,6 +2078,89 @@ function BlockCard({
   const [simpleTableEvalLoading, setSimpleTableEvalLoading] = useState(false);
   const [simpleTableEvalError, setSimpleTableEvalError] = useState<string | null>(null);
   const token = getAccessToken();
+
+  // KPI table UX: manage multi-line item sub-field columns
+  const [mlColumnsModalOpen, setMlColumnsModalOpen] = useState(false);
+  const [mlColumnsModalFieldKey, setMlColumnsModalFieldKey] = useState<string>("");
+  const [mlColumnsModalSearch, setMlColumnsModalSearch] = useState("");
+  const [mlColumnsModalSelectedSubKey, setMlColumnsModalSelectedSubKey] = useState<string>("");
+  const [refFieldsByKpiId, setRefFieldsByKpiId] = useState<Record<number, FieldOption[]>>({});
+  const [mlColumnsModalRefPaths, setMlColumnsModalRefPaths] = useState<string[]>([]);
+
+  const ensureRefKpiFieldsLoaded = useCallback(
+    async (kpiId: number) => {
+      if (!token || detail.organization_id == null) return;
+      if (refFieldsByKpiId[kpiId]) return;
+      try {
+        const fields = await api<FieldOption[]>(
+          `/fields?${qs({ kpi_id: kpiId, organization_id: detail.organization_id })}`,
+          { token }
+        );
+        setRefFieldsByKpiId((prev) => ({ ...prev, [kpiId]: fields }));
+      } catch {
+        setRefFieldsByKpiId((prev) => ({ ...prev, [kpiId]: [] }));
+      }
+    },
+    [token, detail.organization_id, refFieldsByKpiId]
+  );
+
+  const referenceAttributeOptions = useCallback((fields: FieldOption[]): Array<{ value: string; label: string; fieldType?: string }> => {
+    const out: Array<{ value: string; label: string; fieldType?: string }> = [];
+    for (const f of fields || []) {
+      if (!f?.key) continue;
+      if (f.field_type === "multi_line_items") {
+        for (const sf of f.sub_fields || []) {
+          out.push({
+            value: `${f.key}|${sf.key}`,
+            label: `${f.name} → ${sf.name} (${f.key}|${sf.key})`,
+            fieldType: sf.field_type,
+          });
+        }
+      } else {
+        out.push({
+          value: f.key,
+          label: `${f.name} (${f.key})`,
+          fieldType: f.field_type,
+        });
+      }
+    }
+    return out;
+  }, []);
+
+  const fieldTypeAtPath = useCallback((fields: FieldOption[], path: string): { fieldType: string; cfg?: { reference_source_kpi_id?: number } } | null => {
+    if (!path) return null;
+    const [fk, sk] = path.split("|");
+    const f = (fields || []).find((x) => x.key === fk);
+    if (!f) return null;
+    if (sk && f.field_type === "multi_line_items") {
+      const sf = (f.sub_fields || []).find((s) => s.key === sk);
+      if (!sf) return null;
+      return { fieldType: sf.field_type ?? "", cfg: (sf.config ?? undefined) as any };
+    }
+    return { fieldType: f.field_type, cfg: (f.config ?? undefined) as any };
+  }, []);
+
+  const makeRefSyntheticKey = (subKey: string, paths: string[]) => {
+    const cleaned = (paths || []).map((p) => p.replace(/\s+/g, "")).filter(Boolean);
+    const tail = encodeURIComponent(cleaned.join(">>")).slice(0, 240);
+    return `__ref__${subKey}__${tail}`;
+  };
+
+  const tryParseRefSyntheticKey = (k: string): { subKey: string; chain: string[] } | null => {
+    if (!k || !k.startsWith("__ref__")) return null;
+    const rest = k.slice("__ref__".length); // "{subKey}__{enc}"
+    const idx = rest.indexOf("__");
+    if (idx < 0) return null;
+    const subKey = rest.slice(0, idx);
+    const enc = rest.slice(idx + 2);
+    try {
+      const decoded = decodeURIComponent(enc);
+      const chain = decoded.split(">>").filter(Boolean);
+      return { subKey, chain };
+    } catch {
+      return { subKey, chain: enc.split(">>").filter(Boolean) };
+    }
+  };
   const handleSimpleTableEvaluate = useCallback(async () => {
     if (!simpleTableFormulaDraft || !token || detail.organization_id == null) return;
     setSimpleTableEvalError(null);
@@ -2194,7 +2358,9 @@ function BlockCard({
                 style={{ width: "100%", minHeight: 80 }}
               >
                 {kpis.map((k) => (
-                  <option key={k.kpi_id} value={k.kpi_id}>{k.kpi_name}</option>
+                  <option key={k.kpi_id} value={k.kpi_id}>
+                    {k.kpi_name}{typeof k.kpi_year === "number" ? ` (year ${k.kpi_year})` : ""}
+                  </option>
                 ))}
               </select>
             </div>
@@ -2318,7 +2484,7 @@ function BlockCard({
               const kpiIdsBlock = (block as { kpiIds?: number[] }).kpiIds || [];
               const fieldKeysBlock = (block as { fieldKeys?: string[] }).fieldKeys || [];
               const multiLineSubFieldKeys = (block as { multiLineSubFieldKeys?: Record<string, string[]> }).multiLineSubFieldKeys ?? {};
-              const showMultiLineAsTable = (block as { showMultiLineAsTable?: boolean }).showMultiLineAsTable !== false;
+              const multiLineFilters = (block as { multiLineFilters?: Record<string, MultiItemsFilterPayloadV2 | null> }).multiLineFilters ?? {};
               const kids = kpiIdsBlock.length ? kpiIdsBlock : kpis.map((k) => k.kpi_id);
               const allFields = kids.flatMap((kid) => (fieldsByKpiId[kid] || []).map((f) => ({ ...f, kpiId: kid })));
               const seenKeys = new Set<string>();
@@ -2329,68 +2495,394 @@ function BlockCard({
                 return fieldKeysBlock.length === 0 || fieldKeysBlock.includes(f.key);
               });
               if (multiLineFields.length === 0) return null;
+              const kpiNameById = new Map<number, string>(kpis.map((k) => [k.kpi_id, k.kpi_name]));
+              const kpiLabelForField = (fieldKey: string): string => {
+                const ids = Array.from(new Set(allFields.filter((f) => f.key === fieldKey).map((f) => (f as any).kpiId).filter((x) => typeof x === "number")));
+                const names = ids.map((id) => kpiNameById.get(id) || `KPI ${id}`).filter(Boolean);
+                if (names.length === 0) return "—";
+                if (names.length === 1) return names[0];
+                return "Multiple KPIs";
+              };
+              const getSubFieldMeta = (fieldKey: string, subKey: string): SubFieldOption | null => {
+                const f = multiLineFields.find((x) => x.key === fieldKey);
+                if (!f) return null;
+                const sf = (f.sub_fields || []).find((s) => s.key === subKey);
+                return (sf as any) || null;
+              };
+              const getCustomSubLabel = (fieldKey: string, subKey: string): string => {
+                const m = (block as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames || {};
+                return (m[fieldKey]?.[subKey] ?? "") as string;
+              };
+              const setCustomSubLabel = (fieldKey: string, subKey: string, value: string) => {
+                const prev = (block as { subFieldDisplayNames?: Record<string, Record<string, string>> }).subFieldDisplayNames || {};
+                const nextOuter = { ...prev };
+                const inner = { ...(nextOuter[fieldKey] || {}) };
+                if (!value.trim()) delete inner[subKey];
+                else inner[subKey] = value;
+                if (Object.keys(inner).length === 0) delete nextOuter[fieldKey];
+                else nextOuter[fieldKey] = inner;
+                onUpdate({ subFieldDisplayNames: nextOuter } as any);
+              };
+              const getSelectedSubKeys = (f: FieldOption & { kpiId: number }): string[] => {
+                const stored = multiLineSubFieldKeys[f.key] ?? [];
+                const allSub = (f.sub_fields || []).map((s) => s.key);
+                return stored.length === 0 ? allSub : stored;
+              };
+              const setSelectedSubKeys = (fieldKey: string, nextList: string[]) => {
+                const next = { ...multiLineSubFieldKeys, [fieldKey]: nextList };
+                onUpdate({ ...block, multiLineSubFieldKeys: next } as any);
+              };
               return (
                 <div className="form-group" style={{ margin: 0, marginTop: "0.5rem" }}>
-                  <label style={{ fontSize: "0.85rem" }}>Sub-fields to show (multi-line fields; empty = all)</label>
+                  <label style={{ fontSize: "0.85rem" }}>Multi-line columns</label>
                   <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.25rem 0 0.5rem 0" }}>
-                    Choose which sub-field columns to include. Use <strong>Custom names…</strong> above to set display labels.
-                    {showMultiLineAsTable
-                      ? " Multi-line values are shown as a nested table inside each cell."
-                      : " Multi-line values are shown as stacked labels and values inside each cell (no nested table)."}
+                    Pick and order which columns (sub-fields) appear for multi-line items. Use the grid below to reorder, rename, or remove.
                   </p>
-                  <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.8rem", marginBottom: "0.35rem" }}>
-                    <input
-                      type="checkbox"
-                      checked={showMultiLineAsTable}
-                      onChange={(e) => onUpdate({ showMultiLineAsTable: e.target.checked })}
-                    />
-                    Show multi-line items as nested table
-                  </label>
-                  <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginTop: "0.25rem" }}>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
                     {multiLineFields.map((f) => {
-                      const selected = multiLineSubFieldKeys[f.key] ?? [];
-                      const isChecked = (subKey: string) => selected.length === 0 || selected.includes(subKey);
-                      const toggleSub = (subKey: string, checked: boolean) => {
-                        const next = { ...multiLineSubFieldKeys };
-                        const list = next[f.key] ?? [];
-                        const allSubKeys = (f.sub_fields || []).map((s) => s.key);
-                        if (checked) {
-                          next[f.key] = list.length === 0 ? allSubKeys : list.includes(subKey) ? list : [...list, subKey];
-                        } else {
-                          next[f.key] = list.length === 0
-                            ? allSubKeys.filter((k) => k !== subKey)
-                            : list.filter((k) => k !== subKey);
-                        }
-                        onUpdate({ ...block, multiLineSubFieldKeys: next });
+                      const selectedSubKeys = getSelectedSubKeys(f);
+                      const subFields = f.sub_fields || [];
+                      const allSubKeys = subFields.map((s) => s.key);
+                      const hasExplicit = (multiLineSubFieldKeys[f.key] ?? []).length > 0;
+                      const addColumn = (subKey: string) => {
+                        const current = getSelectedSubKeys(f);
+                        if (current.includes(subKey)) return;
+                        setSelectedSubKeys(f.key, [...current, subKey]);
                       };
-                      const selectAll = () => {
-                        const next = { ...multiLineSubFieldKeys, [f.key]: (f.sub_fields || []).map((s) => s.key) };
-                        onUpdate({ ...block, multiLineSubFieldKeys: next });
+                      const removeColumn = (subKey: string) => {
+                        const current = getSelectedSubKeys(f);
+                        const next = current.filter((k) => k !== subKey);
+                        setSelectedSubKeys(f.key, next);
                       };
-                      const selectNone = () => {
-                        const next = { ...multiLineSubFieldKeys, [f.key]: [] };
-                        onUpdate({ ...block, multiLineSubFieldKeys: next });
+                      const move = (subKey: string, dir: "up" | "down") => {
+                        const current = getSelectedSubKeys(f);
+                        const idx = current.indexOf(subKey);
+                        if (idx < 0) return;
+                        const ni = dir === "up" ? idx - 1 : idx + 1;
+                        if (ni < 0 || ni >= current.length) return;
+                        const next = [...current];
+                        [next[idx], next[ni]] = [next[ni], next[idx]];
+                        setSelectedSubKeys(f.key, next);
                       };
+                      const openAddModal = () => {
+                        setMlColumnsModalFieldKey(f.key);
+                        setMlColumnsModalSearch("");
+                        setMlColumnsModalSelectedSubKey("");
+                        setMlColumnsModalOpen(true);
+                      };
+                      const available = subFields
+                        .filter((sf) => !selectedSubKeys.includes(sf.key))
+                        .filter((sf) => {
+                          const q = mlColumnsModalSearch.trim().toLowerCase();
+                          if (!q) return true;
+                          return (sf.name || "").toLowerCase().includes(q) || sf.key.toLowerCase().includes(q);
+                        });
                       return (
-                        <div key={f.key} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "0.5rem", background: "var(--bg-subtle)" }}>
-                          <div style={{ fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.35rem" }}>{f.name} ({f.key})</div>
-                          <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.25rem" }}>
-                            <button type="button" onClick={selectAll} style={{ fontSize: "0.75rem", padding: "0.15rem 0.4rem" }}>All</button>
-                            <button type="button" onClick={selectNone} style={{ fontSize: "0.75rem", padding: "0.15rem 0.4rem" }}>None (show all)</button>
+                        <div key={f.key} style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", background: "var(--surface)" }}>
+                          <div style={{ padding: "0.6rem 0.75rem", background: "var(--bg-subtle)", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", alignItems: "center" }}>
+                            <div style={{ minWidth: 200 }}>
+                              <div style={{ fontSize: "0.9rem", fontWeight: 700 }}>{f.name}</div>
+                              <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                                KPI: {kpiLabelForField(f.key)} • Field key: <span style={{ fontFamily: "monospace" }}>{f.key}</span>
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                              <button type="button" className="btn btn-primary" onClick={openAddModal} style={{ fontSize: "0.85rem" }}>
+                                + Add column
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => setSelectedSubKeys(f.key, allSubKeys)}
+                                title="Select all columns explicitly"
+                                style={{ fontSize: "0.85rem" }}
+                              >
+                                Select all
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => setSelectedSubKeys(f.key, [])}
+                                title="Reset to default (show all columns)"
+                                style={{ fontSize: "0.85rem" }}
+                              >
+                                Reset (show all)
+                              </button>
+                              {!hasExplicit && (
+                                <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                                  Currently: showing all columns
+                                </span>
+                              )}
+                            </div>
                           </div>
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-                            {(f.sub_fields || []).map((sf) => (
-                              <label key={sf.key} style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.85rem", cursor: "pointer" }}>
-                                <input
-                                  type="checkbox"
-                                  checked={isChecked(sf.key)}
-                                  onChange={() => toggleSub(sf.key, !isChecked(sf.key))}
-                                  onClick={(e) => e.stopPropagation()}
-                                />
-                                {sf.name || sf.key}
-                              </label>
-                            ))}
+
+                          <div style={{ padding: "0.75rem" }}>
+                            <div style={{ border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+                              <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1.4fr 0.9fr", gap: 0, background: "var(--bg-subtle)", borderBottom: "1px solid var(--border)", fontSize: "0.8rem", fontWeight: 700 }}>
+                                <div style={{ padding: "0.5rem 0.6rem" }}>Column</div>
+                                <div style={{ padding: "0.5rem 0.6rem" }}>KPI</div>
+                                <div style={{ padding: "0.5rem 0.6rem" }}>Custom heading</div>
+                                <div style={{ padding: "0.5rem 0.6rem" }}>Actions</div>
+                              </div>
+
+                              {selectedSubKeys.length === 0 ? (
+                                <div style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem" }}>
+                                  No columns selected (default behavior is “show all”).
+                                </div>
+                              ) : (
+                                selectedSubKeys.map((subKey, idx) => {
+                                  const sf = getSubFieldMeta(f.key, subKey);
+                                  const ref = sf?.field_type === "reference" ? sf?.config : null;
+                                  const parsedSyn = tryParseRefSyntheticKey(subKey);
+                                  const tooltipParts: string[] = [];
+                                  if (sf?.field_type === "reference" && ref?.reference_source_kpi_id && ref?.reference_source_field_key) {
+                                    tooltipParts.push(
+                                      `Source: KPI ${ref.reference_source_kpi_id}.${ref.reference_source_field_key}${ref.reference_source_sub_field_key ? `.${ref.reference_source_sub_field_key}` : ""}`
+                                    );
+                                  }
+                                  if (parsedSyn?.chain?.length) {
+                                    tooltipParts.push(`Chain: ${parsedSyn.chain.join(" → ")}`);
+                                  }
+                                  const tooltip = tooltipParts.join("\n");
+                                  return (
+                                    <div key={subKey} style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1.4fr 0.9fr", borderBottom: idx === selectedSubKeys.length - 1 ? "none" : "1px solid var(--border)" }}>
+                                      <div style={{ padding: "0.5rem 0.6rem" }}>
+                                        <div style={{ fontWeight: 600 }}>
+                                          {sf?.name || parsedSyn?.subKey || subKey}
+                                        </div>
+                                        <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                                          <span style={{ fontFamily: "monospace" }}>{parsedSyn?.subKey || subKey}</span>
+                                          {tooltip ? (
+                                            <span
+                                              title={tooltip}
+                                              style={{
+                                                marginLeft: 8,
+                                                padding: "0.1rem 0.35rem",
+                                                border: "1px solid var(--border)",
+                                                borderRadius: 999,
+                                                fontSize: "0.75rem",
+                                                color: "var(--muted)",
+                                                background: "var(--surface)",
+                                                cursor: "help",
+                                              }}
+                                            >
+                                              ref
+                                            </span>
+                                          ) : null}
+                                        </div>
+                                      </div>
+                                      <div style={{ padding: "0.5rem 0.6rem", color: "var(--muted)" }}>
+                                        {kpiLabelForField(f.key)}
+                                      </div>
+                                      <div style={{ padding: "0.5rem 0.6rem" }}>
+                                        <input
+                                          type="text"
+                                          value={getCustomSubLabel(f.key, subKey)}
+                                          onChange={(e) => setCustomSubLabel(f.key, subKey, e.target.value)}
+                                          placeholder="(use default)"
+                                          style={{ width: "100%" }}
+                                        />
+                                      </div>
+                                      <div style={{ padding: "0.5rem 0.6rem", display: "flex", gap: "0.25rem", flexWrap: "wrap" }}>
+                                        <button type="button" className="btn" onClick={() => move(subKey, "up")} disabled={idx === 0} title="Move up" style={{ padding: "0.2rem 0.4rem", fontSize: "0.85rem" }}>↑</button>
+                                        <button type="button" className="btn" onClick={() => move(subKey, "down")} disabled={idx === selectedSubKeys.length - 1} title="Move down" style={{ padding: "0.2rem 0.4rem", fontSize: "0.85rem" }}>↓</button>
+                                        <button type="button" className="btn" onClick={() => removeColumn(subKey)} title="Remove" style={{ padding: "0.2rem 0.4rem", fontSize: "0.85rem", color: "var(--error)" }}>✕</button>
+                                      </div>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
                           </div>
+
+                          {mlColumnsModalOpen && mlColumnsModalFieldKey === f.key && (
+                            <div
+                              role="dialog"
+                              aria-modal="true"
+                              style={{
+                                position: "fixed",
+                                inset: 0,
+                                zIndex: 1200,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                background: "rgba(0,0,0,0.45)",
+                                padding: "1rem",
+                              }}
+                              onClick={() => setMlColumnsModalOpen(false)}
+                            >
+                              <div
+                                className="card"
+                                style={{ maxWidth: 560, width: "100%", padding: "1rem" }}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", marginBottom: "0.75rem" }}>
+                                  <div>
+                                    <div style={{ fontSize: "1rem", fontWeight: 700 }}>Add column</div>
+                                    <div style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
+                                      {f.name} • <span style={{ fontFamily: "monospace" }}>{f.key}</span>
+                                    </div>
+                                  </div>
+                                  <button type="button" className="btn" onClick={() => setMlColumnsModalOpen(false)} style={{ padding: "0.25rem 0.5rem" }}>×</button>
+                                </div>
+
+                                <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                                  <div>
+                                    <label style={{ fontSize: "0.8rem", color: "var(--muted)", display: "block", marginBottom: "0.25rem" }}>Search</label>
+                                    <input
+                                      type="search"
+                                      value={mlColumnsModalSearch}
+                                      onChange={(e) => setMlColumnsModalSearch(e.target.value)}
+                                      placeholder="Type to filter columns…"
+                                      style={{ width: "100%" }}
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <label style={{ fontSize: "0.8rem", color: "var(--muted)", display: "block", marginBottom: "0.25rem" }}>Column</label>
+                                    <select
+                                      value={mlColumnsModalSelectedSubKey}
+                                      onChange={(e) => setMlColumnsModalSelectedSubKey(e.target.value)}
+                                      style={{ width: "100%" }}
+                                    >
+                                      <option value="">— Select —</option>
+                                      {available.map((sf) => (
+                                        <option key={sf.key} value={sf.key}>
+                                          {sf.name || sf.key} ({sf.key}){sf.field_type === "reference" ? " — reference" : ""}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+
+                                  {mlColumnsModalSelectedSubKey && (() => {
+                                    const sf = getSubFieldMeta(f.key, mlColumnsModalSelectedSubKey);
+                                    const ref = sf?.field_type === "reference" ? sf?.config : null;
+                                    if (!ref?.reference_source_kpi_id || !ref?.reference_source_field_key) return null;
+                                    // Load reference KPI fields for attribute selection.
+                                    ensureRefKpiFieldsLoaded(ref.reference_source_kpi_id);
+                                    const chain0Fields = refFieldsByKpiId[ref.reference_source_kpi_id] || [];
+                                    const opts0 = referenceAttributeOptions(chain0Fields);
+                                    const selected0 = mlColumnsModalRefPaths[0] ?? "";
+                                    const type0 = fieldTypeAtPath(chain0Fields, selected0);
+                                    const nextKpiId = type0?.fieldType === "reference" || type0?.fieldType === "multi_reference"
+                                      ? (type0?.cfg?.reference_source_kpi_id ?? null)
+                                      : null;
+                                    if (nextKpiId != null) ensureRefKpiFieldsLoaded(nextKpiId);
+                                    const chain1Fields = nextKpiId != null ? (refFieldsByKpiId[nextKpiId] || []) : [];
+                                    const opts1 = nextKpiId != null ? referenceAttributeOptions(chain1Fields) : [];
+                                    const selected1 = mlColumnsModalRefPaths[1] ?? "";
+                                    const type1 = nextKpiId != null ? fieldTypeAtPath(chain1Fields, selected1) : null;
+                                    const nextKpiId2 = type1 && (type1.fieldType === "reference" || type1.fieldType === "multi_reference")
+                                      ? (type1.cfg?.reference_source_kpi_id ?? null)
+                                      : null;
+                                    if (nextKpiId2 != null) ensureRefKpiFieldsLoaded(nextKpiId2);
+                                    const chain2Fields = nextKpiId2 != null ? (refFieldsByKpiId[nextKpiId2] || []) : [];
+                                    const opts2 = nextKpiId2 != null ? referenceAttributeOptions(chain2Fields) : [];
+                                    const selected2 = mlColumnsModalRefPaths[2] ?? "";
+                                    return (
+                                      <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "0.6rem", background: "var(--bg-subtle)" }}>
+                                        <div style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
+                                          Reference source: KPI <strong>{ref.reference_source_kpi_id}</strong>, label field <strong>{ref.reference_source_field_key}</strong>
+                                          {ref.reference_source_sub_field_key ? <> (label sub-field <strong>{ref.reference_source_sub_field_key}</strong>)</> : null}
+                                        </div>
+                                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                                          <div style={{ minWidth: 220, maxWidth: "min(100%, 360px)" }}>
+                                            <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Reference attribute</label>
+                                            <select
+                                              value={selected0}
+                                              onChange={(e) => setMlColumnsModalRefPaths([e.target.value, "", ""])}
+                                              style={{ width: "100%" }}
+                                            >
+                                              <option value="">— Select column —</option>
+                                              {opts0.map((o) => (
+                                                <option key={o.value} value={o.value}>{o.label}</option>
+                                              ))}
+                                            </select>
+                                          </div>
+                                          {nextKpiId != null && selected0 && (
+                                            <div style={{ minWidth: 220, maxWidth: "min(100%, 360px)" }}>
+                                              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Linked field (2)</label>
+                                              <select
+                                                value={selected1}
+                                                onChange={(e) => setMlColumnsModalRefPaths([selected0, e.target.value, ""])}
+                                                style={{ width: "100%" }}
+                                              >
+                                                <option value="">— Select column —</option>
+                                                {opts1.map((o) => (
+                                                  <option key={o.value} value={o.value}>{o.label}</option>
+                                                ))}
+                                              </select>
+                                            </div>
+                                          )}
+                                          {nextKpiId2 != null && selected1 && (
+                                            <div style={{ minWidth: 220, maxWidth: "min(100%, 360px)" }}>
+                                              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Linked field (3)</label>
+                                              <select
+                                                value={selected2}
+                                                onChange={(e) => setMlColumnsModalRefPaths([selected0, selected1, e.target.value])}
+                                                style={{ width: "100%" }}
+                                              >
+                                                <option value="">— Select column —</option>
+                                                {opts2.map((o) => (
+                                                  <option key={o.value} value={o.value}>{o.label}</option>
+                                                ))}
+                                              </select>
+                                            </div>
+                                          )}
+                                        </div>
+                                        <div style={{ marginTop: "0.5rem", fontSize: "0.8rem", color: "var(--muted)" }}>
+                                          Pick a scalar column to display. If you pick another reference column, you can continue chaining.
+                                        </div>
+                                      </div>
+                                    );
+                                  })()}
+
+                                  <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "0.25rem" }}>
+                                    <button type="button" className="btn" onClick={() => setMlColumnsModalOpen(false)}>Cancel</button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary"
+                                      disabled={!mlColumnsModalSelectedSubKey}
+                                      onClick={() => {
+                                        if (!mlColumnsModalSelectedSubKey) return;
+                                        const sf = getSubFieldMeta(f.key, mlColumnsModalSelectedSubKey);
+                                        if (sf?.field_type === "reference") {
+                                          const paths = (mlColumnsModalRefPaths || []).filter((p) => p && p.trim());
+                                          if (paths.length === 0) return;
+                                          const syn = makeRefSyntheticKey(mlColumnsModalSelectedSubKey, paths);
+                                          addColumn(syn);
+                                          // Set a sensible default heading if none is set.
+                                          const cur = getCustomSubLabel(f.key, syn);
+                                          if (!cur) {
+                                            setCustomSubLabel(f.key, syn, `${sf.name || sf.key} → ${paths[paths.length - 1]}`);
+                                          }
+                                        } else {
+                                          addColumn(mlColumnsModalSelectedSubKey);
+                                        }
+                                        setMlColumnsModalOpen(false);
+                                      }}
+                                    >
+                                      Add
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                          <MultiLineReportFilterPanel
+                            organizationId={detail.organization_id}
+                            token={token ?? null}
+                            fieldKey={f.key}
+                            subFields={(f.sub_fields || []) as MultiFilterSubField[]}
+                            value={multiLineFilters[f.key] ?? null}
+                            onChange={(p) => {
+                              const next = { ...multiLineFilters };
+                              if (p == null) delete next[f.key];
+                              else next[f.key] = p;
+                              onUpdate({ multiLineFilters: next } as Partial<ReportBlock>);
+                            }}
+                          />
                         </div>
                       );
                     })}
@@ -2914,7 +3406,9 @@ function BlockCard({
                           style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
                         >
                           {kpis.map((k) => (
-                            <option key={k.kpi_id} value={k.kpi_id}>{k.kpi_name}</option>
+                            <option key={k.kpi_id} value={k.kpi_id}>
+                              {k.kpi_name}{typeof k.kpi_year === "number" ? ` (year ${k.kpi_year})` : ""}
+                            </option>
                           ))}
                         </select>
                       </div>
@@ -3000,7 +3494,9 @@ function BlockCard({
                 style={{ width: "100%" }}
               >
                 {kpis.map((k) => (
-                  <option key={k.kpi_id} value={k.kpi_id}>{k.kpi_name}</option>
+                  <option key={k.kpi_id} value={k.kpi_id}>
+                    {k.kpi_name}{typeof k.kpi_year === "number" ? ` (year ${k.kpi_year})` : ""}
+                  </option>
                 ))}
               </select>
             </div>
@@ -3064,7 +3560,9 @@ function BlockCard({
               >
                 <option value="">— Select —</option>
                 {kpis.map((k) => (
-                  <option key={k.kpi_id} value={k.kpi_id}>{k.kpi_name}</option>
+                  <option key={k.kpi_id} value={k.kpi_id}>
+                    {k.kpi_name}{typeof k.kpi_year === "number" ? ` (year ${k.kpi_year})` : ""}
+                  </option>
                 ))}
               </select>
             </div>
