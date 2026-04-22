@@ -7,6 +7,8 @@ import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer } from "../widgets";
+import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
+import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
 import {
   DASHBOARD_GRID_COLUMNS,
   effectiveColSpan,
@@ -79,6 +81,7 @@ type Widget =
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
       filter_label?: string;
+      filters?: MultiItemsFilterPayloadV2 | null;
       full_width?: boolean;
       col_span?: number;
     }
@@ -100,6 +103,7 @@ type Widget =
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
       filter_label?: string;
+      filters?: MultiItemsFilterPayloadV2 | null;
       full_width?: boolean;
       col_span?: number;
     }
@@ -131,6 +135,7 @@ type Widget =
       allow_custom_colors?: boolean;
       bg_color?: string;
       fg_color?: string;
+      filters?: MultiItemsFilterPayloadV2 | null;
       full_width?: boolean;
       col_span?: number;
     }
@@ -147,6 +152,7 @@ type Widget =
       rows_limit?: number;
       /** Display order for combined columns (primary + join:...). */
       column_order?: string[];
+      filters?: MultiItemsFilterPayloadV2 | null;
       join?: {
         kpi_id: number;
         source_field_key: string;
@@ -321,6 +327,7 @@ export default function DashboardDesignPage() {
   const [addValueSubFieldKey, setAddValueSubFieldKey] = useState<string>("");
   const [addFilterSubFieldKey, setAddFilterSubFieldKey] = useState<string>("");
   const [addFilterLabel, setAddFilterLabel] = useState<string>("");
+  const [addAdvancedFilters, setAddAdvancedFilters] = useState<MultiItemsFilterPayloadV2 | null>(null);
   const [addCardSourceMode, setAddCardSourceMode] = useState<"field" | "multi_line_agg" | "static">("field");
   const [addCardAgg, setAddCardAgg] = useState<KpiCardAgg>("sum");
   const [addCardStaticValue, setAddCardStaticValue] = useState<string>("");
@@ -385,6 +392,7 @@ export default function DashboardDesignPage() {
     setAddValueSubFieldKey("");
     setAddFilterSubFieldKey("");
     setAddFilterLabel("");
+    setAddAdvancedFilters(null);
     setAddCardSourceMode("field");
     setAddCardAgg("sum");
     setAddCardStaticValue("");
@@ -448,6 +456,7 @@ export default function DashboardDesignPage() {
     setAddValueSubFieldKey((w as any).value_sub_field_key || "");
     setAddFilterSubFieldKey((w as any).filter_sub_field_key || "");
     setAddFilterLabel((w as any).filter_label || "");
+    setAddAdvancedFilters(((w as any).filters as MultiItemsFilterPayloadV2 | null) ?? null);
     if (w.type === "kpi_card_single_value") {
       setAddCardSourceMode((w as any).source_mode || "field");
       setAddCardStaticValue((w as any).static_value != null ? String((w as any).static_value) : "");
@@ -743,6 +752,7 @@ export default function DashboardDesignPage() {
               value_sub_field_key: addAggFn === "count_rows" ? undefined : addValueSubFieldKey.trim(),
               filter_sub_field_key: addFilterSubFieldKey.trim() || undefined,
               filter_label: addFilterLabel.trim() || undefined,
+              filters: addAdvancedFilters,
             }
           : {
               id: editingWidgetId ?? newId(),
@@ -757,6 +767,7 @@ export default function DashboardDesignPage() {
                 .split(",")
                 .map((x) => x.trim())
                 .filter(Boolean),
+              filters: null,
             };
       applyWidgetUpsert(w as Widget);
       return;
@@ -827,6 +838,7 @@ export default function DashboardDesignPage() {
         value_sub_field_key: addAggFn === "count_rows" ? undefined : addValueSubFieldKey.trim(),
         filter_sub_field_key: addFilterSubFieldKey.trim() || undefined,
         filter_label: addFilterLabel.trim() || undefined,
+        filters: addAdvancedFilters,
       };
       applyWidgetUpsert(w);
       return;
@@ -868,6 +880,7 @@ export default function DashboardDesignPage() {
         allow_custom_colors: addCardAllowCustomColors,
         bg_color: addCardAllowCustomColors ? addCardBgColor.trim() || undefined : undefined,
         fg_color: addCardAllowCustomColors ? addCardFgColor.trim() || undefined : undefined,
+        filters: addCardSourceMode === "multi_line_agg" ? addAdvancedFilters : null,
       } as any;
       applyWidgetUpsert(w);
       return;
@@ -916,6 +929,7 @@ export default function DashboardDesignPage() {
         rows_limit: rowsLimit as any,
         column_order: addMultiLineTableColumnOrder as any,
         joins: joins as any,
+        filters: addAdvancedFilters,
       };
       applyWidgetUpsert(w);
       return;
@@ -1343,6 +1357,20 @@ export default function DashboardDesignPage() {
                               onChange={(e) => setAddMultiLineTableTopRows(Number(e.target.value))}
                               style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
                               placeholder="e.g. 5"
+                            />
+                          </div>
+                        ) : null}
+
+                        {userRole === "SUPER_ADMIN" && addType === "kpi_multi_line_table" && addMultiLineTableFieldKey.trim() && tableMultiLineSubFields.length > 0 ? (
+                          <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>
+                            <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Advanced filters</div>
+                            <MultiLineReportFilterPanel
+                              organizationId={dashboard?.organization_id ?? 0}
+                              token={token}
+                              fieldKey={addMultiLineTableFieldKey.trim()}
+                              subFields={tableMultiLineSubFields as unknown as MultiFilterSubField[]}
+                              value={addAdvancedFilters}
+                              onChange={setAddAdvancedFilters}
                             />
                           </div>
                         ) : null}
@@ -2004,6 +2032,20 @@ export default function DashboardDesignPage() {
                             />
                           </div>
                         )}
+
+                        {userRole === "SUPER_ADMIN" && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
+                          <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>
+                            <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Advanced filters</div>
+                            <MultiLineReportFilterPanel
+                              organizationId={dashboard?.organization_id ?? 0}
+                              token={token}
+                              fieldKey={addMultiLineFieldKey.trim()}
+                              subFields={selectedMultiLineSubFields as unknown as MultiFilterSubField[]}
+                              value={addAdvancedFilters}
+                              onChange={setAddAdvancedFilters}
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     )}
 
@@ -2099,6 +2141,20 @@ export default function DashboardDesignPage() {
                             />
                           </div>
                         )}
+
+                        {userRole === "SUPER_ADMIN" && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
+                          <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>
+                            <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Advanced filters</div>
+                            <MultiLineReportFilterPanel
+                              organizationId={dashboard?.organization_id ?? 0}
+                              token={token}
+                              fieldKey={addMultiLineFieldKey.trim()}
+                              subFields={selectedMultiLineSubFields as unknown as MultiFilterSubField[]}
+                              value={addAdvancedFilters}
+                              onChange={setAddAdvancedFilters}
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     )}
 
@@ -2202,6 +2258,20 @@ export default function DashboardDesignPage() {
                             ) : null}
                           </div>
                         )}
+
+                        {userRole === "SUPER_ADMIN" && addCardSourceMode === "multi_line_agg" && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
+                          <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>
+                            <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Advanced filters</div>
+                            <MultiLineReportFilterPanel
+                              organizationId={dashboard?.organization_id ?? 0}
+                              token={token}
+                              fieldKey={addMultiLineFieldKey.trim()}
+                              subFields={selectedMultiLineSubFields as unknown as MultiFilterSubField[]}
+                              value={addAdvancedFilters}
+                              onChange={setAddAdvancedFilters}
+                            />
+                          </div>
+                        ) : null}
 
                         <div style={{ height: 1, background: "var(--border)" }} />
                         <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>

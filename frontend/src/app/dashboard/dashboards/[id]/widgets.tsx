@@ -4,6 +4,7 @@ import Link from "next/link";
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import type { MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 export type WidgetDesignMenuActions = {
   onEdit: () => void;
   onDelete: () => void;
@@ -79,6 +80,8 @@ export type Widget =
       filter_sub_field_key?: string;
       /** Optional viewer-facing label for filter button */
       filter_label?: string;
+      /** Advanced multi-line row filters (SUPER_ADMIN) */
+      filters?: MultiItemsFilterPayloadV2 | null;
       full_width?: boolean;
       col_span?: number;
     }
@@ -106,6 +109,8 @@ export type Widget =
       filter_sub_field_key?: string;
       /** Optional viewer-facing label for filter button */
       filter_label?: string;
+      /** Advanced multi-line row filters (SUPER_ADMIN) */
+      filters?: MultiItemsFilterPayloadV2 | null;
       full_width?: boolean;
       col_span?: number;
     }
@@ -137,6 +142,8 @@ export type Widget =
       allow_custom_colors?: boolean;
       bg_color?: string;
       fg_color?: string;
+      /** Advanced multi-line row filters (SUPER_ADMIN) */
+      filters?: MultiItemsFilterPayloadV2 | null;
       full_width?: boolean;
       col_span?: number;
     }
@@ -155,6 +162,8 @@ export type Widget =
       rows_limit?: number;
       /** Display order for combined columns (primary + join:...). */
       column_order?: string[];
+      /** Advanced multi-line row filters (SUPER_ADMIN) */
+      filters?: MultiItemsFilterPayloadV2 | null;
       /** Optional join to another KPI's multi-line items (acts like a lookup join). */
       join?: {
         kpi_id: number;
@@ -177,6 +186,13 @@ type KpiFieldWithSubs = {
   name: string;
   field_type: string;
   sub_fields?: Array<{ id: number; key: string; name: string; field_type: string }>;
+};
+
+type MultiItemsRowsResponse = {
+  rows: Array<{ index: number; data: Record<string, unknown> }>;
+  total: number;
+  page: number;
+  page_size: number;
 };
 const _kpiFieldsDetailCache: Record<string, Promise<KpiFieldWithSubs[]> | undefined> = {};
 
@@ -645,6 +661,53 @@ async function fetchEntryForPeriod(
   return api<any>(`/entries/for-period?${q.toString()}`, { token });
 }
 
+async function fetchAllFilteredMultiItemsRows(opts: {
+  token: string;
+  organizationId: number;
+  kpiId: number;
+  year: number;
+  periodKey?: string | null;
+  sourceFieldKey: string;
+  filters: MultiItemsFilterPayloadV2;
+}): Promise<Record<string, unknown>[]> {
+  const { token, organizationId, kpiId, year, periodKey, sourceFieldKey, filters } = opts;
+  if (!filters || !Array.isArray((filters as any).conditions) || (filters as any).conditions.length === 0) return [];
+
+  const fields = await getKpiFieldsWithSubs(token, organizationId, kpiId);
+  const sourceField = fields.find((f) => f.key === sourceFieldKey && f.field_type === "multi_line_items");
+  const fieldId = sourceField?.id;
+  if (!fieldId) return [];
+
+  const entry = await fetchEntryForPeriod(token, organizationId, kpiId, year, periodKey);
+  const entryId = entry?.id;
+  if (!entryId) return [];
+
+  const pageSize = 200;
+  let page = 1;
+  const out: Array<{ index: number; data: Record<string, unknown> }> = [];
+
+  while (true) {
+    const params = new URLSearchParams({
+      entry_id: String(entryId),
+      field_id: String(fieldId),
+      organization_id: String(organizationId),
+      page: String(page),
+      page_size: String(pageSize),
+      filters: JSON.stringify(filters),
+    });
+    const res = await api<MultiItemsRowsResponse>(`/entries/multi-items/rows?${params.toString()}`, { token });
+    const rows = Array.isArray(res?.rows) ? res.rows : [];
+    rows.forEach((r) => out.push(r));
+    const total = typeof res?.total === "number" ? res.total : out.length;
+    if (out.length >= total) break;
+    if (rows.length === 0) break;
+    page += 1;
+  }
+
+  out.sort((a, b) => a.index - b.index);
+  return out.map((r) => r.data || {});
+}
+
 function KpiSingleValueWidget({
   widget,
   organizationId,
@@ -728,8 +791,19 @@ function KpiCardSingleValueWidget({
     Promise.all([
       getKpiFieldMap(token, organizationId, widget.kpi_id),
       fetchEntryForPeriod(token, organizationId, widget.kpi_id, widget.year, widget.period_key),
+      widget.source_mode === "multi_line_agg" && widget.source_field_key && widget.filters && widget.filters.conditions?.length
+        ? fetchAllFilteredMultiItemsRows({
+            token,
+            organizationId,
+            kpiId: widget.kpi_id,
+            year: widget.year,
+            periodKey: widget.period_key,
+            sourceFieldKey: widget.source_field_key,
+            filters: widget.filters,
+          })
+        : Promise.resolve(null),
     ])
-      .then(([map, entry]) => {
+      .then(([map, entry, filteredRows]) => {
         if (widget.source_mode === "field") {
           const key = widget.field_key || "";
           const fid = key ? map.idByKey[key] : undefined;
@@ -743,7 +817,7 @@ function KpiCardSingleValueWidget({
           const sourceKey = widget.source_field_key || "";
           const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
           const raw = sourceId ? rawFieldFromEntry(entry, sourceId) : null;
-          const items = Array.isArray(raw) ? raw : [];
+          const items = Array.isArray(filteredRows) ? filteredRows : Array.isArray(raw) ? raw : [];
           const agg = widget.agg ?? "sum";
           const n = aggregateSingleValue(items, { agg, valueKey: widget.value_sub_field_key });
           setValue(n == null ? "" : formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
@@ -1177,8 +1251,22 @@ function KpiBarChartWidgetInner({
     if (!token) return;
     setLoading(true);
     setError(null);
-    Promise.all([getKpiFieldMap(token, organizationId, widget.kpi_id), fetchEntryForPeriod(token, organizationId, widget.kpi_id, viewerYear, widget.period_key)])
-      .then(([map, entry]) => {
+    Promise.all([
+      getKpiFieldMap(token, organizationId, widget.kpi_id),
+      fetchEntryForPeriod(token, organizationId, widget.kpi_id, viewerYear, widget.period_key),
+      widget.mode === "multi_line_items" && widget.source_field_key && widget.filters && widget.filters.conditions?.length
+        ? fetchAllFilteredMultiItemsRows({
+            token,
+            organizationId,
+            kpiId: widget.kpi_id,
+            year: viewerYear,
+            periodKey: widget.period_key,
+            sourceFieldKey: widget.source_field_key,
+            filters: widget.filters,
+          })
+        : Promise.resolve(null),
+    ])
+      .then(([map, entry, filteredRows]) => {
         const mode = widget.mode || "fields";
         if (mode === "multi_line_items") {
           const sourceKey = widget.source_field_key || "";
@@ -1192,7 +1280,7 @@ function KpiBarChartWidgetInner({
             return;
           }
           const raw = rawFieldFromEntry(entry, sourceId);
-          const items = Array.isArray(raw) ? raw : [];
+          const items = Array.isArray(filteredRows) ? filteredRows : Array.isArray(raw) ? raw : [];
           if (filterKey) {
             const uniq = Array.from(new Set(items.map((r: any) => safeKey(r?.[filterKey])).filter((v) => v && v !== "(empty)"))).sort((a, b) =>
               a.localeCompare(b)
@@ -1237,6 +1325,7 @@ function KpiBarChartWidgetInner({
     widget.agg,
     widget.value_sub_field_key,
     widget.filter_sub_field_key,
+    JSON.stringify(widget.filters ?? null),
     JSON.stringify(selectedFilterValues),
   ]);
 
@@ -2190,8 +2279,26 @@ function KpiTrendWidgetInner({
     if (selectedYears.length === 0) return;
     setLoading(true);
     setError(null);
-    Promise.all([getKpiFieldMap(token, organizationId, widget.kpi_id), Promise.all(selectedYears.map((y) => fetchEntryForPeriod(token, organizationId, widget.kpi_id, y, widget.period_key)))])
-      .then(([map, entries]) => {
+    Promise.all([
+      getKpiFieldMap(token, organizationId, widget.kpi_id),
+      Promise.all(selectedYears.map((y) => fetchEntryForPeriod(token, organizationId, widget.kpi_id, y, widget.period_key))),
+      mode === "multi_line_items" && widget.source_field_key && widget.filters && widget.filters.conditions?.length
+        ? Promise.all(
+            selectedYears.map((y) =>
+              fetchAllFilteredMultiItemsRows({
+                token,
+                organizationId,
+                kpiId: widget.kpi_id,
+                year: y,
+                periodKey: widget.period_key,
+                sourceFieldKey: widget.source_field_key || "",
+                filters: widget.filters!,
+              })
+            )
+          )
+        : Promise.resolve(null),
+    ])
+      .then(([map, entries, filteredRowsByYear]) => {
         const years = [...selectedYears].sort((a, b) => b - a);
         const entryByYear = new Map<number, any>();
         years.forEach((y, idx) => entryByYear.set(y, entries[idx]));
@@ -2216,7 +2323,9 @@ function KpiTrendWidgetInner({
           years.forEach((y) => {
             const entry = entryByYear.get(y);
             const raw = rawFieldFromEntry(entry, sourceId);
-            const items = Array.isArray(raw) ? raw : [];
+            const idx = selectedYears.indexOf(y);
+            const prefiltered = Array.isArray(filteredRowsByYear) ? filteredRowsByYear[idx] : null;
+            const items = Array.isArray(prefiltered) ? prefiltered : Array.isArray(raw) ? raw : [];
             rawItemsByYear.set(y, items);
             allItems.push(...items);
           });
@@ -2270,6 +2379,7 @@ function KpiTrendWidgetInner({
     widget.agg,
     widget.value_sub_field_key,
     widget.filter_sub_field_key,
+    JSON.stringify(widget.filters ?? null),
     JSON.stringify(widget.field_keys || []),
     JSON.stringify(selectedYears),
     JSON.stringify(selectedFilterValues),
@@ -3184,6 +3294,17 @@ function KpiMultiLineTableWidgetInner({
     Promise.all([
       getKpiFieldsWithSubs(token, organizationId, widget.kpi_id),
       fetchEntryForPeriod(token, organizationId, widget.kpi_id, viewerYear, widget.period_key),
+      widget.source_field_key && widget.filters && widget.filters.conditions?.length
+        ? fetchAllFilteredMultiItemsRows({
+            token,
+            organizationId,
+            kpiId: widget.kpi_id,
+            year: viewerYear,
+            periodKey: widget.period_key,
+            sourceFieldKey: widget.source_field_key,
+            filters: widget.filters,
+          })
+        : Promise.resolve(null),
       ...joinSpecs.map((j) =>
         Promise.all([
           getKpiFieldsWithSubs(token, organizationId, j.kpi_id),
@@ -3191,12 +3312,12 @@ function KpiMultiLineTableWidgetInner({
         ])
       ),
     ])
-      .then(([fields, entry, ...joinResults]) => {
+      .then(([fields, entry, filteredRows, ...joinResults]) => {
         const source = fields.find((f) => f.key === widget.source_field_key && f.field_type === "multi_line_items");
         const fid = source?.id;
         setSourceFieldId(typeof fid === "number" ? fid : null);
         const raw = fid ? rawFieldFromEntry(entry, fid) : null;
-        const rows = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
+        const rows = Array.isArray(filteredRows) ? filteredRows : Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
         setItems(rows);
         const labels: Record<string, string> = {};
         (source?.sub_fields ?? []).forEach((sf) => {
@@ -3239,6 +3360,7 @@ function KpiMultiLineTableWidgetInner({
     viewerYear,
     widget.period_key,
     widget.source_field_key,
+    JSON.stringify(widget.filters ?? null),
     JSON.stringify((widget as any).joins ?? null),
     JSON.stringify((widget as any).join ?? null),
   ]);
@@ -3374,6 +3496,7 @@ function KpiMultiLineTableWidgetInner({
                 ...(Array.isArray(widget.sub_field_keys) && widget.sub_field_keys.length > 0
                   ? { cols: widget.sub_field_keys.join(",") }
                   : {}),
+                ...(widget.filters && widget.filters.conditions?.length ? { filters: JSON.stringify(widget.filters) } : {}),
                 ...(widget.period_key ? { period_key: widget.period_key } : {}),
               }).toString()}`}
               className="btn"

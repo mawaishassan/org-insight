@@ -414,6 +414,7 @@ export default function FullPageMultiItems() {
   const dashboardIdFromUrl = searchParams.get("dashboard_id");
   const widgetIdFromUrl = searchParams.get("widget_id");
   const colsFromUrl = searchParams.get("cols");
+  const filtersFromUrl = searchParams.get("filters");
 
   const token = getAccessToken();
 
@@ -440,8 +441,27 @@ export default function FullPageMultiItems() {
   const [uploadOption, setUploadOption] = useState<"append" | "override" | "upsert" | null>(null);
   const [upsertMatchSubFieldKey, setUpsertMatchSubFieldKey] = useState<string>("");
   const [uploading, setUploading] = useState(false);
-  const [appliedFilter, setAppliedFilter] = useState<MultiItemsFilterPayloadV2 | null>(null);
-  const [filterDraft, setFilterDraft] = useState<MultiFilterConditionRow[]>(() => [emptyMultiFilterRow()]);
+  const parsedFiltersFromUrl = useMemo(() => {
+    if (!filtersFromUrl) return null;
+    try {
+      const parsed = JSON.parse(filtersFromUrl) as MultiItemsFilterPayloadV2;
+      return parsed && Array.isArray((parsed as any).conditions) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }, [filtersFromUrl]);
+
+  const [appliedFilter, setAppliedFilter] = useState<MultiItemsFilterPayloadV2 | null>(() => parsedFiltersFromUrl);
+  const [filterDraft, setFilterDraft] = useState<MultiFilterConditionRow[]>(() =>
+    payloadToFilterDraft(parsedFiltersFromUrl)
+  );
+
+  useEffect(() => {
+    // If filters are provided via URL (e.g. from a dashboard widget), use them as the initial applied filter.
+    if (!parsedFiltersFromUrl) return;
+    setAppliedFilter(parsedFiltersFromUrl);
+    setFilterDraft(payloadToFilterDraft(parsedFiltersFromUrl));
+  }, [parsedFiltersFromUrl]);
   const [refFilterOptions, setRefFilterOptions] = useState<Record<string, string[]>>({});
   const [sourceKpiFieldsById, setSourceKpiFieldsById] = useState<Record<number, FieldSummary[]>>({});
   const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
@@ -494,8 +514,9 @@ export default function FullPageMultiItems() {
     if (periodKey) q.set("period_key", periodKey);
     if (cameFromDashboard && dashboardId != null && Number.isFinite(dashboardId)) q.set("dashboard_id", String(dashboardId));
     if (cameFromDashboard && widgetIdFromUrl) q.set("widget_id", String(widgetIdFromUrl));
+    if (cameFromDashboard && filtersFromUrl) q.set("filters", String(filtersFromUrl));
     return q;
-  }, [effectiveOrgId, periodKey, cameFromDashboard, dashboardIdFromUrl, widgetIdFromUrl]);
+  }, [effectiveOrgId, periodKey, cameFromDashboard, dashboardIdFromUrl, widgetIdFromUrl, filtersFromUrl]);
 
   useEffect(() => {
     if (!token) return;
