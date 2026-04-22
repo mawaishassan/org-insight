@@ -394,14 +394,19 @@ export default function MultiItemRowDetail() {
   const rowIndexParam = params.rowIndex as string;
   const isNew = rowIndexParam === "new";
   const rowIndex = isNew ? null : Number(rowIndexParam);
+  const isEditMode = isNew || searchParams.get("mode") === "edit";
   const organizationIdFromUrl = searchParams.get("organization_id");
   const periodKey = searchParams.get("period_key") || "";
+  const dashboardIdFromUrl = searchParams.get("dashboard_id");
+  const widgetIdFromUrl = searchParams.get("widget_id");
 
   const token = getAccessToken();
 
   const [meOrgId, setMeOrgId] = useState<number | null>(null);
   const [kpiName, setKpiName] = useState<string>("");
   const [field, setField] = useState<FieldSummary | null>(null);
+  const [dashboardName, setDashboardName] = useState<string>("");
+  const [dashboardWidgetTitle, setDashboardWidgetTitle] = useState<string>("");
   const [entryId, setEntryId] = useState<number | null>(null);
   const [editData, setEditData] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(true);
@@ -412,12 +417,88 @@ export default function MultiItemRowDetail() {
   const [activeMixedListTabByGroup, setActiveMixedListTabByGroup] = useState<Record<string, string>>({});
   const [activeListLikeTabByGroup, setActiveListLikeTabByGroup] = useState<Record<string, string>>({});
 
+  const cameFromDashboard = dashboardIdFromUrl != null && String(dashboardIdFromUrl).trim() !== "";
+  const dashboardId = cameFromDashboard ? Number(dashboardIdFromUrl) : null;
+
+  const baseQueryParams = useMemo(() => {
+    const q = new URLSearchParams();
+    if (effectiveOrgId != null) q.set("organization_id", String(effectiveOrgId));
+    if (periodKey) q.set("period_key", periodKey);
+    if (cameFromDashboard && dashboardId != null && Number.isFinite(dashboardId)) q.set("dashboard_id", String(dashboardId));
+    if (cameFromDashboard && widgetIdFromUrl) q.set("widget_id", String(widgetIdFromUrl));
+    return q;
+  }, [effectiveOrgId, periodKey, cameFromDashboard, dashboardIdFromUrl, widgetIdFromUrl]);
+
+  const backToList = () => {
+    router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}?${baseQueryParams.toString()}`);
+  };
+
+  const exitEditMode = () => {
+    if (isNew) {
+      backToList();
+      return;
+    }
+    router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${baseQueryParams.toString()}`);
+  };
+
+  const handleDelete = async () => {
+    if (!token) {
+      toast.error("Session expired. Please log in again.");
+      router.push("/login");
+      return;
+    }
+    if (isNew || rowIndex == null) return;
+    if (!entryId || !fieldId) {
+      toast.error("Entry is still loading. Please wait and try again.");
+      return;
+    }
+    if (!window.confirm("Delete this row?")) return;
+    try {
+      await api(
+        `/entries/multi-items/rows/${rowIndex}?${new URLSearchParams({
+          entry_id: String(entryId),
+          field_id: String(fieldId),
+          organization_id: String(effectiveOrgId ?? ""),
+        }).toString()}`,
+        { method: "DELETE", token }
+      );
+      toast.success("Row deleted");
+      backToList();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Delete failed");
+    }
+  };
+
   const rowPageContextLoadGenRef = useRef(0);
 
   const effectiveOrgId = useMemo(
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
     [organizationIdFromUrl, meOrgId]
   );
+
+  useEffect(() => {
+    if (!token) return;
+    if (!cameFromDashboard) {
+      setDashboardName("");
+      setDashboardWidgetTitle("");
+      return;
+    }
+    if (dashboardId == null || !Number.isFinite(dashboardId)) return;
+    const q = new URLSearchParams();
+    if (effectiveOrgId != null) q.set("organization_id", String(effectiveOrgId));
+    api<{ name: string; layout?: any }>(`/dashboards/${dashboardId}?${q.toString()}`, { token })
+      .then((d) => {
+        setDashboardName(d?.name || "Dashboard");
+        const wid = widgetIdFromUrl ? String(widgetIdFromUrl) : "";
+        const ws = asWidgets((d as any)?.layout);
+        const w = wid ? ws.find((x) => String((x as any)?.id) === wid) : null;
+        setDashboardWidgetTitle(String((w as any)?.title || "").trim());
+      })
+      .catch(() => {
+        setDashboardName("Dashboard");
+        setDashboardWidgetTitle("");
+      });
+  }, [token, cameFromDashboard, dashboardId, effectiveOrgId, widgetIdFromUrl]);
 
   useEffect(() => {
     if (!token) {
@@ -731,7 +812,7 @@ export default function MultiItemRowDetail() {
     setSaving(true);
     try {
       if (isNew) {
-        await api<MultiItemsRow>(
+        const created = await api<MultiItemsRow>(
           `/entries/multi-items/rows?${new URLSearchParams({
             entry_id: String(entryId),
             field_id: String(fieldId),
@@ -744,16 +825,19 @@ export default function MultiItemRowDetail() {
           }
         );
         toast.success("Row added successfully");
+        const next = new URLSearchParams({
+          organization_id: String(effectiveOrgId ?? ""),
+          ...(periodKey ? { period_key: periodKey } : {}),
+        });
+        router.replace(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${created.index}?${next.toString()}`);
       } else {
         await persistExistingRow(editData);
         toast.success("Row updated successfully");
+        const next = new URLSearchParams(searchParams.toString());
+        next.delete("mode");
+        next.set("row_updated", "1");
+        router.replace(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${next.toString()}`);
       }
-      const backParams = new URLSearchParams({
-        organization_id: String(effectiveOrgId ?? ""),
-        ...(periodKey ? { period_key: periodKey } : {}),
-      });
-      backParams.set(isNew ? "row_added" : "row_updated", "1");
-      router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}?${backParams.toString()}`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Save failed");
       return;
@@ -762,13 +846,7 @@ export default function MultiItemRowDetail() {
     }
   };
 
-  const handleCancel = () => {
-    const backParams = new URLSearchParams({
-      organization_id: String(effectiveOrgId ?? ""),
-      ...(periodKey ? { period_key: periodKey } : {}),
-    });
-    router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}?${backParams.toString()}`);
-  };
+  const handleCancel = () => backToList();
 
   if (!token) {
     return null;
@@ -787,6 +865,70 @@ export default function MultiItemRowDetail() {
           <p style={{ color: "var(--muted)" }}>Loading…</p>
         ) : (
           <>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                <button type="button" className="btn" onClick={handleCancel}>
+                  Back
+                </button>
+                <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+                  {cameFromDashboard && dashboardId != null && Number.isFinite(dashboardId) ? (
+                    <>
+                      <Link
+                        href={`/dashboard/dashboards/${dashboardId}?${new URLSearchParams({ organization_id: String(effectiveOrgId ?? "") }).toString()}`}
+                        style={{ color: "var(--accent)", textDecoration: "none" }}
+                      >
+                        {dashboardName || "Dashboard"}
+                      </Link>
+                      <span style={{ margin: "0 0.35rem" }}>/</span>
+                      <Link
+                        href={`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}?${baseQueryParams.toString()}`}
+                        style={{ color: "var(--accent)", textDecoration: "none" }}
+                      >
+                        {dashboardWidgetTitle || field?.name || "Full Page"}
+                      </Link>
+                      <span style={{ margin: "0 0.35rem" }}>/</span>
+                      <span style={{ color: "var(--text)", fontWeight: 600 }}>Record #{(rowIndex ?? 0) + 1}</span>
+                    </>
+                  ) : (
+                    <span style={{ color: "var(--text)", fontWeight: 600 }}>
+                      {kpiName ? `${kpiName} · ` : ""}{field?.name || "Row"} · Record #{(rowIndex ?? 0) + 1}
+                    </span>
+                  )}
+                </span>
+              </div>
+              {!isNew && (
+                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                  {isEditMode ? (
+                    <>
+                      <button type="button" className="btn" onClick={exitEditMode} disabled={saving}>
+                        Cancel
+                      </button>
+                      <button type="button" className="btn btn-primary" disabled={saving || !entryId} onClick={handleSave}>
+                        {saving ? "Saving..." : "Save"}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => {
+                        const next = new URLSearchParams(searchParams.toString());
+                        next.set("mode", "edit");
+                        router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${next.toString()}`);
+                      }}
+                    >
+                      Edit
+                    </button>
+                  )}
+                  {!isEditMode ? (
+                    <button type="button" className="btn" onClick={handleDelete} style={{ color: "var(--error)" }}>
+                      Delete
+                    </button>
+                  ) : null}
+                </div>
+              )}
+            </div>
+
             {/* Summary strip with a few key attributes */}
             {subFields.length > 0 && (
               <div
@@ -932,6 +1074,51 @@ export default function MultiItemRowDetail() {
                     if (current && listLikeKeys.includes(current)) return current;
                     return listLikeKeys[0] || "";
                   })();
+
+                  if (!isEditMode) {
+                    const renderValue = (sf: SubField) => {
+                      const key = sf.key;
+                      const val = editData[key];
+                      if (sf.field_type === "attachment") {
+                        const url = (val as any)?.download_url || (typeof val === "string" ? val : "");
+                        const name =
+                          typeof (val as any)?.filename === "string"
+                            ? (val as any).filename
+                            : typeof (val as any)?.name === "string"
+                              ? (val as any).name
+                              : url
+                                ? "Attachment"
+                                : "—";
+                        if (!url) return <span style={{ color: "var(--muted)" }}>—</span>;
+                        return (
+                          <a href={url} target="_blank" rel="noreferrer" style={{ color: "var(--accent)", textDecoration: "underline" }}>
+                            {name}
+                          </a>
+                        );
+                      }
+                      if (sf.field_type === "multi_reference" || sf.field_type === "mixed_list") {
+                        const arr = Array.isArray(val) ? (val as unknown[]).filter((x) => x != null && String(x).trim() !== "") : [];
+                        return <span>{arr.length ? arr.map((x) => String(x)).join("; ") : "—"}</span>;
+                      }
+                      if (sf.field_type === "boolean") return <span>{Boolean(val) ? "Yes" : "No"}</span>;
+                      if (val == null || String(val).trim() === "") return <span style={{ color: "var(--muted)" }}>—</span>;
+                      return <span>{String(val)}</span>;
+                    };
+                    const allFields = group.fields;
+                    return (
+                      <div style={{ display: "grid", gap: "0.6rem", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+                        {allFields.map((sf) => (
+                          <div key={sf.key} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "0.75rem", background: "var(--bg-subtle, #f9fafb)" }}>
+                            <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: 6 }}>
+                              {sf.name}
+                              {sf.is_required ? " *" : ""}
+                            </div>
+                            <div style={{ fontSize: "0.95rem", color: "var(--text)" }}>{renderValue(sf)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  }
 
                   return (
                     <div style={{ display: "grid", gap: "1rem" }}>
@@ -1334,20 +1521,7 @@ export default function MultiItemRowDetail() {
             );
               })}
             <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem", justifyContent: "flex-end", alignItems: "center" }}>
-              {!entryId && (
-                <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Loading entry…</span>
-              )}
-              <button type="button" className="btn" onClick={handleCancel}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={saving || !entryId}
-                onClick={handleSave}
-              >
-                {saving ? "Saving..." : "Save"}
-              </button>
+              {!entryId && <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Loading entry…</span>}
             </div>
           </>
         )}

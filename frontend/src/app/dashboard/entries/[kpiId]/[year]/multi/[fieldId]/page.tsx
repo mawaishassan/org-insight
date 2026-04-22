@@ -411,12 +411,18 @@ export default function FullPageMultiItems() {
   const fieldId = Number(params.fieldId);
   const organizationIdFromUrl = searchParams.get("organization_id");
   const periodKey = searchParams.get("period_key") || "";
+  const dashboardIdFromUrl = searchParams.get("dashboard_id");
+  const widgetIdFromUrl = searchParams.get("widget_id");
+  const colsFromUrl = searchParams.get("cols");
+  const filtersFromUrl = searchParams.get("filters");
 
   const token = getAccessToken();
 
   const [meOrgId, setMeOrgId] = useState<number | null>(null);
   const [kpiName, setKpiName] = useState<string>("");
   const [field, setField] = useState<FieldSummary | null>(null);
+  const [dashboardName, setDashboardName] = useState<string>("");
+  const [dashboardWidgetTitle, setDashboardWidgetTitle] = useState<string>("");
   const [entryId, setEntryId] = useState<number | null>(null);
   const [rows, setRows] = useState<MultiItemsRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -435,8 +441,27 @@ export default function FullPageMultiItems() {
   const [uploadOption, setUploadOption] = useState<"append" | "override" | "upsert" | null>(null);
   const [upsertMatchSubFieldKey, setUpsertMatchSubFieldKey] = useState<string>("");
   const [uploading, setUploading] = useState(false);
-  const [appliedFilter, setAppliedFilter] = useState<MultiItemsFilterPayloadV2 | null>(null);
-  const [filterDraft, setFilterDraft] = useState<MultiFilterConditionRow[]>(() => [emptyMultiFilterRow()]);
+  const parsedFiltersFromUrl = useMemo(() => {
+    if (!filtersFromUrl) return null;
+    try {
+      const parsed = JSON.parse(filtersFromUrl) as MultiItemsFilterPayloadV2;
+      return parsed && Array.isArray((parsed as any).conditions) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }, [filtersFromUrl]);
+
+  const [appliedFilter, setAppliedFilter] = useState<MultiItemsFilterPayloadV2 | null>(() => parsedFiltersFromUrl);
+  const [filterDraft, setFilterDraft] = useState<MultiFilterConditionRow[]>(() =>
+    payloadToFilterDraft(parsedFiltersFromUrl)
+  );
+
+  useEffect(() => {
+    // If filters are provided via URL (e.g. from a dashboard widget), use them as the initial applied filter.
+    if (!parsedFiltersFromUrl) return;
+    setAppliedFilter(parsedFiltersFromUrl);
+    setFilterDraft(payloadToFilterDraft(parsedFiltersFromUrl));
+  }, [parsedFiltersFromUrl]);
   const [refFilterOptions, setRefFilterOptions] = useState<Record<string, string[]>>({});
   const [sourceKpiFieldsById, setSourceKpiFieldsById] = useState<Record<number, FieldSummary[]>>({});
   const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
@@ -480,6 +505,42 @@ export default function FullPageMultiItems() {
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
     [organizationIdFromUrl, meOrgId]
   );
+
+  const cameFromDashboard = dashboardIdFromUrl != null && String(dashboardIdFromUrl).trim() !== "";
+  const dashboardId = cameFromDashboard ? Number(dashboardIdFromUrl) : null;
+  const baseQueryParams = useMemo(() => {
+    const q = new URLSearchParams();
+    if (effectiveOrgId != null) q.set("organization_id", String(effectiveOrgId));
+    if (periodKey) q.set("period_key", periodKey);
+    if (cameFromDashboard && dashboardId != null && Number.isFinite(dashboardId)) q.set("dashboard_id", String(dashboardId));
+    if (cameFromDashboard && widgetIdFromUrl) q.set("widget_id", String(widgetIdFromUrl));
+    if (cameFromDashboard && filtersFromUrl) q.set("filters", String(filtersFromUrl));
+    return q;
+  }, [effectiveOrgId, periodKey, cameFromDashboard, dashboardIdFromUrl, widgetIdFromUrl, filtersFromUrl]);
+
+  useEffect(() => {
+    if (!token) return;
+    if (!cameFromDashboard) {
+      setDashboardName("");
+      setDashboardWidgetTitle("");
+      return;
+    }
+    if (dashboardId == null || !Number.isFinite(dashboardId)) return;
+    const q = new URLSearchParams();
+    if (effectiveOrgId != null) q.set("organization_id", String(effectiveOrgId));
+    api<{ name: string; layout?: any }>(`/dashboards/${dashboardId}?${q.toString()}`, { token })
+      .then((d) => {
+        setDashboardName(d?.name || "Dashboard");
+        const wid = widgetIdFromUrl ? String(widgetIdFromUrl) : "";
+        const ws = asWidgets((d as any)?.layout);
+        const w = wid ? ws.find((x) => String((x as any)?.id) === wid) : null;
+        setDashboardWidgetTitle(String((w as any)?.title || "").trim());
+      })
+      .catch(() => {
+        setDashboardName("Dashboard");
+        setDashboardWidgetTitle("");
+      });
+  }, [token, cameFromDashboard, dashboardId, effectiveOrgId, widgetIdFromUrl]);
 
   useEffect(() => {
     entryIdLiveRef.current = entryId;
@@ -730,11 +791,24 @@ export default function FullPageMultiItems() {
     }
   }, [subFields, sortBy]);
 
-  // Initialize visible columns (up to 4, persisted per KPI/field)
+  // Initialize visible columns (persisted per KPI/field; dashboard-origin can override via ?cols=)
   useEffect(() => {
     if (subFields.length === 0) return;
     const storageKey = `multi_visible_cols:${kpiId}:${fieldId}`;
     let initial: string[] | null = null;
+
+    if (cameFromDashboard && colsFromUrl) {
+      const parsed = String(colsFromUrl)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const filtered = parsed.filter((k) => subFields.some((sf) => sf.key === k));
+      if (filtered.length > 0) {
+        setVisibleColumns(filtered);
+        return;
+      }
+    }
+
     if (typeof window !== "undefined") {
       try {
         const stored = window.localStorage.getItem(storageKey);
@@ -757,15 +831,15 @@ export default function FullPageMultiItems() {
         .map((sf) => sf.key);
       const combined: string[] = [];
       attachmentKeys.forEach((k) => {
-        if (!combined.includes(k) && combined.length < 4) combined.push(k);
+        if (!combined.includes(k)) combined.push(k);
       });
       otherKeys.forEach((k) => {
-        if (!combined.includes(k) && combined.length < 4) combined.push(k);
+        if (!combined.includes(k)) combined.push(k);
       });
-      initial = combined.length > 0 ? combined : subFields.slice(0, 4).map((sf) => sf.key);
+      initial = combined.length > 0 ? combined : subFields.map((sf) => sf.key);
     }
     setVisibleColumns(initial);
-  }, [subFields, kpiId, fieldId]);
+  }, [subFields, kpiId, fieldId, cameFromDashboard, colsFromUrl]);
 
   // Persist visible columns
   useEffect(() => {
@@ -780,12 +854,8 @@ export default function FullPageMultiItems() {
     }
   }, [visibleColumns, kpiId, fieldId]);
 
-  const startEdit = (row: MultiItemsRow) => {
-    if (!entryId) return;
-    const params = new URLSearchParams({
-      organization_id: String(effectiveOrgId ?? ""),
-      ...(periodKey ? { period_key: periodKey } : {}),
-    });
+  const openRowView = (row: MultiItemsRow) => {
+    const params = new URLSearchParams(baseQueryParams.toString());
     router.push(
       `/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${row.index}?${params.toString()}`
     );
@@ -795,24 +865,7 @@ export default function FullPageMultiItems() {
     // legacy inline save no longer used; kept for compatibility
   };
 
-  const handleDeleteRow = async (rowIndex: number) => {
-    if (!token || !entryId || !fieldId) return;
-    if (!window.confirm("Delete this row?")) return;
-    try {
-      await api(
-        `/entries/multi-items/rows/${rowIndex}?${new URLSearchParams({
-          entry_id: String(entryId),
-          field_id: String(fieldId),
-          organization_id: String(effectiveOrgId ?? ""),
-        }).toString()}`,
-        { method: "DELETE", token }
-      );
-      toast.success("Row deleted");
-      await loadRows();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Delete failed");
-    }
-  };
+  // Single-row delete is now handled on the row detail page.
 
   const handleBulkDelete = async () => {
     if (!token || !entryId || !fieldId || selectedIndices.length === 0) return;
@@ -988,7 +1041,6 @@ export default function FullPageMultiItems() {
 
   return (
     <div style={{ padding: "0.75rem 1rem 1rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
-
       {error && (
         <div className="card" style={{ padding: "0.75rem", color: "var(--error)" }}>
           {error}
@@ -997,6 +1049,22 @@ export default function FullPageMultiItems() {
 
       {/* Search + Add row + Bulk upload + filters */}
       <div className="card" style={{ padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+        {cameFromDashboard && dashboardId != null && Number.isFinite(dashboardId) ? (
+          <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+            <Link
+              href={`/dashboard/dashboards/${dashboardId}?${new URLSearchParams({ organization_id: String(effectiveOrgId ?? "") }).toString()}`}
+              style={{ color: "var(--accent)", textDecoration: "none" }}
+            >
+              {dashboardName || "Dashboard"}
+            </Link>
+            <span style={{ margin: "0 0.35rem" }}>/</span>
+            <span style={{ color: "var(--text)", fontWeight: 600 }}>{dashboardWidgetTitle || field?.name || "Full Page"}</span>
+          </div>
+        ) : (
+          <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+            <span style={{ color: "var(--text)", fontWeight: 600 }}>{field?.name || kpiName || "Entries"}</span>
+          </div>
+        )}
         <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center" }}>
           <input
             type="text"
@@ -1044,9 +1112,7 @@ export default function FullPageMultiItems() {
                     organization_id: String(effectiveOrgId ?? ""),
                     ...(periodKey ? { period_key: periodKey } : {}),
                   });
-                  router.push(
-                    `/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/new?${params.toString()}`
-                  );
+                  router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/new?${params.toString()}&mode=edit`);
                 }}
               >
                 Add row
@@ -1076,7 +1142,7 @@ export default function FullPageMultiItems() {
             <button
               type="button"
               className="btn"
-              title="Choose visible columns (max 4)"
+              title="Choose visible columns"
               aria-label="Choose visible columns"
               onClick={() => {
                 if (!showColumnsPopup) {
@@ -1101,7 +1167,7 @@ export default function FullPageMultiItems() {
               </svg>
               <span>Columns</span>
               {visibleColumns.length > 0 && (
-                <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>({visibleColumns.length}/4)</span>
+                <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>({visibleColumns.length})</span>
               )}
             </button>
           )}
@@ -2230,9 +2296,7 @@ export default function FullPageMultiItems() {
               }}
               onClick={(e) => e.stopPropagation()}
             >
-              <div style={{ padding: "1rem", borderBottom: "1px solid var(--border)", fontWeight: 600 }}>
-                Visible columns (max 4)
-              </div>
+              <div style={{ padding: "1rem", borderBottom: "1px solid var(--border)", fontWeight: 600 }}>Visible columns</div>
               <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid var(--border)" }}>
                 <input
                   type="text"
@@ -2266,7 +2330,7 @@ export default function FullPageMultiItems() {
                   })
                   .map((sf) => {
                     const selected = columnsPopupDraft.includes(sf.key);
-                    const atLimit = !selected && columnsPopupDraft.length >= 4;
+                    const atLimit = false;
                     return (
                       <label
                         key={sf.key}
@@ -2285,7 +2349,6 @@ export default function FullPageMultiItems() {
                           disabled={atLimit}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              if (columnsPopupDraft.length >= 4) return;
                               setColumnsPopupDraft((prev) => (prev.includes(sf.key) ? prev : [...prev, sf.key]));
                             } else {
                               setColumnsPopupDraft((prev) => prev.filter((k) => k !== sf.key));
@@ -2325,7 +2388,7 @@ export default function FullPageMultiItems() {
                   type="button"
                   className="btn btn-primary"
                   onClick={() => {
-                    setVisibleColumns(columnsPopupDraft.length > 0 ? columnsPopupDraft : subFields.slice(0, 4).map((sf) => sf.key));
+                    setVisibleColumns(columnsPopupDraft.length > 0 ? columnsPopupDraft : subFields.map((sf) => sf.key));
                     setShowColumnsPopup(false);
                   }}
                 >
@@ -2437,7 +2500,7 @@ export default function FullPageMultiItems() {
                         cursor: canEditKpi && row.can_edit !== false ? "pointer" : "default",
                       }}
                       onClick={() => {
-                        if (canEditKpi && row.can_edit !== false) startEdit(row);
+                        openRowView(row);
                       }}
                     >
                       {(() => {
@@ -2544,14 +2607,51 @@ export default function FullPageMultiItems() {
                           </svg>
                         </button>
                         )}
-                        {row.can_edit !== false && canEditKpi && (
+                        <button
+                          type="button"
+                          title="View row"
+                          aria-label="View row"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openRowView(row);
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            width: 32,
+                            height: 32,
+                            padding: 0,
+                            border: "1px solid var(--border)",
+                            borderRadius: 6,
+                            background: "var(--bg-subtle, #f5f5f5)",
+                            color: "var(--text)",
+                            cursor: "pointer",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "var(--accent-muted, #e8e8e8)";
+                            e.currentTarget.style.borderColor = "var(--accent)";
+                            e.currentTarget.style.color = "var(--accent)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "var(--bg-subtle, #f5f5f5)";
+                            e.currentTarget.style.borderColor = "var(--border)";
+                            e.currentTarget.style.color = "var(--text)";
+                          }}
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+                            <circle cx="12" cy="12" r="3" />
+                          </svg>
+                        </button>
+                        {false && row.can_edit !== false && canEditKpi && (
                         <button
                           type="button"
                           title="Edit row"
                           aria-label="Edit row"
                           onClick={(e) => {
                             e.stopPropagation();
-                            startEdit(row);
+                              openRowView(row);
                           }}
                           style={{
                             display: "inline-flex",
@@ -2583,14 +2683,14 @@ export default function FullPageMultiItems() {
                           </svg>
                         </button>
                         )}
-                        {row.can_delete !== false && canEditKpi && (
+                        {false && row.can_delete !== false && canEditKpi && (
                         <button
                           type="button"
                           title="Delete row"
                           aria-label="Delete row"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleDeleteRow(row.index);
+                              // handled on row detail page
                           }}
                           style={{
                             display: "inline-flex",
