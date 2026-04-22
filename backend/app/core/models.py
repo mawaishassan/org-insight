@@ -779,6 +779,15 @@ class ReportTemplate(Base):
     )
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
+    # Rendering mode:
+    # - designer: body_blocks (visual builder) is the source of truth when present
+    # - code: body_template (raw Jinja2/HTML) is the source of truth; designer is disabled
+    template_mode = Column(
+        String(20),
+        nullable=False,
+        default="designer",
+        server_default="designer",
+    )
     # Optional rich layout template (Jinja2-style) stored as raw text.
     # When present, this is used to render HTML for the report using the
     # structured KPI data produced at generation time.

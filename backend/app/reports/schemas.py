@@ -17,6 +17,7 @@ class ReportTemplateUpdate(BaseModel):
 
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
+    template_mode: str | None = Field(None, pattern="^(designer|code)$")
     body_template: str | None = None
     body_blocks: list[dict] | None = None
 

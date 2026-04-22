@@ -325,12 +325,12 @@ async def generate_report(
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
-    data = await generate_report_data(db, template_id, rt.organization_id, year=year)
+    data = await generate_report_data(db, template_id, rt.organization_id, year=year, include_drafts=False)
     # If the template has a body_template or body_blocks (visual builder), render HTML
     # so the report view shows the same content as the design live preview.
     can_render = bool(rt.body_template or getattr(rt, "body_blocks", None))
     if format == "json" and can_render:
-        html = await render_report_html(db, template_id, rt.organization_id, year=year)
+        html = await render_report_html(db, template_id, rt.organization_id, year=year, include_drafts=False)
         if html is not None:
             data["rendered_html"] = html
     if not data:
@@ -383,6 +383,7 @@ async def evaluate_snippet(
         sub_field_group_fn=body.sub_field_group_fn,
         entry_index=body.entry_index,
         expression=body.expression,
+        include_drafts=current_user.role.value in ("SUPER_ADMIN", "ORG_ADMIN"),
     )
     return {"value": value}
 
@@ -401,10 +402,29 @@ async def preview_report(
     can = await user_can_access_report(db, current_user.id, template_id, "view")
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+    include_drafts = current_user.role.value in ("SUPER_ADMIN", "ORG_ADMIN")
     try:
-        html = await render_report_html_with_template(
-            db, template_id, org_id, year=year, body_template_override=body.body_template
-        )
+        # If designer sends an empty template, render from saved body_blocks/body_template instead.
+        # This ensures block-driven features (e.g. multi-line row filters) are included in preview.
+        if (body.body_template or "").strip():
+            html = await render_report_html_with_template(
+                db,
+                template_id,
+                org_id,
+                year=year,
+                body_template_override=body.body_template,
+                include_drafts=include_drafts,
+            )
+        else:
+            from app.reports.service import render_report_html
+
+            html = await render_report_html(
+                db,
+                template_id,
+                org_id,
+                year=year,
+                include_drafts=include_drafts,
+            )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
