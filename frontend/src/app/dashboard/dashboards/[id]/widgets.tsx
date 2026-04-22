@@ -3104,6 +3104,7 @@ function KpiMultiLineTableWidgetInner({
   const [yearOptions, setYearOptions] = useState<number[]>([]);
   const [items, setItems] = useState<Record<string, unknown>[]>([]);
   const [labelByKey, setLabelByKey] = useState<Record<string, string>>({});
+  const [sourceFieldId, setSourceFieldId] = useState<number | null>(null);
   const [joinIndexes, setJoinIndexes] = useState<Array<Record<string, Record<string, unknown>>>>([]);
   const [joinLabels, setJoinLabels] = useState<Array<Record<string, string>>>([]);
   const [loading, setLoading] = useState(true);
@@ -3193,6 +3194,7 @@ function KpiMultiLineTableWidgetInner({
       .then(([fields, entry, ...joinResults]) => {
         const source = fields.find((f) => f.key === widget.source_field_key && f.field_type === "multi_line_items");
         const fid = source?.id;
+        setSourceFieldId(typeof fid === "number" ? fid : null);
         const raw = fid ? rawFieldFromEntry(entry, fid) : null;
         const rows = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
         setItems(rows);
@@ -3362,19 +3364,37 @@ function KpiMultiLineTableWidgetInner({
     setHeaderAddon(
       <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
         {yearSelect}
-        {showOpenFullLink && dashboardId != null ? (
-          <Link
-            href={`/dashboard/dashboards/${dashboardId}/widgets/${widget.id}`}
-            className="btn"
-            style={{ fontSize: "0.85rem", textDecoration: "none", height: 36, display: "inline-flex", alignItems: "center" }}
-          >
-            Full Page View
-          </Link>
+        {showOpenFullLink ? (
+          sourceFieldId != null ? (
+            <Link
+              href={`/dashboard/entries/${widget.kpi_id}/${viewerYear}/multi/${sourceFieldId}?${new URLSearchParams({
+                organization_id: String(organizationId),
+                ...(dashboardId != null ? { dashboard_id: String(dashboardId) } : {}),
+                widget_id: String(widget.id),
+                ...(Array.isArray(widget.sub_field_keys) && widget.sub_field_keys.length > 0
+                  ? { cols: widget.sub_field_keys.join(",") }
+                  : {}),
+                ...(widget.period_key ? { period_key: widget.period_key } : {}),
+              }).toString()}`}
+              className="btn"
+              style={{ fontSize: "0.85rem", textDecoration: "none", height: 36, display: "inline-flex", alignItems: "center" }}
+            >
+              Full Page View
+            </Link>
+          ) : dashboardId != null ? (
+            <Link
+              href={`/dashboard/dashboards/${dashboardId}/widgets/${widget.id}`}
+              className="btn"
+              style={{ fontSize: "0.85rem", textDecoration: "none", height: 36, display: "inline-flex", alignItems: "center" }}
+            >
+              Full Page View
+            </Link>
+          ) : null
         ) : null}
       </div>
     );
     return () => setHeaderAddon(null);
-  }, [setHeaderAddon, showOpenFullLink, dashboardId, widget.id, viewerYear, JSON.stringify(yearOptions)]);
+  }, [setHeaderAddon, showOpenFullLink, dashboardId, widget.id, widget.kpi_id, widget.period_key, organizationId, viewerYear, sourceFieldId, JSON.stringify(yearOptions)]);
 
   useEffect(() => {
     if (!setViewerMenu) return;

@@ -397,12 +397,16 @@ export default function MultiItemRowDetail() {
   const isEditMode = isNew || searchParams.get("mode") === "edit";
   const organizationIdFromUrl = searchParams.get("organization_id");
   const periodKey = searchParams.get("period_key") || "";
+  const dashboardIdFromUrl = searchParams.get("dashboard_id");
+  const widgetIdFromUrl = searchParams.get("widget_id");
 
   const token = getAccessToken();
 
   const [meOrgId, setMeOrgId] = useState<number | null>(null);
   const [kpiName, setKpiName] = useState<string>("");
   const [field, setField] = useState<FieldSummary | null>(null);
+  const [dashboardName, setDashboardName] = useState<string>("");
+  const [dashboardWidgetTitle, setDashboardWidgetTitle] = useState<string>("");
   const [entryId, setEntryId] = useState<number | null>(null);
   const [editData, setEditData] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(true);
@@ -413,12 +417,20 @@ export default function MultiItemRowDetail() {
   const [activeMixedListTabByGroup, setActiveMixedListTabByGroup] = useState<Record<string, string>>({});
   const [activeListLikeTabByGroup, setActiveListLikeTabByGroup] = useState<Record<string, string>>({});
 
+  const cameFromDashboard = dashboardIdFromUrl != null && String(dashboardIdFromUrl).trim() !== "";
+  const dashboardId = cameFromDashboard ? Number(dashboardIdFromUrl) : null;
+
+  const baseQueryParams = useMemo(() => {
+    const q = new URLSearchParams();
+    if (effectiveOrgId != null) q.set("organization_id", String(effectiveOrgId));
+    if (periodKey) q.set("period_key", periodKey);
+    if (cameFromDashboard && dashboardId != null && Number.isFinite(dashboardId)) q.set("dashboard_id", String(dashboardId));
+    if (cameFromDashboard && widgetIdFromUrl) q.set("widget_id", String(widgetIdFromUrl));
+    return q;
+  }, [effectiveOrgId, periodKey, cameFromDashboard, dashboardIdFromUrl, widgetIdFromUrl]);
+
   const backToList = () => {
-    const backParams = new URLSearchParams({
-      organization_id: String(effectiveOrgId ?? ""),
-      ...(periodKey ? { period_key: periodKey } : {}),
-    });
-    router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}?${backParams.toString()}`);
+    router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}?${baseQueryParams.toString()}`);
   };
 
   const exitEditMode = () => {
@@ -426,9 +438,7 @@ export default function MultiItemRowDetail() {
       backToList();
       return;
     }
-    const next = new URLSearchParams(searchParams.toString());
-    next.delete("mode");
-    router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${next.toString()}`);
+    router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${baseQueryParams.toString()}`);
   };
 
   const handleDelete = async () => {
@@ -465,6 +475,30 @@ export default function MultiItemRowDetail() {
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
     [organizationIdFromUrl, meOrgId]
   );
+
+  useEffect(() => {
+    if (!token) return;
+    if (!cameFromDashboard) {
+      setDashboardName("");
+      setDashboardWidgetTitle("");
+      return;
+    }
+    if (dashboardId == null || !Number.isFinite(dashboardId)) return;
+    const q = new URLSearchParams();
+    if (effectiveOrgId != null) q.set("organization_id", String(effectiveOrgId));
+    api<{ name: string; layout?: any }>(`/dashboards/${dashboardId}?${q.toString()}`, { token })
+      .then((d) => {
+        setDashboardName(d?.name || "Dashboard");
+        const wid = widgetIdFromUrl ? String(widgetIdFromUrl) : "";
+        const ws = asWidgets((d as any)?.layout);
+        const w = wid ? ws.find((x) => String((x as any)?.id) === wid) : null;
+        setDashboardWidgetTitle(String((w as any)?.title || "").trim());
+      })
+      .catch(() => {
+        setDashboardName("Dashboard");
+        setDashboardWidgetTitle("");
+      });
+  }, [token, cameFromDashboard, dashboardId, effectiveOrgId, widgetIdFromUrl]);
 
   useEffect(() => {
     if (!token) {
@@ -837,7 +871,29 @@ export default function MultiItemRowDetail() {
                   Back
                 </button>
                 <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-                  {kpiName ? `${kpiName} · ` : ""}{field?.name || "Row"} · Record #{(rowIndex ?? 0) + 1}
+                  {cameFromDashboard && dashboardId != null && Number.isFinite(dashboardId) ? (
+                    <>
+                      <Link
+                        href={`/dashboard/dashboards/${dashboardId}?${new URLSearchParams({ organization_id: String(effectiveOrgId ?? "") }).toString()}`}
+                        style={{ color: "var(--accent)", textDecoration: "none" }}
+                      >
+                        {dashboardName || "Dashboard"}
+                      </Link>
+                      <span style={{ margin: "0 0.35rem" }}>/</span>
+                      <Link
+                        href={`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}?${baseQueryParams.toString()}`}
+                        style={{ color: "var(--accent)", textDecoration: "none" }}
+                      >
+                        {dashboardWidgetTitle || field?.name || "Full Page"}
+                      </Link>
+                      <span style={{ margin: "0 0.35rem" }}>/</span>
+                      <span style={{ color: "var(--text)", fontWeight: 600 }}>Record #{(rowIndex ?? 0) + 1}</span>
+                    </>
+                  ) : (
+                    <span style={{ color: "var(--text)", fontWeight: 600 }}>
+                      {kpiName ? `${kpiName} · ` : ""}{field?.name || "Row"} · Record #{(rowIndex ?? 0) + 1}
+                    </span>
+                  )}
                 </span>
               </div>
               {!isNew && (
