@@ -676,6 +676,73 @@ class KpiMultiLineRowAccess(Base):
     field = relationship("KPIField", back_populates="row_access")
 
 
+class KpiMultiLineRow(Base):
+    """Relational storage for multi_line_items rows (one per record)."""
+
+    __tablename__ = "kpi_multi_line_rows"
+
+    id = Column(Integer, primary_key=True, index=True)
+    entry_id = Column(
+        Integer, ForeignKey("kpi_entries.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    field_id = Column(
+        Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    row_index = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "entry_id",
+            "field_id",
+            "row_index",
+            name="uq_kpi_multi_line_rows_entry_field_row_index",
+        ),
+    )
+
+    entry = relationship("KPIEntry", lazy="selectin")
+    field = relationship("KPIField", lazy="selectin")
+    cells = relationship(
+        "KpiMultiLineCell",
+        back_populates="row",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class KpiMultiLineCell(Base):
+    """Relational storage for a single multi_line_items cell (typed)."""
+
+    __tablename__ = "kpi_multi_line_cells"
+
+    id = Column(Integer, primary_key=True, index=True)
+    row_id = Column(
+        Integer, ForeignKey("kpi_multi_line_rows.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sub_field_id = Column(
+        Integer, ForeignKey("kpi_field_sub_fields.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    value_text = Column(Text, nullable=True)
+    value_number = Column(Float, nullable=True)
+    value_json = Column(JSON, nullable=True)
+    value_boolean = Column(Boolean, nullable=True)
+    value_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "row_id",
+            "sub_field_id",
+            name="uq_kpi_multi_line_cells_row_sub_field",
+        ),
+    )
+
+    row = relationship("KpiMultiLineRow", back_populates="cells")
+    sub_field = relationship("KPIFieldSubField", lazy="selectin")
+
+
 class KPIEntry(Base):
     """KPI data entry (one per organization per KPI per year per period_key). period_key '' = full year."""
 

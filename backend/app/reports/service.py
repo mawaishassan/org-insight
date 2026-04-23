@@ -15,6 +15,8 @@ from app.core.models import (
     KPIField,
     KPIEntry,
     KPIFieldValue,
+    KpiMultiLineRow,
+    KpiMultiLineCell,
     Domain,
     ReportTemplateTextBlock,
     Category,
@@ -38,6 +40,43 @@ from app.entries.reference_filter_resolve import (
 from app.entries.multi_item_filters import row_passes_filters
 from jinja2 import Environment, BaseLoader, select_autoescape
 from markupsafe import escape as html_escape
+
+
+def _ml_cell_raw(c: KpiMultiLineCell):
+    if getattr(c, "value_json", None) is not None:
+        return c.value_json
+    if getattr(c, "value_text", None) is not None:
+        return c.value_text
+    if getattr(c, "value_number", None) is not None:
+        return c.value_number
+    if getattr(c, "value_boolean", None) is not None:
+        return c.value_boolean
+    if getattr(c, "value_date", None) is not None:
+        try:
+            return c.value_date.isoformat()
+        except Exception:
+            return str(c.value_date)
+    return None
+
+
+async def _load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField) -> list[dict]:
+    res = await db.execute(
+        select(KpiMultiLineRow)
+        .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
+        .order_by(KpiMultiLineRow.row_index)
+        .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
+    )
+    out: list[dict] = []
+    for r in list(res.scalars().all()):
+        d = {}
+        for c in getattr(r, "cells", None) or []:
+            sf = getattr(c, "sub_field", None)
+            key = getattr(sf, "key", None) if sf is not None else None
+            if not key:
+                continue
+            d[str(key)] = _ml_cell_raw(c)
+        out.append(d)
+    return out
 
 
 async def create_report_template(
@@ -1566,8 +1605,11 @@ async def generate_report_data(
                             val = fv.value_boolean
                         if f.field_type == FieldType.number and fv.value_number is not None:
                             value_by_key[f.key] = fv.value_number
-                        if f.field_type == FieldType.multi_line_items and isinstance(fv.value_json, list):
-                            multi_line_items_data[f.key] = fv.value_json
+                        if f.field_type == FieldType.multi_line_items:
+                            # Multi-line items are stored relationally.
+                            rows_items = await _load_multi_line_items_rows(db, entry_id=entry.id, field=f)
+                            multi_line_items_data[f.key] = rows_items
+                            val = rows_items
                     card_ids = kpi.card_display_field_ids or []
                     show_on_card = f.id in card_ids if isinstance(card_ids, list) else False
                     field_payload = {

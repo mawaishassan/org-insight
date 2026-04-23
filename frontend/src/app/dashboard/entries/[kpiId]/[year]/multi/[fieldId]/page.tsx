@@ -578,17 +578,18 @@ export default function FullPageMultiItems() {
     const loadId = ++multiPageContextLoadGenRef.current;
     setError(null);
     try {
-      // Load KPI name
-      const kpi = await api<KpiInfo>(`/kpis/${kpiId}?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`, { token }).catch(() => null);
-      if (loadId !== multiPageContextLoadGenRef.current) return;
-      if (kpi?.name) setKpiName(kpi.name);
-      // Load fields and find this multi_line_items field
-      const fields = await api<FieldSummary[]>(`/entries/fields?${new URLSearchParams({ kpi_id: String(kpiId), organization_id: String(effectiveOrgId) }).toString()}`, { token }).catch(() => []);
-      if (loadId !== multiPageContextLoadGenRef.current) return;
-      const f = fields.find((x) => x.id === fieldId && x.field_type === "multi_line_items") || null;
-      setField(f);
-      // Ensure entry exists for this period
-      const forPeriod = await api<{ id: number }>(
+      const qOrg = new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString();
+      const kpiP = api<KpiInfo>(`/kpis/${kpiId}/minimal?${qOrg}`, { token }).catch(() => null);
+      const fieldsP = api<FieldSummary[]>(
+        `/entries/fields?${new URLSearchParams({
+          kpi_id: String(kpiId),
+          field_id: String(fieldId),
+          minimal: "true",
+          organization_id: String(effectiveOrgId),
+        }).toString()}`,
+        { token }
+      ).catch(() => []);
+      const forPeriodP = api<{ id: number }>(
         `/entries/for-period?${new URLSearchParams({
           kpi_id: String(kpiId),
           year: String(year),
@@ -597,23 +598,29 @@ export default function FullPageMultiItems() {
         }).toString()}`,
         { token }
       );
-      if (loadId !== multiPageContextLoadGenRef.current) return;
-      setEntryId(forPeriod.id);
-      // User's edit rights for this KPI (view-only users get can_edit: false)
-      const apiInfo = await api<{ can_edit?: boolean; kpi_level_can_edit?: boolean }>(
+      const apiInfoP = api<{ can_edit?: boolean; kpi_level_can_edit?: boolean }>(
         `/entries/kpi-api-info?${new URLSearchParams({ kpi_id: String(kpiId), organization_id: String(effectiveOrgId) }).toString()}`,
         { token }
       ).catch(() => ({ can_edit: false, kpi_level_can_edit: false }));
-      if (loadId !== multiPageContextLoadGenRef.current) return;
-      setCanEditKpi(apiInfo?.can_edit !== false);
-      setKpiLevelCanEdit(apiInfo?.kpi_level_can_edit === true);
-
-      // Add-row permission is field-specific (not KPI-level)
-      const addRowInfo = await api<{ can_add_row?: boolean }>(
+      const addRowInfoP = api<{ can_add_row?: boolean }>(
         `/entries/multi-items/add-row-info?${new URLSearchParams({ field_id: String(fieldId), organization_id: String(effectiveOrgId) }).toString()}`,
         { token }
       ).catch(() => ({ can_add_row: false }));
+
+      const [kpi, fields, forPeriod, apiInfo, addRowInfo] = await Promise.all([
+        kpiP,
+        fieldsP,
+        forPeriodP,
+        apiInfoP,
+        addRowInfoP,
+      ]);
       if (loadId !== multiPageContextLoadGenRef.current) return;
+      if (kpi?.name) setKpiName(kpi.name);
+      const f = fields.find((x) => x.id === fieldId && x.field_type === "multi_line_items") || null;
+      setField(f);
+      setEntryId(forPeriod.id);
+      setCanEditKpi(apiInfo?.can_edit !== false);
+      setKpiLevelCanEdit(apiInfo?.kpi_level_can_edit === true);
       setCanAddRow(addRowInfo?.can_add_row === true);
     } catch (e) {
       if (loadId === multiPageContextLoadGenRef.current) {
