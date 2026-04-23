@@ -26,6 +26,20 @@ function useWidgetHeaderAddonSetter() {
   return useContext(WidgetHeaderAddonSetterContext);
 }
 
+const PALETTE_SCHEMES: Record<string, string[]> = {
+  tableau10: ["#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC"],
+  set2: ["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494", "#B3B3B3"],
+  dark2: ["#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#666666"],
+  pastel1: ["#FBB4AE", "#B3CDE3", "#CCEBC5", "#DECBE4", "#FED9A6", "#FFFFCC", "#E5D8BD", "#FDDAEC", "#F2F2F2"],
+  okabe_ito: ["#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7"],
+};
+
+function paletteForScheme(scheme: string | undefined, count: number) {
+  const colors = (scheme && PALETTE_SCHEMES[scheme]) || PALETTE_SCHEMES.tableau10;
+  const n = Math.max(2, Math.min(12, Math.trunc(count)));
+  return colors.slice(0, n);
+}
+
 export type Widget =
   | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean; col_span?: number }
   | {
@@ -72,6 +86,16 @@ export type Widget =
       chart_type?: "bar" | "pie";
       mode?: "fields" | "multi_line_items";
       field_keys?: string[];
+      /** Sort bars left-to-right by x-axis label or by value. */
+      sort_by?: "x" | "value";
+      sort_dir?: "asc" | "desc";
+      /** Bar color scheme (for bar charts). */
+      bar_color_mode?: "solid" | "palette" | "gradient";
+      bar_color?: string;
+      bar_palette?: string[];
+      bar_palette_scheme?: string;
+      bar_gradient_from?: string;
+      bar_gradient_to?: string;
       // multi_line_items mode
       source_field_key?: string;
       agg?: "count_rows" | "sum" | "avg";
@@ -101,6 +125,16 @@ export type Widget =
       mode?: "fields" | "multi_line_items";
       /** fields mode: scalar KPI value fields */
       field_keys?: string[];
+      /** Sort categories left-to-right by label or by value. */
+      sort_by?: "x" | "value";
+      sort_dir?: "asc" | "desc";
+      /** Color scheme for multi-series bars/lines. */
+      bar_color_mode?: "solid" | "palette" | "gradient";
+      bar_color?: string;
+      bar_palette?: string[];
+      bar_palette_scheme?: string;
+      bar_gradient_from?: string;
+      bar_gradient_to?: string;
       // multi_line_items mode
       source_field_key?: string;
       agg?: "count_rows" | "sum" | "avg";
@@ -1177,7 +1211,6 @@ function aggregateMultiLine(
     else if (agg === "sum") out.push({ label, value: v.sum });
     else out.push({ label, value: v.count ? v.sum / v.count : 0 });
   });
-  out.sort((a, b) => b.value - a.value);
   return out;
 }
 
@@ -1337,8 +1370,130 @@ function KpiBarChartWidgetInner({
   const groupVals = groups.map((g) => g.value);
   const maxG = groupVals.length ? Math.max(...groupVals, 0) : 1;
 
-  const visibleGroups = useMemo(() => groups.filter((g) => !hiddenSeriesKeys.includes(g.label)), [groups, JSON.stringify(hiddenSeriesKeys)]);
-  const visibleNumeric = useMemo(() => numeric.filter((b) => !hiddenSeriesKeys.includes(b.key)), [JSON.stringify(numeric), JSON.stringify(hiddenSeriesKeys)]);
+  const sortBy = widget.sort_by || "value";
+  const sortDir = widget.sort_dir || "desc";
+  const dirMul = sortDir === "asc" ? 1 : -1;
+
+  const visibleGroups = useMemo(() => {
+    const v = groups.filter((g) => !hiddenSeriesKeys.includes(g.label));
+    const next = [...v];
+    if (sortBy === "x") next.sort((a, b) => dirMul * a.label.localeCompare(b.label));
+    else next.sort((a, b) => dirMul * (a.value - b.value));
+    return next;
+  }, [groups, JSON.stringify(hiddenSeriesKeys), sortBy, sortDir]);
+
+  const visibleNumeric = useMemo(() => {
+    const v = numeric.filter((b) => !hiddenSeriesKeys.includes(b.key));
+    const next = [...v];
+    if (sortBy === "x") next.sort((a, b) => dirMul * a.label.localeCompare(b.label));
+    else next.sort((a, b) => dirMul * (a.value - b.value));
+    return next;
+  }, [JSON.stringify(numeric), JSON.stringify(hiddenSeriesKeys), sortBy, sortDir]);
+
+  const barColorMode = widget.bar_color_mode || "solid";
+  const barSolid = widget.bar_color || "var(--accent)";
+  const barPalette =
+    Array.isArray(widget.bar_palette) && widget.bar_palette.length
+      ? widget.bar_palette
+      : paletteForScheme(widget.bar_palette_scheme, 8);
+  const barGradFrom = widget.bar_gradient_from || "var(--accent)";
+  const barGradTo = widget.bar_gradient_to || "";
+
+  const parseRgbColor = (raw: string) => {
+    const s = raw.trim();
+    const m = /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*(0|1|0?\.\d+))?\s*\)$/i.exec(s);
+    if (!m) return null;
+    const r = Math.max(0, Math.min(255, Number(m[1])));
+    const g = Math.max(0, Math.min(255, Number(m[2])));
+    const b = Math.max(0, Math.min(255, Number(m[3])));
+    if (![r, g, b].every((n) => Number.isFinite(n))) return null;
+    return { r, g, b };
+  };
+
+  const parseHslColor = (raw: string) => {
+    const s = raw.trim();
+    const m = /^hsla?\(\s*([+-]?\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)%\s*,\s*(\d+(?:\.\d+)?)%(?:\s*,\s*(0|1|0?\.\d+))?\s*\)$/i.exec(s);
+    if (!m) return null;
+    let h = Number(m[1]);
+    const sat = Number(m[2]) / 100;
+    const light = Number(m[3]) / 100;
+    if (![h, sat, light].every((n) => Number.isFinite(n))) return null;
+    h = ((h % 360) + 360) % 360;
+    const c = (1 - Math.abs(2 * light - 1)) * sat;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const mm = light - c / 2;
+    let rr = 0, gg = 0, bb = 0;
+    if (h < 60) [rr, gg, bb] = [c, x, 0];
+    else if (h < 120) [rr, gg, bb] = [x, c, 0];
+    else if (h < 180) [rr, gg, bb] = [0, c, x];
+    else if (h < 240) [rr, gg, bb] = [0, x, c];
+    else if (h < 300) [rr, gg, bb] = [x, 0, c];
+    else [rr, gg, bb] = [c, 0, x];
+    const r = Math.round((rr + mm) * 255);
+    const g = Math.round((gg + mm) * 255);
+    const b = Math.round((bb + mm) * 255);
+    return { r, g, b };
+  };
+
+  const parseHexColor = (raw: string) => {
+    const s = raw.trim();
+    const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
+    if (!m) return null;
+    const hex = m[1].length === 3 ? m[1].split("").map((c) => c + c).join("") : m[1];
+    const n = parseInt(hex, 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+  };
+
+  const parseColor = (raw: string) => parseHexColor(raw) ?? parseRgbColor(raw) ?? parseHslColor(raw);
+
+  const derivedGradTo = useMemo(() => {
+    const raw = (barGradTo || "").trim();
+    if (raw) return raw;
+    const base = parseColor(String(barGradFrom || "").trim());
+    if (!base) return "rgb(165, 180, 252)";
+    // Create a real visible ramp by mixing towards white (or black if already very light).
+    const lum = 0.2126 * (base.r / 255) + 0.7152 * (base.g / 255) + 0.0722 * (base.b / 255);
+    const toward = lum > 0.72 ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 };
+    const t = lum > 0.72 ? 0.35 : 0.62;
+    const r = Math.round(base.r + (toward.r - base.r) * t);
+    const g = Math.round(base.g + (toward.g - base.g) * t);
+    const b = Math.round(base.b + (toward.b - base.b) * t);
+    return `rgb(${r}, ${g}, ${b})`;
+  }, [barGradFrom, barGradTo]);
+
+  const colorForIndex = (idx: number, total: number) => {
+    if (barColorMode === "palette") return barPalette[idx % barPalette.length];
+    if (barColorMode === "solid") return barSolid;
+    // Gradient: create distinct shades by varying lightness in HSL.
+    const base = parseColor(barGradFrom) ?? parseColor(barSolid);
+    if (!base) return barGradFrom || barSolid;
+    const rgbToHsl = ({ r, g, b }: { r: number; g: number; b: number }) => {
+      const rr = r / 255;
+      const gg = g / 255;
+      const bb = b / 255;
+      const max = Math.max(rr, gg, bb);
+      const min = Math.min(rr, gg, bb);
+      const d = max - min;
+      let h = 0;
+      const l = (max + min) / 2;
+      const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+      if (d !== 0) {
+        if (max === rr) h = ((gg - bb) / d) % 6;
+        else if (max === gg) h = (bb - rr) / d + 2;
+        else h = (rr - gg) / d + 4;
+        h *= 60;
+        if (h < 0) h += 360;
+      }
+      return { h, s: s * 100, l: l * 100 };
+    };
+    const { h, s, l } = rgbToHsl(base);
+    const t = total <= 1 ? 0 : Math.min(1, Math.max(0, idx / (total - 1)));
+    // Make a +/- 26% lightness ramp around the base, clamped for readability.
+    const lo = Math.max(12, Math.min(88, l - 26));
+    const hi = Math.max(12, Math.min(88, l + 26));
+    const ll = lo + (hi - lo) * t;
+    return `hsl(${Math.round(h)}, ${Math.round(Math.max(18, Math.min(92, s)))}%, ${Math.round(ll)}%)`;
+  };
 
   const toggleFilterValue = (v: string) => {
     setSelectedFilterValues((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
@@ -1703,7 +1858,7 @@ function KpiBarChartWidgetInner({
     viewerChartType,
     JSON.stringify(hiddenSeriesKeys),
     JSON.stringify(groups),
-    JSON.stringify(numeric.map((b) => b.key)),
+    JSON.stringify(numeric.map((b) => b.key))
   ]);
 
   return (
@@ -1773,42 +1928,45 @@ function KpiBarChartWidgetInner({
                   const cy = 150;
                   const r = 110;
                   let a = -Math.PI / 2;
-                  const colors = ["var(--accent)", "rgba(79,70,229,0.65)", "rgba(79,70,229,0.45)", "rgba(79,70,229,0.3)"];
                   return (
                     <>
-                      {visibleGroups.slice(0, 12).map((g, i) => {
-                        const frac = g.value / total;
-                        const next = a + frac * Math.PI * 2;
-                        const d = pieArcPath(cx, cy, r, a, next);
-                        const mid = (a + next) / 2;
-                        const p = polarToCartesian(cx, cy, r * 0.72, mid);
-                        a = next;
-                        return (
-                          <path
-                            key={g.label}
-                            d={d}
-                            fill={colors[i % colors.length]}
-                            stroke="var(--surface)"
-                            strokeWidth="1"
-                            onMouseEnter={() => {
-                              setHoverPieKey(g.label);
-                              setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                            }}
-                            onMouseMove={() => {
-                              setHoverPieKey(g.label);
-                              setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                            }}
-                            onTouchStart={() => {
-                              setHoverPieKey(g.label);
-                              setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                            }}
-                            onTouchMove={() => {
-                              setHoverPieKey(g.label);
-                              setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                            }}
-                          />
-                        );
-                      })}
+                      {(() => {
+                        const slices = visibleGroups.slice(0, 12);
+                        return slices.map((g, i) => {
+                          const frac = g.value / total;
+                          const next = a + frac * Math.PI * 2;
+                          const d = pieArcPath(cx, cy, r, a, next);
+                          const mid = (a + next) / 2;
+                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
+                          a = next;
+                          const fill = colorForIndex(i, slices.length);
+                          return (
+                            <path
+                              key={g.label}
+                              d={d}
+                              fill={fill}
+                              stroke="var(--surface)"
+                              strokeWidth="1"
+                              onMouseEnter={() => {
+                                setHoverPieKey(g.label);
+                                setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                              }}
+                              onMouseMove={() => {
+                                setHoverPieKey(g.label);
+                                setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                              }}
+                              onTouchStart={() => {
+                                setHoverPieKey(g.label);
+                                setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                              }}
+                              onTouchMove={() => {
+                                setHoverPieKey(g.label);
+                                setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                              }}
+                            />
+                          );
+                        });
+                      })()}
                       {hoverPiePt && hoverPieKey ? (
                         <g>
                           <circle cx={hoverPiePt.x} cy={hoverPiePt.y} r={4} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
@@ -1833,14 +1991,17 @@ function KpiBarChartWidgetInner({
                       <text x="420" y="34" fontSize="12" fill="var(--muted)">
                         Top groups
                       </text>
-                      {visibleGroups.slice(0, 8).map((g, i) => (
-                        <g key={g.label}>
-                          <rect x="420" y={52 + i * 26} width="10" height="10" fill={colors[i % colors.length]} />
-                          <text x="436" y={61 + i * 26} fontSize="11" fill="var(--text)">
-                            {g.label.length > 22 ? `${g.label.slice(0, 20)}…` : g.label} ({g.value.toLocaleString()})
-                          </text>
-                        </g>
-                      ))}
+                      {(() => {
+                        const legend = visibleGroups.slice(0, 8);
+                        return legend.map((g, i) => (
+                          <g key={g.label}>
+                            <rect x="420" y={52 + i * 26} width="10" height="10" fill={colorForIndex(i, legend.length)} />
+                            <text x="436" y={61 + i * 26} fontSize="11" fill="var(--text)">
+                              {g.label.length > 22 ? `${g.label.slice(0, 20)}…` : g.label} ({g.value.toLocaleString()})
+                            </text>
+                          </g>
+                        ));
+                      })()}
                     </>
                   );
                 })()}
@@ -1887,6 +2048,7 @@ function KpiBarChartWidgetInner({
                         const x = left + i * (barW + gap);
                         const h = maxG > 0 ? (b.value / maxG) * innerH : 0;
                         const y = top + innerH - h;
+                        const fill = colorForIndex(i, data.length);
                         return (
                           <g key={b.label}>
                             <rect
@@ -1894,7 +2056,7 @@ function KpiBarChartWidgetInner({
                               y={y}
                               width={barW}
                               height={h}
-                              fill="var(--accent)"
+                              fill={fill}
                               opacity={0.85}
                               rx={2}
                               onMouseEnter={() => {
@@ -1988,7 +2150,6 @@ function KpiBarChartWidgetInner({
                 const cy = 150;
                 const r = 110;
                 let a = -Math.PI / 2;
-                const colors = ["var(--accent)", "rgba(79,70,229,0.65)", "rgba(79,70,229,0.45)", "rgba(79,70,229,0.3)"];
                 return (
                   <>
                     {data.map((b, i) => {
@@ -1998,11 +2159,12 @@ function KpiBarChartWidgetInner({
                       const mid = (a + next) / 2;
                       const p = polarToCartesian(cx, cy, r * 0.72, mid);
                       a = next;
+                      const fill = colorForIndex(i, data.length);
                       return (
                         <path
                           key={b.key}
                           d={d}
-                          fill={colors[i % colors.length]}
+                          fill={fill}
                           stroke="var(--surface)"
                           strokeWidth="1"
                           onMouseEnter={() => {
@@ -2050,7 +2212,7 @@ function KpiBarChartWidgetInner({
                     </text>
                     {data.slice(0, 8).map((b, i) => (
                       <g key={b.key}>
-                        <rect x="420" y={52 + i * 26} width="10" height="10" fill={colors[i % colors.length]} />
+                        <rect x="420" y={52 + i * 26} width="10" height="10" fill={colorForIndex(i, Math.min(8, data.length))} />
                         <text x="436" y={61 + i * 26} fontSize="11" fill="var(--text)">
                           {b.key.length > 22 ? `${b.key.slice(0, 20)}…` : b.key} ({b.value.toLocaleString()})
                         </text>
@@ -2099,6 +2261,7 @@ function KpiBarChartWidgetInner({
                       const x = left + i * (barW + gap);
                       const h = maxV > 0 ? (b.value / maxV) * innerH : 0;
                       const y = top + innerH - h;
+                      const fill = colorForIndex(i, visibleNumeric.length);
                       return (
                         <g key={b.key}>
                           <rect
@@ -2106,7 +2269,7 @@ function KpiBarChartWidgetInner({
                             y={y}
                             width={barW}
                             height={h}
-                            fill="var(--accent)"
+                            fill={fill}
                             opacity={0.85}
                             rx={2}
                             onMouseEnter={() => {
@@ -2699,12 +2862,118 @@ function KpiTrendWidgetInner({
   }, [setViewerMenu, loading, error, viewerView, JSON.stringify(yearOptions), JSON.stringify(selectedYears)]);
 
   const years = useMemo(() => [...selectedYears].sort((a, b) => a - b), [JSON.stringify(selectedYears)]);
+
+  const sortBy = widget.sort_by || "value";
+  const sortDir = widget.sort_dir || "desc";
+  const dirMul = sortDir === "asc" ? 1 : -1;
+
+  const barColorMode = widget.bar_color_mode || "solid";
+  const barSolid = widget.bar_color || "var(--accent)";
+  const barPalette =
+    Array.isArray(widget.bar_palette) && widget.bar_palette.length
+      ? widget.bar_palette
+      : paletteForScheme(widget.bar_palette_scheme, 8);
+  const barGradFrom = widget.bar_gradient_from || "var(--accent)";
+  const barGradTo = widget.bar_gradient_to || "";
+
+  const parseRgbColor = (raw: string) => {
+    const s = raw.trim();
+    const m = /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*(0|1|0?\.\d+))?\s*\)$/i.exec(s);
+    if (!m) return null;
+    const r = Math.max(0, Math.min(255, Number(m[1])));
+    const g = Math.max(0, Math.min(255, Number(m[2])));
+    const b = Math.max(0, Math.min(255, Number(m[3])));
+    if (![r, g, b].every((n) => Number.isFinite(n))) return null;
+    return { r, g, b };
+  };
+
+  const parseHslColor = (raw: string) => {
+    const s = raw.trim();
+    const m = /^hsla?\(\s*([+-]?\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)%\s*,\s*(\d+(?:\.\d+)?)%(?:\s*,\s*(0|1|0?\.\d+))?\s*\)$/i.exec(s);
+    if (!m) return null;
+    let h = Number(m[1]);
+    const sat = Number(m[2]) / 100;
+    const light = Number(m[3]) / 100;
+    if (![h, sat, light].every((n) => Number.isFinite(n))) return null;
+    h = ((h % 360) + 360) % 360;
+    const c = (1 - Math.abs(2 * light - 1)) * sat;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const mm = light - c / 2;
+    let rr = 0, gg = 0, bb = 0;
+    if (h < 60) [rr, gg, bb] = [c, x, 0];
+    else if (h < 120) [rr, gg, bb] = [x, c, 0];
+    else if (h < 180) [rr, gg, bb] = [0, c, x];
+    else if (h < 240) [rr, gg, bb] = [0, x, c];
+    else if (h < 300) [rr, gg, bb] = [x, 0, c];
+    else [rr, gg, bb] = [c, 0, x];
+    const r = Math.round((rr + mm) * 255);
+    const g = Math.round((gg + mm) * 255);
+    const b = Math.round((bb + mm) * 255);
+    return { r, g, b };
+  };
+
+  const parseHexColor = (raw: string) => {
+    const s = raw.trim();
+    const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
+    if (!m) return null;
+    const hex = m[1].length === 3 ? m[1].split("").map((c) => c + c).join("") : m[1];
+    const n = parseInt(hex, 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+  };
+
+  const parseColor = (raw: string) => parseHexColor(raw) ?? parseRgbColor(raw) ?? parseHslColor(raw);
+
+  const derivedGradTo = useMemo(() => {
+    const raw = (barGradTo || "").trim();
+    if (raw) return raw;
+    const base = parseColor(String(barGradFrom || "").trim());
+    if (!base) return "rgb(165, 180, 252)";
+    const lum = 0.2126 * (base.r / 255) + 0.7152 * (base.g / 255) + 0.0722 * (base.b / 255);
+    const toward = lum > 0.72 ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 };
+    const t = lum > 0.72 ? 0.35 : 0.62;
+    const r = Math.round(base.r + (toward.r - base.r) * t);
+    const g = Math.round(base.g + (toward.g - base.g) * t);
+    const b = Math.round(base.b + (toward.b - base.b) * t);
+    return `rgb(${r}, ${g}, ${b})`;
+  }, [barGradFrom, barGradTo]);
+
+  const colorForIndex = (idx: number, total: number) => {
+    if (barColorMode === "palette") return barPalette[idx % barPalette.length];
+    if (barColorMode === "solid") return barSolid;
+    const base = parseColor(barGradFrom) ?? parseColor(barSolid);
+    if (!base) return barGradFrom || barSolid;
+    const rgbToHsl = ({ r, g, b }: { r: number; g: number; b: number }) => {
+      const rr = r / 255;
+      const gg = g / 255;
+      const bb = b / 255;
+      const max = Math.max(rr, gg, bb);
+      const min = Math.min(rr, gg, bb);
+      const d = max - min;
+      let h = 0;
+      const l = (max + min) / 2;
+      const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+      if (d !== 0) {
+        if (max === rr) h = ((gg - bb) / d) % 6;
+        else if (max === gg) h = (bb - rr) / d + 2;
+        else h = (rr - gg) / d + 4;
+        h *= 60;
+        if (h < 0) h += 360;
+      }
+      return { h, s: s * 100, l: l * 100 };
+    };
+    const { h, s, l } = rgbToHsl(base);
+    const t = total <= 1 ? 0 : Math.min(1, Math.max(0, idx / (total - 1)));
+    const lo = Math.max(12, Math.min(88, l - 26));
+    const hi = Math.max(12, Math.min(88, l + 26));
+    const ll = lo + (hi - lo) * t;
+    return `hsl(${Math.round(h)}, ${Math.round(Math.max(18, Math.min(92, s)))}%, ${Math.round(ll)}%)`;
+  };
+
   const yearColors = useMemo(() => {
-    const pal = ["var(--accent)", "rgba(79,70,229,0.65)", "rgba(79,70,229,0.45)", "rgba(79,70,229,0.3)", "rgba(16,185,129,0.65)", "rgba(245,158,11,0.7)"];
     const out: Record<number, string> = {};
-    years.forEach((y, i) => (out[y] = pal[i % pal.length]));
+    years.forEach((y, i) => (out[y] = colorForIndex(i, years.length)));
     return out;
-  }, [JSON.stringify(years)]);
+  }, [JSON.stringify(years), barColorMode, barSolid, barGradFrom, barGradTo, JSON.stringify(barPalette)]);
 
   const categories = useMemo(() => {
     if (mode !== "multi_line_items") return [];
@@ -2717,9 +2986,16 @@ function KpiTrendWidgetInner({
     const latest = years.length ? years[years.length - 1] : null;
     const latestMap = new Map<string, number>((latest != null ? (seriesByYear[latest] || []) : []).map((g) => [g.label, g.value]));
     return Array.from(union.keys())
-      .sort((a, b) => (latestMap.get(b) ?? 0) - (latestMap.get(a) ?? 0) || (union.get(b) ?? 0) - (union.get(a) ?? 0) || a.localeCompare(b))
+      .sort((a, b) => {
+        if (sortBy === "x") return dirMul * a.localeCompare(b);
+        return (
+          dirMul * ((latestMap.get(a) ?? 0) - (latestMap.get(b) ?? 0)) ||
+          dirMul * ((union.get(a) ?? 0) - (union.get(b) ?? 0)) ||
+          dirMul * a.localeCompare(b)
+        );
+      })
       .slice(0, 12);
-  }, [mode, JSON.stringify(years), JSON.stringify(seriesByYear)]);
+  }, [mode, JSON.stringify(years), JSON.stringify(seriesByYear), sortBy, sortDir]);
 
   return (
     <>
@@ -2898,7 +3174,7 @@ function KpiTrendWidgetInner({
                   const xStep = years.length > 1 ? innerW / (years.length - 1) : 0;
 
                   const topCats = categories.slice(0, 6);
-                  const catColors = ["var(--accent)", "rgba(16,185,129,0.85)", "rgba(245,158,11,0.9)", "rgba(236,72,153,0.85)", "rgba(59,130,246,0.85)", "rgba(107,114,128,0.85)"];
+                  const catColor = (idx: number) => colorForIndex(idx, topCats.length);
 
                   let maxV = 1;
                   topCats.forEach((c) => {
@@ -2931,14 +3207,14 @@ function KpiTrendWidgetInner({
                         const d = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
                         return (
                           <g key={c}>
-                            <path d={d} fill="none" stroke={catColors[idx % catColors.length]} strokeWidth="2.5" />
+                            <path d={d} fill="none" stroke={catColor(idx)} strokeWidth="2.5" />
                             {pts.map((p, i) => (
                               <circle
                                 key={`${c}:${i}`}
                                 cx={p.x}
                                 cy={p.y}
                                 r="3"
-                                fill={catColors[idx % catColors.length]}
+                                fill={catColor(idx)}
                                 onMouseEnter={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
                                 onMouseMove={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
                                 onTouchStart={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
@@ -2974,7 +3250,7 @@ function KpiTrendWidgetInner({
                       <g>
                         {topCats.map((c, i) => (
                           <g key={c} transform={`translate(${left + i * 110}, ${top + 12})`}>
-                            <rect x="0" y="-9" width="10" height="10" fill={["var(--accent)", "rgba(16,185,129,0.85)", "rgba(245,158,11,0.9)", "rgba(236,72,153,0.85)", "rgba(59,130,246,0.85)", "rgba(107,114,128,0.85)"][i % 6]} />
+                            <rect x="0" y="-9" width="10" height="10" fill={catColor(i)} />
                             <text x="14" y="0" fontSize="10" fill="var(--muted)">
                               {c.length > 16 ? `${c.slice(0, 14)}…` : c}
                             </text>
@@ -3009,7 +3285,18 @@ function KpiTrendWidgetInner({
                 const bottom = 86;
                 const innerW = W - left - right;
                 const innerH = H - top - bottom;
-                const keys = (widget.field_keys || []).slice(0, 10);
+                const rawKeys = (widget.field_keys || []).slice(0, 10);
+                const latest = years.length ? years[years.length - 1] : null;
+                const latestMap = new Map<string, number>(
+                  rawKeys.map((k) => {
+                    const v = latest != null ? (fieldBarsByYear[latest] || []).find((b) => b.key === k)?.value ?? 0 : 0;
+                    return [k, v ?? 0];
+                  })
+                );
+                const keys = [...rawKeys].sort((a, b) => {
+                  if (sortBy === "x") return dirMul * a.localeCompare(b);
+                  return dirMul * ((latestMap.get(a) ?? 0) - (latestMap.get(b) ?? 0)) || dirMul * a.localeCompare(b);
+                });
                 const perCat = years.length;
                 const catGap = 10;
                 const barGap = 3;

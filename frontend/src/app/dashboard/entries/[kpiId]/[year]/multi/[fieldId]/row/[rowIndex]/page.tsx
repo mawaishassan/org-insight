@@ -9,6 +9,14 @@ import { makeAttachmentCellValue } from "@/lib/attachmentCellValue";
 import { AttachmentFieldControl } from "@/components/AttachmentFieldControl";
 import { toast } from "react-toastify";
 import MultiReferenceInput from "@/components/MultiReferenceInput";
+import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
+
+function asWidgets(layout: any): Widget[] {
+  if (!layout) return [];
+  if (Array.isArray(layout)) return layout as Widget[];
+  if (typeof layout === "object" && Array.isArray((layout as any).widgets)) return (layout as any).widgets as Widget[];
+  return [];
+}
 
 type MixedAtom = string | number;
 
@@ -417,6 +425,11 @@ export default function MultiItemRowDetail() {
   const [activeMixedListTabByGroup, setActiveMixedListTabByGroup] = useState<Record<string, string>>({});
   const [activeListLikeTabByGroup, setActiveListLikeTabByGroup] = useState<Record<string, string>>({});
 
+  const effectiveOrgId = useMemo(
+    () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
+    [organizationIdFromUrl, meOrgId]
+  );
+
   const cameFromDashboard = dashboardIdFromUrl != null && String(dashboardIdFromUrl).trim() !== "";
   const dashboardId = cameFromDashboard ? Number(dashboardIdFromUrl) : null;
 
@@ -470,11 +483,6 @@ export default function MultiItemRowDetail() {
   };
 
   const rowPageContextLoadGenRef = useRef(0);
-
-  const effectiveOrgId = useMemo(
-    () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
-    [organizationIdFromUrl, meOrgId]
-  );
 
   useEffect(() => {
     if (!token) return;

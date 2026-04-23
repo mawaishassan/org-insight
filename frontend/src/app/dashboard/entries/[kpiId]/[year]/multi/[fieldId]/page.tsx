@@ -7,6 +7,7 @@ import { getAccessToken, clearTokens } from "@/lib/auth";
 import { api, getApiUrl, openKpiStoredFileInNewTab } from "@/lib/api";
 import { getAttachmentDisplayName, getAttachmentUrl } from "@/lib/attachmentCellValue";
 import toast from "react-hot-toast";
+import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
 import {
   buildMultiItemsApiRequestExample,
   buildMultiItemsApiResponseExamplePreferActual,
@@ -21,6 +22,13 @@ type SubField = {
   is_required?: boolean;
   config?: { reference_source_kpi_id?: number; reference_source_field_key?: string; reference_source_sub_field_key?: string } | null;
 };
+
+function asWidgets(layout: any): Widget[] {
+  if (!layout) return [];
+  if (Array.isArray(layout)) return layout as Widget[];
+  if (typeof layout === "object" && Array.isArray((layout as any).widgets)) return (layout as any).widgets as Widget[];
+  return [];
+}
 
 function truncateLabel(label: string, max = 48): string {
   const s = String(label ?? "");

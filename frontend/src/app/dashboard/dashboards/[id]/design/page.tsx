@@ -29,6 +29,64 @@ type EditTab = "basics" | "options";
 
 const SUPER_ADMIN_WIDGET_TYPES: WidgetType[] = ["kpi_card_single_value", "kpi_bar_chart", "kpi_trend", "kpi_multi_line_table"];
 
+function isSuperAdminRole(role: string | null | undefined) {
+  const norm = String(role ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "_");
+  return norm === "SUPER_ADMIN" || norm === "SUPERADMIN";
+}
+
+const PALETTE_SCHEMES = [
+  {
+    id: "tableau10",
+    label: "Tableau 10 (balanced)",
+    colors: ["#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC"],
+  },
+  {
+    id: "set2",
+    label: "Set2 (soft)",
+    colors: ["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494", "#B3B3B3"],
+  },
+  {
+    id: "dark2",
+    label: "Dark2 (high contrast)",
+    colors: ["#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#666666"],
+  },
+  {
+    id: "pastel1",
+    label: "Pastel (light)",
+    colors: ["#FBB4AE", "#B3CDE3", "#CCEBC5", "#DECBE4", "#FED9A6", "#FFFFCC", "#E5D8BD", "#FDDAEC", "#F2F2F2"],
+  },
+  {
+    id: "okabe_ito",
+    label: "Okabe–Ito (colorblind-safe)",
+    colors: ["#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7"],
+  },
+] as const;
+
+type PaletteSchemeId = (typeof PALETTE_SCHEMES)[number]["id"];
+
+function paletteForScheme(id: PaletteSchemeId, count = 8) {
+  const scheme = PALETTE_SCHEMES.find((s) => s.id === id) ?? PALETTE_SCHEMES[0];
+  const n = Math.max(2, Math.min(12, Math.trunc(count)));
+  return scheme.colors.slice(0, n);
+}
+
+function deriveGradientStopsFromBase(base: string) {
+  const s = (base || "").trim();
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
+  // Keep `from` as hex so `<input type="color">` always stays valid.
+  // If user types a non-hex value, don't try to derive stops (renderer will fallback).
+  if (!m) return { from: s || "#4f46e5", to: "" };
+  const hex = m[1].length === 3 ? m[1].split("").map((c) => c + c).join("") : m[1];
+  const n = parseInt(hex, 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  return { from: `#${hex.toLowerCase()}`, to: `rgba(${r}, ${g}, ${b}, 0.35)` };
+}
+
 type Widget =
   | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean; col_span?: number }
   | {
@@ -75,6 +133,16 @@ type Widget =
       field_keys: string[];
       chart_type?: "bar" | "pie";
       mode?: "fields" | "multi_line_items";
+      /** Sort bars left-to-right by x-axis label or by value. */
+      sort_by?: "x" | "value";
+      sort_dir?: "asc" | "desc";
+      /** Bar color scheme (for bar charts). */
+      bar_color_mode?: "solid" | "palette" | "gradient";
+      bar_color?: string;
+      bar_palette?: string[];
+      bar_palette_scheme?: string;
+      bar_gradient_from?: string;
+      bar_gradient_to?: string;
       source_field_key?: string;
       agg?: "count_rows" | "sum" | "avg";
       group_by_sub_field_key?: string;
@@ -97,6 +165,16 @@ type Widget =
       default_years?: number[];
       mode?: "fields" | "multi_line_items";
       field_keys?: string[];
+      /** Sort categories left-to-right by label or by value. */
+      sort_by?: "x" | "value";
+      sort_dir?: "asc" | "desc";
+      /** Color scheme for multi-series bars/lines. */
+      bar_color_mode?: "solid" | "palette" | "gradient";
+      bar_color?: string;
+      bar_palette?: string[];
+      bar_palette_scheme?: string;
+      bar_gradient_from?: string;
+      bar_gradient_to?: string;
       source_field_key?: string;
       agg?: "count_rows" | "sum" | "avg";
       group_by_sub_field_key?: string;
@@ -320,6 +398,13 @@ export default function DashboardDesignPage() {
   const [addChartMode, setAddChartMode] = useState<"fields" | "multi_line_items">("fields");
   const [addTrendView, setAddTrendView] = useState<"bar" | "line">("bar");
   const [addTrendMode, setAddTrendMode] = useState<"fields" | "multi_line_items">("multi_line_items");
+  const [addBarSortBy, setAddBarSortBy] = useState<"x" | "value">("value");
+  const [addBarSortDir, setAddBarSortDir] = useState<"asc" | "desc">("desc");
+  const [addBarColorMode, setAddBarColorMode] = useState<"solid" | "palette" | "gradient">("solid");
+  const [addBarColor, setAddBarColor] = useState<string>("#4f46e5");
+  const [addBarPaletteScheme, setAddBarPaletteScheme] = useState<PaletteSchemeId>("tableau10");
+  const [addBarGradientFrom, setAddBarGradientFrom] = useState<string>("#4f46e5");
+  const [addBarGradientTo, setAddBarGradientTo] = useState<string>("#a5b4fc");
   const [addTrendDefaultYears, setAddTrendDefaultYears] = useState<number[]>([]);
   const [addMultiLineFieldKey, setAddMultiLineFieldKey] = useState<string>("");
   const [addAggFn, setAddAggFn] = useState<"count_rows" | "sum" | "avg">("count_rows");
@@ -388,6 +473,16 @@ export default function DashboardDesignPage() {
     setAddTrendDefaultYears([]);
     setAddMultiLineFieldKey("");
     setAddAggFn("count_rows");
+    setAddBarSortBy("value");
+    setAddBarSortDir("desc");
+    setAddBarColorMode("solid");
+    setAddBarColor("#4f46e5");
+    setAddBarPaletteScheme("tableau10");
+    {
+      const stops = deriveGradientStopsFromBase("#4f46e5");
+      setAddBarGradientFrom(stops.from);
+      setAddBarGradientTo(stops.to);
+    }
     setAddGroupBySubFieldKey("");
     setAddValueSubFieldKey("");
     setAddFilterSubFieldKey("");
@@ -448,9 +543,23 @@ export default function DashboardDesignPage() {
     setAddMultiLineFieldKey((w as any).source_field_key || "");
     if (w.type === "kpi_bar_chart") {
       setAddAggFn((((w as any).agg as any) || "count_rows") as any);
+      setAddBarSortBy((((w as any).sort_by as any) || "value") as any);
+      setAddBarSortDir((((w as any).sort_dir as any) || "desc") as any);
+      setAddBarColorMode((((w as any).bar_color_mode as any) || "solid") as any);
+      setAddBarColor((w as any).bar_color || "#4f46e5");
+      setAddBarPaletteScheme((((w as any).bar_palette_scheme as any) || "tableau10") as any);
+      setAddBarGradientFrom((w as any).bar_gradient_from || "#4f46e5");
+      setAddBarGradientTo((w as any).bar_gradient_to || "#a5b4fc");
     }
     if (w.type === "kpi_trend") {
       setAddAggFn((((w as any).agg as any) || "count_rows") as any);
+      setAddBarSortBy((((w as any).sort_by as any) || "value") as any);
+      setAddBarSortDir((((w as any).sort_dir as any) || "desc") as any);
+      setAddBarColorMode((((w as any).bar_color_mode as any) || "solid") as any);
+      setAddBarColor((w as any).bar_color || "#4f46e5");
+      setAddBarPaletteScheme((((w as any).bar_palette_scheme as any) || "tableau10") as any);
+      setAddBarGradientFrom((w as any).bar_gradient_from || "#4f46e5");
+      setAddBarGradientTo((w as any).bar_gradient_to || "#a5b4fc");
     }
     setAddGroupBySubFieldKey((w as any).group_by_sub_field_key || "");
     setAddValueSubFieldKey((w as any).value_sub_field_key || "");
@@ -746,6 +855,14 @@ export default function DashboardDesignPage() {
               period_key,
               chart_type: addChartType,
               mode: "multi_line_items",
+              sort_by: addBarSortBy,
+              sort_dir: addBarSortDir,
+              bar_color_mode: addBarColorMode,
+              bar_color: addBarColorMode === "solid" ? (addBarColor.trim() || undefined) : undefined,
+              bar_palette: addBarColorMode === "palette" ? paletteForScheme(addBarPaletteScheme, 8) : undefined,
+              bar_palette_scheme: addBarColorMode === "palette" ? addBarPaletteScheme : undefined,
+              bar_gradient_from: addBarColorMode === "gradient" ? (addBarGradientFrom.trim() || undefined) : undefined,
+              bar_gradient_to: addBarColorMode === "gradient" ? (addBarGradientTo.trim() || undefined) : undefined,
               source_field_key: addMultiLineFieldKey.trim(),
               agg: addAggFn,
               group_by_sub_field_key: addGroupBySubFieldKey.trim(),
@@ -763,6 +880,14 @@ export default function DashboardDesignPage() {
               period_key,
               chart_type: addChartType,
               mode: "fields",
+              sort_by: addBarSortBy,
+              sort_dir: addBarSortDir,
+              bar_color_mode: addBarColorMode,
+              bar_color: addBarColorMode === "solid" ? (addBarColor.trim() || undefined) : undefined,
+              bar_palette: addBarColorMode === "palette" ? paletteForScheme(addBarPaletteScheme, 8) : undefined,
+              bar_palette_scheme: addBarColorMode === "palette" ? addBarPaletteScheme : undefined,
+              bar_gradient_from: addBarColorMode === "gradient" ? (addBarGradientFrom.trim() || undefined) : undefined,
+              bar_gradient_to: addBarColorMode === "gradient" ? (addBarGradientTo.trim() || undefined) : undefined,
               field_keys: addFieldKeys
                 .split(",")
                 .map((x) => x.trim())
@@ -801,6 +926,14 @@ export default function DashboardDesignPage() {
           default_years: defaultYears.length ? defaultYears : undefined,
           mode: "fields",
           field_keys: keys,
+          sort_by: addBarSortBy,
+          sort_dir: addBarSortDir,
+          bar_color_mode: addBarColorMode,
+          bar_color: addBarColorMode === "solid" ? (addBarColor.trim() || undefined) : undefined,
+          bar_palette: addBarColorMode === "palette" ? paletteForScheme(addBarPaletteScheme, 8) : undefined,
+          bar_palette_scheme: addBarColorMode === "palette" ? addBarPaletteScheme : undefined,
+          bar_gradient_from: addBarColorMode === "gradient" ? (addBarGradientFrom.trim() || undefined) : undefined,
+          bar_gradient_to: addBarColorMode === "gradient" ? (addBarGradientTo.trim() || undefined) : undefined,
         };
         applyWidgetUpsert(w);
         return;
@@ -832,6 +965,14 @@ export default function DashboardDesignPage() {
         view: addTrendView,
         default_years: defaultYears.length ? defaultYears : undefined,
         mode: "multi_line_items",
+        sort_by: addBarSortBy,
+        sort_dir: addBarSortDir,
+        bar_color_mode: addBarColorMode,
+        bar_color: addBarColorMode === "solid" ? (addBarColor.trim() || undefined) : undefined,
+        bar_palette: addBarColorMode === "palette" ? paletteForScheme(addBarPaletteScheme, 8) : undefined,
+        bar_palette_scheme: addBarColorMode === "palette" ? addBarPaletteScheme : undefined,
+        bar_gradient_from: addBarColorMode === "gradient" ? (addBarGradientFrom.trim() || undefined) : undefined,
+        bar_gradient_to: addBarColorMode === "gradient" ? (addBarGradientTo.trim() || undefined) : undefined,
         source_field_key: addMultiLineFieldKey.trim(),
         agg: addAggFn,
         group_by_sub_field_key: addGroupBySubFieldKey.trim(),
@@ -1059,7 +1200,7 @@ export default function DashboardDesignPage() {
             }}
           >
             {widgets.map((w) => {
-              const canDesign = userRole === "SUPER_ADMIN";
+              const canDesign = isSuperAdminRole(userRole);
               const showMoveChrome =
                 canDesign && (hoveredDesignWidgetId === w.id || selectedDesignWidgetId === w.id);
               const isDesignActive = showMoveChrome;
@@ -1361,12 +1502,12 @@ export default function DashboardDesignPage() {
                           </div>
                         ) : null}
 
-                        {userRole === "SUPER_ADMIN" && addType === "kpi_multi_line_table" && addMultiLineTableFieldKey.trim() && tableMultiLineSubFields.length > 0 ? (
+                        {isSuperAdminRole(userRole) && addType === "kpi_multi_line_table" && addMultiLineTableFieldKey.trim() && tableMultiLineSubFields.length > 0 ? (
                           <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>
                             <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Advanced filters</div>
                             <MultiLineReportFilterPanel
                               organizationId={dashboard?.organization_id ?? 0}
-                              token={token}
+                              token={token ?? null}
                               fieldKey={addMultiLineTableFieldKey.trim()}
                               subFields={tableMultiLineSubFields as unknown as MultiFilterSubField[]}
                               value={addAdvancedFilters}
@@ -1463,6 +1604,105 @@ export default function DashboardDesignPage() {
                             <option value="line">Line (trend)</option>
                           </select>
                         </div>
+                        {isSuperAdminRole(userRole) ? (
+                          <div style={{ display: "grid", gap: "0.75rem" }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Sort</label>
+                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                                <select
+                                  value={addBarSortBy}
+                                  onChange={(e) => setAddBarSortBy(e.target.value as any)}
+                                  style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                  title="Sort by"
+                                >
+                                  <option value="x">Label</option>
+                                  <option value="value">Value</option>
+                                </select>
+                                <select
+                                  value={addBarSortDir}
+                                  onChange={(e) => setAddBarSortDir(e.target.value as any)}
+                                  style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                  title="Sort direction"
+                                >
+                                  <option value="asc">Ascending</option>
+                                  <option value="desc">Descending</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Colors</label>
+                              <select
+                                value={addBarColorMode}
+                                onChange={(e) => setAddBarColorMode(e.target.value as any)}
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              >
+                                <option value="solid">Single (solid)</option>
+                                <option value="palette">Palette</option>
+                                <option value="gradient">Gradient</option>
+                              </select>
+                            </div>
+                            {addBarColorMode === "solid" ? (
+                              <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                                <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Color</label>
+                                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                                  <input type="color" value={addBarColor} onChange={(e) => setAddBarColor(e.target.value)} style={{ width: 44, height: 34, padding: 0 }} />
+                                  <input
+                                    value={addBarColor}
+                                    onChange={(e) => setAddBarColor(e.target.value)}
+                                    placeholder="#4f46e5 or CSS color"
+                                    style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                  />
+                                </div>
+                              </div>
+                            ) : null}
+                        {addBarColorMode === "palette" ? (
+                          <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Scheme</label>
+                            <select
+                              value={addBarPaletteScheme}
+                              onChange={(e) => setAddBarPaletteScheme(e.target.value as PaletteSchemeId)}
+                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                            >
+                              {PALETTE_SCHEMES.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        ) : null}
+                        {addBarColorMode === "gradient" ? (
+                          <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Base color</label>
+                            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                              <input
+                                type="color"
+                                value={addBarGradientFrom}
+                                onChange={(e) => {
+                                  const base = e.target.value;
+                                  const stops = deriveGradientStopsFromBase(base);
+                                  setAddBarGradientFrom(stops.from);
+                                  setAddBarGradientTo(stops.to);
+                                }}
+                                style={{ width: 44, height: 34, padding: 0 }}
+                              />
+                              <input
+                                value={addBarGradientFrom}
+                                onChange={(e) => {
+                                  const base = e.target.value;
+                                  const stops = deriveGradientStopsFromBase(base);
+                                  setAddBarGradientFrom(stops.from);
+                                  setAddBarGradientTo(stops.to);
+                                }}
+                                placeholder="#4f46e5"
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              />
+                            </div>
+                          </div>
+                        ) : null}
+                          </div>
+                        ) : null}
                         <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
                           <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Data</label>
                           <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
@@ -1535,6 +1775,106 @@ export default function DashboardDesignPage() {
                         />
                       </div>
                     )}
+
+                    {addType === "kpi_bar_chart" && isSuperAdminRole(userRole) ? (
+                      <div style={{ display: "grid", gap: "0.75rem" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Sort</label>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                            <select
+                              value={addBarSortBy}
+                              onChange={(e) => setAddBarSortBy(e.target.value as any)}
+                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              title="Sort by"
+                            >
+                              <option value="x">X-axis (label)</option>
+                              <option value="value">Value</option>
+                            </select>
+                            <select
+                              value={addBarSortDir}
+                              onChange={(e) => setAddBarSortDir(e.target.value as any)}
+                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              title="Sort direction"
+                            >
+                              <option value="asc">Ascending</option>
+                              <option value="desc">Descending</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Colors</label>
+                          <select
+                            value={addBarColorMode}
+                            onChange={(e) => setAddBarColorMode(e.target.value as any)}
+                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                          >
+                            <option value="solid">Same color (solid)</option>
+                            <option value="palette">Different colors (palette)</option>
+                            <option value="gradient">Gradient (same color family)</option>
+                          </select>
+                        </div>
+                        {addBarColorMode === "solid" ? (
+                          <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Color</label>
+                            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                              <input type="color" value={addBarColor} onChange={(e) => setAddBarColor(e.target.value)} style={{ width: 44, height: 34, padding: 0 }} />
+                              <input
+                                value={addBarColor}
+                                onChange={(e) => setAddBarColor(e.target.value)}
+                                placeholder="#4f46e5 or CSS color"
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              />
+                            </div>
+                          </div>
+                        ) : null}
+                        {addBarColorMode === "palette" ? (
+                          <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Scheme</label>
+                            <select
+                              value={addBarPaletteScheme}
+                              onChange={(e) => setAddBarPaletteScheme(e.target.value as PaletteSchemeId)}
+                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                            >
+                              {PALETTE_SCHEMES.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        ) : null}
+                        {addBarColorMode === "gradient" ? (
+                          <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Base color</label>
+                            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                              <input
+                                type="color"
+                                value={addBarGradientFrom}
+                                onChange={(e) => {
+                                  const base = e.target.value;
+                                  const stops = deriveGradientStopsFromBase(base);
+                                  setAddBarGradientFrom(stops.from);
+                                  setAddBarGradientTo(stops.to);
+                                }}
+                                style={{ width: 44, height: 34, padding: 0 }}
+                              />
+                              <input
+                                value={addBarGradientFrom}
+                                onChange={(e) => {
+                                  const base = e.target.value;
+                                  const stops = deriveGradientStopsFromBase(base);
+                                  setAddBarGradientFrom(stops.from);
+                                  setAddBarGradientTo(stops.to);
+                                }}
+                                placeholder="#4f46e5"
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              />
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
 
                     {addType === "kpi_trend" && addTrendMode === "fields" && (
                       <div style={{ display: "grid", gap: "0.35rem" }}>
@@ -2033,12 +2373,12 @@ export default function DashboardDesignPage() {
                           </div>
                         )}
 
-                        {userRole === "SUPER_ADMIN" && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
+                        {isSuperAdminRole(userRole) && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
                           <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>
                             <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Advanced filters</div>
                             <MultiLineReportFilterPanel
                               organizationId={dashboard?.organization_id ?? 0}
-                              token={token}
+                              token={token ?? null}
                               fieldKey={addMultiLineFieldKey.trim()}
                               subFields={selectedMultiLineSubFields as unknown as MultiFilterSubField[]}
                               value={addAdvancedFilters}
@@ -2142,12 +2482,12 @@ export default function DashboardDesignPage() {
                           </div>
                         )}
 
-                        {userRole === "SUPER_ADMIN" && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
+                        {isSuperAdminRole(userRole) && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
                           <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>
                             <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Advanced filters</div>
                             <MultiLineReportFilterPanel
                               organizationId={dashboard?.organization_id ?? 0}
-                              token={token}
+                              token={token ?? null}
                               fieldKey={addMultiLineFieldKey.trim()}
                               subFields={selectedMultiLineSubFields as unknown as MultiFilterSubField[]}
                               value={addAdvancedFilters}
@@ -2259,12 +2599,12 @@ export default function DashboardDesignPage() {
                           </div>
                         )}
 
-                        {userRole === "SUPER_ADMIN" && addCardSourceMode === "multi_line_agg" && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
+                        {isSuperAdminRole(userRole) && addCardSourceMode === "multi_line_agg" && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
                           <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>
                             <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Advanced filters</div>
                             <MultiLineReportFilterPanel
                               organizationId={dashboard?.organization_id ?? 0}
-                              token={token}
+                              token={token ?? null}
                               fieldKey={addMultiLineFieldKey.trim()}
                               subFields={selectedMultiLineSubFields as unknown as MultiFilterSubField[]}
                               value={addAdvancedFilters}
