@@ -678,6 +678,51 @@ async def get_field_access_for_role(
     return out
 
 
+async def get_field_access_by_role_snapshot(
+    db: AsyncSession, kpi_id: int, org_id: int
+) -> dict:
+    """
+    Return org roles + field-access-by-role for a KPI in a single call.
+    Shape:
+      {
+        "roles": [ { "id": int, "name": str, "description": str|null }, ... ],
+        "access_by_role": { "<role_id>": [ {field_id, sub_field_id, access_type}, ... ], ... }
+      }
+    """
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return {"roles": [], "access_by_role": {}}
+
+    roles_res = await db.execute(
+        select(OrganizationRole.id, OrganizationRole.name, OrganizationRole.description).where(
+            OrganizationRole.organization_id == org_id
+        )
+    )
+    roles = [{"id": r[0], "name": r[1], "description": r[2]} for r in roles_res.all()]
+
+    access_res = await db.execute(
+        select(
+            KpiFieldAccessByRole.organization_role_id,
+            KpiFieldAccessByRole.field_id,
+            KpiFieldAccessByRole.sub_field_id,
+            KpiFieldAccessByRole.access_type,
+        )
+        .join(OrganizationRole, OrganizationRole.id == KpiFieldAccessByRole.organization_role_id)
+        .where(
+            KpiFieldAccessByRole.kpi_id == kpi_id,
+            OrganizationRole.organization_id == org_id,
+        )
+    )
+    by_role: dict[str, list[dict]] = {}
+    for role_id, field_id, sub_field_id, access_type in access_res.all():
+        at = access_type.value if hasattr(access_type, "value") else str(access_type or "data_entry")
+        by_role.setdefault(str(role_id), []).append(
+            {"field_id": field_id, "sub_field_id": sub_field_id, "access_type": at}
+        )
+
+    return {"roles": roles, "access_by_role": by_role}
+
+
 async def replace_field_access_for_role(
     db: AsyncSession,
     kpi_id: int,

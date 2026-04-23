@@ -64,6 +64,7 @@ from app.kpis.service import (
     get_field_access_for_user,
     replace_field_access,
     get_field_access_for_role,
+    get_field_access_by_role_snapshot,
     replace_field_access_for_role,
     get_add_row_users_for_field,
     replace_add_row_users_for_field,
@@ -567,6 +568,17 @@ async def get_kpi_field_access_by_role_route(
     items = await get_field_access_for_role(db, kpi_id, role_id, org_id)
     return [{"field_id": i["field_id"], "sub_field_id": i["sub_field_id"], "access_type": i["access_type"]} for i in items]
 
+
+@router.get("/{kpi_id}/field-access-by-role/snapshot")
+async def get_kpi_field_access_by_role_snapshot_route(
+    kpi_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Single-call payload for security UI: org roles + field access by role for this KPI."""
+    org_id = _org_id(current_user, organization_id)
+    return await get_field_access_by_role_snapshot(db, kpi_id, org_id)
 
 @router.put("/{kpi_id}/field-access-by-role", status_code=status.HTTP_200_OK)
 async def replace_kpi_field_access_by_role_route(
