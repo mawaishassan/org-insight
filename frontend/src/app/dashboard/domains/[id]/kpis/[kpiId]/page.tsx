@@ -269,6 +269,8 @@ export default function DomainKpiDetailPage() {
   const [kpiOrgId, setKpiOrgId] = useState<number | null>(null);
   /** Column (subfield) access panels expanded in Security tab (multi-line fields). */
   const [columnAccessExpandedByFieldId, setColumnAccessExpandedByFieldId] = useState<Record<number, boolean>>({});
+  /** When true, we have auto-expanded multi-field rights at least once (so we don't override user collapses). */
+  const [multiFieldRightsAutoExpanded, setMultiFieldRightsAutoExpanded] = useState(false);
   /** When set, we're updating row_level_user_access_enabled for this multi-line field (PATCH). */
   const [rowLevelAccessUpdatingFieldId, setRowLevelAccessUpdatingFieldId] = useState<number | null>(null);
   /** Security tab: full-row access management (per field + entry). */
@@ -764,6 +766,39 @@ export default function DomainKpiDetailPage() {
   useEffect(() => {
     if (activeTab === "security") setSecuritySection("kpi_rights");
   }, [activeTab]);
+
+  // Multi field level rights: default-expand all multi-line fields once.
+  useEffect(() => {
+    if (activeTab !== "security") return;
+    if (securitySection !== "multi_field_rights") return;
+    if (multiFieldRightsAutoExpanded) {
+      // If new multi-line fields appear later, auto-expand only those not yet seen.
+      if (!multiLineFields || multiLineFields.length === 0) return;
+      setColumnAccessExpandedByFieldId((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        multiLineFields.forEach((f) => {
+          if (!f?.id) return;
+          if (next[f.id] == null) {
+            next[f.id] = true;
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+      return;
+    }
+    if (!multiLineFields || multiLineFields.length === 0) return;
+    setColumnAccessExpandedByFieldId((prev) => {
+      const next: Record<number, boolean> = { ...prev };
+      multiLineFields.forEach((f) => {
+        if (!f?.id) return;
+        next[f.id] = true;
+      });
+      return next;
+    });
+    setMultiFieldRightsAutoExpanded(true);
+  }, [activeTab, securitySection, multiLineFields, multiFieldRightsAutoExpanded]);
 
   // When requested, pre-load Add Row users for multi-line fields
   useEffect(() => {
