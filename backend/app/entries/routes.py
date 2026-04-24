@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from datetime import datetime
 import csv
 import json
 from typing import Any
@@ -10,7 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, distinct, func, and_
+from sqlalchemy import select, distinct, func, and_, cast, or_
+from sqlalchemy.sql import nulls_last
+from sqlalchemy.types import String
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 import httpx
@@ -807,9 +810,269 @@ async def list_multi_items_rows(
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
 
-    # Fast path: if caller isn't using search/filters/sorting, do true SQL pagination.
-    # This is the common case and is the key performance improvement for large datasets (e.g. 20k rows).
-    use_fast_sql_paging = not search and not filters and not sort_by
+    def _try_parse_iso_datetime(v: Any) -> datetime | None:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            try:
+                # Accept YYYY-MM-DD or full ISO datetime
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+        return None
+
+    def _string_value_expr(cell) -> Any:
+        # Used for text-like comparisons across typed columns.
+        return func.coalesce(
+            cast(cell.value_text, String()),
+            cast(cell.value_json, String()),
+            cast(cell.value_number, String()),
+            cast(cell.value_boolean, String()),
+            cast(cell.value_date, String()),
+        )
+
+    def _reference_like_exprs(cell) -> list[Any]:
+        """
+        Common expressions for reference / multi_reference stored either as plain text or as JSON object/array.
+        We compare against:
+        - value_text (when stored as label)
+        - value_json->>'label' / ->>'value' / ->>'token' when stored as object
+        - stringified JSON for array membership fallback (multi_reference)
+        """
+        return [
+            cast(cell.value_text, String()),
+            func.json_extract_path_text(cell.value_json, "label"),
+            func.json_extract_path_text(cell.value_json, "value"),
+            func.json_extract_path_text(cell.value_json, "token"),
+            cast(cell.value_json, String()),
+        ]
+
+    def _build_sql_filter_clause(raw: Any) -> Any | None:
+        """
+        Build a SQLAlchemy boolean clause for filters payload when possible.
+        Supports only structured _version=2 scalar filters (no reference_resolution).
+        Returns None when payload is unsupported, so we can fall back to the existing slow path.
+        """
+        if not isinstance(raw, dict) or raw.get("_version") != 2:
+            return None
+        conds = raw.get("conditions")
+        if not isinstance(conds, list) or not conds:
+            return None
+
+        # Map sub-field keys to (id, field_type)
+        sf_map: dict[str, tuple[int, str]] = {}
+        for sf in (field.sub_fields or []):
+            k = str(getattr(sf, "key", "") or "")
+            sid = getattr(sf, "id", None)
+            if not k or sid is None:
+                continue
+            ft = getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", None))
+            sf_map[k] = (int(sid), str(ft or ""))
+
+        def exists_for(sub_field_id: int, pred) -> Any:
+            return (
+                select(func.count())
+                .select_from(KpiMultiLineCell)
+                .where(
+                    and_(
+                        KpiMultiLineCell.row_id == KpiMultiLineRow.id,
+                        KpiMultiLineCell.sub_field_id == sub_field_id,
+                        pred,
+                    )
+                )
+                .correlate(KpiMultiLineRow)
+                .scalar_subquery()
+                > 0
+            )
+
+        expr = None
+        for idx, c in enumerate(conds):
+            if not isinstance(c, dict):
+                return None
+            if c.get("reference_resolution"):
+                return None
+            fk = str(c.get("field") or "").strip()
+            op = str(c.get("op") or "").strip()
+            if not fk or not op:
+                return None
+            if fk not in sf_map:
+                return None
+            sub_field_id, ft = sf_map[fk]
+
+            values = c.get("values")
+            value = c.get("value")
+            use_values = isinstance(values, list) and len(values) > 0
+
+            cell = KpiMultiLineCell
+            clause_part = None
+
+            if ft == "number":
+                def to_num(x: Any) -> float | None:
+                    try:
+                        if x is None or (isinstance(x, str) and not x.strip()):
+                            return None
+                        return float(x)
+                    except Exception:
+                        return None
+                if use_values and op in ("eq", "neq"):
+                    nums = [to_num(x) for x in values]
+                    nums = [n for n in nums if n is not None]
+                    if not nums:
+                        return None
+                    pos = exists_for(sub_field_id, cell.value_number.in_(nums))
+                    clause_part = pos if op == "eq" else ~pos
+                else:
+                    n = to_num(value)
+                    if n is None:
+                        return None
+                    if op == "eq":
+                        clause_part = exists_for(sub_field_id, cell.value_number == n)
+                    elif op == "neq":
+                        clause_part = ~exists_for(sub_field_id, cell.value_number == n)
+                    elif op == "gt":
+                        clause_part = exists_for(sub_field_id, cell.value_number > n)
+                    elif op == "gte":
+                        clause_part = exists_for(sub_field_id, cell.value_number >= n)
+                    elif op == "lt":
+                        clause_part = exists_for(sub_field_id, cell.value_number < n)
+                    elif op == "lte":
+                        clause_part = exists_for(sub_field_id, cell.value_number <= n)
+                    else:
+                        return None
+            elif ft == "date":
+                dt = _try_parse_iso_datetime(value)
+                if dt is None:
+                    return None
+                if op == "eq":
+                    clause_part = exists_for(sub_field_id, cell.value_date == dt)
+                elif op == "neq":
+                    clause_part = ~exists_for(sub_field_id, cell.value_date == dt)
+                elif op == "gt":
+                    clause_part = exists_for(sub_field_id, cell.value_date > dt)
+                elif op == "gte":
+                    clause_part = exists_for(sub_field_id, cell.value_date >= dt)
+                elif op == "lt":
+                    clause_part = exists_for(sub_field_id, cell.value_date < dt)
+                elif op == "lte":
+                    clause_part = exists_for(sub_field_id, cell.value_date <= dt)
+                else:
+                    return None
+            elif ft == "boolean":
+                if isinstance(value, bool):
+                    b = value
+                elif isinstance(value, str):
+                    vs = value.strip().lower()
+                    if vs == "true":
+                        b = True
+                    elif vs == "false":
+                        b = False
+                    else:
+                        return None
+                else:
+                    return None
+                if op == "eq":
+                    clause_part = exists_for(sub_field_id, cell.value_boolean == b)
+                elif op == "neq":
+                    clause_part = ~exists_for(sub_field_id, cell.value_boolean == b)
+                else:
+                    return None
+            else:
+                # Treat as text-like.
+                if use_values and op in ("eq", "neq"):
+                    vals = [str(x).strip() for x in values if x is not None and str(x).strip()]
+                    if not vals:
+                        return None
+                    if ft in ("reference", "multi_reference"):
+                        # membership match for multi_reference arrays; exact/label match for reference objects
+                        candidates = _reference_like_exprs(cell)
+                        pred = or_(*[e.in_(vals) for e in candidates if e is not None])
+                        pos = exists_for(sub_field_id, pred)
+                    else:
+                        pos = exists_for(sub_field_id, _string_value_expr(cell).in_(vals))
+                    clause_part = pos if op == "eq" else ~pos
+                else:
+                    if value is None:
+                        return None
+                    s = str(value).strip()
+                    if s == "":
+                        return None
+                    if ft in ("reference", "multi_reference"):
+                        # For reference values we attempt exact match on text/label/value/token, and for multi_reference
+                        # also allow JSON array membership via string contains on `"value"`.
+                        exprs = _reference_like_exprs(cell)
+                        if op == "eq":
+                            pred = or_(*[(e == s) for e in exprs if e is not None])
+                            # array membership fallback
+                            pred = or_(pred, cast(cell.value_json, String()).ilike(f"%\\\"{s}\\\"%"))
+                            clause_part = exists_for(sub_field_id, pred)
+                        elif op == "neq":
+                            pred = or_(*[(e == s) for e in exprs if e is not None])
+                            pred = or_(pred, cast(cell.value_json, String()).ilike(f"%\\\"{s}\\\"%"))
+                            clause_part = ~exists_for(sub_field_id, pred)
+                        elif op == "contains":
+                            pred = or_(*[(e.ilike(f"%{s}%")) for e in exprs if e is not None])
+                            clause_part = exists_for(sub_field_id, pred)
+                        elif op == "not_contains":
+                            pred = or_(*[(e.ilike(f"%{s}%")) for e in exprs if e is not None])
+                            clause_part = ~exists_for(sub_field_id, pred)
+                        elif op == "starts_with":
+                            pred = or_(*[(e.ilike(f"{s}%")) for e in exprs if e is not None])
+                            clause_part = exists_for(sub_field_id, pred)
+                        elif op == "ends_with":
+                            pred = or_(*[(e.ilike(f"%{s}")) for e in exprs if e is not None])
+                            clause_part = exists_for(sub_field_id, pred)
+                        else:
+                            return None
+                        # done
+                        logic = str(c.get("logic") or "").strip().lower()
+                        if idx == 0:
+                            expr = clause_part
+                        else:
+                            expr = or_(expr, clause_part) if logic == "or" else and_(expr, clause_part)
+                        continue
+
+                    vexpr = _string_value_expr(cell)
+                    if op == "eq":
+                        clause_part = exists_for(sub_field_id, vexpr == s)
+                    elif op == "neq":
+                        clause_part = ~exists_for(sub_field_id, vexpr == s)
+                    elif op == "contains":
+                        clause_part = exists_for(sub_field_id, vexpr.ilike(f"%{s}%"))
+                    elif op == "not_contains":
+                        clause_part = ~exists_for(sub_field_id, vexpr.ilike(f"%{s}%"))
+                    elif op == "starts_with":
+                        clause_part = exists_for(sub_field_id, vexpr.ilike(f"{s}%"))
+                    elif op == "ends_with":
+                        clause_part = exists_for(sub_field_id, vexpr.ilike(f"%{s}"))
+                    else:
+                        return None
+
+            logic = str(c.get("logic") or "").strip().lower()
+            if idx == 0:
+                expr = clause_part
+            else:
+                expr = or_(expr, clause_part) if logic == "or" else and_(expr, clause_part)
+
+        return expr
+
+    raw_filters: Any | None = None
+    sql_filters_clause = None
+    if filters and not search:
+        try:
+            raw_filters = json.loads(filters)
+            sql_filters_clause = _build_sql_filter_clause(raw_filters)
+        except json.JSONDecodeError:
+            raw_filters = None
+            sql_filters_clause = None
+
+    # Fast path: if caller isn't using search and filters are SQL-able, do true SQL pagination.
+    # If filters are present but unsupported (e.g. reference_resolution), fall back to the existing slow path.
+    use_fast_sql_paging = not search and (not filters or sql_filters_clause is not None)
     rows: list[tuple[int, dict]] = []
 
     # Restrict to sub_fields (columns) the user can view.
@@ -877,7 +1140,7 @@ async def list_multi_items_rows(
     # Advanced column filters (legacy substring map or structured _version 2)
     if filters:
         try:
-            raw_filters = json.loads(filters)
+            raw_filters = raw_filters if raw_filters is not None else json.loads(filters)
             if isinstance(raw_filters, dict):
                 resolution_maps = None
                 reference_field_types: dict[str, str] = {}
@@ -988,6 +1251,8 @@ async def list_multi_items_rows(
             KpiMultiLineRow.entry_id == entry.id,
             KpiMultiLineRow.field_id == field.id,
         )
+        if sql_filters_clause is not None:
+            base_rows_stmt = base_rows_stmt.where(sql_filters_clause)
         if field_row_access_enabled and not is_org_admin:
             # Only rows with an access record for this user are visible.
             base_rows_stmt = (
@@ -1025,9 +1290,47 @@ async def list_multi_items_rows(
             or 0
         )
         start = (page - 1) * page_size
-        paged_rows_res = await db.execute(
-            base_rows_stmt.order_by(KpiMultiLineRow.row_index).offset(start).limit(page_size)
-        )
+
+        order_stmt = base_rows_stmt
+        if sort_by:
+            # SQL sort on a specific sub-field to avoid the slow in-memory path on large datasets.
+            # This keeps paging in SQL even for 20k+ rows.
+            sort_sf = next((s for s in (field.sub_fields or []) if str(getattr(s, "key", "")) == str(sort_by)), None)
+            sort_sf_id = int(getattr(sort_sf, "id", 0) or 0) if sort_sf is not None else 0
+            sort_ft = getattr(getattr(sort_sf, "field_type", None), "value", getattr(sort_sf, "field_type", None)) if sort_sf is not None else None
+            if sort_sf_id > 0:
+                order_cell = KpiMultiLineCell
+                order_stmt = order_stmt.outerjoin(
+                    order_cell,
+                    and_(
+                        order_cell.row_id == KpiMultiLineRow.id,
+                        order_cell.sub_field_id == sort_sf_id,
+                    ),
+                )
+                if str(sort_ft) == "number":
+                    sort_expr = order_cell.value_number
+                elif str(sort_ft) == "date":
+                    sort_expr = order_cell.value_date
+                elif str(sort_ft) == "boolean":
+                    # bool sorts false < true; keep nulls last
+                    sort_expr = order_cell.value_boolean
+                else:
+                    # text / json / reference-like: sort by stringified value
+                    sort_expr = func.coalesce(
+                        cast(order_cell.value_text, String()),
+                        cast(order_cell.value_json, String()),
+                        cast(order_cell.value_number, String()),
+                        cast(order_cell.value_boolean, String()),
+                        cast(order_cell.value_date, String()),
+                    )
+                reverse = sort_dir == "desc"
+                order_stmt = order_stmt.order_by(nulls_last(sort_expr.desc() if reverse else sort_expr.asc()))
+            else:
+                order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
+        else:
+            order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
+
+        paged_rows_res = await db.execute(order_stmt.offset(start).limit(page_size))
         page_rows = list(paged_rows_res.all())  # [(id, row_index)]
         if not page_rows:
             return MultiItemsListResponse(
