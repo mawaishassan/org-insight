@@ -854,7 +854,15 @@ export default function DomainKpiDetailPage() {
           sub_fields: Array<{ key: string; name: string }>;
         }>;
       }
-    >(`/entries/reverse-references?${qs({ kpi_id: kpiId, entry_id: entry.id, organization_id: effectiveOrgId })}`, { token })
+    >(
+      `/entries/reverse-references?${qs({
+        kpi_id: kpiId,
+        entry_id: entry.id,
+        include_rows: false,
+        organization_id: effectiveOrgId,
+      })}`,
+      { token }
+    )
       .then((res) => {
         const tabs = res?.tabs ?? [];
         setReverseRefTimeFilter(res?.time_filter ?? null);

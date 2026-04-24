@@ -539,6 +539,10 @@ class EntryIdResponse(BaseModel):
 async def download_multi_items_template(
     field_id: int = Query(...),
     entry_id: int | None = Query(None, description="If provided, include existing rows for this entry/field"),
+    include_existing_rows: bool = Query(
+        False,
+        description="When true and entry_id is provided, include existing rows in the Excel download (can be slow for large datasets).",
+    ),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -553,7 +557,7 @@ async def download_multi_items_template(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
 
     existing_items: list[dict] | None = None
-    if entry_id is not None:
+    if include_existing_rows and entry_id is not None:
         entry_res = await db.execute(
             select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
         )
@@ -3157,8 +3161,18 @@ async def get_reverse_references_for_entry(
     kpi_id: int = Query(..., description="Parent KPI id"),
     entry_id: int = Query(..., description="Parent KPI entry id"),
     include_rows: bool = Query(
-        True,
+        False,
         description="When false, return only KPI names + value tokens/counts without embedding row data.",
+    ),
+    values_limit: int = Query(
+        500,
+        ge=1,
+        le=5000,
+        description="When include_rows is false, maximum number of dropdown values to return per related KPI.",
+    ),
+    values_search: str | None = Query(
+        None,
+        description="When include_rows is false, optional case-insensitive search over value token/label.",
     ),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
@@ -3244,40 +3258,50 @@ async def get_reverse_references_for_entry(
     parent_fields_by_key = {f.key: f for f in getattr(parent_kpi, "fields", []) or []}
     parent_fv_by_field_id = {fv.field_id: fv for fv in getattr(parent_entry, "field_values", []) or []}
 
-    # Load all KPI fields in this org with sub_fields, to find reference sub-fields pointing to this KPI
-    fields_res = await db.execute(
-        select(KPIField)
+    # Build descriptors for reference sub-fields that point to this parent KPI.
+    # Critical for performance: do NOT load all fields+sub_fields in the org.
+    sub_fields_res = await db.execute(
+        select(
+            KPIField.kpi_id,
+            KPIField.id,
+            KPIField.key,
+            KPIField.name,
+            KPIFieldSubField.id,
+            KPIFieldSubField.key,
+            KPIFieldSubField.name,
+            KPIFieldSubField.config,
+        )
+        .select_from(KPIFieldSubField)
+        .join(KPIField, KPIField.id == KPIFieldSubField.field_id)
         .join(KPI, KPI.id == KPIField.kpi_id)
-        .where(KPI.organization_id == org_id)
-        .options(selectinload(KPIField.sub_fields))
+        .where(
+            KPI.organization_id == org_id,
+            KPIFieldSubField.field_type.in_([FieldType.reference, FieldType.multi_reference]),
+        )
     )
-    all_fields = list(fields_res.scalars().all())
 
-    # Build descriptors for reference sub-fields that point to this parent KPI
     descriptors_by_child_kpi: dict[int, list[dict]] = {}
-    for f in all_fields:
-        for sf in getattr(f, "sub_fields", []) or []:
-            if getattr(sf, "field_type", None) not in (FieldType.reference, FieldType.multi_reference):
-                continue
-            cfg = getattr(sf, "config", None) or {}
-            sid = cfg.get("reference_source_kpi_id")
-            if not sid or int(sid) != kpi_id:
-                continue
-            skey = cfg.get("reference_source_field_key")
-            if not skey:
-                continue
-            parent_sub_key = cfg.get("reference_source_sub_field_key")
-            desc = {
-                "child_kpi_id": f.kpi_id,
-                "child_field_id": f.id,
-                "child_field_key": f.key,
-                "child_field_name": f.name,
-                "child_sub_field_key": sf.key,
-                "child_sub_field_name": sf.name,
-                "parent_field_key": str(skey),
-                "parent_sub_field_key": str(parent_sub_key) if parent_sub_key else None,
-            }
-            descriptors_by_child_kpi.setdefault(f.kpi_id, []).append(desc)
+    for child_kpi_id, child_field_id, child_field_key, child_field_name, child_sub_field_id, child_sub_field_key, child_sub_field_name, cfg in sub_fields_res.all():
+        cfg = cfg or {}
+        sid = cfg.get("reference_source_kpi_id")
+        if not sid or int(sid) != kpi_id:
+            continue
+        skey = cfg.get("reference_source_field_key")
+        if not skey:
+            continue
+        parent_sub_key = cfg.get("reference_source_sub_field_key")
+        desc = {
+            "child_kpi_id": int(child_kpi_id),
+            "child_field_id": int(child_field_id),
+            "child_field_key": str(child_field_key),
+            "child_field_name": str(child_field_name),
+            "child_sub_field_id": int(child_sub_field_id),
+            "child_sub_field_key": str(child_sub_field_key),
+            "child_sub_field_name": str(child_sub_field_name),
+            "parent_field_key": str(skey),
+            "parent_sub_field_key": str(parent_sub_key) if parent_sub_key else None,
+        }
+        descriptors_by_child_kpi.setdefault(int(child_kpi_id), []).append(desc)
 
     if not descriptors_by_child_kpi:
         return {
@@ -3295,6 +3319,175 @@ async def get_reverse_references_for_entry(
     child_kpis = {k.id: k for k in kpi_res.scalars().all()}
 
     response_tabs: list[dict] = []
+
+    # Fast path for the UI: include_rows=false only needs token counts and deep-link defaults.
+    # Avoid scanning all child multi_line rows in Python and avoid returning 20k dropdown options in one response.
+    if not include_rows:
+        parent_multi_cache: dict[int, list[tuple[int, dict]]] = {}
+
+        for child_kpi_id, desc_list in descriptors_by_child_kpi.items():
+            child_kpi = child_kpis.get(child_kpi_id)
+            child_kpi_name = getattr(child_kpi, "name", f"KPI #{child_kpi_id}")
+
+            # Compute parent tokens (token -> label) once for this child KPI's descriptors.
+            descriptor_tokens: dict[str, dict[str, str]] = {}
+            for d in desc_list:
+                p_key = d["parent_field_key"]
+                p_sub = d["parent_sub_field_key"]
+                parent_field = parent_fields_by_key.get(p_key)
+                if not parent_field:
+                    continue
+                fv = parent_fv_by_field_id.get(parent_field.id)
+                if not fv:
+                    continue
+                if p_sub:
+                    # Parent is a multi_line_items field: load from relational rows (cached per field id).
+                    if parent_field.id not in parent_multi_cache:
+                        parent_multi_cache[parent_field.id] = await _load_multi_line_row_dicts(
+                            db, entry_id=parent_entry.id, field=parent_field
+                        )
+                    items = [r for _, r in parent_multi_cache[parent_field.id]] if parent_multi_cache[parent_field.id] else []
+                    for row in items:
+                        if not isinstance(row, dict):
+                            continue
+                        cell = row.get(p_sub)
+                        for label, token in _reverse_ref_tokens_from_cell(cell):
+                            descriptor_tokens.setdefault(token, {"label": label})
+                else:
+                    p_ft = getattr(parent_field, "field_type", None)
+                    if p_ft == FieldType.multi_reference:
+                        arr = fv.value_json if isinstance(fv.value_json, list) else []
+                        for x in arr:
+                            label = str(x).strip() if x is not None else ""
+                            token = _normalize_reference_value(label)
+                            if token:
+                                descriptor_tokens.setdefault(token, {"label": label})
+                    else:
+                        raw_val = None
+                        if fv.value_text not in (None, ""):
+                            raw_val = fv.value_text
+                        elif fv.value_number is not None:
+                            raw_val = fv.value_number
+                        elif fv.value_boolean is not None:
+                            raw_val = fv.value_boolean
+                        elif fv.value_date is not None:
+                            raw_val = fv.value_date.isoformat()
+                        if raw_val is not None:
+                            label = (str(raw_val)).strip()
+                            token = _normalize_reference_value(label)
+                            if token:
+                                descriptor_tokens.setdefault(token, {"label": label})
+
+            if not descriptor_tokens:
+                continue
+
+            # Count matches in SQL per descriptor and merge results.
+            # IMPORTANT: Do NOT pass 20k tokens in an IN (...) list (very slow / huge query).
+            # Instead, aggregate counts for child tokens then intersect with parent tokens in Python.
+            token_counts: dict[str, int] = {}
+            for d in desc_list:
+                child_field_id = int(d["child_field_id"])
+                child_sub_field_id = int(d["child_sub_field_id"])
+
+                # Find the single child entry id for this KPI+year+period in this org (1 row).
+                child_entry_id_res = await db.execute(
+                    select(KPIEntry.id).where(
+                        KPIEntry.organization_id == org_id,
+                        KPIEntry.kpi_id == child_kpi_id,
+                        KPIEntry.year == parent_year,
+                        KPIEntry.period_key == parent_period_key,
+                    )
+                )
+                child_entry_id = child_entry_id_res.scalar_one_or_none()
+                if child_entry_id is None:
+                    continue
+
+                # Normalize reference token in SQL similar to _normalize_reference_value (strip + lower),
+                # but also keep the original-case label for UI + deep links.
+                cell = KpiMultiLineCell
+                raw_expr = func.trim(
+                    func.coalesce(
+                        cast(cell.value_text, String()),
+                        func.json_extract_path_text(cell.value_json, "label"),
+                        func.json_extract_path_text(cell.value_json, "value"),
+                        func.json_extract_path_text(cell.value_json, "token"),
+                        cast(cell.value_json, String()),
+                    )
+                )
+                token_expr = func.lower(raw_expr)
+                label_expr = raw_expr
+
+                base_q = (
+                    select(
+                        token_expr.label("t"),
+                        func.min(label_expr).label("label"),
+                        func.count().label("c"),
+                    )
+                    .select_from(KpiMultiLineRow)
+                    .join(KpiMultiLineCell, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+                    .where(
+                        KpiMultiLineRow.entry_id == int(child_entry_id),
+                        KpiMultiLineRow.field_id == child_field_id,
+                        KpiMultiLineCell.sub_field_id == child_sub_field_id,
+                        token_expr.isnot(None),
+                        token_expr != "",
+                    )
+                    .group_by(token_expr)
+                )
+
+                # Optional server-side search to keep payload small.
+                if values_search and values_search.strip():
+                    q = values_search.strip()
+                    base_q = base_q.where(token_expr.ilike(f"%{q.lower()}%"))
+
+                q = (
+                    base_q.order_by(token_expr.asc()).limit(int(values_limit))
+                )
+                res = await db.execute(q)
+                for t, label, c in res.all():
+                    if not t:
+                        continue
+                    token_counts[str(t)] = token_counts.get(str(t), 0) + int(c or 0)
+                    # Prefer a real original-case label from child rows.
+                    if label:
+                        descriptor_tokens.setdefault(str(t), {"label": str(label)})
+
+            if not token_counts:
+                continue
+
+            # Build payload from tokens that actually exist in the child KPI (keeps response small).
+            values_payload = []
+            for token, count in token_counts.items():
+                meta = descriptor_tokens.get(token)
+                label = meta["label"] if meta else token
+                if int(count or 0) <= 0:
+                    continue
+                values_payload.append({"token": token, "label": label, "count": int(count)})
+            if not values_payload:
+                continue
+            values_payload.sort(key=lambda x: x["label"])
+
+            default_target = desc_list[0] if desc_list else None
+            response_tabs.append(
+                {
+                    "child_kpi_id": child_kpi_id,
+                    "child_kpi_name": child_kpi_name,
+                    "child_field_id": default_target.get("child_field_id") if default_target else None,
+                    "child_sub_field_key": default_target.get("child_sub_field_key") if default_target else None,
+                    "values": values_payload,
+                    "rows": [],
+                    "sub_fields": [],
+                }
+            )
+
+        return {
+            "time_filter": {
+                "year": parent_year,
+                "period_key": parent_period_key,
+                "effective_time_dimension": effective_td.value if hasattr(effective_td, "value") else str(effective_td),
+            },
+            "tabs": response_tabs,
+        }
 
     for child_kpi_id, desc_list in descriptors_by_child_kpi.items():
         child_kpi = child_kpis.get(child_kpi_id)
@@ -3363,9 +3556,22 @@ async def get_reverse_references_for_entry(
         )
         child_entries = list(child_entries_res.scalars().all())
 
-        # For table headers we can reuse the sub_fields of the first descriptor's field
+        # For table headers we can reuse the sub_fields of the first descriptor's field (slow path only).
+        # We no longer have `all_fields` loaded; fetch only needed fields.
+        child_field_cache: dict[int, KPIField] = {}
         first_desc = desc_list[0]
-        child_field = next((f for f in all_fields if f.id == first_desc["child_field_id"]), None)
+        first_child_field_id = int(first_desc["child_field_id"])
+        if first_child_field_id not in child_field_cache:
+            cf_res = await db.execute(
+                select(KPIField)
+                .join(KPI, KPI.id == KPIField.kpi_id)
+                .where(KPIField.id == first_child_field_id, KPI.organization_id == org_id)
+                .options(selectinload(KPIField.sub_fields))
+            )
+            cf = cf_res.scalar_one_or_none()
+            if cf is not None:
+                child_field_cache[first_child_field_id] = cf
+        child_field = child_field_cache.get(first_child_field_id)
         sub_fields_payload = []
         if child_field is not None:
             for sf in getattr(child_field, "sub_fields", []) or []:
@@ -3380,9 +3586,19 @@ async def get_reverse_references_for_entry(
         for entry in child_entries:
             field_values = getattr(entry, "field_values", []) or []
             for d in desc_list:
-                child_field_id = d["child_field_id"]
+                child_field_id = int(d["child_field_id"])
                 child_sub_key = d["child_sub_field_key"]
-                child_field = next((f for f in all_fields if f.id == child_field_id), None)
+                if child_field_id not in child_field_cache:
+                    cf_res = await db.execute(
+                        select(KPIField)
+                        .join(KPI, KPI.id == KPIField.kpi_id)
+                        .where(KPIField.id == child_field_id, KPI.organization_id == org_id)
+                        .options(selectinload(KPIField.sub_fields))
+                    )
+                    cf = cf_res.scalar_one_or_none()
+                    if cf is not None:
+                        child_field_cache[child_field_id] = cf
+                child_field = child_field_cache.get(child_field_id)
                 if child_field is None:
                     continue
                 cache_key = (int(entry.id), int(child_field_id))

@@ -937,6 +937,7 @@ export default function MultiItemRowDetail() {
               )}
             </div>
 
+
             {/* Summary strip with a few key attributes */}
             {subFields.length > 0 && (
               <div
