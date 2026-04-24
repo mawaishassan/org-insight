@@ -197,7 +197,7 @@ export default function DomainKpiDetailPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"scalar" | "security" | number>("scalar");
+  const [activeTab, setActiveTab] = useState<"scalar" | "security" | "related" | number>("scalar");
   const [securitySection, setSecuritySection] = useState<SecuritySection>("kpi_rights");
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   /** When editing: list of { user_id, permission } for PUT assignments (legacy user assignments) */
@@ -256,6 +256,7 @@ export default function DomainKpiDetailPage() {
       sub_fields: Array<{ key: string; name: string }>;
     }>
   >([]);
+  const [reverseRefLoading, setReverseRefLoading] = useState(false);
   const [reverseRefActiveKpiId, setReverseRefActiveKpiId] = useState<number | null>(null);
   const [reverseRefSelectedTokenByKpi, setReverseRefSelectedTokenByKpi] = useState<Record<number, string>>({});
   const [reverseRefTimeFilter, setReverseRefTimeFilter] = useState<{ year: number; period_key: string; effective_time_dimension: string } | null>(null);
@@ -818,8 +819,9 @@ export default function DomainKpiDetailPage() {
 
   // Field-access-by-role is now loaded via the snapshot call above when Security tab is opened.
 
-  // Load reverse-reference info (child KPIs that reference this KPI via multi_line_items reference sub-fields)
+  // Load reverse-reference info only when Related tab opens.
   useEffect(() => {
+    if (activeTab !== "related") return;
     if (!token || !entry?.id || effectiveOrgId == null) {
       setReverseRefTabs([]);
       setReverseRefActiveKpiId(null);
@@ -827,6 +829,7 @@ export default function DomainKpiDetailPage() {
       setReverseRefTimeFilter(null);
       return;
     }
+    setReverseRefLoading(true);
     api<
       {
         time_filter: { year: number; period_key: string; effective_time_dimension: string };
@@ -873,8 +876,9 @@ export default function DomainKpiDetailPage() {
         setReverseRefActiveKpiId(null);
         setReverseRefSelectedTokenByKpi({});
         setReverseRefTimeFilter(null);
-      });
-  }, [token, kpiId, entry?.id, effectiveOrgId]);
+      })
+      .finally(() => setReverseRefLoading(false));
+  }, [activeTab, token, kpiId, entry?.id, effectiveOrgId]);
 
   useEffect(() => {
     if (!token || effectiveOrgId == null || fields.length === 0) return;
@@ -1969,6 +1973,16 @@ export default function DomainKpiDetailPage() {
               <span>Security</span>
             </button>
           )}
+          <button
+            type="button"
+            className="btn"
+            style={{
+              ...(activeTab === "related" ? { background: "var(--accent)", color: "var(--on-muted)" } : {}),
+            }}
+            onClick={() => setActiveTab("related")}
+          >
+            Related records
+          </button>
         </div>
 
         {activeTab === "scalar" && (
@@ -3684,6 +3698,122 @@ export default function DomainKpiDetailPage() {
           </div>
         )}
 
+        {activeTab === "related" && (
+          <div style={{ padding: "0.5rem 0.25rem" }}>
+            {reverseRefLoading ? (
+              <div className="card" style={{ padding: "0.75rem 1rem", color: "var(--muted)" }}>
+                Loading related records…
+              </div>
+            ) : reverseRefTabs.length === 0 ? (
+              <div className="card" style={{ padding: "0.75rem 1rem", color: "var(--muted)" }}>
+                No related records found.
+              </div>
+            ) : (
+              <div className="card">
+                <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid var(--border)" }}>
+                  <strong>Related records (referencing KPIs)</strong>
+                  {reverseRefTimeFilter && (
+                    <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", color: "var(--text-secondary)" }}>
+                      Filtered by time dimension: <strong>{reverseRefTimeFilter.year}</strong>
+                      {reverseRefTimeFilter.period_key ? ` · ${reverseRefTimeFilter.period_key}` : ""}
+                      <span style={{ color: "var(--muted)", fontWeight: "normal" }}>
+                        {" "}({reverseRefTimeFilter.effective_time_dimension.replace(/_/g, " ")})
+                      </span>
+                    </p>
+                  )}
+                </div>
+                <div style={{ padding: "0.75rem 1rem" }}>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.9rem" }}>
+                      <thead>
+                        <tr>
+                          <th style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>KPI</th>
+                          <th style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Related name</th>
+                          <th style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Count</th>
+                          <th style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)" }} />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reverseRefTabs.map((tab) => {
+                          const selectedToken =
+                            reverseRefSelectedTokenByKpi[tab.child_kpi_id] ?? (tab.values[0]?.token ?? "");
+                          const selectedMeta = tab.values.find((v) => v.token === selectedToken) ?? null;
+                          const total = tab.values.reduce((s, v) => s + (v.count || 0), 0);
+                          const canOpen =
+                            Boolean((tab as any).child_field_id) &&
+                            Boolean((tab as any).child_sub_field_key) &&
+                            Boolean(selectedMeta?.label);
+                          return (
+                            <tr key={tab.child_kpi_id}>
+                              <td style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                {tab.child_kpi_name}
+                              </td>
+                              <td style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                <select
+                                  value={selectedToken}
+                                  onChange={(e) =>
+                                    setReverseRefSelectedTokenByKpi((prev) => ({
+                                      ...prev,
+                                      [tab.child_kpi_id]: e.target.value,
+                                    }))
+                                  }
+                                  style={{
+                                    minWidth: 220,
+                                    padding: "0.35rem 0.5rem",
+                                    borderRadius: 6,
+                                    border: "1px solid var(--border)",
+                                    fontSize: "0.9rem",
+                                  }}
+                                >
+                                  {tab.values.map((v) => (
+                                    <option key={v.token} value={v.token}>
+                                      {v.label} ({v.count})
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
+                                {total}
+                              </td>
+                              <td style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  disabled={!canOpen}
+                                  onClick={() => {
+                                    const childFieldId = (tab as any).child_field_id as number | null | undefined;
+                                    const childSubKey = (tab as any).child_sub_field_key as string | null | undefined;
+                                    const label = selectedMeta?.label;
+                                    if (!childFieldId || !childSubKey || !label) return;
+                                    const payload = {
+                                      _version: 2 as const,
+                                      conditions: [{ field: childSubKey, op: "eq", value: label }],
+                                    };
+                                    const q = new URLSearchParams({
+                                      organization_id: String(effectiveOrgId ?? ""),
+                                      ...(reverseRefTimeFilter?.period_key
+                                        ? { period_key: reverseRefTimeFilter.period_key }
+                                        : {}),
+                                      filters: JSON.stringify(payload),
+                                    });
+                                    window.location.href = `/dashboard/entries/${tab.child_kpi_id}/${reverseRefTimeFilter?.year ?? year}/multi/${childFieldId}?${q.toString()}`;
+                                  }}
+                                >
+                                  Detail
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
           {inlineMultiLineFields.map((f) => {
           if (activeTab !== f.id) return null;
           const v = valuesByFieldId.get(f.id);
@@ -5040,115 +5170,7 @@ export default function DomainKpiDetailPage() {
           })}
       </div>
 
-      {/* Section 4: Reverse-reference tabs – child KPIs that reference this KPI via multi_line_items */}
-      {reverseRefTabs.length > 0 && (
-        <div className="card" style={{ marginTop: "1.5rem" }}>
-          <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid var(--border)" }}>
-            <strong>Related records (referencing KPIs)</strong>
-            <p style={{ margin: "0.25rem 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
-              These KPIs reference this record via reference sub-fields in multi-line items. Data is read-only here.
-            </p>
-            {reverseRefTimeFilter && (
-              <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", color: "var(--text-secondary)" }}>
-                Filtered by time dimension: <strong>{reverseRefTimeFilter.year}</strong>
-                {reverseRefTimeFilter.period_key ? ` · ${reverseRefTimeFilter.period_key}` : ""}
-                <span style={{ color: "var(--muted)", fontWeight: "normal" }}>
-                  {" "}({reverseRefTimeFilter.effective_time_dimension.replace(/_/g, " ")})
-                </span>
-              </p>
-            )}
-          </div>
-          <div style={{ padding: "0.75rem 1rem" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
-              {reverseRefTabs.map((tab) => (
-                <button
-                  key={tab.child_kpi_id}
-                  type="button"
-                  className="btn"
-                  style={reverseRefActiveKpiId === tab.child_kpi_id ? { background: "var(--accent)", color: "var(--on-muted)" } : {}}
-                  onClick={() => setReverseRefActiveKpiId(tab.child_kpi_id)}
-                >
-                  {tab.child_kpi_name}
-                </button>
-              ))}
-            </div>
-            {reverseRefTabs.map((tab) => {
-              if (reverseRefActiveKpiId !== tab.child_kpi_id) return null;
-              const selectedToken = reverseRefSelectedTokenByKpi[tab.child_kpi_id] ?? (tab.values[0]?.token ?? "");
-              const rowsForToken = tab.rows.filter((r) => r.value_token === selectedToken);
-              const selectedMeta = tab.values.find((v) => v.token === selectedToken);
-              return (
-                <div key={tab.child_kpi_id}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.75rem", flexWrap: "wrap" }}>
-                    <label style={{ fontSize: "0.9rem", fontWeight: 500 }}>Select value</label>
-                    <select
-                      value={selectedToken}
-                      onChange={(e) =>
-                        setReverseRefSelectedTokenByKpi((prev) => ({ ...prev, [tab.child_kpi_id]: e.target.value }))
-                      }
-                      style={{
-                        minWidth: 200,
-                        padding: "0.4rem 0.5rem",
-                        borderRadius: 6,
-                        border: "1px solid var(--border)",
-                        fontSize: "0.9rem",
-                      }}
-                    >
-                      {tab.values.map((v) => (
-                        <option key={v.token} value={v.token}>
-                          {v.label} ({v.count})
-                        </option>
-                      ))}
-                    </select>
-                    {selectedMeta && (
-                      <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
-                        Showing {rowsForToken.length} row(s) referencing this value.
-                      </span>
-                    )}
-                  </div>
-                  {rowsForToken.length === 0 ? (
-                    <p style={{ fontSize: "0.9rem", color: "var(--muted)" }}>No related rows for the selected value.</p>
-                  ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.9rem" }}>
-                        <thead>
-                          <tr>
-                            <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Year</th>
-                            <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Period</th>
-                            {tab.sub_fields.map((sf) => (
-                              <th
-                                key={sf.key}
-                                style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}
-                              >
-                                {sf.name}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {rowsForToken.map((row) => (
-                            <tr key={`${row.entry_id}-${row.row_index}`}>
-                              <td style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>{row.year}</td>
-                              <td style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                {row.period_key || "—"}
-                              </td>
-                              {tab.sub_fields.map((sf) => (
-                                <td key={sf.key} style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                  {String((row.row as Record<string, unknown>)[sf.key] ?? "")}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* Related records moved into a dedicated tab above */}
 
         </>
       )}

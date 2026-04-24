@@ -849,14 +849,28 @@ async def list_multi_items_rows(
                 if raw_filters.get("_version") == 2:
                     conds = raw_filters.get("conditions")
                     if isinstance(conds, list):
-                        resolution_maps = await build_reference_resolution_map(
-                            db,
-                            org_id,
-                            entry.year,
-                            field,
-                            conds,
-                            [r for _, r in rows],
-                        )
+                        # Only build reference resolution maps if filters actually require reference lookups.
+                        # This can be very expensive; avoid it for pure scalar conditions (e.g. eq/contains on text/number/date).
+                        needs_ref = False
+                        for c in conds:
+                            if not isinstance(c, dict):
+                                continue
+                            if c.get("reference_resolution"):
+                                needs_ref = True
+                                break
+                            fk = c.get("field")
+                            if fk is not None and reference_field_types.get(str(fk)) in ("reference", "multi_reference"):
+                                needs_ref = True
+                                break
+                        if needs_ref:
+                            resolution_maps = await build_reference_resolution_map(
+                                db,
+                                org_id,
+                                entry.year,
+                                field,
+                                conds,
+                                [r for _, r in rows],
+                            )
                     rows = [
                         (i, r)
                         for i, r in rows
@@ -1080,14 +1094,26 @@ async def list_multi_items_rows(
                 if raw_filters.get("_version") == 2:
                     conds = raw_filters.get("conditions")
                     if isinstance(conds, list):
-                        resolution_maps = await build_reference_resolution_map(
-                            db,
-                            org_id,
-                            entry.year,
-                            field,
-                            conds,
-                            [r for _, r in rows],
-                        )
+                        needs_ref = False
+                        for c in conds:
+                            if not isinstance(c, dict):
+                                continue
+                            if c.get("reference_resolution"):
+                                needs_ref = True
+                                break
+                            fk = c.get("field")
+                            if fk is not None and reference_field_types.get(str(fk)) in ("reference", "multi_reference"):
+                                needs_ref = True
+                                break
+                        if needs_ref:
+                            resolution_maps = await build_reference_resolution_map(
+                                db,
+                                org_id,
+                                entry.year,
+                                field,
+                                conds,
+                                [r for _, r in rows],
+                            )
                     rows = [
                         (i, r)
                         for i, r in rows
@@ -1926,14 +1952,26 @@ async def export_multi_items_csv(
                 if raw_filters.get("_version") == 2:
                     conds = raw_filters.get("conditions")
                     if isinstance(conds, list):
-                        resolution_maps = await build_reference_resolution_map(
-                            db,
-                            org_id,
-                            entry.year,
-                            field,
-                            conds,
-                            [r for r in rows if isinstance(r, dict)],
-                        )
+                        needs_ref = False
+                        for c in conds:
+                            if not isinstance(c, dict):
+                                continue
+                            if c.get("reference_resolution"):
+                                needs_ref = True
+                                break
+                            fk = c.get("field")
+                            if fk is not None and reference_field_types.get(str(fk)) in ("reference", "multi_reference"):
+                                needs_ref = True
+                                break
+                        if needs_ref:
+                            resolution_maps = await build_reference_resolution_map(
+                                db,
+                                org_id,
+                                entry.year,
+                                field,
+                                conds,
+                                [r for r in rows if isinstance(r, dict)],
+                            )
                     rows = [
                         r
                         for r in rows
@@ -2632,6 +2670,10 @@ def _reverse_ref_tokens_from_cell(cell) -> list[tuple[str, str]]:
 async def get_reverse_references_for_entry(
     kpi_id: int = Query(..., description="Parent KPI id"),
     entry_id: int = Query(..., description="Parent KPI entry id"),
+    include_rows: bool = Query(
+        True,
+        description="When false, return only KPI names + value tokens/counts without embedding row data.",
+    ),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -2843,7 +2885,7 @@ async def get_reverse_references_for_entry(
             for sf in getattr(child_field, "sub_fields", []) or []:
                 sub_fields_payload.append({"key": sf.key, "name": getattr(sf, "name", sf.key)})
 
-        rows_payload: list[dict] = []
+        rows_payload: list[dict] = [] if include_rows else []
         token_counts: dict[str, int] = {t: 0 for t in descriptor_tokens.keys()}
         tokens_set = set(descriptor_tokens.keys())
 
@@ -2868,25 +2910,26 @@ async def get_reverse_references_for_entry(
                         if token not in tokens_set:
                             continue
                         token_counts[token] = token_counts.get(token, 0) + 1
-                        rows_payload.append(
-                            {
-                                "entry_id": entry.id,
-                                "year": entry.year,
-                                "period_key": getattr(entry, "period_key", "") or "",
-                                "value_token": token,
-                                "value_display": label,
-                                "child_field_id": child_field_id,
-                                "child_field_key": d["child_field_key"],
-                                "child_field_name": d["child_field_name"],
-                                "child_sub_field_key": child_sub_key,
-                                "child_sub_field_name": d["child_sub_field_name"],
-                                "row_index": idx,
-                                "row": row,
-                            }
-                        )
+                        if include_rows:
+                            rows_payload.append(
+                                {
+                                    "entry_id": entry.id,
+                                    "year": entry.year,
+                                    "period_key": getattr(entry, "period_key", "") or "",
+                                    "value_token": token,
+                                    "value_display": label,
+                                    "child_field_id": child_field_id,
+                                    "child_field_key": d["child_field_key"],
+                                    "child_field_name": d["child_field_name"],
+                                    "child_sub_field_key": child_sub_key,
+                                    "child_sub_field_name": d["child_sub_field_name"],
+                                    "row_index": idx,
+                                    "row": row,
+                                }
+                            )
 
-        # Only include child KPI if we found any rows
-        if not rows_payload:
+        # Only include child KPI if we found any matching tokens
+        if not any((c or 0) > 0 for c in token_counts.values()):
             continue
 
         values_payload = []
@@ -2904,13 +2947,17 @@ async def get_reverse_references_for_entry(
         # Sort dropdown values by label
         values_payload.sort(key=lambda x: x["label"])
 
+        # Provide a default target field+sub_field for deep-linking into the child multi-line full page.
+        default_target = desc_list[0] if desc_list else None
         response_tabs.append(
             {
                 "child_kpi_id": child_kpi_id,
                 "child_kpi_name": child_kpi_name,
+                "child_field_id": default_target.get("child_field_id") if default_target else None,
+                "child_sub_field_key": default_target.get("child_sub_field_key") if default_target else None,
                 "values": values_payload,
-                "rows": rows_payload,
-                "sub_fields": sub_fields_payload,
+                "rows": rows_payload if include_rows else [],
+                "sub_fields": sub_fields_payload if include_rows else [],
             }
         )
 
