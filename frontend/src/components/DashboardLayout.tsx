@@ -281,10 +281,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       const isNew = rowIndexStr === "new";
       const rowIndexNum = isNew ? null : Number(rowIndexStr);
       const orgForQuery = oid || undefined;
-      const params = qs({ kpi_id: kpiId, organization_id: orgForQuery });
+      const params = qs({
+        kpi_id: kpiId,
+        field_id: fieldId,
+        minimal: true,
+        organization_id: orgForQuery,
+      });
 
       Promise.all([
-        api<{ id: number; name: string }>(`/kpis/${kpiId}?${qs({ organization_id: orgForQuery })}`, { token }),
+        api<{ id: number; name: string }>(`/kpis/${kpiId}/minimal?${qs({ organization_id: orgForQuery })}`, { token }),
         api<Array<{ id: number; name: string }>>(`/entries/fields?${params}`, { token }),
       ])
         .then(([kpi, fields]) => {
@@ -324,10 +329,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       const targetYear = entryMultiMatch[2];
       const fieldId = Number(entryMultiMatch[3]);
       const orgForQuery = oid || undefined;
-      const params = qs({ kpi_id: kpiId, organization_id: orgForQuery });
+      const params = qs({
+        kpi_id: kpiId,
+        field_id: fieldId,
+        minimal: true,
+        organization_id: orgForQuery,
+      });
 
       Promise.all([
-        api<{ id: number; name: string }>(`/kpis/${kpiId}?${qs({ organization_id: orgForQuery })}`, { token }),
+        api<{ id: number; name: string }>(`/kpis/${kpiId}/minimal?${qs({ organization_id: orgForQuery })}`, { token }),
         api<Array<{ id: number; name: string }>>(`/entries/fields?${params}`, { token }),
       ])
         .then(([kpi, fields]) => {

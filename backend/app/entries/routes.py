@@ -493,6 +493,45 @@ class MultiItemsListResponse(BaseModel):
     sub_fields: list[dict]
 
 
+class MultiItemsPageContextSubField(BaseModel):
+    id: int | None = None
+    key: str
+    name: str
+    field_type: str | None = None
+    is_required: bool | None = None
+    sort_order: int | None = None
+    config: dict | None = None
+    can_view: bool | None = None
+    can_edit: bool | None = None
+
+
+class MultiItemsPageContextField(BaseModel):
+    id: int
+    kpi_id: int
+    name: str
+    key: str
+    field_type: str
+    full_page_multi_items: bool | None = None
+    row_level_user_access_enabled: bool | None = None
+    config: dict | None = None
+    sub_fields: list[MultiItemsPageContextSubField] = []
+
+
+class MultiItemsPageContextResponse(BaseModel):
+    entry_id: int
+    kpi_id: int
+    kpi_name: str
+    field: MultiItemsPageContextField
+    can_edit: bool
+    kpi_level_can_edit: bool
+    can_add_row: bool
+
+
+class EntryIdResponse(BaseModel):
+    id: int
+    created: bool = False
+
+
 @router.get("/multi-items/template")
 async def download_multi_items_template(
     field_id: int = Query(...),
@@ -2125,6 +2164,146 @@ async def get_multi_items_add_row_info(
     return {"can_add_row": bool(can_add)}
 
 
+@router.get("/multi-items/page-context", response_model=MultiItemsPageContextResponse)
+async def get_multi_items_page_context(
+    kpi_id: int = Query(..., description="KPI id for the entry"),
+    year: int = Query(..., ge=2000, le=2100),
+    field_id: int = Query(..., description="Multi-line items field id"),
+    period_key: str | None = Query(None, description="Period key: '', H1, H2, Q1-Q4, 01-12"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Multi-line full page view context in a single call:
+    - entry_id (created if missing)
+    - KPI minimal name
+    - the requested multi-line field (with sub_fields + permissions)
+    - can_edit and KPI-level edit
+    - can_add_row for this multi-line field
+    """
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id, org_id=org_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+
+    pk = (period_key or "").strip()[:8]
+    entry, created = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=pk)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
+    if created:
+        await db.commit()
+
+    # KPI minimal
+    kpi_res = await db.execute(select(KPI.id, KPI.name).where(KPI.id == kpi_id, KPI.organization_id == org_id))
+    kpi_row = kpi_res.first()
+    if not kpi_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    kpi_name = str(kpi_row[1] or "")
+
+    # Load just the requested field (fast path) + permissions payload like /entries/fields
+    field_res = await db.execute(
+        select(KPIField)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPIField.id == int(field_id), KPIField.kpi_id == int(kpi_id), KPI.organization_id == org_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    f = field_res.scalar_one_or_none()
+    if not f or getattr(f, "field_type", None) != FieldType.multi_line_items:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    field_access = await get_user_field_access_for_kpi(db, current_user.id, kpi_id)
+    if field_access is None:
+        can_edit = await user_can_edit_kpi(db, current_user.id, kpi_id, org_id=org_id)
+        whole_perm = "data_entry" if can_edit else "view"
+    else:
+        can_edit = any(perm == "data_entry" for perm in field_access.values())
+        whole_perm = field_access.get((f.id, None))
+
+    # KPI-level can_edit (same semantics as /entries/kpi-api-info)
+    if current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        kpi_level_can_edit = True
+    else:
+        kpi_level_res = await db.execute(
+            select(KpiRoleAssignment.id)
+            .join(
+                UserOrganizationRole,
+                UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+            )
+            .where(
+                UserOrganizationRole.user_id == current_user.id,
+                KpiRoleAssignment.kpi_id == kpi_id,
+                KpiRoleAssignment.assignment_type == "data_entry",
+            )
+            .limit(1)
+        )
+        kpi_level_can_edit = kpi_level_res.scalar_one_or_none() is not None
+
+    # Field + sub-field permissions
+    sub_fields = list(getattr(f, "sub_fields", None) or [])
+    sub_payload: list[MultiItemsPageContextSubField] = []
+    if field_access is None:
+        for s in sub_fields:
+            sub_payload.append(
+                MultiItemsPageContextSubField(
+                    id=getattr(s, "id", None),
+                    key=str(getattr(s, "key", "")),
+                    name=str(getattr(s, "name", getattr(s, "key", ""))),
+                    field_type=getattr(getattr(s, "field_type", None), "value", getattr(s, "field_type", None)),
+                    is_required=bool(getattr(s, "is_required", False)),
+                    sort_order=getattr(s, "sort_order", None),
+                    config=getattr(s, "config", None),
+                    can_view=True,
+                    can_edit=bool(can_edit),
+                )
+            )
+    else:
+        for s in sub_fields:
+            sid = getattr(s, "id", None)
+            if sid is None:
+                continue
+            sub_perm = field_access.get((f.id, int(sid))) or whole_perm
+            if not sub_perm:
+                continue
+            sub_payload.append(
+                MultiItemsPageContextSubField(
+                    id=int(sid),
+                    key=str(getattr(s, "key", "")),
+                    name=str(getattr(s, "name", getattr(s, "key", ""))),
+                    field_type=getattr(getattr(s, "field_type", None), "value", getattr(s, "field_type", None)),
+                    is_required=bool(getattr(s, "is_required", False)),
+                    sort_order=getattr(s, "sort_order", None),
+                    config=getattr(s, "config", None),
+                    can_view=sub_perm in ("view", "data_entry"),
+                    can_edit=sub_perm == "data_entry",
+                )
+            )
+
+    out_field = MultiItemsPageContextField(
+        id=int(f.id),
+        kpi_id=int(f.kpi_id),
+        name=str(f.name or ""),
+        key=str(f.key or ""),
+        field_type=getattr(getattr(f, "field_type", None), "value", str(getattr(f, "field_type", ""))),
+        full_page_multi_items=bool(getattr(f, "full_page_multi_items", False)),
+        row_level_user_access_enabled=bool(getattr(f, "row_level_user_access_enabled", False)),
+        config=getattr(f, "config", None),
+        sub_fields=sub_payload,
+    )
+
+    can_add = await user_can_add_row_multi_line_field(db, current_user.id, kpi_id, int(f.id))
+
+    return MultiItemsPageContextResponse(
+        entry_id=int(entry.id),
+        kpi_id=int(kpi_id),
+        kpi_name=kpi_name,
+        field=out_field,
+        can_edit=bool(can_edit),
+        kpi_level_can_edit=bool(kpi_level_can_edit),
+        can_add_row=bool(can_add),
+    )
+
+
 @router.post("/sync-from-api")
 async def entry_sync_from_api(
     kpi_id: int = Query(...),
@@ -2184,6 +2363,7 @@ async def get_entry_fields(
     if field_id is not None:
         # True fast path: load only the requested field (and its options/sub_fields) from DB.
         # Avoid loading all fields for the KPI and filtering in Python.
+        load_options = not minimal
         field_res = await db.execute(
             select(KPIField)
             .join(KPI, KPI.id == KPIField.kpi_id)
@@ -2192,7 +2372,10 @@ async def get_entry_fields(
                 KPIField.kpi_id == int(kpi_id),
                 KPI.organization_id == org_id,
             )
-            .options(selectinload(KPIField.options), selectinload(KPIField.sub_fields))
+            .options(
+                *( [selectinload(KPIField.options)] if load_options else [] ),
+                selectinload(KPIField.sub_fields),
+            )
         )
         one = field_res.scalar_one_or_none()
         fields = [one] if one is not None else []
@@ -2993,6 +3176,32 @@ async def get_or_create_entry_for_period(
         await db.commit()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
     return _entry_to_response(entry)
+
+
+@router.get("/for-period-id", response_model=EntryIdResponse)
+async def get_or_create_entry_for_period_id(
+    kpi_id: int = Query(...),
+    year: int = Query(...),
+    period_key: str | None = Query(None, description="Period key: '', H1, H2, Q1-Q4, 01-12"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Lightweight variant of /entries/for-period that returns only the entry id.
+    Avoids loading/serializing field values (used by list pages that only need entry_id).
+    """
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+    pk = (period_key or "").strip()[:8]
+    entry, created = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=pk)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
+    if created:
+        await db.commit()
+    return EntryIdResponse(id=int(entry.id), created=bool(created))
 
 
 @router.get("", response_model=list[EntryResponse])

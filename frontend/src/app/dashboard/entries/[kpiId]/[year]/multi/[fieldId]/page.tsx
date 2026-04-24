@@ -578,50 +578,35 @@ export default function FullPageMultiItems() {
     const loadId = ++multiPageContextLoadGenRef.current;
     setError(null);
     try {
-      const qOrg = new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString();
-      const kpiP = api<KpiInfo>(`/kpis/${kpiId}/minimal?${qOrg}`, { token }).catch(() => null);
-      const fieldsP = api<FieldSummary[]>(
-        `/entries/fields?${new URLSearchParams({
-          kpi_id: String(kpiId),
-          field_id: String(fieldId),
-          minimal: "true",
-          organization_id: String(effectiveOrgId),
-        }).toString()}`,
-        { token }
-      ).catch(() => []);
-      const forPeriodP = api<{ id: number }>(
-        `/entries/for-period?${new URLSearchParams({
+      const ctx = await api<{
+        entry_id: number;
+        kpi_id: number;
+        kpi_name: string;
+        field: FieldSummary;
+        can_edit: boolean;
+        kpi_level_can_edit: boolean;
+        can_add_row: boolean;
+      }>(
+        `/entries/multi-items/page-context?${new URLSearchParams({
           kpi_id: String(kpiId),
           year: String(year),
           period_key: periodKey || "",
+          field_id: String(fieldId),
           organization_id: String(effectiveOrgId),
         }).toString()}`,
         { token }
       );
-      const apiInfoP = api<{ can_edit?: boolean; kpi_level_can_edit?: boolean }>(
-        `/entries/kpi-api-info?${new URLSearchParams({ kpi_id: String(kpiId), organization_id: String(effectiveOrgId) }).toString()}`,
-        { token }
-      ).catch(() => ({ can_edit: false, kpi_level_can_edit: false }));
-      const addRowInfoP = api<{ can_add_row?: boolean }>(
-        `/entries/multi-items/add-row-info?${new URLSearchParams({ field_id: String(fieldId), organization_id: String(effectiveOrgId) }).toString()}`,
-        { token }
-      ).catch(() => ({ can_add_row: false }));
-
-      const [kpi, fields, forPeriod, apiInfo, addRowInfo] = await Promise.all([
-        kpiP,
-        fieldsP,
-        forPeriodP,
-        apiInfoP,
-        addRowInfoP,
-      ]);
       if (loadId !== multiPageContextLoadGenRef.current) return;
-      if (kpi?.name) setKpiName(kpi.name);
-      const f = fields.find((x) => x.id === fieldId && x.field_type === "multi_line_items") || null;
-      setField(f);
-      setEntryId(forPeriod.id);
-      setCanEditKpi(apiInfo?.can_edit !== false);
-      setKpiLevelCanEdit(apiInfo?.kpi_level_can_edit === true);
-      setCanAddRow(addRowInfo?.can_add_row === true);
+      setKpiName(ctx?.kpi_name || "");
+      setField(ctx?.field ?? null);
+      // Initialize sort before entry_id triggers first rows load to avoid a duplicate fetch.
+      if (sortBy === null && ctx?.field?.sub_fields?.length) {
+        setSortBy(ctx.field.sub_fields[0].key);
+      }
+      setEntryId(ctx.entry_id);
+      setCanEditKpi(ctx?.can_edit !== false);
+      setKpiLevelCanEdit(ctx?.kpi_level_can_edit === true);
+      setCanAddRow(ctx?.can_add_row === true);
     } catch (e) {
       if (loadId === multiPageContextLoadGenRef.current) {
         setError(e instanceof Error ? e.message : "Failed to load context");
@@ -799,12 +784,7 @@ export default function FullPageMultiItems() {
     }
   }, []);
 
-  // Default sort by first column when sub_fields become available
-  useEffect(() => {
-    if (subFields.length > 0 && sortBy === null) {
-      setSortBy(subFields[0].key);
-    }
-  }, [subFields, sortBy]);
+  // Note: sortBy is initialized during context load to prevent double row fetches on first render.
 
   // Initialize visible columns (persisted per KPI/field; dashboard-origin can override via ?cols=)
   useEffect(() => {
