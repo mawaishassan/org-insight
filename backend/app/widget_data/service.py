@@ -12,11 +12,23 @@ import math
 import asyncio
 from typing import Any, Callable, Awaitable
 
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, cast, func, or_, select, text
+from sqlalchemy.sql import nulls_last
+from sqlalchemy.types import String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.models import FieldType, KPI, KPIEntry, KPIField, KPIFieldValue, User
+from app.core.models import (
+    FieldType,
+    KPI,
+    KPIEntry,
+    KPIField,
+    KPIFieldSubField,
+    KPIFieldValue,
+    KpiMultiLineCell,
+    KpiMultiLineRow,
+    User,
+)
 from app.entries.multi_item_filters import row_passes_filters
 from app.entries.reference_filter_resolve import build_reference_resolution_map
 from app.entries.multi_line_load import load_multi_line_row_dicts
@@ -1876,6 +1888,257 @@ async def _dashboard_multi_line_table_payload(
         },
         e_rev,
     )
+
+
+async def resolve_dashboard_table_rows_widget_data(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None,
+    *,
+    page: int,
+    page_size: int,
+    search: str | None,
+    sort_by: str | None,
+    sort_dir: str,
+) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
+    """
+    Fast paged rows for dashboard `kpi_multi_line_table`.
+    Uses SQL paging so 20k rows doesn't mean 20k JSON payload.
+    """
+    merged = _merge_overrides(widget, overrides)
+    if str(merged.get("type") or "") != "kpi_multi_line_table":
+        return ({"error": "unsupported_widget_type"}, {"type": merged.get("type")}, "error", None)
+    kpi_id = int(merged.get("kpi_id") or 0)
+    if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+        return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
+
+    year = int(merged.get("year") or 0)
+    period_key = merged.get("period_key")
+    mls = str(merged.get("source_field_key") or "").strip()
+    if not kpi_id or not year or not mls:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, "error", None)
+
+    f_light = (
+        await db.execute(
+            select(KPIField).where(
+                KPIField.kpi_id == int(kpi_id),
+                KPIField.key == mls,
+                KPIField.field_type == FieldType.multi_line_items,
+            )
+        )
+    ).scalars().first()
+    f_obj = await get_field_with_subfields_only(db, int(f_light.id), org_id) if f_light is not None else None
+
+    eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+    e_rev = revision_for_parts(eid, e_ts)
+
+    label_by_key: dict[str, str] = {}
+    if f_obj and f_obj.sub_fields:
+        for sf in f_obj.sub_fields:
+            label_by_key[str(sf.key)] = str(sf.name or sf.key)
+
+    if not f_obj or not eid:
+        meta0 = {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": eid, "row_count": 0}
+        data0 = {"rows": [], "total": 0, "page": page, "page_size": page_size, "sub_field_labels": label_by_key, "joins": [], "source_field_id": f_obj.id if f_obj else (f_light.id if f_light else None)}
+        return (meta0, data0, "kpi_multi_line_table", e_rev)
+
+    allowed_keys: list[str] = [str(x) for x in (merged.get("sub_field_keys") or []) if str(x).strip()]
+    sf_by_key: dict[str, KPIFieldSubField] = {str(getattr(sf, "key", "")): sf for sf in (f_obj.sub_fields or []) if getattr(sf, "key", None)}
+    if not allowed_keys:
+        allowed_keys = [k for k in sf_by_key.keys() if k]
+    visible_sf_ids = [int(getattr(sf_by_key[k], "id")) for k in allowed_keys if k in sf_by_key]
+
+    r = KpiMultiLineRow.__table__.alias("r")
+    stmt = select(r.c.id, r.c.row_index).where(r.c.entry_id == int(eid), r.c.field_id == int(f_obj.id))
+
+    raw_filters = merged.get("filters")
+    sub_id_by_key = {str(getattr(sf, "key", "")): int(getattr(sf, "id")) for sf in (f_obj.sub_fields or []) if getattr(sf, "key", None)}
+    reference_field_types = {str(getattr(sf, "key", "")): str(getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", "")) or "") for sf in (f_obj.sub_fields or []) if getattr(sf, "key", None)}
+    compiled = compile_multiline_row_filters_sql(
+        raw_filters,
+        sub_id_by_key=sub_id_by_key,
+        reference_field_types=reference_field_types,
+        resolved_label_sets=None,
+    )
+    filter_params: dict[str, Any] = {}
+    if compiled is not None:
+        where_sql, p = compiled
+        if where_sql.strip():
+            stmt = stmt.where(text(where_sql))
+            filter_params.update(p)
+
+    if search and search.strip():
+        q = f"%{search.strip().lower()}%"
+        c = KpiMultiLineCell.__table__.alias("cs")
+        val_expr = func.lower(
+            func.coalesce(
+                cast(c.c.value_text, String()),
+                cast(c.c.value_json, String()),
+                cast(c.c.value_number, String()),
+                cast(c.c.value_boolean, String()),
+                cast(c.c.value_date, String()),
+            )
+        )
+        stmt = stmt.where(
+            select(func.count())
+            .select_from(c)
+            .where(and_(c.c.row_id == r.c.id, c.c.sub_field_id.in_(visible_sf_ids), val_expr.like(q)))
+            .correlate(r)
+            .scalar_subquery()
+            > 0
+        )
+
+    total = int((await db.execute(select(func.count()).select_from(stmt.subquery()), filter_params)).scalar_one() or 0)
+
+    sort_key = (sort_by or "").strip()
+    sort_dir_s = "desc" if str(sort_dir).lower() == "desc" else "asc"
+    if sort_key and sort_key in sf_by_key:
+        sf = sf_by_key[sort_key]
+        sort_sf_id = int(getattr(sf, "id"))
+        sort_ft = str(getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", "")) or "")
+        sc = KpiMultiLineCell.__table__.alias("sc")
+        stmt = stmt.outerjoin(sc, and_(sc.c.row_id == r.c.id, sc.c.sub_field_id == sort_sf_id))
+        if sort_ft == "number":
+            expr = sc.c.value_number
+        elif sort_ft == "date":
+            expr = sc.c.value_date
+        elif sort_ft == "boolean":
+            expr = sc.c.value_boolean
+        else:
+            expr = func.coalesce(
+                cast(sc.c.value_text, String()),
+                cast(sc.c.value_json, String()),
+                cast(sc.c.value_number, String()),
+                cast(sc.c.value_boolean, String()),
+                cast(sc.c.value_date, String()),
+            )
+        stmt = stmt.order_by(nulls_last(expr.desc() if sort_dir_s == "desc" else expr.asc()))
+    else:
+        stmt = stmt.order_by(r.c.row_index)
+
+    start = (int(page) - 1) * int(page_size)
+    page_rows = list((await db.execute(stmt.offset(start).limit(int(page_size)), filter_params)).all())
+    row_ids = [int(rr[0]) for rr in page_rows]
+    row_index_by_id = {int(rr[0]): int(rr[1]) for rr in page_rows}
+
+    if not row_ids:
+        meta0 = {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": eid, "row_count": 0, "total": total, "source_field_id": int(f_obj.id)}
+        data0 = {"rows": [], "total": total, "page": page, "page_size": page_size, "sub_field_labels": label_by_key, "joins": [], "source_field_id": int(f_obj.id)}
+        return (meta0, data0, "kpi_multi_line_table", e_rev)
+
+    ctab = KpiMultiLineCell.__table__
+    sftab = KPIFieldSubField.__table__
+    cell_res = await db.execute(
+        select(ctab.c.row_id, sftab.c.key, ctab.c.value_text, ctab.c.value_number, ctab.c.value_boolean, ctab.c.value_date, ctab.c.value_json)
+        .select_from(ctab)
+        .join(sftab, sftab.c.id == ctab.c.sub_field_id)
+        .where(ctab.c.row_id.in_(row_ids), ctab.c.sub_field_id.in_(visible_sf_ids))
+    )
+    row_data_by_index: dict[int, dict[str, Any]] = {row_index_by_id[rid]: {} for rid in row_ids}
+    for row_id, key, vt, vn, vb, vd, vj in cell_res.all():
+        idx = row_index_by_id.get(int(row_id))
+        if idx is None or not key:
+            continue
+        if vj is not None:
+            raw = vj
+        elif vt is not None:
+            raw = vt
+        elif vn is not None:
+            raw = vn
+        elif vb is not None:
+            raw = vb
+        elif vd is not None:
+            raw = vd.isoformat() if hasattr(vd, "isoformat") else str(vd)
+        else:
+            raw = None
+        row_data_by_index[idx][str(key)] = raw
+
+    rows_out = [{"__index": idx, **row_data_by_index.get(idx, {})} for idx in sorted(row_data_by_index.keys())]
+
+    # Joins remain best-effort and limited to keys on this page for speed.
+    joins_pack: list[dict[str, Any]] = []
+    for j in _parse_join_specs(merged):
+        left_key = str(j.get("on_left_sub_field_key") or "").strip()
+        right_key = str(j.get("on_right_sub_field_key") or "").strip()
+        needed = sorted({str(rw.get(left_key) or "").strip() for rw in rows_out if left_key and str(rw.get(left_key) or "").strip()})
+        if not needed:
+            joins_pack.append({"rows": [], "sub_field_labels": {}, "source_field_id": None})
+            continue
+        jkpi = int(j["kpi_id"])
+        jsrc = str(j["source_field_key"])
+        jf_light = (
+            await db.execute(
+                select(KPIField).join(KPI, KPI.id == KPIField.kpi_id).where(
+                    KPI.id == jkpi,
+                    KPI.organization_id == org_id,
+                    KPIField.key == jsrc,
+                    KPIField.field_type == FieldType.multi_line_items,
+                )
+            )
+        ).scalars().first()
+        jf_obj = await get_field_with_subfields_only(db, int(jf_light.id), org_id) if jf_light is not None else None
+        jeid, _je_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=jkpi, year=year, period_key=period_key)
+        if not jf_obj or not jeid:
+            joins_pack.append({"rows": [], "sub_field_labels": {}, "source_field_id": int(jf_obj.id) if jf_obj else None})
+            continue
+        jsf_by_key = {str(getattr(sf, "key", "")): sf for sf in (jf_obj.sub_fields or []) if getattr(sf, "key", None)}
+        right_sf = jsf_by_key.get(right_key)
+        if not right_sf:
+            joins_pack.append({"rows": [], "sub_field_labels": {}, "source_field_id": int(jf_obj.id)})
+            continue
+        right_sf_id = int(getattr(right_sf, "id"))
+        jr = KpiMultiLineRow.__table__.alias("jr")
+        jc = KpiMultiLineCell.__table__.alias("jc")
+        jbase = (
+            select(jr.c.id, jr.c.row_index)
+            .select_from(jr)
+            .join(jc, and_(jc.c.row_id == jr.c.id, jc.c.sub_field_id == right_sf_id))
+            .where(jr.c.entry_id == int(jeid), jr.c.field_id == int(jf_obj.id), cast(jc.c.value_text, String()).in_(needed))
+            .limit(500)
+        )
+        jrows = list((await db.execute(jbase)).all())
+        jrow_ids = [int(x[0]) for x in jrows]
+        jlabels = {str(getattr(sf, "key", "")): str(getattr(sf, "name", "") or getattr(sf, "key", "")) for sf in (jf_obj.sub_fields or []) if getattr(sf, "key", None)}
+        if not jrow_ids:
+            joins_pack.append({"rows": [], "sub_field_labels": jlabels, "source_field_id": int(jf_obj.id)})
+            continue
+        want_keys = [str(x) for x in (j.get("sub_field_keys") or []) if str(x).strip()]
+        if not want_keys:
+            want_keys = list(jsf_by_key.keys())
+        want_ids = [int(getattr(jsf_by_key[k], "id")) for k in want_keys if k in jsf_by_key]
+        jcell_res = await db.execute(
+            select(ctab.c.row_id, sftab.c.key, ctab.c.value_text, ctab.c.value_number, ctab.c.value_boolean, ctab.c.value_date, ctab.c.value_json)
+            .select_from(ctab)
+            .join(sftab, sftab.c.id == ctab.c.sub_field_id)
+            .where(ctab.c.row_id.in_(jrow_ids), ctab.c.sub_field_id.in_(want_ids))
+        )
+        jidx_by_id = {int(rid): int(ridx) for rid, ridx in jrows}
+        jrow_data: dict[int, dict[str, Any]] = {jidx_by_id[rid]: {} for rid in jrow_ids}
+        for row_id, key2, vt, vn, vb, vd, vj in jcell_res.all():
+            idx = jidx_by_id.get(int(row_id))
+            if idx is None or not key2:
+                continue
+            if vj is not None:
+                raw = vj
+            elif vt is not None:
+                raw = vt
+            elif vn is not None:
+                raw = vn
+            elif vb is not None:
+                raw = vb
+            elif vd is not None:
+                raw = vd.isoformat() if hasattr(vd, "isoformat") else str(vd)
+            else:
+                raw = None
+            jrow_data[idx][str(key2)] = raw
+        joins_pack.append({"rows": [{"__index": idx, **jrow_data[idx]} for idx in sorted(jrow_data.keys())], "sub_field_labels": jlabels, "source_field_id": int(jf_obj.id)})
+
+    meta = {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": eid, "row_count": len(rows_out), "total": total, "source_field_id": int(f_obj.id)}
+    data = {"rows": rows_out, "total": total, "page": int(page), "page_size": int(page_size), "sub_field_labels": label_by_key, "joins": joins_pack, "source_field_id": int(f_obj.id)}
+    return (meta, data, "kpi_multi_line_table", e_rev)
 
 
 async def _fast_line_points(

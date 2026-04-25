@@ -139,6 +139,25 @@ export async function postDashboardTableWidgetData(
   });
 }
 
+export async function postDashboardTableWidgetRows(
+  token: string,
+  body: ChartWidgetDataRequestV1 & {
+    page: number;
+    page_size: number;
+    search?: string | null;
+    sort_by?: string | null;
+    sort_dir?: "asc" | "desc";
+  },
+  init?: RequestInit
+): Promise<WidgetDataResponseV1> {
+  return api<WidgetDataResponseV1>("/widget-data/table/rows", {
+    method: "POST",
+    body: JSON.stringify(body),
+    token,
+    ...init,
+  });
+}
+
 export async function postDashboardLineWidgetData(
   token: string,
   body: ChartWidgetDataRequestV1,

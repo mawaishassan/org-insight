@@ -16,6 +16,7 @@ import {
   postDashboardLineWidgetData,
   postDashboardSingleValueWidgetData,
   postDashboardKvTableWidgetData,
+  postDashboardTableWidgetRows,
   postDashboardTableWidgetData,
   postDashboardTrendWidgetData,
   postWidgetData,
@@ -4074,6 +4075,7 @@ function KpiMultiLineTableWidgetInner({
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [visibleKeys, setVisibleKeys] = useState<string[]>([]);
   const [page, setPage] = useState(0);
+  const [total, setTotal] = useState(0);
 
   const allowedKeys = widget.sub_field_keys ?? [];
   const joinSpecs: Array<{
@@ -4117,6 +4119,7 @@ function KpiMultiLineTableWidgetInner({
     setSearch("");
     setPage(0);
     setViewerYear(widget.year);
+    setTotal(0);
   }, [widget.id, JSON.stringify(allowedKeys), JSON.stringify(joinSpecs)]);
 
   useEffect(() => {
@@ -4146,7 +4149,7 @@ function KpiMultiLineTableWidgetInner({
       const w = { ...(widget as unknown as Record<string, unknown>) };
       const bundleReq =
         dashboardId != null
-          ? postDashboardTableWidgetData(
+          ? postDashboardTableWidgetRows(
               token,
               {
                 version: 1,
@@ -4154,6 +4157,11 @@ function KpiMultiLineTableWidgetInner({
                 dashboard_id: dashboardId,
                 widget: w,
                 overrides: { year: viewerYear },
+                page: page + 1,
+                page_size: Math.min(200, Math.max(1, pageSize)),
+                search: search || null,
+                sort_by: sortKey,
+                sort_dir: sortDir,
               },
               { signal: ac.signal }
             )
@@ -4170,6 +4178,7 @@ function KpiMultiLineTableWidgetInner({
           const rows = Array.isArray(d.rows) ? (d.rows as Record<string, unknown>[]) : [];
           setItems(rows);
           setLabelByKey((d.sub_field_labels as Record<string, string>) || {});
+          setTotal(typeof (d as any).total === "number" ? ((d as any).total as number) : rows.length);
 
           const jpack = (d.joins as Array<{ rows?: unknown; sub_field_labels?: Record<string, string> }>) || [];
           const nextJoinLabels: Array<Record<string, string>> = [];
@@ -4285,6 +4294,12 @@ function KpiMultiLineTableWidgetInner({
     JSON.stringify(widget.filters ?? null),
     JSON.stringify((widget as any).joins ?? null),
     JSON.stringify((widget as any).join ?? null),
+    dashboardId,
+    page,
+    pageSize,
+    search,
+    sortKey,
+    sortDir,
   ]);
 
   const joinAllowedKeySpecs = useMemo(
@@ -4315,48 +4330,14 @@ function KpiMultiLineTableWidgetInner({
       .filter((x) => x.joinIdx >= 0 && !!x.key);
   }, [orderedKeys]);
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((row) => {
-      const leftHit = allowedKeys.some((k) => formatCellForTable(row[k]).toLowerCase().includes(q));
-      if (leftHit) return true;
-      if (!hasJoins) return false;
-      return joinAllowedKeySpecs.some(({ idx, key }) => {
-        const j = joinLookup(idx, row);
-        if (!j) return false;
-        return formatCellForTable(j[key]).toLowerCase().includes(q);
-      });
-    });
-  }, [items, search, allowedKeys, hasJoins, JSON.stringify(joinAllowedKeySpecs), JSON.stringify(joinIndexes)]);
-
-  const sorted = useMemo(() => {
-    if (!sortKey) return filtered;
-    if (sortKey.startsWith("join:")) {
-      const raw = sortKey.slice("join:".length);
-      const parts = raw.split(":");
-      const joinIdx = Number(parts[0]);
-      const k = parts.slice(1).join(":");
-      if (!Number.isFinite(joinIdx) || !k) return filtered;
-      if (!orderedJoinCols.some((x) => x.joinIdx === joinIdx && x.key === k)) return filtered;
-      const dir = sortDir === "asc" ? 1 : -1;
-      return [...filtered].sort((a, b) => dir * compareCellValues((joinLookup(joinIdx, a) ?? {})[k], (joinLookup(joinIdx, b) ?? {})[k]));
-    }
-    if (!orderedPrimaryKeys.includes(sortKey)) return filtered;
-    const dir = sortDir === "asc" ? 1 : -1;
-    return [...filtered].sort((a, b) => dir * compareCellValues(a[sortKey], b[sortKey]));
-  }, [filtered, sortKey, sortDir, orderedPrimaryKeys, JSON.stringify(joinIndexes), JSON.stringify(orderedJoinCols)]);
-
+  // Paged server-side; keep client side work minimal.
   useEffect(() => {
     setPage(0);
-  }, [search, sortKey, sortDir, JSON.stringify(orderedKeys), items.length]);
+  }, [search, sortKey, sortDir, JSON.stringify(orderedKeys), viewerYear, pageSize]);
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil(sorted.length / Math.max(1, pageSize))), [sorted.length, pageSize]);
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(Math.max(0, total) / Math.max(1, pageSize))), [total, pageSize]);
   const safePage = Math.min(page, totalPages - 1);
-  const paged = useMemo(() => {
-    const start = safePage * pageSize;
-    return sorted.slice(start, start + pageSize);
-  }, [sorted, safePage, pageSize]);
+  const paged = items;
 
   const toggleColumn = (key: string) => {
     setVisibleKeys((prev) => {
@@ -4530,7 +4511,7 @@ function KpiMultiLineTableWidgetInner({
               }}
             />
           </div>
-          {sorted.length === 0 ? (
+          {total === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>No rows to show.</p>
           ) : orderedKeys.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>Select at least one column.</p>
@@ -4609,7 +4590,7 @@ function KpiMultiLineTableWidgetInner({
             </div>
           )}
 
-          {(sorted.length > pageSize || onChangePageSize) && (
+          {(total > pageSize || onChangePageSize) && (
             <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
               {onChangePageSize ? (
                 <div style={{ display: "inline-flex", gap: "0.45rem", alignItems: "center" }}>

@@ -19,6 +19,7 @@ from app.widget_data.schemas import (
     ChartWidgetDataRequestV1,
     DashboardChartBatchRequestV1,
     DashboardCardBatchRequestV1,
+    DashboardMultiLineTableRowsRequestV1,
     DashboardWidgetDataRequestV1,
     WidgetDataRequestV1,
     WidgetDataResponseV1,
@@ -31,6 +32,7 @@ from app.widget_data.service import (
     resolve_dashboard_kpi_table_widget_data,
     resolve_dashboard_line_widget_data,
     resolve_dashboard_single_value_widget_data,
+    resolve_dashboard_table_rows_widget_data,
     resolve_dashboard_table_widget_data,
     resolve_dashboard_trend_widget_data,
     resolve_widget_data,
@@ -255,6 +257,37 @@ async def post_dashboard_table_widget_data(
     if resolved_type == "error":
         if data.get("error") == "KPI not found" or meta.get("error") == "KPI not found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(meta.get("error") or data.get("error") or "Invalid request"))
+    return _chart_response(meta, data, resolved_type, entry_revision)
+
+
+@router.post("/table/rows")
+async def post_dashboard_table_widget_rows(
+    body: DashboardMultiLineTableRowsRequestV1,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    org_id = _org_id(current_user, body.organization_id)
+    if body.version != 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported request version")
+    if not body.widget or not isinstance(body.widget, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="widget is required")
+    meta, data, resolved_type, entry_revision = await resolve_dashboard_table_rows_widget_data(
+        db,
+        current_user,
+        org_id,
+        body.dashboard_id,
+        body.widget,
+        body.overrides,
+        page=body.page,
+        page_size=body.page_size,
+        search=body.search,
+        sort_by=body.sort_by,
+        sort_dir=body.sort_dir,
+    )
+    if data.get("error") == "forbidden" or meta.get("error") == "forbidden":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this dashboard")
+    if resolved_type == "error":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(meta.get("error") or data.get("error") or "Invalid request"))
     return _chart_response(meta, data, resolved_type, entry_revision)
 

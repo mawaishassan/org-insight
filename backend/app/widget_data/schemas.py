@@ -71,3 +71,18 @@ class DashboardCardBatchRequestV1(BaseModel):
     organization_id: int
     dashboard_id: int = Field(..., ge=1)
     items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class DashboardMultiLineTableRowsRequestV1(BaseModel):
+    """Paged rows for `kpi_multi_line_table` widgets on a dashboard view (fast path)."""
+
+    version: int = Field(1, ge=1, le=1)
+    organization_id: int
+    dashboard_id: int = Field(..., ge=1)
+    widget: dict[str, Any]
+    overrides: dict[str, Any] | None = None
+    page: int = Field(1, ge=1)
+    page_size: int = Field(50, ge=1, le=200)
+    search: str | None = None
+    sort_by: str | None = None
+    sort_dir: str = Field("asc", pattern="^(asc|desc)$")
