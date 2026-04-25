@@ -116,17 +116,14 @@ def _compile_v2_one(
     cond_idx: int,
     sub_id_by_key: dict[str, int],
     reference_field_types: dict[str, str],
+    resolved_label_sets: dict[int, set[str]] | None,
     params: dict[str, Any],
 ) -> str | None:
     fk = cond.get("field")
     if fk is None or fk == "":
         return "TRUE"
     fk_s = str(fk)
-    if cond.get("reference_resolution"):
-        return None
     ft = str(reference_field_types.get(fk_s, "") or "")
-    if ft in ("reference", "multi_reference"):
-        return None
     sid = sub_id_by_key.get(fk_s)
     if sid is None:
         return None
@@ -143,6 +140,21 @@ def _compile_v2_one(
     lbl = _corr_cell_label_scalar(sid_key)
     num = _corr_cell_numeric_scalar(sid_key)
     dte = _corr_cell_date_scalar(sid_key)
+
+    # reference_resolution: compile as label IN allowed_labels when pre-resolved by caller
+    rr = cond.get("reference_resolution")
+    if isinstance(rr, dict):
+        allowed = (resolved_label_sets or {}).get(cond_idx)
+        if not allowed:
+            return None
+        arr_key = f"wf_{cond_idx}_allowed"
+        params[arr_key] = sorted({str(x).strip() for x in allowed if str(x).strip()})
+        if op == "eq":
+            return f"({lbl} IS NOT NULL AND TRIM(BOTH FROM COALESCE({lbl}, '')) = ANY(CAST(:{arr_key} AS text[])))"
+        if op == "neq":
+            return f"({lbl} IS NULL OR NOT (TRIM(BOTH FROM COALESCE({lbl}, '')) = ANY(CAST(:{arr_key} AS text[]))))"
+        # Other operators over resolved values are not supported in SQL compilation yet.
+        return None
 
     vals_raw = cond.get("values")
     if isinstance(vals_raw, list) and len(vals_raw) > 1:
@@ -181,6 +193,21 @@ def _compile_v2_one(
         return f"(LOWER(TRIM(COALESCE({lbl}, ''))) LIKE '%' || LOWER(TRIM(CAST(:{vkey} AS text))))"
 
     if op in cmp_ops:
+        # Reference-like sub-fields: comparisons are text-only on their display label.
+        if ft in ("reference", "multi_reference"):
+            if op not in ("eq", "neq"):
+                return None
+            params[vkey] = str(raw_val).strip() if raw_val is not None else ""
+            if op == "eq":
+                return (
+                    f"({lbl} IS NOT NULL AND TRIM(BOTH FROM COALESCE({lbl}, '')) = "
+                    f"TRIM(BOTH FROM CAST(:{vkey} AS text)))"
+                )
+            return (
+                f"({lbl} IS NULL OR TRIM(BOTH FROM COALESCE({lbl}, '')) IS DISTINCT FROM "
+                f"TRIM(BOTH FROM CAST(:{vkey} AS text)))"
+            )
+
         if ft == "date" and op in ("gt", "gte", "lt", "lte", "eq", "neq"):
             dv = _sql_date(raw_val)
             if dv is None:
@@ -258,6 +285,7 @@ def compile_multiline_row_filters_sql(
     *,
     sub_id_by_key: dict[str, int],
     reference_field_types: dict[str, str],
+    resolved_label_sets: dict[int, set[str]] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """
     Build an SQL fragment (without leading ``AND``) for ``WHERE`` on ``kpi_multi_line_rows r``.
@@ -265,7 +293,7 @@ def compile_multiline_row_filters_sql(
     Returns:
         ``("", {})`` when there is nothing to filter;
         ``(sql, params)`` when predicates were generated;
-        ``None`` when filters reference resolution, reference sub-fields, or unsupported ops
+        ``None`` when filters include unsupported ops or cannot be expressed as SQL
         (caller should use the Python row filter path).
     """
     raw = _parse_filters_dict(raw_filters)
@@ -288,6 +316,7 @@ def compile_multiline_row_filters_sql(
                 cond_idx=i,
                 sub_id_by_key=sub_id_by_key,
                 reference_field_types=reference_field_types,
+                resolved_label_sets=resolved_label_sets,
                 params=params,
             )
             if frag is None:

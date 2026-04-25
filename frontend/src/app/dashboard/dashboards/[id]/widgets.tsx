@@ -12,6 +12,7 @@ import {
   postDashboardChartWidgetData,
   postDashboardChartWidgetDataBatch,
   postDashboardCardWidgetData,
+  postDashboardCardWidgetDataBatch,
   postDashboardLineWidgetData,
   postDashboardSingleValueWidgetData,
   postDashboardKvTableWidgetData,
@@ -73,6 +74,55 @@ function enqueueDashboardChartBatch(req: Omit<PendingChart, "resolve" | "reject"
       }, 0);
     }
     pendingChartBatches.set(key, cur);
+  });
+}
+
+// Batch KPI card loads to avoid many tiny requests.
+type CardBatchKey = string;
+type PendingCard = {
+  token: string;
+  organizationId: number;
+  dashboardId: number;
+  widgetId: string;
+  widget: Record<string, unknown>;
+  overrides?: Record<string, unknown>;
+  resolve: (v: any) => void;
+  reject: (e: any) => void;
+};
+const pendingCardBatches = new Map<CardBatchKey, { timer: any; items: PendingCard[] }>();
+
+function enqueueDashboardCardBatch(req: Omit<PendingCard, "resolve" | "reject">): Promise<any> {
+  const key = `${req.token}::${req.organizationId}::${req.dashboardId}`;
+  return new Promise((resolve, reject) => {
+    const item: PendingCard = { ...req, resolve, reject };
+    const cur = pendingCardBatches.get(key) ?? { timer: null, items: [] as PendingCard[] };
+    cur.items.push(item);
+    if (!cur.timer) {
+      cur.timer = setTimeout(async () => {
+        const batch = pendingCardBatches.get(key);
+        if (!batch) return;
+        pendingCardBatches.delete(key);
+        const items = batch.items;
+        if (items.length === 0) return;
+        try {
+          const res = await postDashboardCardWidgetDataBatch(req.token, {
+            version: 1,
+            organization_id: req.organizationId,
+            dashboard_id: req.dashboardId,
+            items: items.map((x) => ({ widget: x.widget, overrides: x.overrides })),
+          });
+          items.forEach((x, idx) => {
+            const k = x.widgetId || `idx:${idx}`;
+            const r = res?.results?.[k] ?? res?.results?.[`idx:${idx}`];
+            if (r && r.ok) x.resolve(r);
+            else x.reject(new Error(r?.error || "Card batch failed"));
+          });
+        } catch (e) {
+          items.forEach((x) => x.reject(e));
+        }
+      }, 0);
+    }
+    pendingCardBatches.set(key, cur);
   });
 }
 export type WidgetDesignMenuActions = {
@@ -905,12 +955,20 @@ function KpiCardSingleValueWidget({
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
       const bundleReq =
-        dashboardId != null && (widget.source_mode === "field" || widget.source_mode === "static")
-          ? postDashboardCardWidgetData(
+        dashboardId != null && widget.source_mode === "field"
+          ? enqueueDashboardCardBatch({
               token,
-              { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
-              { signal: ac.signal }
-            )
+              organizationId,
+              dashboardId,
+              widgetId: String((w as any)?.id ?? ""),
+              widget: w,
+            }).then((r) => ({
+              version: 1,
+              widget_type: "kpi_card_single_value",
+              meta: r.meta ?? {},
+              data: r.data ?? {},
+              entry_revision: r.entry_revision ?? null,
+            }))
           : postWidgetData(token, { version: 1, organization_id: organizationId, widget: w }, { signal: ac.signal });
       bundleReq
         .then((res) => {

@@ -76,7 +76,7 @@ uni_kpi_mis/
 2. Copy `backend/.env.example` to `backend/.env` and set `DATABASE_URL` (e.g. `postgresql+asyncpg://postgres:postgres@localhost:5432/uni_kpi_mis`), `JWT_SECRET_KEY`.
 3. From `backend/`:
    - `pip install -r requirements.txt`
-   - `alembic upgrade head` (create tables)
+   - `alembic upgrade head` (create tables + performance indexes)
    - `uvicorn app.main:app --reload --host 0.0.0.0 --port 8080`
 
 ### Frontend

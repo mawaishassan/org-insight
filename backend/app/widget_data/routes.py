@@ -18,6 +18,7 @@ from app.core.models import User
 from app.widget_data.schemas import (
     ChartWidgetDataRequestV1,
     DashboardChartBatchRequestV1,
+    DashboardCardBatchRequestV1,
     DashboardWidgetDataRequestV1,
     WidgetDataRequestV1,
     WidgetDataResponseV1,
@@ -25,6 +26,8 @@ from app.widget_data.schemas import (
 from app.widget_data.service import (
     resolve_dashboard_card_widget_data,
     resolve_dashboard_chart_widget_data,
+    resolve_dashboard_chart_widget_data_batch,
+    resolve_dashboard_card_widget_data_batch,
     resolve_dashboard_kpi_table_widget_data,
     resolve_dashboard_line_widget_data,
     resolve_dashboard_single_value_widget_data,
@@ -145,52 +148,11 @@ async def post_dashboard_chart_widget_data_batch(
         if not isinstance(items, list) or not items:
             return {"version": 1, "results": {}}
 
-        # Concurrency: resolve multiple charts in parallel to avoid 1+ minute sequential batches.
-        # Keep a modest limit to avoid DB pool starvation.
-        sem = asyncio.Semaphore(6)
-
-        async def _one(idx: int, it: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-            w = it.get("widget")
-            if not isinstance(w, dict):
-                return (f"idx:{idx}", {"ok": False, "error": "invalid widget"})
-            overrides = it.get("overrides") if isinstance(it.get("overrides"), dict) else None
-            wid = w.get("id")
-            key = str(wid) if wid is not None else f"idx:{idx}"
-            async with sem:
-                try:
-                    meta, data, resolved_type, entry_revision = await resolve_dashboard_chart_widget_data(
-                        db,
-                        current_user,
-                        org_id,
-                        body.dashboard_id,
-                        w,
-                        overrides,
-                    )
-                    return (
-                        key,
-                        {
-                            "ok": True,
-                            "widget_type": resolved_type,
-                            "meta": meta,
-                            "data": data,
-                            "entry_revision": entry_revision,
-                        },
-                    )
-                except Exception as e:
-                    logger.exception(
-                        "widget-data/chart batch item failed (dashboard_id=%s org_id=%s widget_key=%s)",
-                        body.dashboard_id,
-                        org_id,
-                        key,
-                    )
-                    traceback.print_exc()
-                    return (key, {"ok": False, "error": str(e)})
-
-        tasks = [_one(i, it) for i, it in enumerate(items) if isinstance(it, dict)]
-        pairs = await asyncio.gather(*tasks, return_exceptions=False)
-        results = {k: v for (k, v) in pairs}
+        results = await resolve_dashboard_chart_widget_data_batch(
+            db, current_user, org_id, body.dashboard_id, [it for it in items if isinstance(it, dict)]
+        )
         dt = (time.perf_counter() - t0) * 1000.0
-        print(f"[widget-data] END /chart/batch dashboard_id={body.dashboard_id} ({dt:.1f}ms) items={len(tasks)}")
+        print(f"[widget-data] END /chart/batch dashboard_id={body.dashboard_id} ({dt:.1f}ms) items={len(results)}")
         return {"version": 1, "results": results}
     except Exception:
         dt = (time.perf_counter() - t0) * 1000.0
@@ -203,6 +165,28 @@ async def post_dashboard_chart_widget_data_batch(
         traceback.print_exc()
         print(f"[widget-data] CRASH /chart/batch dashboard_id={body.dashboard_id} ({dt:.1f}ms)")
         raise
+
+
+@router.post("/card/batch")
+async def post_dashboard_card_widget_data_batch(
+    body: DashboardCardBatchRequestV1,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    t0 = time.perf_counter()
+    print(f"[widget-data] BEGIN /card/batch dashboard_id={body.dashboard_id} org={body.organization_id}", flush=True)
+    org_id = _org_id(current_user, body.organization_id)
+    if body.version != 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported request version")
+    items = body.items or []
+    if not isinstance(items, list) or not items:
+        return {"version": 1, "results": {}}
+    results = await resolve_dashboard_card_widget_data_batch(
+        db, current_user, org_id, body.dashboard_id, [it for it in items if isinstance(it, dict)]
+    )
+    dt = (time.perf_counter() - t0) * 1000.0
+    print(f"[widget-data] END /card/batch dashboard_id={body.dashboard_id} ({dt:.1f}ms) items={len(results)}", flush=True)
+    return {"version": 1, "results": results}
 
 
 @router.post("/card", response_model=WidgetDataResponseV1)

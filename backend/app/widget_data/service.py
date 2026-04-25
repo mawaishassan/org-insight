@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import json
 import math
+import asyncio
 from typing import Any, Callable, Awaitable
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -20,12 +21,330 @@ from app.entries.multi_item_filters import row_passes_filters
 from app.entries.reference_filter_resolve import build_reference_resolution_map
 from app.entries.multi_line_load import load_multi_line_row_dicts
 from app.dashboards.service import can_view_dashboard_for_kpi_chart
-from app.entries.service import can_view_kpi_for_user
+from app.entries.service import _normalize_reference_value, can_view_kpi_for_user
 from app.fields.service import get_field_with_subfields_only, list_kpi_field_definitions
+from app.formula_engine.evaluator import match_cell_value
 from app.widget_data.multiline_chart_sql import (
     compile_multiline_row_filters_sql,
     fetch_multiline_bar_agg_buckets,
 )
+
+
+async def resolve_dashboard_chart_widget_data_batch(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    items: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Batch resolver for dashboard bar/pie charts.
+
+    Returns dict keyed by widget.id (string) or idx fallback:
+      {"<key>": {"ok": bool, "widget_type": str, "meta": {}, "data": {}, "entry_revision": str|None, "error": str?}}
+    """
+    # ---- Pre-parse + group ----
+    parsed: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
+    info_by_key: dict[str, dict[str, Any]] = {}
+    for idx, it in enumerate(items or []):
+        if not isinstance(it, dict):
+            continue
+        w = it.get("widget")
+        if not isinstance(w, dict):
+            continue
+        wid = w.get("id")
+        key = str(wid) if wid is not None else f"idx:{idx}"
+        overrides = it.get("overrides") if isinstance(it.get("overrides"), dict) else None
+        merged = _merge_overrides(w, overrides)
+        parsed.append((key, merged, overrides))
+        info_by_key[key] = {
+            "kpi_id": int(merged.get("kpi_id") or 0),
+            "year": int(merged.get("year") or 0),
+            "period_key": _period_key_norm(merged.get("period_key")),
+        }
+
+    results: dict[str, dict[str, Any]] = {}
+    if not parsed:
+        return results
+
+    # Distinct KPI ids, validate access once each.
+    kpi_ids: set[int] = set()
+    for _key, w, _ov in parsed:
+        if str(w.get("type") or "") != "kpi_bar_chart":
+            continue
+        kpi_ids.add(int(w.get("kpi_id") or 0))
+
+    for kpi_id in sorted({k for k in kpi_ids if k > 0}):
+        if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+            # Mark all widgets of this KPI as forbidden.
+            for key, w, _ov in parsed:
+                if int(w.get("kpi_id") or 0) == kpi_id:
+                    results[key] = {"ok": False, "error": "forbidden"}
+
+    # ---- Caches ----
+    fields_cache: dict[int, list[KPIField]] = {}
+    fmap_cache: dict[int, dict[str, Any]] = {}
+    entry_cache: dict[tuple[int, int, str | None], tuple[int | None, Any]] = {}
+    mline_field_cache: dict[tuple[int, str], KPIField | None] = {}
+    sub_map_cache: dict[int, tuple[dict[str, int], dict[str, str]]] = {}
+
+    async def _fields_for(kpi_id: int) -> list[KPIField]:
+        if kpi_id not in fields_cache:
+            fs = await list_kpi_field_definitions(db, kpi_id, org_id)
+            fields_cache[kpi_id] = fs
+            fmap_cache[kpi_id] = build_kpi_field_maps(fs)
+        return fields_cache[kpi_id]
+
+    async def _entry_for(kpi_id: int, year: int, period_key: Any) -> tuple[int | None, Any]:
+        pk = _period_key_norm(period_key)
+        k = (int(kpi_id), int(year), pk)
+        if k not in entry_cache:
+            entry_cache[k] = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+        return entry_cache[k]
+
+    async def _mline_field_for(kpi_id: int, source_field_key: str) -> KPIField | None:
+        k = (int(kpi_id), str(source_field_key))
+        if k in mline_field_cache:
+            return mline_field_cache[k]
+        fs = await _fields_for(kpi_id)
+        f = next((x for x in fs if x.key == source_field_key and x.field_type == FieldType.multi_line_items), None)
+        if f is None:
+            mline_field_cache[k] = None
+            return None
+        f_full = await get_field_with_subfields_only(db, int(f.id), org_id) or f
+        mline_field_cache[k] = f_full
+        if int(f_full.id) not in sub_map_cache:
+            sub_id_by_key: dict[str, int] = {}
+            ref_types: dict[str, str] = {}
+            for sf in getattr(f_full, "sub_fields", None) or []:
+                sk = getattr(sf, "key", None)
+                if not sk:
+                    continue
+                sks = str(sk)
+                sub_id_by_key[sks] = int(sf.id)
+                ft = getattr(getattr(sf, "field_type", None), "value", sf.field_type)
+                ref_types[sks] = str(ft or "")
+            sub_map_cache[int(f_full.id)] = (sub_id_by_key, ref_types)
+        return f_full
+
+    # ---- Aggregate signature grouping ----
+    sig_to_widgets: dict[tuple[Any, ...], list[str]] = {}
+    sig_to_args: dict[tuple[Any, ...], dict[str, Any]] = {}
+    sig_to_rev: dict[tuple[Any, ...], str | None] = {}
+
+    for key, w, _ov in parsed:
+        if key in results:  # forbidden already
+            continue
+        if str(w.get("type") or "") != "kpi_bar_chart":
+            results[key] = {"ok": False, "error": "unsupported_widget_type"}
+            continue
+        kpi_id = int(w.get("kpi_id") or 0)
+        year = int(w.get("year") or 0)
+        period_key = w.get("period_key")
+        if not kpi_id or not year:
+            results[key] = {"ok": False, "error": "missing kpi_id or year"}
+            continue
+        mode = w.get("mode") or "fields"
+        if mode != "multi_line_items":
+            # Keep existing per-widget path for non-mline charts (rare on bar/pie).
+            meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, w)
+            results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": meta, "data": data, "entry_revision": e_rev}
+            continue
+
+        source_key = str(w.get("source_field_key") or "").strip()
+        f_full = await _mline_field_for(kpi_id, source_key)
+        if not f_full:
+            results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": {"kpi_id": kpi_id, "year": year, "entry_id": None, "row_count": 0}, "data": {"mode": "multi_line_items", "raw_rows": []}, "entry_revision": None}
+            continue
+
+        eid, e_ts = await _entry_for(kpi_id, year, period_key)
+        e_rev = revision_for_parts(eid, e_ts)
+        if not eid:
+            results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": {"kpi_id": kpi_id, "year": year, "entry_id": None, "row_count": 0, "source_field_id": int(f_full.id)}, "data": {"mode": "multi_line_items", "multi_line_agg_buckets": [], "raw_rows": []}, "entry_revision": None}
+            continue
+
+        agg_w = str(w.get("agg") or "count_rows").strip().lower()
+        group_key = str(w.get("group_by_sub_field_key") or "").strip()
+        filt_key = str(w.get("filter_sub_field_key") or "").strip()
+        val_key = str(w.get("value_sub_field_key") or "").strip()
+
+        sub_id_by_key, ref_types = sub_map_cache[int(f_full.id)]
+        gid = sub_id_by_key.get(group_key)
+        fid = sub_id_by_key.get(filt_key) if filt_key else None
+        vid = sub_id_by_key.get(val_key) if val_key else None
+
+        if gid is None:
+            results[key] = {"ok": False, "error": "missing group_by_sub_field_key"}
+            continue
+
+        raw_filters = w.get("filters")
+        resolved_label_sets: dict[int, set[str]] | None = None
+        if isinstance(raw_filters, dict) and raw_filters.get("_version") == 2:
+            conds = raw_filters.get("conditions")
+            if isinstance(conds, list) and any(isinstance(c, dict) and isinstance(c.get("reference_resolution"), dict) for c in conds):
+                resolved_label_sets = {}
+                for ci, c in enumerate(conds):
+                    if not isinstance(c, dict) or not isinstance(c.get("reference_resolution"), dict):
+                        continue
+                    fk = c.get("field")
+                    if fk is None:
+                        continue
+                    sid = sub_id_by_key.get(str(fk))
+                    if sid is None:
+                        continue
+                    labs = await _distinct_multiline_subfield_labels(
+                        db,
+                        entry_id=int(eid),
+                        multiline_field_id=int(f_full.id),
+                        sub_field_id=int(sid),
+                    )
+                    row_dicts = [{str(fk): lab} for lab in labs]
+                    res_map = await build_reference_resolution_map(db, org_id, int(year), f_full, conds, row_dicts)
+                    op = str(c.get("op") or "eq").strip().lower().replace("op_", "", 1)
+                    vals_raw = c.get("values")
+                    allowed: set[str] = set()
+                    for lab in labs:
+                        resolved = res_map.get((ci, _normalize_reference_value(lab)))
+                        if isinstance(vals_raw, list) and len(vals_raw) > 1:
+                            if op == "eq":
+                                ok = any(match_cell_value(resolved, "eq", v) for v in vals_raw)
+                            elif op == "neq":
+                                ok = all(match_cell_value(resolved, "neq", v) for v in vals_raw)
+                            else:
+                                ok = match_cell_value(resolved, op, vals_raw[0])
+                        else:
+                            ok = match_cell_value(resolved, op, c.get("value"))
+                        if ok:
+                            allowed.add(lab)
+                    if allowed:
+                        resolved_label_sets[ci] = allowed
+
+        compiled = compile_multiline_row_filters_sql(
+            raw_filters,
+            sub_id_by_key=sub_id_by_key,
+            reference_field_types=ref_types,
+            resolved_label_sets=resolved_label_sets,
+        )
+        if compiled is None:
+            # Fallback: do not aggregate in SQL for this widget.
+            meta, data, e_rev2 = await _kpi_bar_chart_payload(db, org_id, w)
+            results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": meta, "data": data, "entry_revision": e_rev2}
+            continue
+        filter_where_sql, filter_params = compiled
+        if not (filter_where_sql or "").strip():
+            filter_where_sql, filter_params = (None, None)
+
+        sig = (
+            int(eid),
+            int(f_full.id),
+            int(gid),
+            int(fid) if fid is not None else None,
+            int(vid) if vid is not None else None,
+            agg_w,
+            filter_where_sql or "",
+            repr(sorted((filter_params or {}).items())),
+        )
+        sig_to_widgets.setdefault(sig, []).append(key)
+        sig_to_args[sig] = {
+            "entry_id": int(eid),
+            "multiline_field_id": int(f_full.id),
+            "group_sub_field_id": int(gid),
+            "filter_sub_field_id": int(fid) if fid is not None else None,
+            "value_sub_field_id": int(vid) if vid is not None else None,
+            "agg": agg_w,
+            "filter_where_sql": filter_where_sql,
+            "filter_params": filter_params,
+        }
+        sig_to_rev[sig] = e_rev
+
+    # Execute unique aggregates (concurrently).
+    sem = asyncio.Semaphore(6)
+
+    async def _run_sig(sig: tuple[Any, ...]) -> tuple[tuple[Any, ...], list[dict[str, Any]] | None, str | None]:
+        args = sig_to_args[sig]
+        async with sem:
+            try:
+                buckets = await fetch_multiline_bar_agg_buckets(db, **args)
+                return (sig, buckets, None)
+            except Exception as e:
+                return (sig, None, str(e))
+
+    sigs = list(sig_to_widgets.keys())
+    runs = await asyncio.gather(*[_run_sig(s) for s in sigs], return_exceptions=False)
+    for sig, buckets, err in runs:
+        keys = sig_to_widgets.get(sig) or []
+        args = sig_to_args.get(sig) or {}
+        if err or buckets is None:
+            for key in keys:
+                results[key] = {"ok": False, "error": err or "aggregate failed"}
+            continue
+        row_count = sum(int(b["n"]) for b in buckets)
+        for key in keys:
+            info = info_by_key.get(key) or {}
+            kpi_id = int(info.get("kpi_id") or 0)
+            year = int(info.get("year") or 0)
+            pk = info.get("period_key")
+            fmap = fmap_cache.get(kpi_id) or {}
+            results[key] = {
+                "ok": True,
+                "widget_type": "kpi_bar_chart",
+                "meta": {
+                    "kpi_id": kpi_id,
+                    "year": year,
+                    "period_key": pk,
+                    "entry_id": args.get("entry_id"),
+                    "row_count": row_count,
+                    "source_field_id": args.get("multiline_field_id"),
+                },
+                "data": {
+                    "mode": "multi_line_items",
+                    "multi_line_agg_buckets": buckets,
+                    "raw_rows": [],
+                    "field_map": fmap,
+                },
+                "entry_revision": sig_to_rev.get(sig),
+            }
+
+    return results
+
+
+async def _distinct_multiline_subfield_labels(
+    db: AsyncSession,
+    *,
+    entry_id: int,
+    multiline_field_id: int,
+    sub_field_id: int,
+) -> list[str]:
+    """
+    Get distinct display labels for one multi-line subfield in an entry.
+    Used to pre-resolve reference_resolution filters without loading all rows.
+    """
+    # Keep it simple: prefer value_text, else stringify other typed columns.
+    stmt = text(
+        """
+        SELECT DISTINCT
+          COALESCE(
+            NULLIF(TRIM(BOTH FROM c.value_text), ''),
+            CASE WHEN c.value_number IS NOT NULL THEN TRIM(TO_CHAR(c.value_number, 'FM999999990.999999999999')) ELSE NULL END,
+            CASE WHEN c.value_boolean IS NOT NULL THEN c.value_boolean::text ELSE NULL END,
+            CASE WHEN c.value_date IS NOT NULL THEN TO_CHAR(c.value_date, 'YYYY-MM-DD') ELSE NULL END,
+            CASE WHEN c.value_json IS NOT NULL THEN c.value_json::text ELSE NULL END
+          ) AS lab
+        FROM kpi_multi_line_rows r
+        JOIN kpi_multi_line_cells c ON c.row_id = r.id AND c.sub_field_id = :sid
+        WHERE r.entry_id = :eid AND r.field_id = :fid
+        """
+    )
+    res = await db.execute(stmt, {"eid": int(entry_id), "fid": int(multiline_field_id), "sid": int(sub_field_id)})
+    out: list[str] = []
+    for row in res.all():
+        v = row[0]
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            out.append(s)
+    return out
 
 # ---------------------------------------------------------------------------
 # Limits (table widgets: protect memory / payload size)
@@ -556,10 +875,62 @@ async def _kpi_bar_chart_payload(
             if agg_w in ("sum", "avg") and val_key and vid is None:
                 use_sql_agg = False
             if use_sql_agg:
+                resolved_label_sets: dict[int, set[str]] | None = None
+                # reference_resolution: resolve distinct labels once and convert to label IN (...) so we can keep SQL agg.
+                if isinstance(raw_filters, dict) and raw_filters.get("_version") == 2:
+                    conds = raw_filters.get("conditions")
+                    if isinstance(conds, list) and any(
+                        isinstance(c, dict) and isinstance(c.get("reference_resolution"), dict) for c in conds
+                    ):
+                        resolved_label_sets = {}
+                        # Need subfield metadata for build_reference_resolution_map.
+                        # Distinct labels are extracted via SQL, not from full row dicts.
+                        for ci, c in enumerate(conds):
+                            if not isinstance(c, dict) or not isinstance(c.get("reference_resolution"), dict):
+                                continue
+                            fk = c.get("field")
+                            if fk is None:
+                                continue
+                            fk_s = str(fk)
+                            sid = sub_id_by_key.get(fk_s)
+                            if sid is None:
+                                continue
+                            labs = await _distinct_multiline_subfield_labels(
+                                db,
+                                entry_id=int(eid),
+                                multiline_field_id=int(f_obj.id),
+                                sub_field_id=int(sid),
+                            )
+                            # Build a minimal row_dict list so reference_filter_resolve can discover labels.
+                            row_dicts = [{fk_s: lab} for lab in labs]
+                            res_map = await build_reference_resolution_map(
+                                db, org_id, int(year) if year else None, f_full, conds, row_dicts
+                            )
+                            # Apply this condition to resolved values to compute allowed labels.
+                            op = str(c.get("op") or "eq").strip().lower().replace("op_", "", 1)
+                            vals_raw = c.get("values")
+                            allowed: set[str] = set()
+                            for lab in labs:
+                                resolved = res_map.get((ci, _normalize_reference_value(lab)))
+                                if isinstance(vals_raw, list) and len(vals_raw) > 1:
+                                    if op == "eq":
+                                        ok = any(match_cell_value(resolved, "eq", v) for v in vals_raw)
+                                    elif op == "neq":
+                                        ok = all(match_cell_value(resolved, "neq", v) for v in vals_raw)
+                                    else:
+                                        ok = match_cell_value(resolved, op, vals_raw[0])
+                                else:
+                                    ok = match_cell_value(resolved, op, c.get("value"))
+                                if ok:
+                                    allowed.add(lab)
+                            if allowed:
+                                resolved_label_sets[ci] = allowed
+
                 compiled = compile_multiline_row_filters_sql(
                     raw_filters,
                     sub_id_by_key=sub_id_by_key,
                     reference_field_types=reference_field_types,
+                    resolved_label_sets=resolved_label_sets,
                 )
                 if compiled is None:
                     use_sql_agg = False
@@ -1230,6 +1601,97 @@ async def resolve_dashboard_card_widget_data(
     return meta, data, "kpi_card_single_value", e_rev
 
 
+async def resolve_dashboard_card_widget_data_batch(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    items: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Batch resolver for dashboard KPI cards.
+
+    Supports:
+    - source_mode=static (no DB)
+    - source_mode=field (scalar/formula stored in kpi_field_values)
+    """
+    out: dict[str, dict[str, Any]] = {}
+    parsed: list[tuple[str, dict[str, Any]]] = []
+    for idx, it in enumerate(items or []):
+        if not isinstance(it, dict):
+            continue
+        w = it.get("widget")
+        if not isinstance(w, dict):
+            continue
+        overrides = it.get("overrides") if isinstance(it.get("overrides"), dict) else None
+        merged = _merge_overrides(w, overrides)
+        wid = merged.get("id")
+        key = str(wid) if wid is not None else f"idx:{idx}"
+        parsed.append((key, merged))
+
+    # dashboard auth once per KPI
+    kpi_ids = sorted({int(w.get("kpi_id") or 0) for _k, w in parsed if int(w.get("kpi_id") or 0) > 0})
+    allowed_kpi: dict[int, bool] = {}
+    for kpi_id in kpi_ids:
+        allowed_kpi[kpi_id] = await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id)
+
+    # group field cards by period
+    groups: dict[tuple[int, int, str | None], list[tuple[str, dict[str, Any]]]] = {}
+    for key, w in parsed:
+        if str(w.get("type") or "") != "kpi_card_single_value":
+            out[key] = {"ok": False, "error": "unsupported_widget_type"}
+            continue
+        kpi_id = int(w.get("kpi_id") or 0)
+        if not kpi_id or not allowed_kpi.get(kpi_id, False):
+            out[key] = {"ok": False, "error": "forbidden" if kpi_id else "missing kpi_id"}
+            continue
+        year = int(w.get("year") or 0)
+        if not year:
+            out[key] = {"ok": False, "error": "missing year"}
+            continue
+        sm = w.get("source_mode") or "field"
+        if sm == "static":
+            out[key] = {
+                "ok": True,
+                "widget_type": "kpi_card_single_value",
+                "meta": {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(w.get("period_key")), "entry_id": None, "row_count": 0},
+                "data": {"source_mode": "static", "static_value": w.get("static_value")},
+                "entry_revision": None,
+            }
+            continue
+        if sm != "field":
+            out[key] = {"ok": False, "error": f"unsupported source_mode: {sm}"}
+            continue
+        pk = _period_key_norm(w.get("period_key"))
+        groups.setdefault((kpi_id, year, pk), []).append((key, w))
+
+    for (kpi_id, year, pk), items2 in groups.items():
+        eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=pk)
+        e_rev = revision_for_parts(eid, e_ts)
+        # resolve field ids
+        key_to_fid: dict[str, int] = {}
+        for key, w in items2:
+            fk = str(w.get("field_key") or "").strip()
+            fid = await _field_id_for_kpi_key(db, org_id=org_id, kpi_id=kpi_id, field_key=fk)
+            if fid:
+                key_to_fid[key] = int(fid)
+        fids = sorted(set(key_to_fid.values()))
+        fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=fids) if (eid and fids) else {}
+        for key, w in items2:
+            fid = key_to_fid.get(key)
+            raw = raw_field_from_fv_map(fvm, int(fid)) if (eid and fid) else None
+            n = to_numeric(raw)
+            out[key] = {
+                "ok": True,
+                "widget_type": "kpi_card_single_value",
+                "meta": {"kpi_id": kpi_id, "year": year, "period_key": pk, "entry_id": eid, "row_count": 0},
+                "data": {"source_mode": "field", "numeric": n, "raw": raw},
+                "entry_revision": e_rev,
+            }
+
+    return out
+
+
 async def resolve_dashboard_table_widget_data(
     db: AsyncSession,
     user: User,
@@ -1777,6 +2239,7 @@ async def resolve_dashboard_trend_widget_data(
             merged.get("filters"),
             sub_id_by_key=sub_id_by_key,
             reference_field_types=reference_field_types,
+            resolved_label_sets=None,
         )
         filter_where_sql, filter_params = (None, None)
         if compiled is not None:

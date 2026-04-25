@@ -108,6 +108,24 @@ export async function postDashboardCardWidgetData(
   });
 }
 
+export async function postDashboardCardWidgetDataBatch(
+  token: string,
+  body: {
+    version: 1;
+    organization_id: number;
+    dashboard_id: number;
+    items: Array<{ widget: Record<string, unknown>; overrides?: Record<string, unknown> }>;
+  },
+  init?: RequestInit
+): Promise<{ version: number; results: Record<string, any> }> {
+  return api<{ version: number; results: Record<string, any> }>("/widget-data/card/batch", {
+    method: "POST",
+    body: JSON.stringify(body),
+    token,
+    ...init,
+  });
+}
+
 export async function postDashboardTableWidgetData(
   token: string,
   body: ChartWidgetDataRequestV1,

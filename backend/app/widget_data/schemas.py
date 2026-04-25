@@ -62,3 +62,12 @@ class DashboardChartBatchRequestV1(BaseModel):
     organization_id: int
     dashboard_id: int = Field(..., ge=1)
     items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class DashboardCardBatchRequestV1(BaseModel):
+    """Batch fast path for multiple `kpi_card_single_value` widgets on one dashboard."""
+
+    version: int = Field(1, ge=1, le=1)
+    organization_id: int
+    dashboard_id: int = Field(..., ge=1)
+    items: list[dict[str, Any]] = Field(default_factory=list)
