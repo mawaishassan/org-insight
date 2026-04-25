@@ -6,6 +6,7 @@ import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
+import { fetchMultiLineRowsForEntry } from "@/lib/fetchMultiItemsRows";
 import {
   coerceScalarValueTextFromApi,
   getAttachmentDisplayName,
@@ -111,7 +112,15 @@ interface FullRowAccessUser {
   mode: "view" | "edit" | "edit_delete";
 }
 
-function qs(params: Record<string, string | number | undefined>) {
+type SecuritySection =
+  | "kpi_rights"
+  | "scalar_field_rights"
+  | "multi_field_rights"
+  | "row_level_enable"
+  | "add_row_rights"
+  | "grant_revoke_all";
+
+function qs(params: Record<string, string | number | boolean | undefined>) {
   const entries = Object.entries(params)
     .filter(([, v]) => v !== undefined && v !== "")
     .map(([k, v]) => [k, String(v)] as [string, string]);
@@ -140,7 +149,12 @@ function expectedPeriods(dimension: string): string[] {
   return [""];
 }
 
-function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
+function formatValue(
+  f: FieldDef,
+  v: FieldValueResp | undefined,
+  /** Relational multi-line rows loaded separately (field id → rows); when a key exists, row count comes from here. */
+  multiLineRowsByFieldId?: Record<number, Record<string, unknown>[]>
+): string {
   if (!v) return "—";
   if (f.field_type === "multi_reference" && Array.isArray(v.value_json)) {
     return (v.value_json as string[]).join(", ") || "—";
@@ -156,7 +170,14 @@ function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
   if (v.value_number != null) return String(v.value_number);
   if (v.value_boolean != null) return v.value_boolean ? "Yes" : "No";
   if (v.value_date) return String(v.value_date).slice(0, 10);
-  if (f.field_type === "multi_line_items" && Array.isArray(v.value_json)) return `${v.value_json.length} row(s)`;
+  if (f.field_type === "multi_line_items") {
+    if (multiLineRowsByFieldId && Object.prototype.hasOwnProperty.call(multiLineRowsByFieldId, f.id)) {
+      const rows = multiLineRowsByFieldId[f.id];
+      return `${Array.isArray(rows) ? rows.length : 0} row(s)`;
+    }
+    if (Array.isArray(v.value_json)) return `${v.value_json.length} row(s)`;
+    return "—";
+  }
   if (v.value_json != null) return String(v.value_json).slice(0, 50);
   return "—";
 }
@@ -189,7 +210,8 @@ export default function DomainKpiDetailPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"scalar" | "security" | number>("scalar");
+  const [activeTab, setActiveTab] = useState<"scalar" | "security" | "related" | number>("scalar");
+  const [securitySection, setSecuritySection] = useState<SecuritySection>("kpi_rights");
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   /** When editing: list of { user_id, permission } for PUT assignments (legacy user assignments) */
   const [editAssignments, setEditAssignments] = useState<{ user_id: number; permission: string }[]>([]);
@@ -247,6 +269,7 @@ export default function DomainKpiDetailPage() {
       sub_fields: Array<{ key: string; name: string }>;
     }>
   >([]);
+  const [reverseRefLoading, setReverseRefLoading] = useState(false);
   const [reverseRefActiveKpiId, setReverseRefActiveKpiId] = useState<number | null>(null);
   const [reverseRefSelectedTokenByKpi, setReverseRefSelectedTokenByKpi] = useState<Record<number, string>>({});
   const [reverseRefTimeFilter, setReverseRefTimeFilter] = useState<{ year: number; period_key: string; effective_time_dimension: string } | null>(null);
@@ -258,8 +281,10 @@ export default function DomainKpiDetailPage() {
   const [fieldRightsSaving, setFieldRightsSaving] = useState(false);
   /** For super admin without org in URL: org resolved from KPI by id so data loads and save works. */
   const [kpiOrgId, setKpiOrgId] = useState<number | null>(null);
-  /** Column (subfield) access panel: which multi-line field is expanded (org admin only). */
-  const [columnAccessFieldId, setColumnAccessFieldId] = useState<number | null>(null);
+  /** Column (subfield) access panels expanded in Security tab (multi-line fields). */
+  const [columnAccessExpandedByFieldId, setColumnAccessExpandedByFieldId] = useState<Record<number, boolean>>({});
+  /** When true, we have auto-expanded multi-field rights at least once (so we don't override user collapses). */
+  const [multiFieldRightsAutoExpanded, setMultiFieldRightsAutoExpanded] = useState(false);
   /** When set, we're updating row_level_user_access_enabled for this multi-line field (PATCH). */
   const [rowLevelAccessUpdatingFieldId, setRowLevelAccessUpdatingFieldId] = useState<number | null>(null);
   /** Security tab: full-row access management (per field + entry). */
@@ -305,6 +330,8 @@ export default function DomainKpiDetailPage() {
     value_json?: Record<string, unknown>[] | (string | number)[];
   };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
+  /** Relational multi_line_items rows keyed by field id (loaded from `/entries/multi-items/rows`). */
+  const [multiLineRowsByFieldId, setMultiLineRowsByFieldId] = useState<Record<number, Record<string, unknown>[]>>({});
 
   const token = getAccessToken();
   const effectiveOrgId = organizationIdFromUrl ?? meOrgId ?? kpiOrgId ?? entry?.organization_id ?? undefined;
@@ -316,6 +343,39 @@ export default function DomainKpiDetailPage() {
     (entry?.values ?? []).forEach((v) => map.set(v.field_id, v));
     return map;
   }, [entry?.values]);
+
+  // Load relational multi_line_items rows (value_json on entry is cleared after save for these fields).
+  useEffect(() => {
+    if (!token || !entry?.id || effectiveOrgId == null || fields.length === 0) {
+      setMultiLineRowsByFieldId({});
+      return;
+    }
+    const mlFields = fields.filter((f) => f.field_type === "multi_line_items");
+    if (mlFields.length === 0) {
+      setMultiLineRowsByFieldId({});
+      return;
+    }
+    const loadId = entryDetailLoadGenRef.current;
+    void Promise.all(
+      mlFields.map((f) =>
+        fetchMultiLineRowsForEntry({
+          token,
+          organizationId: effectiveOrgId,
+          entryId: entry.id,
+          fieldId: f.id,
+        })
+          .then((rows) => [f.id, rows] as const)
+          .catch(() => [f.id, [] as Record<string, unknown>[]] as const)
+      )
+    ).then((pairs) => {
+      if (loadId !== entryDetailLoadGenRef.current) return;
+      const next: Record<number, Record<string, unknown>[]> = {};
+      pairs.forEach(([id, rows]) => {
+        next[id] = rows;
+      });
+      setMultiLineRowsByFieldId(next);
+    });
+  }, [token, entry?.id, effectiveOrgId, fields, year, periodKeyFromUrl, isEntriesRoute]);
 
   const fetchFullRowAccessUsers = useCallback(
     async (fieldId: number, entryId: number) => {
@@ -714,16 +774,35 @@ export default function DomainKpiDetailPage() {
     });
   }, [fieldRightsModalUserId, fields, fieldRightsLoading, editAssignments]);
 
-  // Load org roles when org admin on entry page (for role-based column access)
+  // Load org roles + field-access-by-role only when Security tab is opened (single API call).
   useEffect(() => {
-    if (!token || effectiveOrgId == null || !canManageColumnAccess) return;
-    api<Array<{ id: number; name: string; description: string | null }>>(
-      `/organizations/${effectiveOrgId}/roles`,
-      { token }
-    )
-      .then((list) => setOrgRoles(Array.isArray(list) ? list : []))
-      .catch(() => setOrgRoles([]));
-  }, [token, effectiveOrgId, canManageColumnAccess]);
+    if (activeTab !== "security") return;
+    if (!token || !kpiId || effectiveOrgId == null) return;
+    if (!canManageColumnAccess) return;
+    if (!fields || fields.length === 0) return;
+    setColumnAccessByRoleLoading(true);
+    api<{
+      roles: Array<{ id: number; name: string; description: string | null }>;
+      access_by_role: Record<string, Array<{ field_id: number; sub_field_id: number | null; access_type: string }>>;
+    }>(`/kpis/${kpiId}/field-access-by-role/snapshot?${qs({ organization_id: effectiveOrgId })}`, { token })
+      .then((res) => {
+        const roles = Array.isArray(res?.roles) ? res.roles : [];
+        setOrgRoles(roles);
+        const byRole: Record<number, Array<{ field_id: number; sub_field_id: number | null; access_type: string }>> = {};
+        const src = (res?.access_by_role ?? {}) as Record<string, Array<{ field_id: number; sub_field_id: number | null; access_type: string }>>;
+        Object.entries(src).forEach(([rid, list]) => {
+          const id = Number(rid);
+          if (!Number.isFinite(id) || id <= 0) return;
+          byRole[id] = Array.isArray(list) ? list : [];
+        });
+        setColumnAccessByRole(byRole);
+      })
+      .catch(() => {
+        setOrgRoles([]);
+        setColumnAccessByRole({});
+      })
+      .finally(() => setColumnAccessByRoleLoading(false));
+  }, [activeTab, token, kpiId, effectiveOrgId, canManageColumnAccess, fields]);
 
   // Prevent non-org-admins from landing on Security tab
   useEffect(() => {
@@ -732,9 +811,48 @@ export default function DomainKpiDetailPage() {
     }
   }, [activeTab, canSeeSecurityTab]);
 
-  // When Security tab opens (and fields are loaded), pre-load Add Row users for multi-line fields
+  // When Security tab opens, default to KPI rights panel.
+  useEffect(() => {
+    if (activeTab === "security") setSecuritySection("kpi_rights");
+  }, [activeTab]);
+
+  // Multi field level rights: default-expand all multi-line fields once.
   useEffect(() => {
     if (activeTab !== "security") return;
+    if (securitySection !== "multi_field_rights") return;
+    if (multiFieldRightsAutoExpanded) {
+      // If new multi-line fields appear later, auto-expand only those not yet seen.
+      if (!multiLineFields || multiLineFields.length === 0) return;
+      setColumnAccessExpandedByFieldId((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        multiLineFields.forEach((f) => {
+          if (!f?.id) return;
+          if (next[f.id] == null) {
+            next[f.id] = true;
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+      return;
+    }
+    if (!multiLineFields || multiLineFields.length === 0) return;
+    setColumnAccessExpandedByFieldId((prev) => {
+      const next: Record<number, boolean> = { ...prev };
+      multiLineFields.forEach((f) => {
+        if (!f?.id) return;
+        next[f.id] = true;
+      });
+      return next;
+    });
+    setMultiFieldRightsAutoExpanded(true);
+  }, [activeTab, securitySection, multiLineFields, multiFieldRightsAutoExpanded]);
+
+  // When requested, pre-load Add Row users for multi-line fields
+  useEffect(() => {
+    if (activeTab !== "security") return;
+    if (securitySection !== "add_row_rights") return;
     if (!token || !kpiId || effectiveOrgId == null) return;
     if (!canManageColumnAccess) return;
     if (!fields || fields.length === 0) return;
@@ -745,42 +863,13 @@ export default function DomainKpiDetailPage() {
         fetchAddRowUsers(fid);
       }
     });
-  }, [activeTab, token, kpiId, effectiveOrgId, canManageColumnAccess, fields, addRowUsersByField, fetchAddRowUsers]);
+  }, [activeTab, securitySection, token, kpiId, effectiveOrgId, canManageColumnAccess, fields, addRowUsersByField, fetchAddRowUsers]);
 
-  // Load field access by role when scalar or security tab active, or when a multi-line column panel is expanded (org admin)
-  useEffect(() => {
-    const shouldLoad =
-      canManageColumnAccess &&
-      (columnAccessFieldId != null || activeTab === "scalar" || activeTab === "security");
-    if (!token || !kpiId || effectiveOrgId == null || !shouldLoad) {
-      if (!shouldLoad) setColumnAccessByRole({});
-      return;
-    }
-    if (orgRoles.length === 0) {
-      setColumnAccessByRole({});
-      return;
-    }
-    setColumnAccessByRoleLoading(true);
-    const orgId = effectiveOrgId;
-    Promise.all(
-      orgRoles.map((role) =>
-        api<Array<{ field_id: number; sub_field_id: number | null; access_type: string }>>(
-          `/kpis/${kpiId}/field-access-by-role?${qs({ role_id: role.id, organization_id: orgId })}`,
-          { token }
-        ).then((list) => ({ roleId: role.id, list: list ?? [] }))
-      )
-    )
-      .then((results) => {
-        const byRole: Record<number, Array<{ field_id: number; sub_field_id: number | null; access_type: string }>> = {};
-        results.forEach(({ roleId, list }) => { byRole[roleId] = list; });
-        setColumnAccessByRole(byRole);
-      })
-      .catch(() => setColumnAccessByRole({}))
-      .finally(() => setColumnAccessByRoleLoading(false));
-  }, [token, kpiId, effectiveOrgId, columnAccessFieldId, activeTab, canManageColumnAccess, orgRoles]);
+  // Field-access-by-role is now loaded via the snapshot call above when Security tab is opened.
 
-  // Load reverse-reference info (child KPIs that reference this KPI via multi_line_items reference sub-fields)
+  // Load reverse-reference info only when Related tab opens.
   useEffect(() => {
+    if (activeTab !== "related") return;
     if (!token || !entry?.id || effectiveOrgId == null) {
       setReverseRefTabs([]);
       setReverseRefActiveKpiId(null);
@@ -788,6 +877,7 @@ export default function DomainKpiDetailPage() {
       setReverseRefTimeFilter(null);
       return;
     }
+    setReverseRefLoading(true);
     api<
       {
         time_filter: { year: number; period_key: string; effective_time_dimension: string };
@@ -812,7 +902,15 @@ export default function DomainKpiDetailPage() {
           sub_fields: Array<{ key: string; name: string }>;
         }>;
       }
-    >(`/entries/reverse-references?${qs({ kpi_id: kpiId, entry_id: entry.id, organization_id: effectiveOrgId })}`, { token })
+    >(
+      `/entries/reverse-references?${qs({
+        kpi_id: kpiId,
+        entry_id: entry.id,
+        include_rows: false,
+        organization_id: effectiveOrgId,
+      })}`,
+      { token }
+    )
       .then((res) => {
         const tabs = res?.tabs ?? [];
         setReverseRefTimeFilter(res?.time_filter ?? null);
@@ -834,8 +932,9 @@ export default function DomainKpiDetailPage() {
         setReverseRefActiveKpiId(null);
         setReverseRefSelectedTokenByKpi({});
         setReverseRefTimeFilter(null);
-      });
-  }, [token, kpiId, entry?.id, effectiveOrgId]);
+      })
+      .finally(() => setReverseRefLoading(false));
+  }, [activeTab, token, kpiId, entry?.id, effectiveOrgId]);
 
   useEffect(() => {
     if (!token || effectiveOrgId == null || fields.length === 0) return;
@@ -871,14 +970,22 @@ export default function DomainKpiDetailPage() {
     });
   }, [token, effectiveOrgId, fields]);
 
-  const buildFormValuesFromEntry = (e: EntryRow | null): Record<number, FormCell> => {
+  const buildFormValuesFromEntry = (
+    e: EntryRow | null,
+    mlRows: Record<number, Record<string, unknown>[]>
+  ): Record<number, FormCell> => {
     const out: Record<number, FormCell> = {};
     const valueMap = new Map((e?.values ?? []).map((v) => [v.field_id, v]));
     fields.forEach((f) => {
       if (f.field_type === "formula") return;
       const v = valueMap.get(f.id);
       if (f.field_type === "multi_line_items") {
-        out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [] };
+        const fromRelational = mlRows[f.id];
+        if (Object.prototype.hasOwnProperty.call(mlRows, f.id) && Array.isArray(fromRelational)) {
+          out[f.id] = { value_json: fromRelational.map((row) => ({ ...row })) };
+        } else {
+          out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [] };
+        }
       } else if (f.field_type === "multi_reference") {
         out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as string[]) : [] };
       } else if (f.field_type === "mixed_list") {
@@ -902,12 +1009,39 @@ export default function DomainKpiDetailPage() {
   };
 
   const startEditing = () => {
-    setFormValues(buildFormValuesFromEntry(entry));
+    setFormValues(buildFormValuesFromEntry(entry, multiLineRowsByFieldId));
     setEditAssignments(assignedUsers.map((u) => ({ user_id: u.id, permission: u.permission || "data_entry" })));
     setIsEditing(true);
     setEditRoleAssignments(assignedRoles.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })));
     setSaveError(null);
   };
+
+  /** If relational multi-line rows finish loading after Edit was opened, hydrate empty draft rows from API. */
+  useEffect(() => {
+    if (!isEditing || !entry?.id) return;
+    const ml = fields.filter((f) => f.field_type === "multi_line_items");
+    if (ml.length === 0) return;
+    setFormValues((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const f of ml) {
+        if (!Object.prototype.hasOwnProperty.call(multiLineRowsByFieldId, f.id)) continue;
+        const loaded = multiLineRowsByFieldId[f.id];
+        if (!Array.isArray(loaded)) continue;
+        const cur = prev[f.id]?.value_json;
+        if (Array.isArray(cur) && cur.length > 0) continue;
+        next[f.id] = { ...prev[f.id], value_json: loaded.map((row) => ({ ...row })) };
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [isEditing, entry?.id, fields, multiLineRowsByFieldId]);
+
+  // Keep role assignment editor state in sync outside global edit mode.
+  useEffect(() => {
+    if (isEditing) return;
+    setEditRoleAssignments(assignedRoles.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })));
+  }, [assignedRoles, isEditing]);
 
   const saveRoleAssignments = async (next: { role_id: number; permission: string }[]) => {
     if (!token || effectiveOrgId == null || !kpiId) return;
@@ -1358,7 +1492,7 @@ export default function DomainKpiDetailPage() {
                 </div>
               )}
             </div>
-            {(meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN") && (assignedRoles.length > 0 || isEditing) && (
+            {!isEntriesRoute && (meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN") && (assignedRoles.length > 0 || isEditing) && (
               <div style={{ fontSize: "0.85rem" }}>
                 <span style={{ color: "var(--muted)", marginRight: "0.5rem" }}>Assigned roles:</span>
                 {isEditing ? (
@@ -1924,6 +2058,16 @@ export default function DomainKpiDetailPage() {
               <span>Security</span>
             </button>
           )}
+          <button
+            type="button"
+            className="btn"
+            style={{
+              ...(activeTab === "related" ? { background: "var(--accent)", color: "var(--on-muted)" } : {}),
+            }}
+            onClick={() => setActiveTab("related")}
+          >
+            Related records
+          </button>
         </div>
 
         {activeTab === "scalar" && (
@@ -2132,7 +2276,7 @@ export default function DomainKpiDetailPage() {
                       return (
                         <div key={f.id} style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
                           <label style={{ minWidth: 160, fontWeight: 500 }}>{f.name} (formula)</label>
-                          <span style={{ color: "var(--muted)" }}>{formatValue(f, valuesByFieldId.get(f.id))}</span>
+                          <span style={{ color: "var(--muted)" }}>{formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}</span>
                         </div>
                       );
                     }
@@ -2359,7 +2503,7 @@ export default function DomainKpiDetailPage() {
                         {f.field_type === "formula" && " (formula)"}
                       </td>
                       <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
-                        {formatValue(f, valuesByFieldId.get(f.id))}
+                        {formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}
                       </td>
                     </tr>
                   ))}
@@ -2387,7 +2531,7 @@ export default function DomainKpiDetailPage() {
                       <tr key={f.id}>
                         <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{f.name}</td>
                         <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
-                          {formatValue(f, valuesByFieldId.get(f.id))}
+                          {formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}
                         </td>
                       </tr>
                     ))}
@@ -2401,8 +2545,196 @@ export default function DomainKpiDetailPage() {
 
         {activeTab === "security" && canSeeSecurityTab && canManageColumnAccess && (
           <div style={{ padding: "0.5rem 0.25rem" }}>
-            {(scalarFieldsEdit.length > 0 || scalarFieldsViewOnly.length > 0) && orgRoles.length > 0 && (
-              <div style={{ marginBottom: "1.5rem" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", gap: "0.85rem", alignItems: "start" }}>
+              <div
+                className="card"
+                style={{
+                  padding: "0.75rem",
+                  position: "sticky",
+                  top: 12,
+                  alignSelf: "start",
+                  border: "1px solid var(--border)",
+                  background: "var(--surface)",
+                }}
+              >
+                <div style={{ fontSize: "0.8rem", fontWeight: 700, marginBottom: "0.5rem" }}>Security</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+                  {(
+                    [
+                      { id: "kpi_rights", label: "KPI level rights" },
+                      { id: "row_level_enable", label: "Enable row level rights" },
+                      { id: "add_row_rights", label: "Add new row rights" },
+                      { id: "grant_revoke_all", label: "Grant / revoke all rows" },
+                      { id: "scalar_field_rights", label: "Scalar field level rights" },
+                      { id: "multi_field_rights", label: "Multi field level rights" },
+                    ] as const
+                  ).map((item) => {
+                    const active = securitySection === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setSecuritySection(item.id)}
+                        className="btn"
+                        disabled={columnAccessByRoleLoading}
+                        style={{
+                          textAlign: "left",
+                          width: "100%",
+                          padding: "0.5rem 0.6rem",
+                          borderRadius: 8,
+                          border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
+                          background: active ? "rgba(59, 130, 246, 0.10)" : "var(--surface)",
+                          color: "var(--text)",
+                          fontWeight: active ? 700 : 500,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ marginTop: "0.6rem", fontSize: "0.8rem", color: "var(--muted)" }}>
+                  Shared data (roles + access) loads once.
+                </div>
+              </div>
+
+              <div className="card" style={{ padding: "0.9rem", border: "1px solid var(--border)" }}>
+                {columnAccessByRoleLoading && (
+                  <div
+                    style={{
+                      marginBottom: "0.75rem",
+                      padding: "0.5rem 0.65rem",
+                      borderRadius: 10,
+                      border: "1px solid var(--border)",
+                      background: "var(--bg-subtle, #f8fafc)",
+                      color: "var(--muted)",
+                      fontSize: "0.9rem",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                    }}
+                    aria-live="polite"
+                  >
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 999,
+                        background: "var(--accent)",
+                        display: "inline-block",
+                        opacity: 0.75,
+                      }}
+                    />
+                    Loading security data…
+                  </div>
+                )}
+                {/* KPI-level role access (assignments-by-role) */}
+                {securitySection === "kpi_rights" &&
+                  isEntriesRoute &&
+                  (meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN") &&
+                  orgRoles.length > 0 && (
+                    <div style={{ marginBottom: "1.25rem" }}>
+                <h3
+                  style={{
+                    fontSize: "1rem",
+                    fontWeight: 600,
+                    margin: "0 0 0.75rem",
+                    color: "var(--text)",
+                    borderBottom: "1px solid var(--border)",
+                    paddingBottom: "0.35rem",
+                  }}
+                >
+                  KPI role access
+                </h3>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+                  {editRoleAssignments.map((a) => {
+                    const role = orgRoles.find((r) => r.id === a.role_id);
+                    const name = role ? role.name : `Role #${a.role_id}`;
+                    return (
+                      <span
+                        key={a.role_id}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "0.25rem",
+                          padding: "0.15rem 0.4rem",
+                          background: "var(--border)",
+                          borderRadius: 4,
+                          fontSize: "0.85rem",
+                        }}
+                      >
+                        <span style={{ fontWeight: 600 }}>{name}</span>
+                        <select
+                          value={a.permission || "data_entry"}
+                          disabled={savingRoleAssignments}
+                          onChange={(e) => {
+                            const perm = e.target.value;
+                            updateRoleAssignments((prev) =>
+                              prev.map((x) => (x.role_id === a.role_id ? { ...x, permission: perm } : x))
+                            );
+                          }}
+                          style={{
+                            padding: "0.15rem 0.25rem",
+                            fontSize: "0.8rem",
+                            border: "1px solid var(--border)",
+                            borderRadius: 6,
+                            background: "var(--surface)",
+                          }}
+                        >
+                          <option value="data_entry">Edit</option>
+                          <option value="view">View</option>
+                        </select>
+                        <button
+                          type="button"
+                          disabled={savingRoleAssignments}
+                          onClick={() => updateRoleAssignments((prev) => prev.filter((x) => x.role_id !== a.role_id))}
+                          className="btn"
+                          style={{ padding: "0.15rem 0.4rem", fontSize: "0.8rem" }}
+                        >
+                          Remove
+                        </button>
+                      </span>
+                    );
+                  })}
+                  {orgRoles.filter((r) => !editRoleAssignments.some((a) => a.role_id === r.id)).length > 0 && (
+                    <select
+                      value=""
+                      disabled={savingRoleAssignments}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v) {
+                          const roleId = Number(v);
+                          updateRoleAssignments((prev) => [...prev, { role_id: roleId, permission: "data_entry" }]);
+                          e.target.value = "";
+                        }
+                      }}
+                      style={{ padding: "0.35rem 0.5rem", fontSize: "0.85rem", border: "1px solid var(--border)", borderRadius: 6 }}
+                    >
+                      <option value="">+ Add role</option>
+                      {orgRoles
+                        .filter((r) => !editRoleAssignments.some((a) => a.role_id === r.id))
+                        .map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.name}
+                          </option>
+                        ))}
+                    </select>
+                  )}
+                  {savingRoleAssignments && (
+                    <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Saving…</span>
+                  )}
+                </div>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.5rem 0 0" }}>
+                  Changes save automatically.
+                </p>
+                    </div>
+                  )}
+
+            {securitySection === "scalar_field_rights" &&
+              (scalarFieldsEdit.length > 0 || scalarFieldsViewOnly.length > 0) &&
+              orgRoles.length > 0 && (
+                <div style={{ marginBottom: "1.5rem" }}>
                 {columnAccessByRoleLoading ? (
                   <p style={{ color: "var(--muted)" }}>Loading…</p>
                 ) : (
@@ -2691,12 +3023,17 @@ export default function DomainKpiDetailPage() {
                     </table>
                   </div>
                 )}
-              </div>
-            )}
+                </div>
+              )}
 
             {/* Multi-line fields security (row-level toggle + collapse to show columns) */}
-            {multiLineFields.length > 0 && orgRoles.length > 0 && (
-              <div>
+            {(securitySection === "row_level_enable" ||
+              securitySection === "add_row_rights" ||
+              securitySection === "grant_revoke_all" ||
+              securitySection === "multi_field_rights") &&
+              multiLineFields.length > 0 &&
+              orgRoles.length > 0 && (
+                <div>
                 {multiLineFields.map((f) => {
                   const subFields = f.sub_fields ?? [];
                   if (subFields.length === 0) return null;
@@ -2722,7 +3059,10 @@ export default function DomainKpiDetailPage() {
                         <button
                           type="button"
                           onClick={() =>
-                            setColumnAccessFieldId((prev) => (prev === f.id ? null : f.id))
+                            setColumnAccessExpandedByFieldId((prev) => ({
+                              ...prev,
+                              [f.id]: !(prev[f.id] ?? false),
+                            }))
                           }
                           style={{
                             padding: "0.25rem 0.45rem",
@@ -2733,9 +3073,9 @@ export default function DomainKpiDetailPage() {
                             cursor: "pointer",
                             minWidth: 28,
                           }}
-                          title={columnAccessFieldId === f.id ? "Collapse" : "Expand"}
+                          title={(columnAccessExpandedByFieldId[f.id] ?? false) ? "Collapse" : "Expand"}
                         >
-                          {columnAccessFieldId === f.id ? "▲" : "▼"}
+                          {(columnAccessExpandedByFieldId[f.id] ?? false) ? "▲" : "▼"}
                         </button>
                         <span style={{ fontWeight: 600 }}>{f.name}</span>
                         <span
@@ -2748,6 +3088,7 @@ export default function DomainKpiDetailPage() {
                         </span>
                       </div>
                       {/* Row-based user-level access for this multi-line field */}
+                      {securitySection === "row_level_enable" && (
                       <div style={{ marginTop: "0.5rem" }}>
                         <label
                           style={{
@@ -2799,8 +3140,10 @@ export default function DomainKpiDetailPage() {
                           follow role/field access.
                         </p>
                       </div>
+                      )}
 
                       {/* Add-row permission panel (separate from edit/delete) */}
+                      {securitySection === "add_row_rights" && (
                       <div
                         style={{
                           marginTop: "0.6rem",
@@ -2925,7 +3268,8 @@ export default function DomainKpiDetailPage() {
                           Note: Org Admin can always add rows.
                         </div>
                       </div>
-                      {(f as FieldDef).row_level_user_access_enabled && (
+                      )}
+                      {securitySection === "grant_revoke_all" && (f as FieldDef).row_level_user_access_enabled && (
                         <div
                           style={{
                             marginTop: "0.6rem",
@@ -3090,7 +3434,7 @@ export default function DomainKpiDetailPage() {
                         </div>
                       )}
 
-                      {columnAccessFieldId === f.id && (
+                      {securitySection === "multi_field_rights" && (columnAccessExpandedByFieldId[f.id] ?? false) && (
                         <div
                           className="card"
                           style={{ padding: "0.6rem", marginTop: "0.5rem", overflowX: "auto" }}
@@ -3432,6 +3776,124 @@ export default function DomainKpiDetailPage() {
                     </div>
                   );
                 })}
+                </div>
+              )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "related" && (
+          <div style={{ padding: "0.5rem 0.25rem" }}>
+            {reverseRefLoading ? (
+              <div className="card" style={{ padding: "0.75rem 1rem", color: "var(--muted)" }}>
+                Loading related records…
+              </div>
+            ) : reverseRefTabs.length === 0 ? (
+              <div className="card" style={{ padding: "0.75rem 1rem", color: "var(--muted)" }}>
+                No related records found.
+              </div>
+            ) : (
+              <div className="card">
+                <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid var(--border)" }}>
+                  <strong>Related records (referencing KPIs)</strong>
+                  {reverseRefTimeFilter && (
+                    <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", color: "var(--text-secondary)" }}>
+                      Filtered by time dimension: <strong>{reverseRefTimeFilter.year}</strong>
+                      {reverseRefTimeFilter.period_key ? ` · ${reverseRefTimeFilter.period_key}` : ""}
+                      <span style={{ color: "var(--muted)", fontWeight: "normal" }}>
+                        {" "}({reverseRefTimeFilter.effective_time_dimension.replace(/_/g, " ")})
+                      </span>
+                    </p>
+                  )}
+                </div>
+                <div style={{ padding: "0.75rem 1rem" }}>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.9rem" }}>
+                      <thead>
+                        <tr>
+                          <th style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>KPI</th>
+                          <th style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Related name</th>
+                          <th style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Count</th>
+                          <th style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)" }} />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reverseRefTabs.map((tab) => {
+                          const selectedToken =
+                            reverseRefSelectedTokenByKpi[tab.child_kpi_id] ?? (tab.values[0]?.token ?? "");
+                          const selectedMeta = tab.values.find((v) => v.token === selectedToken) ?? null;
+                          const total = tab.values.reduce((s, v) => s + (v.count || 0), 0);
+                          const canOpen =
+                            Boolean((tab as any).child_field_id) &&
+                            Boolean((tab as any).child_sub_field_key) &&
+                            Boolean(selectedMeta?.label);
+                          return (
+                            <tr key={tab.child_kpi_id}>
+                              <td style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                {tab.child_kpi_name}
+                              </td>
+                              <td style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                <select
+                                  value={selectedToken}
+                                  onChange={(e) =>
+                                    setReverseRefSelectedTokenByKpi((prev) => ({
+                                      ...prev,
+                                      [tab.child_kpi_id]: e.target.value,
+                                    }))
+                                  }
+                                  style={{
+                                    minWidth: 220,
+                                    padding: "0.35rem 0.5rem",
+                                    borderRadius: 6,
+                                    border: "1px solid var(--border)",
+                                    fontSize: "0.9rem",
+                                  }}
+                                >
+                                  {tab.values.map((v) => (
+                                    <option key={v.token} value={v.token}>
+                                      {v.label} ({v.count})
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
+                                {total}
+                              </td>
+                              <td style={{ padding: "0.45rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  disabled={!canOpen}
+                                  onClick={() => {
+                                    const childFieldId = (tab as any).child_field_id as number | null | undefined;
+                                    const childSubKey = (tab as any).child_sub_field_key as string | null | undefined;
+                                    const label = selectedMeta?.label;
+                                    if (!childFieldId || !childSubKey || !label) return;
+                                    const payload = {
+                                      _version: 2 as const,
+                                      conditions: [{ field: childSubKey, op: "eq", value: label }],
+                                    };
+                                    const q = new URLSearchParams({
+                                      organization_id: String(effectiveOrgId ?? ""),
+                                      ...(reverseRefTimeFilter?.period_key
+                                        ? { period_key: reverseRefTimeFilter.period_key }
+                                        : {}),
+                                      filters: JSON.stringify(payload),
+                                    });
+                                    window.location.href = `/dashboard/entries/${tab.child_kpi_id}/${reverseRefTimeFilter?.year ?? year}/multi/${childFieldId}?${q.toString()}`;
+                                  }}
+                                >
+                                  Detail
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -3441,13 +3903,19 @@ export default function DomainKpiDetailPage() {
           if (activeTab !== f.id) return null;
           const v = valuesByFieldId.get(f.id);
           const multiFieldCanEdit = (f as FieldDef).can_edit !== false;
+          const relationalLoaded = Object.prototype.hasOwnProperty.call(multiLineRowsByFieldId, f.id);
+          const relationalRows = relationalLoaded ? multiLineRowsByFieldId[f.id] : null;
+          const legacyRows = Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [];
+          const viewRows = relationalRows != null ? relationalRows : legacyRows;
           const formRows: Record<string, unknown>[] =
             isEditing && multiFieldCanEdit && Array.isArray(formValues[f.id]?.value_json)
               ? (formValues[f.id]!.value_json as Record<string, unknown>[])
               : [];
           const rows: Record<string, unknown>[] = !multiFieldCanEdit
-            ? (Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [])
-            : (isEditing ? formRows : (Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : []));
+            ? viewRows
+            : isEditing
+              ? formRows
+              : viewRows;
           const subFields = f.sub_fields ?? [];
           const setRows = (next: Record<string, unknown>[]) => updateField(f.id, "value_json", next);
           const fieldQuery = `?field_id=${f.id}&organization_id=${effectiveOrgId}`;
@@ -3911,7 +4379,12 @@ export default function DomainKpiDetailPage() {
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
                         <button
                           type="button"
-                          onClick={() => setColumnAccessFieldId((prev) => (prev === f.id ? null : f.id))}
+                          onClick={() =>
+                            setColumnAccessExpandedByFieldId((prev) => ({
+                              ...prev,
+                              [f.id]: !(prev[f.id] ?? false),
+                            }))
+                          }
                           style={{
                             padding: "0.35rem 0.5rem",
                             border: "1px solid var(--border)",
@@ -3921,9 +4394,9 @@ export default function DomainKpiDetailPage() {
                             cursor: "pointer",
                             minWidth: 32,
                           }}
-                          title={columnAccessFieldId === f.id ? "Collapse" : "Expand"}
+                          title={(columnAccessExpandedByFieldId[f.id] ?? false) ? "Collapse" : "Expand"}
                         >
-                          {columnAccessFieldId === f.id ? "▲" : "▼"}
+                          {(columnAccessExpandedByFieldId[f.id] ?? false) ? "▲" : "▼"}
                         </button>
                         <span style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--text-secondary)" }}>
                           Column (subfield) access
@@ -3935,7 +4408,7 @@ export default function DomainKpiDetailPage() {
                           Full access control →
                         </Link>
                       </div>
-                      {columnAccessFieldId === f.id && (
+                      {(columnAccessExpandedByFieldId[f.id] ?? false) && (
                         <div className="card" style={{ padding: "0.75rem", overflowX: "auto" }}>
                           {columnAccessByRoleLoading ? (
                             <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
@@ -4487,7 +4960,12 @@ export default function DomainKpiDetailPage() {
                     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
                       <button
                         type="button"
-                        onClick={() => setColumnAccessFieldId((prev) => (prev === f.id ? null : f.id))}
+                        onClick={() =>
+                          setColumnAccessExpandedByFieldId((prev) => ({
+                            ...prev,
+                            [f.id]: !(prev[f.id] ?? false),
+                          }))
+                        }
                         style={{
                           padding: "0.35rem 0.5rem",
                           border: "1px solid var(--border)",
@@ -4497,9 +4975,9 @@ export default function DomainKpiDetailPage() {
                           cursor: "pointer",
                           minWidth: 32,
                         }}
-                        title={columnAccessFieldId === f.id ? "Collapse" : "Expand"}
+                        title={(columnAccessExpandedByFieldId[f.id] ?? false) ? "Collapse" : "Expand"}
                       >
-                        {columnAccessFieldId === f.id ? "▲" : "▼"}
+                        {(columnAccessExpandedByFieldId[f.id] ?? false) ? "▲" : "▼"}
                       </button>
                       <span style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--text-secondary)" }}>
                         Column (subfield) access
@@ -4511,7 +4989,7 @@ export default function DomainKpiDetailPage() {
                         Full access control →
                       </Link>
                     </div>
-                    {columnAccessFieldId === f.id && (
+                    {(columnAccessExpandedByFieldId[f.id] ?? false) && (
                       <div className="card" style={{ padding: "0.75rem", overflowX: "auto" }}>
                         {columnAccessByRoleLoading ? (
                           <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
@@ -4783,115 +5261,7 @@ export default function DomainKpiDetailPage() {
           })}
       </div>
 
-      {/* Section 4: Reverse-reference tabs – child KPIs that reference this KPI via multi_line_items */}
-      {reverseRefTabs.length > 0 && (
-        <div className="card" style={{ marginTop: "1.5rem" }}>
-          <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid var(--border)" }}>
-            <strong>Related records (referencing KPIs)</strong>
-            <p style={{ margin: "0.25rem 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
-              These KPIs reference this record via reference sub-fields in multi-line items. Data is read-only here.
-            </p>
-            {reverseRefTimeFilter && (
-              <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", color: "var(--text-secondary)" }}>
-                Filtered by time dimension: <strong>{reverseRefTimeFilter.year}</strong>
-                {reverseRefTimeFilter.period_key ? ` · ${reverseRefTimeFilter.period_key}` : ""}
-                <span style={{ color: "var(--muted)", fontWeight: "normal" }}>
-                  {" "}({reverseRefTimeFilter.effective_time_dimension.replace(/_/g, " ")})
-                </span>
-              </p>
-            )}
-          </div>
-          <div style={{ padding: "0.75rem 1rem" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
-              {reverseRefTabs.map((tab) => (
-                <button
-                  key={tab.child_kpi_id}
-                  type="button"
-                  className="btn"
-                  style={reverseRefActiveKpiId === tab.child_kpi_id ? { background: "var(--accent)", color: "var(--on-muted)" } : {}}
-                  onClick={() => setReverseRefActiveKpiId(tab.child_kpi_id)}
-                >
-                  {tab.child_kpi_name}
-                </button>
-              ))}
-            </div>
-            {reverseRefTabs.map((tab) => {
-              if (reverseRefActiveKpiId !== tab.child_kpi_id) return null;
-              const selectedToken = reverseRefSelectedTokenByKpi[tab.child_kpi_id] ?? (tab.values[0]?.token ?? "");
-              const rowsForToken = tab.rows.filter((r) => r.value_token === selectedToken);
-              const selectedMeta = tab.values.find((v) => v.token === selectedToken);
-              return (
-                <div key={tab.child_kpi_id}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.75rem", flexWrap: "wrap" }}>
-                    <label style={{ fontSize: "0.9rem", fontWeight: 500 }}>Select value</label>
-                    <select
-                      value={selectedToken}
-                      onChange={(e) =>
-                        setReverseRefSelectedTokenByKpi((prev) => ({ ...prev, [tab.child_kpi_id]: e.target.value }))
-                      }
-                      style={{
-                        minWidth: 200,
-                        padding: "0.4rem 0.5rem",
-                        borderRadius: 6,
-                        border: "1px solid var(--border)",
-                        fontSize: "0.9rem",
-                      }}
-                    >
-                      {tab.values.map((v) => (
-                        <option key={v.token} value={v.token}>
-                          {v.label} ({v.count})
-                        </option>
-                      ))}
-                    </select>
-                    {selectedMeta && (
-                      <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
-                        Showing {rowsForToken.length} row(s) referencing this value.
-                      </span>
-                    )}
-                  </div>
-                  {rowsForToken.length === 0 ? (
-                    <p style={{ fontSize: "0.9rem", color: "var(--muted)" }}>No related rows for the selected value.</p>
-                  ) : (
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "0.9rem" }}>
-                        <thead>
-                          <tr>
-                            <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Year</th>
-                            <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>Period</th>
-                            {tab.sub_fields.map((sf) => (
-                              <th
-                                key={sf.key}
-                                style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}
-                              >
-                                {sf.name}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {rowsForToken.map((row) => (
-                            <tr key={`${row.entry_id}-${row.row_index}`}>
-                              <td style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>{row.year}</td>
-                              <td style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                {row.period_key || "—"}
-                              </td>
-                              {tab.sub_fields.map((sf) => (
-                                <td key={sf.key} style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                  {String((row.row as Record<string, unknown>)[sf.key] ?? "")}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* Related records moved into a dedicated tab above */}
 
         </>
       )}

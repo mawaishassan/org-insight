@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -63,6 +64,7 @@ from app.kpis.service import (
     get_field_access_for_user,
     replace_field_access,
     get_field_access_for_role,
+    get_field_access_by_role_snapshot,
     replace_field_access_for_role,
     get_add_row_users_for_field,
     replace_add_row_users_for_field,
@@ -80,6 +82,12 @@ from app.core.models import FieldType
 from app.storage.service import upload_file as storage_upload_file, delete_file as storage_delete_file, get_file_stream as storage_get_file_stream
 
 router = APIRouter(prefix="/kpis", tags=["kpis"])
+
+
+class KPIMinimalResponse(BaseModel):
+    id: int
+    name: str
+
 
 
 def _org_id(user: User, org_id_param: int | None) -> int:
@@ -265,6 +273,25 @@ async def get_org_kpi(
     if not kpi:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
     return _kpi_to_response(kpi)
+
+
+@router.get("/{kpi_id}/minimal", response_model=KPIMinimalResponse)
+async def get_org_kpi_minimal(
+    kpi_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fast KPI fetch for entry pages: returns only id+name (no tags/assignments)."""
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id, org_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+    res = await db.execute(select(KPI.id, KPI.name).where(KPI.id == kpi_id, KPI.organization_id == org_id))
+    row = res.one_or_none()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    return KPIMinimalResponse(id=int(row[0]), name=str(row[1] or ""))
 
 
 @router.patch("/{kpi_id}", response_model=KPIResponse)
@@ -541,6 +568,17 @@ async def get_kpi_field_access_by_role_route(
     items = await get_field_access_for_role(db, kpi_id, role_id, org_id)
     return [{"field_id": i["field_id"], "sub_field_id": i["sub_field_id"], "access_type": i["access_type"]} for i in items]
 
+
+@router.get("/{kpi_id}/field-access-by-role/snapshot")
+async def get_kpi_field_access_by_role_snapshot_route(
+    kpi_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Single-call payload for security UI: org roles + field access by role for this KPI."""
+    org_id = _org_id(current_user, organization_id)
+    return await get_field_access_by_role_snapshot(db, kpi_id, org_id)
 
 @router.put("/{kpi_id}/field-access-by-role", status_code=status.HTTP_200_OK)
 async def replace_kpi_field_access_by_role_route(

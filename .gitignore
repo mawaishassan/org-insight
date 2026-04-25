@@ -108,3 +108,8 @@ backend/app/dashboards/__pycache__/routes.cpython-312.pyc
 backend/app/dashboards/__pycache__/__init__.cpython-312.pyc
 backend/app/dashboards/__pycache__/routes.cpython-312.pyc
 backend/app/dashboards/__pycache__/service.cpython-312.pyc
+backend/app/widget_data/__pycache__/__init__.cpython-312.pyc
+backend/app/widget_data/__pycache__/multiline_chart_sql.cpython-312.pyc
+backend/app/widget_data/__pycache__/routes.cpython-312.pyc
+backend/app/widget_data/__pycache__/schemas.cpython-312.pyc
+backend/app/widget_data/__pycache__/service.cpython-312.pyc

@@ -29,6 +29,8 @@ from app.core.models import (
     KPIFieldOption,
     ReportTemplateField,
     ReportTemplateKPI,
+    KpiMultiLineRow,
+    KpiMultiLineCell,
     FieldType,
     Organization,
     TimeDimension,
@@ -38,6 +40,7 @@ from app.kpis.schemas import KPICreate, KPIUpdate
 from app.entries.service import (
     get_or_create_entry,
     save_entry_values,
+    load_multi_line_items_rows,
     _upsert_merge_multi_line_items,
     _is_multi_items_row_effectively_empty,
     coerce_mixed_list_raw,
@@ -675,6 +678,51 @@ async def get_field_access_for_role(
     return out
 
 
+async def get_field_access_by_role_snapshot(
+    db: AsyncSession, kpi_id: int, org_id: int
+) -> dict:
+    """
+    Return org roles + field-access-by-role for a KPI in a single call.
+    Shape:
+      {
+        "roles": [ { "id": int, "name": str, "description": str|null }, ... ],
+        "access_by_role": { "<role_id>": [ {field_id, sub_field_id, access_type}, ... ], ... }
+      }
+    """
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return {"roles": [], "access_by_role": {}}
+
+    roles_res = await db.execute(
+        select(OrganizationRole.id, OrganizationRole.name, OrganizationRole.description).where(
+            OrganizationRole.organization_id == org_id
+        )
+    )
+    roles = [{"id": r[0], "name": r[1], "description": r[2]} for r in roles_res.all()]
+
+    access_res = await db.execute(
+        select(
+            KpiFieldAccessByRole.organization_role_id,
+            KpiFieldAccessByRole.field_id,
+            KpiFieldAccessByRole.sub_field_id,
+            KpiFieldAccessByRole.access_type,
+        )
+        .join(OrganizationRole, OrganizationRole.id == KpiFieldAccessByRole.organization_role_id)
+        .where(
+            KpiFieldAccessByRole.kpi_id == kpi_id,
+            OrganizationRole.organization_id == org_id,
+        )
+    )
+    by_role: dict[str, list[dict]] = {}
+    for role_id, field_id, sub_field_id, access_type in access_res.all():
+        at = access_type.value if hasattr(access_type, "value") else str(access_type or "data_entry")
+        by_role.setdefault(str(role_id), []).append(
+            {"field_id": field_id, "sub_field_id": sub_field_id, "access_type": at}
+        )
+
+    return {"roles": roles, "access_by_role": by_role}
+
+
 async def replace_field_access_for_role(
     db: AsyncSession,
     kpi_id: int,
@@ -911,23 +959,74 @@ async def get_row_access_by_entry(
     field = field_res.scalar_one_or_none()
     if not field or _normalized_field_type_for_row(field) != "multi_line_items":
         return []
-    fv_res = await db.execute(
-        select(KPIFieldValue.value_json).where(
-            KPIFieldValue.entry_id == entry_id,
-            KPIFieldValue.field_id == field_id,
-        )
+
+    total_rows = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(KpiMultiLineRow)
+                .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field_id)
+            )
+        ).scalar_one()
+        or 0
     )
-    fv_row = fv_res.one_or_none()
-    value_json = fv_row[0] if fv_row and fv_row[0] is not None else []
-    if not isinstance(value_json, list):
-        value_json = []
-    sub_keys = [getattr(s, "key", "") for s in (field.sub_fields or []) if getattr(s, "key", None)][:3]
+    if total_rows <= 0:
+        return []
+
+    sub_fields = list(getattr(field, "sub_fields", None) or [])
+    sub_fields.sort(key=lambda s: getattr(s, "sort_order", 0))
+    sub_fields = [s for s in sub_fields if getattr(s, "key", None)][:3]
+    sub_keys = [str(getattr(s, "key")) for s in sub_fields]
+    sub_ids = [int(getattr(s, "id")) for s in sub_fields if getattr(s, "id", None) is not None]
+    key_by_id = {int(getattr(s, "id")): str(getattr(s, "key")) for s in sub_fields if getattr(s, "id", None) is not None}
+
+    def _cell_raw(vt, vn, vb, vd, vj):
+        if vj is not None:
+            return vj
+        if vt is not None:
+            return vt
+        if vn is not None:
+            return vn
+        if vb is not None:
+            return vb
+        if vd is not None:
+            return vd.isoformat() if hasattr(vd, "isoformat") else str(vd)
+        return None
+
+    row_vals: dict[int, dict[str, str]] = {}
+    if sub_ids:
+        cell_res = await db.execute(
+            select(
+                KpiMultiLineRow.row_index,
+                KpiMultiLineCell.sub_field_id,
+                KpiMultiLineCell.value_text,
+                KpiMultiLineCell.value_number,
+                KpiMultiLineCell.value_boolean,
+                KpiMultiLineCell.value_date,
+                KpiMultiLineCell.value_json,
+            )
+            .select_from(KpiMultiLineRow)
+            .join(KpiMultiLineCell, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+            .where(
+                KpiMultiLineRow.entry_id == entry_id,
+                KpiMultiLineRow.field_id == field_id,
+                KpiMultiLineCell.sub_field_id.in_(sub_ids),
+            )
+            .order_by(KpiMultiLineRow.row_index)
+        )
+        for row_index, sub_field_id, vt, vn, vb, vd, vj in cell_res.all():
+            k = key_by_id.get(int(sub_field_id))
+            if not k:
+                continue
+            raw = _cell_raw(vt, vn, vb, vd, vj)
+            if raw is None:
+                continue
+            row_vals.setdefault(int(row_index), {})[k] = str(raw)[:30]
+
     row_previews: list[str] = []
-    for i, row in enumerate(value_json):
-        if not isinstance(row, dict):
-            row_previews.append("")
-            continue
-        parts = [str(row.get(k, ""))[:30] for k in sub_keys if row.get(k) not in (None, "")]
+    for i in range(total_rows):
+        d = row_vals.get(i, {})
+        parts = [d.get(k, "") for k in sub_keys if d.get(k, "") not in ("", None)]
         row_previews.append(" | ".join(parts) if parts else "")
 
     result = await db.execute(
@@ -956,7 +1055,7 @@ async def get_row_access_by_entry(
             "can_delete": can_delete,
         })
     out = []
-    for row_index in range(len(value_json)):
+    for row_index in range(total_rows):
         preview = row_previews[row_index] if row_index < len(row_previews) else ""
         out.append({
             "row_index": row_index,
@@ -993,15 +1092,16 @@ async def get_full_row_access_users(
     if not field or _normalized_field_type_for_row(field) != "multi_line_items":
         return []
 
-    fv_res = await db.execute(
-        select(KPIFieldValue.value_json).where(
-            KPIFieldValue.entry_id == entry_id,
-            KPIFieldValue.field_id == field_id,
-        )
+    total_rows = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(KpiMultiLineRow)
+                .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field_id)
+            )
+        ).scalar_one()
+        or 0
     )
-    fv_row = fv_res.one_or_none()
-    value_json = fv_row[0] if fv_row and fv_row[0] is not None else []
-    total_rows = len(value_json) if isinstance(value_json, list) else 0
     if total_rows <= 0:
         return []
 
@@ -1092,15 +1192,17 @@ async def grant_view_all_rows_to_user(
     user_res = await db.execute(select(User).where(User.id == user_id, User.organization_id == org_id))
     if user_res.scalar_one_or_none() is None:
         return False
-    fv_res = await db.execute(
-        select(KPIFieldValue.value_json).where(
-            KPIFieldValue.entry_id == entry_id,
-            KPIFieldValue.field_id == field_id,
-        )
+
+    total_rows = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(KpiMultiLineRow)
+                .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field_id)
+            )
+        ).scalar_one()
+        or 0
     )
-    fv_row = fv_res.one_or_none()
-    value_json = fv_row[0] if fv_row and fv_row[0] is not None else []
-    total_rows = len(value_json) if isinstance(value_json, list) else 0
     if total_rows <= 0:
         return True
 
@@ -1415,7 +1517,8 @@ async def sync_kpi_entry_from_api(
         for fv in fv_res.scalars().all():
             if isinstance(fv.value_json, list):
                 existing_value_json_by_field[fv.field_id] = fv.value_json
-        _log("%s mode: existing multi_line_items field_ids with data: %s", mode, list(existing_value_json_by_field.keys()))
+        # NOTE: multi_line_items uses relational storage now; `existing_value_json_by_field` is only
+        # meaningful for list-valued non-multi-line fields (e.g. multi_reference, mixed_list).
 
     # Case-insensitive key lookup for API response (some APIs return "Grant_Type" vs "grant_type")
     _values_lower = {k.lower(): (k, v) for k, v in values_map.items() if isinstance(k, str)} if values_map else {}
@@ -1477,7 +1580,7 @@ async def sync_kpi_entry_from_api(
                 dict(r) for r in raw if isinstance(r, dict) and not _is_multi_items_row_effectively_empty(dict(r))
             ]
             if mode == "append":
-                existing_list = existing_value_json_by_field.get(f.id) or []
+                existing_list = await load_multi_line_items_rows(db, entry_id=entry.id, field=f)
                 merged = existing_list + incoming
                 value_inputs.append(FieldValueInput(field_id=f.id, value_json=merged))
                 _log(
@@ -1487,7 +1590,7 @@ async def sync_kpi_entry_from_api(
                     len(merged),
                 )
             elif mode == "upsert":
-                existing_list = list(existing_value_json_by_field.get(f.id) or [])
+                existing_list = await load_multi_line_items_rows(db, entry_id=entry.id, field=f)
                 mk = (ukeys.get(f.key) or "").strip()
                 sub = next((s for s in (f.sub_fields or []) if s.key == mk), None)
                 match_ft = sub.field_type if sub else None

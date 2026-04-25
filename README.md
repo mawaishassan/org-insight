@@ -76,7 +76,7 @@ uni_kpi_mis/
 2. Copy `backend/.env.example` to `backend/.env` and set `DATABASE_URL` (e.g. `postgresql+asyncpg://postgres:postgres@localhost:5432/uni_kpi_mis`), `JWT_SECRET_KEY`.
 3. From `backend/`:
    - `pip install -r requirements.txt`
-   - `alembic upgrade head` (create tables)
+   - `alembic upgrade head` (create tables + performance indexes)
    - `uvicorn app.main:app --reload --host 0.0.0.0 --port 8080`
 
 ### Frontend
@@ -85,7 +85,7 @@ uni_kpi_mis/
    - `npm install`
    - `npm run dev` (default port 3000)
 
-Next.js rewrites `/api/*` to `http://localhost:8080/api/*` when using default config (set `NEXT_PUBLIC_BACKEND_URL` if your backend runs on another port).
+Next.js rewrites `/api/*` to your FastAPI host (default `http://localhost:8080/api/*`, matching `start.bat`). If uvicorn runs on another port (e.g. 8000), set **`NEXT_PUBLIC_BACKEND_URL`** or **`NEXT_PUBLIC_API_URL`** in `frontend/.env.local` to that base URL (no trailing slash). Check that the backend is up with `GET /api/widget-data/health` → `{"status":"ok"}` (via the Next proxy or directly on the backend port).
 
 ### First Super Admin
 

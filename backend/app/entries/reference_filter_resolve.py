@@ -11,7 +11,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.models import FieldType, KPI, KPIEntry, KPIField, KPIFieldValue
+from app.core.models import (
+    FieldType,
+    KPI,
+    KPIEntry,
+    KPIField,
+    KPIFieldSubField,
+    KPIFieldValue,
+    KpiMultiLineRow,
+    KpiMultiLineCell,
+)
 from app.entries.service import _normalize_reference_value
 
 
@@ -266,27 +275,130 @@ async def _read_compare_value(
     if not fv:
         return None
     if cmp_f.field_type == FieldType.multi_line_items and compare_sub_field_key:
-        rows = fv.value_json if isinstance(fv.value_json, list) else []
-        # When the source KPI labels rows via a subfield (e.g. department_name), we must read the
-        # compare subfield from the *same* row as the Program anchor — not the first non-empty row.
+        # Relational multi_line_items: read from kpi_multi_line_rows/cells.
+        # When `match_row_sub_key` is set, read from the *same* row whose label matches.
+        cmp_sf = _subfield_by_key(cmp_f, compare_sub_field_key) if compare_sub_field_key else None
+        if cmp_sf is None:
+            # Ensure sub_fields are loaded if caller passed a KPIField without relationship loaded.
+            fld_res = await db.execute(
+                select(KPIField).where(KPIField.id == cmp_f.id).options(selectinload(KPIField.sub_fields))
+            )
+            cmp_f2 = fld_res.scalar_one_or_none()
+            cmp_sf = _subfield_by_key(cmp_f2, compare_sub_field_key) if cmp_f2 is not None else None
+        if cmp_sf is None:
+            return None
+        cmp_sf_id = int(getattr(cmp_sf, "id"))
+
+        def _cell_raw_from_row_cell(cell: Any) -> Any:
+            if cell is None:
+                return None
+            if getattr(cell, "value_json", None) is not None:
+                return cell.value_json
+            if getattr(cell, "value_text", None) is not None:
+                return cell.value_text
+            if getattr(cell, "value_number", None) is not None:
+                return cell.value_number
+            if getattr(cell, "value_boolean", None) is not None:
+                return cell.value_boolean
+            if getattr(cell, "value_date", None) is not None:
+                return cell.value_date.isoformat() if hasattr(cell.value_date, "isoformat") else str(cell.value_date)
+            return None
+
+        # Same-row match path
         if match_row_sub_key and match_row_normalized_label is not None and match_row_normalized_label != "":
-            for row in rows:
-                if not isinstance(row, dict) or compare_sub_field_key not in row:
-                    continue
-                lab_cell = row.get(match_row_sub_key)
+            match_sf = _subfield_by_key(cmp_f, match_row_sub_key)
+            if match_sf is None:
+                fld_res = await db.execute(
+                    select(KPIField).where(KPIField.id == cmp_f.id).options(selectinload(KPIField.sub_fields))
+                )
+                cmp_f2 = fld_res.scalar_one_or_none()
+                match_sf = _subfield_by_key(cmp_f2, match_row_sub_key) if cmp_f2 is not None else None
+            if match_sf is None:
+                return None
+            match_sf_id = int(getattr(match_sf, "id"))
+
+            # Load candidate rows with both match cell and compare cell.
+            q = (
+                select(
+                    KpiMultiLineRow.row_index,
+                    KpiMultiLineCell.sub_field_id,
+                    KpiMultiLineCell.value_text,
+                    KpiMultiLineCell.value_number,
+                    KpiMultiLineCell.value_json,
+                    KpiMultiLineCell.value_boolean,
+                    KpiMultiLineCell.value_date,
+                )
+                .select_from(KpiMultiLineRow)
+                .join(KpiMultiLineCell, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+                .where(
+                    KpiMultiLineRow.entry_id == int(entry_id),
+                    KpiMultiLineRow.field_id == int(cmp_f.id),
+                    KpiMultiLineCell.sub_field_id.in_([match_sf_id, cmp_sf_id]),
+                )
+                .order_by(KpiMultiLineRow.row_index)
+            )
+            _buffer_ref_filter_sql(
+                f"_read_compare_value relational multi_line_items entry_id={entry_id} field_id={cmp_f.id}",
+                q,
+            )
+            res2 = await db.execute(q)
+            by_row: dict[int, dict[int, KpiMultiLineCell]] = {}
+            for row_index, sub_field_id, vt, vn, vj, vb, vd in res2.all():
+                # Build a lightweight cell-like object using a tiny shim (dict with attributes)
+                cell = type("Cell", (), {})()
+                cell.sub_field_id = int(sub_field_id)
+                cell.value_text = vt
+                cell.value_number = vn
+                cell.value_json = vj
+                cell.value_boolean = vb
+                cell.value_date = vd
+                by_row.setdefault(int(row_index), {})[int(sub_field_id)] = cell
+
+            for idx in sorted(by_row.keys()):
+                mcell = by_row[idx].get(match_sf_id)
+                lab_cell = _cell_raw_from_row_cell(mcell)
                 cell_lab = _normalize_reference_value(_extract_ref_label(lab_cell if lab_cell is not None else ""))
                 if cell_lab != match_row_normalized_label:
                     continue
-                v = row.get(compare_sub_field_key)
+                ccell = by_row[idx].get(cmp_sf_id)
+                v = _cell_raw_from_row_cell(ccell)
                 if v is not None and str(v).strip() != "":
                     return v
                 return v
             return None
+
+        # Fallback: first non-empty compare value by row_index.
+        q = (
+            select(
+                KpiMultiLineCell.value_text,
+                KpiMultiLineCell.value_number,
+                KpiMultiLineCell.value_json,
+                KpiMultiLineCell.value_boolean,
+                KpiMultiLineCell.value_date,
+            )
+            .select_from(KpiMultiLineRow)
+            .join(KpiMultiLineCell, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+            .where(
+                KpiMultiLineRow.entry_id == int(entry_id),
+                KpiMultiLineRow.field_id == int(cmp_f.id),
+                KpiMultiLineCell.sub_field_id == int(cmp_sf_id),
+            )
+            .order_by(KpiMultiLineRow.row_index)
+        )
+        _buffer_ref_filter_sql(
+            f"_read_compare_value relational multi_line_items fallback entry_id={entry_id} field_id={cmp_f.id}",
+            q,
+        )
+        res2 = await db.execute(q)
         fallback: Any = None
-        for row in rows:
-            if not isinstance(row, dict) or compare_sub_field_key not in row:
-                continue
-            v = row.get(compare_sub_field_key)
+        for vt, vn, vj, vb, vd in res2.all():
+            cell = type("Cell", (), {})()
+            cell.value_text = vt
+            cell.value_number = vn
+            cell.value_json = vj
+            cell.value_boolean = vb
+            cell.value_date = vd
+            v = _cell_raw_from_row_cell(cell)
             if v is not None and str(v).strip() != "":
                 return v
             fallback = v
@@ -384,23 +496,49 @@ async def find_entry_id_by_label(
     if not label_sub_field_key:
         return None
     ml_f = label_field
-    q0 = base.where(KPIFieldValue.field_id == ml_f.id)
+    # Ensure sub_fields are loaded (label_sub_field_key lives on KPIFieldSubField).
+    if not getattr(ml_f, "sub_fields", None):
+        ml_res = await db.execute(select(KPIField).where(KPIField.id == ml_f.id).options(selectinload(KPIField.sub_fields)))
+        ml_f = ml_res.scalar_one_or_none() or ml_f
+    sf = _subfield_by_key(ml_f, str(label_sub_field_key))
+    if sf is None:
+        return None
+    sf_id = int(getattr(sf, "id"))
+
+    q0 = (
+        select(KPIEntry.id, KpiMultiLineCell.value_text, KpiMultiLineCell.value_json, KpiMultiLineCell.value_number, KpiMultiLineCell.value_boolean)
+        .select_from(KPIEntry)
+        .join(KpiMultiLineRow, KpiMultiLineRow.entry_id == KPIEntry.id)
+        .join(KpiMultiLineCell, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi_id,
+            KpiMultiLineRow.field_id == ml_f.id,
+            KpiMultiLineCell.sub_field_id == sf_id,
+        )
+    )
     for y in year_tries:
         q = q0
         if y is not None:
             q = q.where(KPIEntry.year == y)
-        _buffer_ref_filter_sql("find_entry_id_by_label (multi_line_items label field)", q)
+        _buffer_ref_filter_sql("find_entry_id_by_label (relational multi_line_items label field)", q)
         res = await db.execute(q)
-        for fv, entry_id in res.all():
-            rows = fv.value_json if isinstance(fv.value_json, list) else []
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                lab_cell = row.get(label_sub_field_key)
-                cell_lab = _normalize_reference_value(_extract_ref_label(lab_cell if lab_cell is not None else ""))
-                if cell_lab != normalized_label:
-                    continue
-                return int(entry_id)
+        for entry_id, vt, vj, vn, vb in res.all():
+            raw = None
+            if vt is not None and str(vt).strip() != "":
+                raw = vt
+            elif vj is not None:
+                raw = _extract_ref_label(vj)
+            elif vn is not None:
+                raw = str(vn)
+            elif vb is not None:
+                raw = str(vb).lower()
+            if raw is None:
+                continue
+            cell_lab = _normalize_reference_value(_extract_ref_label(raw))
+            if cell_lab != normalized_label:
+                continue
+            return int(entry_id)
     return None
 
 
@@ -426,7 +564,11 @@ async def resolve_reference_chain(
     if not sid or not lab_key:
         return None
 
-    lf_stmt = select(KPIField).where(KPIField.kpi_id == int(sid), KPIField.key == str(lab_key))
+    lf_stmt = (
+        select(KPIField)
+        .where(KPIField.kpi_id == int(sid), KPIField.key == str(lab_key))
+        .options(selectinload(KPIField.sub_fields))
+    )
     _buffer_ref_filter_sql("resolve_reference_chain: load label KPIField", lf_stmt)
     lf_res = await db.execute(lf_stmt)
     label_field = lf_res.scalar_one_or_none()

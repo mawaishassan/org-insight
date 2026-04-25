@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from datetime import datetime
 import csv
 import json
 from typing import Any
@@ -10,7 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, distinct
+from sqlalchemy import select, distinct, func, and_, cast, or_
+from sqlalchemy.sql import nulls_last
+from sqlalchemy.types import String
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 import httpx
@@ -21,6 +24,7 @@ from app.core.models import (
     User,
     KPIEntry,
     KPIField,
+    KPIFieldSubField,
     KPIFieldValue,
     KPI,
     FieldType,
@@ -28,6 +32,8 @@ from app.core.models import (
     TimeDimension,
     effective_kpi_time_dimension,
     KpiMultiLineRowAccess,
+    KpiMultiLineRow,
+    KpiMultiLineCell,
     KpiRoleAssignment,
     UserOrganizationRole,
 )
@@ -60,6 +66,7 @@ from app.entries.service import (
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
 from app.entries.multi_item_filters import row_passes_filters
+from app.entries.multi_line_load import load_multi_line_row_dicts as _load_multi_line_row_dicts
 from app.entries.reference_filter_resolve import build_reference_resolution_map
 
 router = APIRouter(prefix="/entries", tags=["entries"])
@@ -118,6 +125,106 @@ async def _reindex_row_access_after_delete(
     for rule, final_index in to_shift:
         rule.row_index = final_index
     await db.flush()
+
+
+async def _reindex_multi_line_rows(
+    db: AsyncSession,
+    *,
+    entry_id: int,
+    field_id: int,
+) -> None:
+    """
+    Reindex relational multi-line rows so row_index is dense 0..N-1.
+    Two-phase update avoids transient uniqueness collisions on (entry_id, field_id, row_index).
+    """
+    res = await db.execute(
+        select(KpiMultiLineRow).where(
+            KpiMultiLineRow.entry_id == entry_id,
+            KpiMultiLineRow.field_id == field_id,
+        ).order_by(KpiMultiLineRow.row_index)
+    )
+    rows = list(res.scalars().all())
+    if not rows:
+        return
+    # Temp negative indices
+    for i, r in enumerate(rows, start=1):
+        r.row_index = -i
+    await db.flush()
+    # Final dense indices
+    for i, r in enumerate(rows):
+        r.row_index = i
+    await db.flush()
+
+
+async def _replace_multi_line_rows_from_dicts(
+    db: AsyncSession,
+    *,
+    entry_id: int,
+    field: KPIField,
+    rows: list[dict],
+) -> None:
+    """Replace relational multi-line rows/cells for (entry, field) from legacy list-of-dicts."""
+    # Delete existing rows (cells cascade)
+    existing_res = await db.execute(
+        select(KpiMultiLineRow).where(
+            KpiMultiLineRow.entry_id == entry_id,
+            KpiMultiLineRow.field_id == field.id,
+        )
+    )
+    for r in list(existing_res.scalars().all()):
+        await db.delete(r)
+    await db.flush()
+
+    key_to_sub = {getattr(s, "key", None): s for s in (field.sub_fields or []) if getattr(s, "key", None)}
+
+    def _add_cell(row_id: int, sub: Any, raw_val: Any) -> None:
+        c = KpiMultiLineCell(row_id=row_id, sub_field_id=int(getattr(sub, "id")))
+        ft = getattr(sub, "field_type", None)
+        ft_s = ft.value if hasattr(ft, "value") else str(ft)
+        if raw_val is None:
+            pass
+        elif ft_s == "number":
+            try:
+                c.value_number = float(raw_val)
+            except Exception:
+                c.value_text = str(raw_val)
+        elif ft_s == "boolean":
+            if isinstance(raw_val, bool):
+                c.value_boolean = raw_val
+            else:
+                s = str(raw_val).strip().lower()
+                if s in ("true", "yes", "1"):
+                    c.value_boolean = True
+                elif s in ("false", "no", "0"):
+                    c.value_boolean = False
+                else:
+                    c.value_text = str(raw_val)
+        elif ft_s == "date":
+            c.value_text = str(raw_val)
+        elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
+            if isinstance(raw_val, (dict, list)):
+                c.value_json = raw_val
+            else:
+                c.value_text = str(raw_val)
+        else:
+            if isinstance(raw_val, (dict, list)):
+                c.value_json = raw_val
+            else:
+                c.value_text = str(raw_val)
+        db.add(c)
+
+    for idx, row in enumerate(rows or []):
+        rdict = row if isinstance(row, dict) else {}
+        mlr = KpiMultiLineRow(entry_id=entry_id, field_id=field.id, row_index=int(idx))
+        db.add(mlr)
+        await db.flush()
+        for k, v in rdict.items():
+            sub = key_to_sub.get(k)
+            if not sub:
+                continue
+            if getattr(sub, "field_type", None) == FieldType.mixed_list:
+                v = coerce_mixed_list_raw(v) or None
+            _add_cell(mlr.id, sub, v)
 
 
 def _entry_to_response(entry):
@@ -338,10 +445,53 @@ class MultiItemsListResponse(BaseModel):
     sub_fields: list[dict]
 
 
+class MultiItemsPageContextSubField(BaseModel):
+    id: int | None = None
+    key: str
+    name: str
+    field_type: str | None = None
+    is_required: bool | None = None
+    sort_order: int | None = None
+    config: dict | None = None
+    can_view: bool | None = None
+    can_edit: bool | None = None
+
+
+class MultiItemsPageContextField(BaseModel):
+    id: int
+    kpi_id: int
+    name: str
+    key: str
+    field_type: str
+    full_page_multi_items: bool | None = None
+    row_level_user_access_enabled: bool | None = None
+    config: dict | None = None
+    sub_fields: list[MultiItemsPageContextSubField] = []
+
+
+class MultiItemsPageContextResponse(BaseModel):
+    entry_id: int
+    kpi_id: int
+    kpi_name: str
+    field: MultiItemsPageContextField
+    can_edit: bool
+    kpi_level_can_edit: bool
+    can_add_row: bool
+
+
+class EntryIdResponse(BaseModel):
+    id: int
+    created: bool = False
+
+
 @router.get("/multi-items/template")
 async def download_multi_items_template(
     field_id: int = Query(...),
     entry_id: int | None = Query(None, description="If provided, include existing rows for this entry/field"),
+    include_existing_rows: bool = Query(
+        False,
+        description="When true and entry_id is provided, include existing rows in the Excel download (can be slow for large datasets).",
+    ),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -356,18 +506,14 @@ async def download_multi_items_template(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this KPI")
 
     existing_items: list[dict] | None = None
-    if entry_id is not None:
+    if include_existing_rows and entry_id is not None:
         entry_res = await db.execute(
             select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
         )
         entry = entry_res.scalar_one_or_none()
         if entry and entry.kpi_id == field.kpi_id:
-            fv_res = await db.execute(
-                select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
-            )
-            fv = fv_res.scalar_one_or_none()
-            if fv and isinstance(fv.value_json, list):
-                existing_items = fv.value_json
+            pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+            existing_items = [r for _, r in pairs] if pairs else None
 
     content = _xlsx_bytes_for_multi_items_template(field, existing_items=existing_items)
     filename = f"multi_items_{field.key}_{field.id}.xlsx"
@@ -546,34 +692,28 @@ async def upload_multi_items_excel(
         mk = None
         match_ft = None
 
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
-    )
-    fv = fv_res.scalar_one_or_none()
-    if fv is None:
-        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id)
-        db.add(fv)
-    prev_count = len(fv.value_json) if isinstance(fv.value_json, list) else 0
+    existing_pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+    existing_list = [r for _, r in existing_pairs] if existing_pairs else []
+    prev_count = len(existing_list)
     imported_count = len(items) if isinstance(items, list) else 0
-    existing_list = list(fv.value_json) if isinstance(fv.value_json, list) else []
 
     rows_updated = 0
     if mode == "append":
-        fv.value_json = existing_list + items
+        new_rows = existing_list + items
         rows_added = imported_count
         rows_overridden = 0
     elif mode == "upsert":
         merged, rows_updated, rows_added = _upsert_merge_multi_line_items(
             existing_list, items, mk, match_ft
         )
-        fv.value_json = merged
+        new_rows = merged
         rows_overridden = 0
     else:
-        fv.value_json = items
+        new_rows = items
         rows_added = imported_count
         rows_overridden = prev_count
     entry.user_id = current_user.id  # track last editor (optional)
-    flag_modified(fv, "value_json")
+    await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
     await db.commit()
 
     return {
@@ -623,16 +763,270 @@ async def list_multi_items_rows(
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
 
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
-    )
-    fv = fv_res.scalar_one_or_none()
-    raw_rows: list[dict] = fv.value_json if fv and isinstance(fv.value_json, list) else []
-    # Keep (original_index, row_data) so edit/delete use index in original value_json, not filtered/sorted position
-    rows: list[tuple[int, dict]] = [
-        (i, r if isinstance(r, dict) else {})
-        for i, r in enumerate(raw_rows)
-    ]
+    def _try_parse_iso_datetime(v: Any) -> datetime | None:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            try:
+                # Accept YYYY-MM-DD or full ISO datetime
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+        return None
+
+    def _string_value_expr(cell) -> Any:
+        # Used for text-like comparisons across typed columns.
+        return func.coalesce(
+            cast(cell.value_text, String()),
+            cast(cell.value_json, String()),
+            cast(cell.value_number, String()),
+            cast(cell.value_boolean, String()),
+            cast(cell.value_date, String()),
+        )
+
+    def _reference_like_exprs(cell) -> list[Any]:
+        """
+        Common expressions for reference / multi_reference stored either as plain text or as JSON object/array.
+        We compare against:
+        - value_text (when stored as label)
+        - value_json->>'label' / ->>'value' / ->>'token' when stored as object
+        - stringified JSON for array membership fallback (multi_reference)
+        """
+        return [
+            cast(cell.value_text, String()),
+            func.json_extract_path_text(cell.value_json, "label"),
+            func.json_extract_path_text(cell.value_json, "value"),
+            func.json_extract_path_text(cell.value_json, "token"),
+            cast(cell.value_json, String()),
+        ]
+
+    def _build_sql_filter_clause(raw: Any) -> Any | None:
+        """
+        Build a SQLAlchemy boolean clause for filters payload when possible.
+        Supports only structured _version=2 scalar filters (no reference_resolution).
+        Returns None when payload is unsupported, so we can fall back to the existing slow path.
+        """
+        if not isinstance(raw, dict) or raw.get("_version") != 2:
+            return None
+        conds = raw.get("conditions")
+        if not isinstance(conds, list) or not conds:
+            return None
+
+        # Map sub-field keys to (id, field_type)
+        sf_map: dict[str, tuple[int, str]] = {}
+        for sf in (field.sub_fields or []):
+            k = str(getattr(sf, "key", "") or "")
+            sid = getattr(sf, "id", None)
+            if not k or sid is None:
+                continue
+            ft = getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", None))
+            sf_map[k] = (int(sid), str(ft or ""))
+
+        def exists_for(sub_field_id: int, pred) -> Any:
+            return (
+                select(func.count())
+                .select_from(KpiMultiLineCell)
+                .where(
+                    and_(
+                        KpiMultiLineCell.row_id == KpiMultiLineRow.id,
+                        KpiMultiLineCell.sub_field_id == sub_field_id,
+                        pred,
+                    )
+                )
+                .correlate(KpiMultiLineRow)
+                .scalar_subquery()
+                > 0
+            )
+
+        expr = None
+        for idx, c in enumerate(conds):
+            if not isinstance(c, dict):
+                return None
+            if c.get("reference_resolution"):
+                return None
+            fk = str(c.get("field") or "").strip()
+            op = str(c.get("op") or "").strip()
+            if not fk or not op:
+                return None
+            if fk not in sf_map:
+                return None
+            sub_field_id, ft = sf_map[fk]
+
+            values = c.get("values")
+            value = c.get("value")
+            use_values = isinstance(values, list) and len(values) > 0
+
+            cell = KpiMultiLineCell
+            clause_part = None
+
+            if ft == "number":
+                def to_num(x: Any) -> float | None:
+                    try:
+                        if x is None or (isinstance(x, str) and not x.strip()):
+                            return None
+                        return float(x)
+                    except Exception:
+                        return None
+                if use_values and op in ("eq", "neq"):
+                    nums = [to_num(x) for x in values]
+                    nums = [n for n in nums if n is not None]
+                    if not nums:
+                        return None
+                    pos = exists_for(sub_field_id, cell.value_number.in_(nums))
+                    clause_part = pos if op == "eq" else ~pos
+                else:
+                    n = to_num(value)
+                    if n is None:
+                        return None
+                    if op == "eq":
+                        clause_part = exists_for(sub_field_id, cell.value_number == n)
+                    elif op == "neq":
+                        clause_part = ~exists_for(sub_field_id, cell.value_number == n)
+                    elif op == "gt":
+                        clause_part = exists_for(sub_field_id, cell.value_number > n)
+                    elif op == "gte":
+                        clause_part = exists_for(sub_field_id, cell.value_number >= n)
+                    elif op == "lt":
+                        clause_part = exists_for(sub_field_id, cell.value_number < n)
+                    elif op == "lte":
+                        clause_part = exists_for(sub_field_id, cell.value_number <= n)
+                    else:
+                        return None
+            elif ft == "date":
+                dt = _try_parse_iso_datetime(value)
+                if dt is None:
+                    return None
+                if op == "eq":
+                    clause_part = exists_for(sub_field_id, cell.value_date == dt)
+                elif op == "neq":
+                    clause_part = ~exists_for(sub_field_id, cell.value_date == dt)
+                elif op == "gt":
+                    clause_part = exists_for(sub_field_id, cell.value_date > dt)
+                elif op == "gte":
+                    clause_part = exists_for(sub_field_id, cell.value_date >= dt)
+                elif op == "lt":
+                    clause_part = exists_for(sub_field_id, cell.value_date < dt)
+                elif op == "lte":
+                    clause_part = exists_for(sub_field_id, cell.value_date <= dt)
+                else:
+                    return None
+            elif ft == "boolean":
+                if isinstance(value, bool):
+                    b = value
+                elif isinstance(value, str):
+                    vs = value.strip().lower()
+                    if vs == "true":
+                        b = True
+                    elif vs == "false":
+                        b = False
+                    else:
+                        return None
+                else:
+                    return None
+                if op == "eq":
+                    clause_part = exists_for(sub_field_id, cell.value_boolean == b)
+                elif op == "neq":
+                    clause_part = ~exists_for(sub_field_id, cell.value_boolean == b)
+                else:
+                    return None
+            else:
+                # Treat as text-like.
+                if use_values and op in ("eq", "neq"):
+                    vals = [str(x).strip() for x in values if x is not None and str(x).strip()]
+                    if not vals:
+                        return None
+                    if ft in ("reference", "multi_reference"):
+                        # membership match for multi_reference arrays; exact/label match for reference objects
+                        candidates = _reference_like_exprs(cell)
+                        pred = or_(*[e.in_(vals) for e in candidates if e is not None])
+                        pos = exists_for(sub_field_id, pred)
+                    else:
+                        pos = exists_for(sub_field_id, _string_value_expr(cell).in_(vals))
+                    clause_part = pos if op == "eq" else ~pos
+                else:
+                    if value is None:
+                        return None
+                    s = str(value).strip()
+                    if s == "":
+                        return None
+                    if ft in ("reference", "multi_reference"):
+                        # For reference values we attempt exact match on text/label/value/token, and for multi_reference
+                        # also allow JSON array membership via string contains on `"value"`.
+                        exprs = _reference_like_exprs(cell)
+                        if op == "eq":
+                            pred = or_(*[(e == s) for e in exprs if e is not None])
+                            # array membership fallback
+                            pred = or_(pred, cast(cell.value_json, String()).ilike(f"%\\\"{s}\\\"%"))
+                            clause_part = exists_for(sub_field_id, pred)
+                        elif op == "neq":
+                            pred = or_(*[(e == s) for e in exprs if e is not None])
+                            pred = or_(pred, cast(cell.value_json, String()).ilike(f"%\\\"{s}\\\"%"))
+                            clause_part = ~exists_for(sub_field_id, pred)
+                        elif op == "contains":
+                            pred = or_(*[(e.ilike(f"%{s}%")) for e in exprs if e is not None])
+                            clause_part = exists_for(sub_field_id, pred)
+                        elif op == "not_contains":
+                            pred = or_(*[(e.ilike(f"%{s}%")) for e in exprs if e is not None])
+                            clause_part = ~exists_for(sub_field_id, pred)
+                        elif op == "starts_with":
+                            pred = or_(*[(e.ilike(f"{s}%")) for e in exprs if e is not None])
+                            clause_part = exists_for(sub_field_id, pred)
+                        elif op == "ends_with":
+                            pred = or_(*[(e.ilike(f"%{s}")) for e in exprs if e is not None])
+                            clause_part = exists_for(sub_field_id, pred)
+                        else:
+                            return None
+                        # done
+                        logic = str(c.get("logic") or "").strip().lower()
+                        if idx == 0:
+                            expr = clause_part
+                        else:
+                            expr = or_(expr, clause_part) if logic == "or" else and_(expr, clause_part)
+                        continue
+
+                    vexpr = _string_value_expr(cell)
+                    if op == "eq":
+                        clause_part = exists_for(sub_field_id, vexpr == s)
+                    elif op == "neq":
+                        clause_part = ~exists_for(sub_field_id, vexpr == s)
+                    elif op == "contains":
+                        clause_part = exists_for(sub_field_id, vexpr.ilike(f"%{s}%"))
+                    elif op == "not_contains":
+                        clause_part = ~exists_for(sub_field_id, vexpr.ilike(f"%{s}%"))
+                    elif op == "starts_with":
+                        clause_part = exists_for(sub_field_id, vexpr.ilike(f"{s}%"))
+                    elif op == "ends_with":
+                        clause_part = exists_for(sub_field_id, vexpr.ilike(f"%{s}"))
+                    else:
+                        return None
+
+            logic = str(c.get("logic") or "").strip().lower()
+            if idx == 0:
+                expr = clause_part
+            else:
+                expr = or_(expr, clause_part) if logic == "or" else and_(expr, clause_part)
+
+        return expr
+
+    raw_filters: Any | None = None
+    sql_filters_clause = None
+    if filters and not search:
+        try:
+            raw_filters = json.loads(filters)
+            sql_filters_clause = _build_sql_filter_clause(raw_filters)
+        except json.JSONDecodeError:
+            raw_filters = None
+            sql_filters_clause = None
+
+    # Fast path: if caller isn't using search and filters are SQL-able, do true SQL pagination.
+    # If filters are present but unsupported (e.g. reference_resolution), fall back to the existing slow path.
+    use_fast_sql_paging = not search and (not filters or sql_filters_clause is not None)
+    rows: list[tuple[int, dict]] = []
 
     # Restrict to sub_fields (columns) the user can view.
     # Important: don't call permission helpers per column (slow and can time out).
@@ -674,14 +1068,14 @@ async def list_multi_items_rows(
                     "is_required": getattr(sf, "is_required", False),
                 }
             )
-    # Keep all defined sub-field keys for search / sort / filters. Reference-chain resolution must read
-    # stored reference cells even when this column is not in the user's viewable set (field ACL).
-    # Strip to viewable_keys only when building each row's `data` in the response.
-    subfield_key_set = {str(getattr(s, "key", "")) for s in (field.sub_fields or []) if getattr(s, "key", None)}
-    rows = [
-        (i, {k: v for k, v in r.items() if k in subfield_key_set})
-        for i, r in rows
-    ]
+    if not use_fast_sql_paging:
+        # Slow path only: we will load all rows into memory and need to restrict keys for search/sort/filter.
+        # Keep all defined sub-field keys for search / sort / filters.
+        subfield_key_set = {str(getattr(s, "key", "")) for s in (field.sub_fields or []) if getattr(s, "key", None)}
+        rows = [
+            (i, {k: v for k, v in r.items() if k in subfield_key_set})
+            for i, r in rows
+        ]
 
     # Filter by search
     if search:
@@ -699,7 +1093,7 @@ async def list_multi_items_rows(
     # Advanced column filters (legacy substring map or structured _version 2)
     if filters:
         try:
-            raw_filters = json.loads(filters)
+            raw_filters = raw_filters if raw_filters is not None else json.loads(filters)
             if isinstance(raw_filters, dict):
                 resolution_maps = None
                 reference_field_types: dict[str, str] = {}
@@ -710,14 +1104,28 @@ async def list_multi_items_rows(
                 if raw_filters.get("_version") == 2:
                     conds = raw_filters.get("conditions")
                     if isinstance(conds, list):
-                        resolution_maps = await build_reference_resolution_map(
-                            db,
-                            org_id,
-                            entry.year,
-                            field,
-                            conds,
-                            [r for _, r in rows],
-                        )
+                        # Only build reference resolution maps if filters actually require reference lookups.
+                        # This can be very expensive; avoid it for pure scalar conditions (e.g. eq/contains on text/number/date).
+                        needs_ref = False
+                        for c in conds:
+                            if not isinstance(c, dict):
+                                continue
+                            if c.get("reference_resolution"):
+                                needs_ref = True
+                                break
+                            fk = c.get("field")
+                            if fk is not None and reference_field_types.get(str(fk)) in ("reference", "multi_reference"):
+                                needs_ref = True
+                                break
+                        if needs_ref:
+                            resolution_maps = await build_reference_resolution_map(
+                                db,
+                                org_id,
+                                entry.year,
+                                field,
+                                conds,
+                                [r for _, r in rows],
+                            )
                     rows = [
                         (i, r)
                         for i, r in rows
@@ -781,18 +1189,271 @@ async def list_multi_items_rows(
     # Visibility: when row-level access is enabled, non-admin users should only see rows explicitly assigned to them.
     # An access record implies view permission; can_edit/can_delete control actions.
     if field_row_access_enabled and not is_org_admin:
+        pass
+
+    # Optional: filter down to only rows the user can edit/delete.
+    if editable_only:
+        if not (field_row_access_enabled and not is_org_admin):
+            # Row-level access disabled (or org/super admin): permissions are identical for all rows.
+            if not (can_edit_common or can_delete_common):
+                use_fast_sql_paging = True  # will return empty below
+
+    if use_fast_sql_paging:
+        # Determine which row_indices are visible to the user (row-level access) and/or editable_only.
+        base_rows_stmt = select(KpiMultiLineRow.id, KpiMultiLineRow.row_index).where(
+            KpiMultiLineRow.entry_id == entry.id,
+            KpiMultiLineRow.field_id == field.id,
+        )
+        if sql_filters_clause is not None:
+            base_rows_stmt = base_rows_stmt.where(sql_filters_clause)
+        if field_row_access_enabled and not is_org_admin:
+            # Only rows with an access record for this user are visible.
+            base_rows_stmt = (
+                base_rows_stmt.join(
+                    KpiMultiLineRowAccess,
+                    and_(
+                        KpiMultiLineRowAccess.entry_id == KpiMultiLineRow.entry_id,
+                        KpiMultiLineRowAccess.field_id == KpiMultiLineRow.field_id,
+                        KpiMultiLineRowAccess.row_index == KpiMultiLineRow.row_index,
+                    ),
+                )
+                .where(KpiMultiLineRowAccess.user_id == current_user.id)
+            )
+            if editable_only:
+                base_rows_stmt = base_rows_stmt.where(
+                    (KpiMultiLineRowAccess.can_edit == True) | (KpiMultiLineRowAccess.can_delete == True)  # noqa: E712
+                )
+        elif editable_only and not (can_edit_common or can_delete_common):
+            # No row is editable for this user.
+            total = 0
+            return MultiItemsListResponse(
+                total=0,
+                page=page,
+                page_size=page_size,
+                rows=[],
+                sub_fields=sub_fields_payload,
+            )
+
+        total = int(
+            (
+                await db.execute(
+                    select(func.count()).select_from(base_rows_stmt.subquery())
+                )
+            ).scalar_one()
+            or 0
+        )
+        start = (page - 1) * page_size
+
+        order_stmt = base_rows_stmt
+        if sort_by:
+            # SQL sort on a specific sub-field to avoid the slow in-memory path on large datasets.
+            # This keeps paging in SQL even for 20k+ rows.
+            sort_sf = next((s for s in (field.sub_fields or []) if str(getattr(s, "key", "")) == str(sort_by)), None)
+            sort_sf_id = int(getattr(sort_sf, "id", 0) or 0) if sort_sf is not None else 0
+            sort_ft = getattr(getattr(sort_sf, "field_type", None), "value", getattr(sort_sf, "field_type", None)) if sort_sf is not None else None
+            if sort_sf_id > 0:
+                order_cell = KpiMultiLineCell
+                order_stmt = order_stmt.outerjoin(
+                    order_cell,
+                    and_(
+                        order_cell.row_id == KpiMultiLineRow.id,
+                        order_cell.sub_field_id == sort_sf_id,
+                    ),
+                )
+                if str(sort_ft) == "number":
+                    sort_expr = order_cell.value_number
+                elif str(sort_ft) == "date":
+                    sort_expr = order_cell.value_date
+                elif str(sort_ft) == "boolean":
+                    # bool sorts false < true; keep nulls last
+                    sort_expr = order_cell.value_boolean
+                else:
+                    # text / json / reference-like: sort by stringified value
+                    sort_expr = func.coalesce(
+                        cast(order_cell.value_text, String()),
+                        cast(order_cell.value_json, String()),
+                        cast(order_cell.value_number, String()),
+                        cast(order_cell.value_boolean, String()),
+                        cast(order_cell.value_date, String()),
+                    )
+                reverse = sort_dir == "desc"
+                order_stmt = order_stmt.order_by(nulls_last(sort_expr.desc() if reverse else sort_expr.asc()))
+            else:
+                order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
+        else:
+            order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
+
+        paged_rows_res = await db.execute(order_stmt.offset(start).limit(page_size))
+        page_rows = list(paged_rows_res.all())  # [(id, row_index)]
+        if not page_rows:
+            return MultiItemsListResponse(
+                total=total,
+                page=page,
+                page_size=page_size,
+                rows=[],
+                sub_fields=sub_fields_payload,
+            )
+        row_ids = [int(r[0]) for r in page_rows]
+        row_index_by_id = {int(rid): int(ridx) for rid, ridx in page_rows}
+
+        cell_res = await db.execute(
+            select(
+                KpiMultiLineCell.row_id,
+                KPIFieldSubField.key,
+                KpiMultiLineCell.value_text,
+                KpiMultiLineCell.value_number,
+                KpiMultiLineCell.value_boolean,
+                KpiMultiLineCell.value_date,
+                KpiMultiLineCell.value_json,
+            )
+            .select_from(KpiMultiLineCell)
+            .join(KPIFieldSubField, KPIFieldSubField.id == KpiMultiLineCell.sub_field_id)
+            .where(KpiMultiLineCell.row_id.in_(row_ids))
+        )
+
+        row_data_by_index: dict[int, dict[str, Any]] = {row_index_by_id[rid]: {} for rid in row_ids}
+        for row_id, key, vt, vn, vb, vd, vj in cell_res.all():
+            idx = row_index_by_id.get(int(row_id))
+            if idx is None or not key:
+                continue
+            # Reuse helper behavior from _cell_value_raw (inline for speed)
+            if vj is not None:
+                raw = vj
+            elif vt is not None:
+                raw = vt
+            elif vn is not None:
+                raw = vn
+            elif vb is not None:
+                raw = vb
+            elif vd is not None:
+                raw = vd.isoformat() if hasattr(vd, "isoformat") else str(vd)
+            else:
+                raw = None
+            row_data_by_index[idx][str(key)] = raw
+
+        for rid, row_index in page_rows:
+            orig_index = int(row_index)
+            r = row_data_by_index.get(orig_index, {})
+            if field_row_access_enabled and not is_org_admin:
+                rule = row_rule_map.get(int(orig_index))
+                can_edit = rule[0] if rule else False
+                can_delete = rule[1] if rule else False
+            else:
+                can_edit = can_edit_common
+                can_delete = can_delete_common
+            r_visible = {k: v for k, v in (r or {}).items() if k in viewable_keys}
+            out_rows.append(MultiItemsRow(index=orig_index, data=r_visible, can_edit=can_edit, can_delete=can_delete))
+
+        return MultiItemsListResponse(
+            total=total,
+            page=page,
+            page_size=page_size,
+            rows=out_rows,
+            sub_fields=sub_fields_payload,
+        )
+
+    # Slow path: load all rows into memory for complex search/filters/sort_by.
+    # (This is kept for feature parity; we can iterate to push these into SQL later.)
+    rows: list[tuple[int, dict]] = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+
+    # Restrict keys for search/sort/filter operations.
+    subfield_key_set = {str(getattr(s, "key", "")) for s in (field.sub_fields or []) if getattr(s, "key", None)}
+    rows = [(i, {k: v for k, v in r.items() if k in subfield_key_set}) for i, r in rows]
+
+    # Filter by search
+    if search:
+        q = search.lower().strip()
+
+        def matches(row: dict) -> bool:
+            for v in row.values():
+                if v is None:
+                    continue
+                s = str(v).lower()
+                if q in s:
+                    return True
+            return False
+
+        rows = [(i, r) for i, r in rows if matches(r)]
+
+    # Advanced column filters (legacy substring map or structured _version 2)
+    if filters:
+        try:
+            raw_filters = json.loads(filters)
+            if isinstance(raw_filters, dict):
+                resolution_maps = None
+                reference_field_types: dict[str, str] = {}
+                for sf in field.sub_fields or []:
+                    k = getattr(sf, "key", "")
+                    ft = getattr(sf.field_type, "value", sf.field_type)
+                    reference_field_types[str(k)] = str(ft)
+                if raw_filters.get("_version") == 2:
+                    conds = raw_filters.get("conditions")
+                    if isinstance(conds, list):
+                        needs_ref = False
+                        for c in conds:
+                            if not isinstance(c, dict):
+                                continue
+                            if c.get("reference_resolution"):
+                                needs_ref = True
+                                break
+                            fk = c.get("field")
+                            if fk is not None and reference_field_types.get(str(fk)) in ("reference", "multi_reference"):
+                                needs_ref = True
+                                break
+                        if needs_ref:
+                            resolution_maps = await build_reference_resolution_map(
+                                db,
+                                org_id,
+                                entry.year,
+                                field,
+                                conds,
+                                [r for _, r in rows],
+                            )
+                    rows = [
+                        (i, r)
+                        for i, r in rows
+                        if row_passes_filters(
+                            r,
+                            raw_filters,
+                            resolution_maps=resolution_maps,
+                            reference_field_types=reference_field_types,
+                        )
+                    ]
+                else:
+                    rows = [(i, r) for i, r in rows if row_passes_filters(r, raw_filters)]
+        except json.JSONDecodeError:
+            pass
+
+    # Sort (by row data; original index is preserved in the tuple)
+    if sort_by:
+        reverse = sort_dir == "desc"
+
+        def sort_key(row: dict):
+            v = row.get(sort_by)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return str(v) if v is not None else ""
+
+        try:
+            rows = sorted(rows, key=lambda ir: sort_key(ir[1]), reverse=reverse)
+        except Exception:
+            pass
+
+    # Visibility: when row-level access is enabled, non-admin users should only see rows explicitly assigned to them.
+    if field_row_access_enabled and not is_org_admin:
         rows = [(i, r) for (i, r) in rows if int(i) in row_rule_map]
 
     # Optional: filter down to only rows the user can edit/delete.
     if editable_only:
         if field_row_access_enabled and not is_org_admin:
+
             def row_can_edit_or_delete(orig_index: int) -> bool:
                 rule = row_rule_map.get(int(orig_index))
                 return bool(rule and (rule[0] or rule[1]))
 
             rows = [(i, r) for (i, r) in rows if row_can_edit_or_delete(i)]
         else:
-            # Row-level access disabled (or org/super admin): permissions are identical for all rows.
             if not (can_edit_common or can_delete_common):
                 rows = []
 
@@ -833,7 +1494,7 @@ async def add_multi_items_row(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Append a new row to multi_line_items value_json for an entry+field."""
+    """Append a new row to relational multi_line_items storage for an entry+field."""
     org_id = _org_id(current_user, organization_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
@@ -848,15 +1509,6 @@ async def add_multi_items_row(
     if not can_add:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to add rows to this field")
 
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
-    )
-    fv = fv_res.scalar_one_or_none()
-    if fv is None:
-        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id, value_json=[])
-        db.add(fv)
-    if not isinstance(fv.value_json, list):
-        fv.value_json = []
     # Normalize special sub-field types (e.g. mixed_list) for consistent storage.
     normalized_row = row if isinstance(row, dict) else {}
     key_to_sub = {getattr(s, "key", None): s for s in (field.sub_fields or []) if getattr(s, "key", None)}
@@ -866,12 +1518,65 @@ async def add_multi_items_row(
             continue
         if getattr(sub, "field_type", None) == FieldType.mixed_list:
             normalized_row[k] = coerce_mixed_list_raw(v) or None
-    fv.value_json.append(normalized_row)
-    flag_modified(fv, "value_json")
-    await db.flush()
+
+    max_idx_res = await db.execute(
+        select(func.max(KpiMultiLineRow.row_index)).where(
+            KpiMultiLineRow.entry_id == entry.id,
+            KpiMultiLineRow.field_id == field.id,
+        )
+    )
+    max_idx = max_idx_res.scalar_one_or_none()
+    new_index = int(max_idx) + 1 if max_idx is not None else 0
+
+    mlr = KpiMultiLineRow(entry_id=entry.id, field_id=field.id, row_index=new_index)
+    db.add(mlr)
+    await db.flush()  # populate mlr.id
+
+    def _add_cell(sub, raw_val: Any) -> None:
+        c = KpiMultiLineCell(row_id=mlr.id, sub_field_id=int(getattr(sub, "id")))
+        ft = getattr(sub, "field_type", None)
+        ft_s = ft.value if hasattr(ft, "value") else str(ft)
+        if raw_val is None:
+            pass
+        elif ft_s == "number":
+            try:
+                c.value_number = float(raw_val)
+            except Exception:
+                c.value_text = str(raw_val)
+        elif ft_s == "boolean":
+            if isinstance(raw_val, bool):
+                c.value_boolean = raw_val
+            else:
+                s = str(raw_val).strip().lower()
+                if s in ("true", "yes", "1"):
+                    c.value_boolean = True
+                elif s in ("false", "no", "0"):
+                    c.value_boolean = False
+                else:
+                    c.value_text = str(raw_val)
+        elif ft_s == "date":
+            # UI often stores ISO date string; keep it as text for consistency.
+            c.value_text = str(raw_val)
+        elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
+            if isinstance(raw_val, (dict, list)):
+                c.value_json = raw_val
+            else:
+                c.value_text = str(raw_val)
+        else:
+            if isinstance(raw_val, (dict, list)):
+                c.value_json = raw_val
+            else:
+                c.value_text = str(raw_val)
+        db.add(c)
+
+    for k, v in normalized_row.items():
+        sub = key_to_sub.get(k)
+        if not sub:
+            continue
+        _add_cell(sub, v)
+
     await db.commit()
-    index = len(fv.value_json) - 1
-    return MultiItemsRow(index=index, data=normalized_row)
+    return MultiItemsRow(index=new_index, data=normalized_row)
 
 
 @router.put("/multi-items/rows/{row_index}", response_model=MultiItemsRow)
@@ -884,7 +1589,7 @@ async def update_multi_items_row(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Update a single row in multi_line_items value_json."""
+    """Update a single row in relational multi_line_items storage."""
     org_id = _org_id(current_user, organization_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
@@ -899,33 +1604,85 @@ async def update_multi_items_row(
     if not can_edit:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this row")
 
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    mlr_res = await db.execute(
+        select(KpiMultiLineRow)
+        .where(
+            KpiMultiLineRow.entry_id == entry.id,
+            KpiMultiLineRow.field_id == field.id,
+            KpiMultiLineRow.row_index == row_index,
+        )
+        .options(selectinload(KpiMultiLineRow.cells))
     )
-    fv = fv_res.scalar_one_or_none()
-    if not fv or not isinstance(fv.value_json, list):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rows to update")
-    if row_index < 0 or row_index >= len(fv.value_json):
+    mlr = mlr_res.scalar_one_or_none()
+    if not mlr:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Row index out of range")
-    # Merge row: only update cells for sub_fields the user can edit
-    existing_row = fv.value_json[row_index]
-    if not isinstance(existing_row, dict):
-        existing_row = {}
+
+    existing_cells = {int(c.sub_field_id): c for c in (mlr.cells or []) if getattr(c, "sub_field_id", None) is not None}
     key_to_sub = {getattr(s, "key", None): s for s in (field.sub_fields or []) if getattr(s, "key", None)}
-    for col_key, col_value in row.items():
+
+    def _set_cell_value(cell: KpiMultiLineCell, sub: Any, raw_val: Any) -> None:
+        cell.value_text = None
+        cell.value_number = None
+        cell.value_json = None
+        cell.value_boolean = None
+        cell.value_date = None
+        ft = getattr(sub, "field_type", None)
+        ft_s = ft.value if hasattr(ft, "value") else str(ft)
+        if raw_val is None:
+            return
+        if ft_s == "number":
+            try:
+                cell.value_number = float(raw_val)
+            except Exception:
+                cell.value_text = str(raw_val)
+            return
+        if ft_s == "boolean":
+            if isinstance(raw_val, bool):
+                cell.value_boolean = raw_val
+            else:
+                s = str(raw_val).strip().lower()
+                if s in ("true", "yes", "1"):
+                    cell.value_boolean = True
+                elif s in ("false", "no", "0"):
+                    cell.value_boolean = False
+                else:
+                    cell.value_text = str(raw_val)
+            return
+        if ft_s == "date":
+            cell.value_text = str(raw_val)
+            return
+        if ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
+            if isinstance(raw_val, (dict, list)):
+                cell.value_json = raw_val
+            else:
+                cell.value_text = str(raw_val)
+            return
+        if isinstance(raw_val, (dict, list)):
+            cell.value_json = raw_val
+        else:
+            cell.value_text = str(raw_val)
+
+    # Merge row: only update cells for sub_fields the user can edit
+    for col_key, col_value in (row or {}).items():
         sub = key_to_sub.get(col_key)
         if sub is None:
             continue
-        if await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, getattr(sub, "id", None)):
-            if getattr(sub, "field_type", None) == FieldType.mixed_list:
-                existing_row[col_key] = coerce_mixed_list_raw(col_value) or None
-            else:
-                existing_row[col_key] = col_value
-    fv.value_json[row_index] = existing_row
-    flag_modified(fv, "value_json")
-    await db.flush()
+        if not await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, getattr(sub, "id", None)):
+            continue
+        next_val = (coerce_mixed_list_raw(col_value) or None) if getattr(sub, "field_type", None) == FieldType.mixed_list else col_value
+        sub_id = int(getattr(sub, "id"))
+        cell = existing_cells.get(sub_id)
+        if cell is None:
+            cell = KpiMultiLineCell(row_id=mlr.id, sub_field_id=sub_id)
+            db.add(cell)
+            existing_cells[sub_id] = cell
+        _set_cell_value(cell, sub, next_val)
+
     await db.commit()
-    return MultiItemsRow(index=row_index, data=fv.value_json[row_index])
+    # Return row in legacy dict shape
+    rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
+    data = rows[0][1] if rows else {}
+    return MultiItemsRow(index=row_index, data=data)
 
 
 @router.post("/multi-items/rows/{row_index}/cell", response_model=MultiItemsRow)
@@ -965,28 +1722,72 @@ async def update_multi_items_row_cell(
     if not can_edit_cell:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this column")
 
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    mlr_res = await db.execute(
+        select(KpiMultiLineRow)
+        .where(
+            KpiMultiLineRow.entry_id == entry.id,
+            KpiMultiLineRow.field_id == field.id,
+            KpiMultiLineRow.row_index == row_index,
+        )
+        .options(selectinload(KpiMultiLineRow.cells))
     )
-    fv = fv_res.scalar_one_or_none()
-    if not fv or not isinstance(fv.value_json, list):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No rows to update")
-    if row_index < 0 or row_index >= len(fv.value_json):
+    mlr = mlr_res.scalar_one_or_none()
+    if not mlr:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Row index out of range")
 
-    row = fv.value_json[row_index]
-    if not isinstance(row, dict):
-        row = {}
-        fv.value_json[row_index] = row
+    sub_id = int(getattr(sub, "id"))
+    cell = next((c for c in (mlr.cells or []) if int(getattr(c, "sub_field_id", -1)) == sub_id), None)
+    if cell is None:
+        cell = KpiMultiLineCell(row_id=mlr.id, sub_field_id=sub_id)
+        db.add(cell)
 
+    raw_val: Any = value
     if getattr(sub, "field_type", None) == FieldType.mixed_list:
-        row[key] = coerce_mixed_list_raw(value) or None
+        raw_val = coerce_mixed_list_raw(value) or None
+
+    # Typed set (similar to update_multi_items_row)
+    cell.value_text = None
+    cell.value_number = None
+    cell.value_json = None
+    cell.value_boolean = None
+    cell.value_date = None
+    ft = getattr(sub, "field_type", None)
+    ft_s = ft.value if hasattr(ft, "value") else str(ft)
+    if raw_val is None:
+        pass
+    elif ft_s == "number":
+        try:
+            cell.value_number = float(raw_val)
+        except Exception:
+            cell.value_text = str(raw_val)
+    elif ft_s == "boolean":
+        if isinstance(raw_val, bool):
+            cell.value_boolean = raw_val
+        else:
+            s = str(raw_val).strip().lower()
+            if s in ("true", "yes", "1"):
+                cell.value_boolean = True
+            elif s in ("false", "no", "0"):
+                cell.value_boolean = False
+            else:
+                cell.value_text = str(raw_val)
+    elif ft_s == "date":
+        cell.value_text = str(raw_val)
+    elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
+        if isinstance(raw_val, (dict, list)):
+            cell.value_json = raw_val
+        else:
+            cell.value_text = str(raw_val)
     else:
-        row[key] = value
-    flag_modified(fv, "value_json")  # SQLAlchemy does not track in-place JSON mutations
-    await db.flush()
+        if isinstance(raw_val, (dict, list)):
+            cell.value_json = raw_val
+        else:
+            cell.value_text = str(raw_val)
+
     await db.commit()
-    return MultiItemsRow(index=row_index, data=row)
+    rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
+    data = rows[0][1] if rows else {}
+    return MultiItemsRow(index=row_index, data=data)
 
 
 @router.delete("/multi-items/rows/{row_index}", status_code=status.HTTP_204_NO_CONTENT)
@@ -998,7 +1799,7 @@ async def delete_multi_items_row(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete a single row in multi_line_items value_json."""
+    """Delete a single row in relational multi_line_items storage."""
     org_id = _org_id(current_user, organization_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
@@ -1013,17 +1814,19 @@ async def delete_multi_items_row(
     if not can_delete:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to delete this row")
 
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
+    mlr_res = await db.execute(
+        select(KpiMultiLineRow).where(
+            KpiMultiLineRow.entry_id == entry.id,
+            KpiMultiLineRow.field_id == field.id,
+            KpiMultiLineRow.row_index == row_index,
+        )
     )
-    fv = fv_res.scalar_one_or_none()
-    if not fv or not isinstance(fv.value_json, list):
+    mlr = mlr_res.scalar_one_or_none()
+    if not mlr:
         return
-    if row_index < 0 or row_index >= len(fv.value_json):
-        return
-    del fv.value_json[row_index]
-    flag_modified(fv, "value_json")
+    await db.delete(mlr)
     await db.flush()
+    await _reindex_multi_line_rows(db, entry_id=entry.id, field_id=field.id)
     await _reindex_row_access_after_delete(
         db,
         entry_id=entry.id,
@@ -1042,7 +1845,7 @@ async def bulk_delete_multi_items_rows(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Bulk delete rows in multi_line_items value_json by index list."""
+    """Bulk delete rows in relational multi_line_items storage by index list."""
     org_id = _org_id(current_user, organization_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
@@ -1054,25 +1857,30 @@ async def bulk_delete_multi_items_rows(
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
 
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
-    )
-    fv = fv_res.scalar_one_or_none()
-    if not fv or not isinstance(fv.value_json, list):
-        return
     raw_index_set = {i for i in indices if isinstance(i, int) and i >= 0}
     if not raw_index_set:
         return
     # Only delete rows the user is allowed to delete (record-level or field-level)
-    index_set = set()
+    index_set: set[int] = set()
     for idx in raw_index_set:
-        if idx < len(fv.value_json) and await user_can_delete_row(db, current_user.id, entry.id, field.id, idx):
-            index_set.add(idx)
+        if await user_can_delete_row(db, current_user.id, entry.id, field.id, idx):
+            index_set.add(int(idx))
     if not index_set:
         return
-    fv.value_json = [r for idx, r in enumerate(fv.value_json) if idx not in index_set]
-    flag_modified(fv, "value_json")
+
+    # Delete rows matching indices
+    del_res = await db.execute(
+        select(KpiMultiLineRow).where(
+            KpiMultiLineRow.entry_id == entry.id,
+            KpiMultiLineRow.field_id == field.id,
+            KpiMultiLineRow.row_index.in_(sorted(index_set)),
+        )
+    )
+    for r in list(del_res.scalars().all()):
+        await db.delete(r)
     await db.flush()
+
+    await _reindex_multi_line_rows(db, entry_id=entry.id, field_id=field.id)
     await _reindex_row_access_after_delete(
         db,
         entry_id=entry.id,
@@ -1172,14 +1980,9 @@ async def sync_multi_items_from_api(
     if not isinstance(items, list):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Field API response 'items' must be a list")
 
-    # Load existing rows
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
-    )
-    fv = fv_res.scalar_one_or_none()
-    existing_rows: list[dict] = []
-    if fv and isinstance(fv.value_json, list):
-        existing_rows = fv.value_json
+    # Load existing rows (relational)
+    existing_pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+    existing_rows: list[dict] = [r for _, r in existing_pairs] if existing_pairs else []
 
     effective_mode = (sync_mode or "override").lower()
     item_dicts = [
@@ -1214,13 +2017,7 @@ async def sync_multi_items_from_api(
         rows_updated = 0
         rows_added = len(item_dicts)
 
-    if fv is None:
-        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id, value_json=new_rows)
-        db.add(fv)
-    else:
-        fv.value_json = new_rows
-    flag_modified(fv, "value_json")
-    await db.flush()
+    await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
     await db.commit()
     out: dict = {
         "entry_id": entry.id,
@@ -1292,17 +2089,10 @@ async def import_multi_items_from_year(
     if not src_entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source entry not found for selected year/period")
 
-    src_fv_res = await db.execute(
-        select(KPIFieldValue).where(
-            KPIFieldValue.entry_id == src_entry.id,
-            KPIFieldValue.field_id == field.id,
-        )
-    )
-    src_fv = src_fv_res.scalar_one_or_none()
-    incoming_items = list(src_fv.value_json) if src_fv and isinstance(src_fv.value_json, list) else []
+    incoming_pairs = await _load_multi_line_row_dicts(db, entry_id=src_entry.id, field=field)
     incoming_items = [
         dict(x)
-        for x in incoming_items
+        for _, x in (incoming_pairs or [])
         if isinstance(x, dict) and not _is_multi_items_row_effectively_empty(dict(x))
     ]
 
@@ -1319,36 +2109,26 @@ async def import_multi_items_from_year(
         mk = None
         match_ft = None
 
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(
-            KPIFieldValue.entry_id == entry.id,
-            KPIFieldValue.field_id == field.id,
-        )
-    )
-    fv = fv_res.scalar_one_or_none()
-    if fv is None:
-        fv = KPIFieldValue(entry_id=entry.id, field_id=field.id)
-        db.add(fv)
-    prev_count = len(fv.value_json) if isinstance(fv.value_json, list) else 0
-    existing_list = list(fv.value_json) if isinstance(fv.value_json, list) else []
+    existing_pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+    existing_list = [r for _, r in existing_pairs] if existing_pairs else []
+    prev_count = len(existing_list)
 
     rows_updated = 0
     if mode == "append":
-        fv.value_json = existing_list + incoming_items
+        new_rows = existing_list + incoming_items
         rows_added = len(incoming_items)
         rows_overridden = 0
     elif mode == "upsert":
         merged, rows_updated, rows_added = _upsert_merge_multi_line_items(existing_list, incoming_items, mk, match_ft)
-        fv.value_json = merged
+        new_rows = merged
         rows_overridden = 0
     else:
-        fv.value_json = incoming_items
+        new_rows = incoming_items
         rows_added = len(incoming_items)
         rows_overridden = prev_count
 
     entry.user_id = current_user.id
-    flag_modified(fv, "value_json")
-    await db.flush()
+    await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
     await db.commit()
 
     out: dict = {
@@ -1394,13 +2174,12 @@ async def list_multi_items_available_source_years(
     stmt = (
         select(distinct(KPIEntry.year))
         .select_from(KPIEntry)
-        .join(KPIFieldValue, KPIFieldValue.entry_id == KPIEntry.id)
+        .join(KpiMultiLineRow, KpiMultiLineRow.entry_id == KPIEntry.id)
         .where(
             KPIEntry.organization_id == org_id,
             KPIEntry.kpi_id == int(kpi_id),
             KPIEntry.year < int(target_year),
-            KPIFieldValue.field_id == int(field_id),
-            KPIFieldValue.value_json.isnot(None),
+            KpiMultiLineRow.field_id == int(field_id),
         )
     )
     if period_key is not None:
@@ -1436,11 +2215,8 @@ async def export_multi_items_csv(
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
 
-    fv_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id, KPIFieldValue.field_id == field.id)
-    )
-    fv = fv_res.scalar_one_or_none()
-    rows: list[dict] = fv.value_json if fv and isinstance(fv.value_json, list) else []
+    pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+    rows: list[dict] = [r for _, r in pairs] if pairs else []
 
     # Filter by search
     if search:
@@ -1471,14 +2247,26 @@ async def export_multi_items_csv(
                 if raw_filters.get("_version") == 2:
                     conds = raw_filters.get("conditions")
                     if isinstance(conds, list):
-                        resolution_maps = await build_reference_resolution_map(
-                            db,
-                            org_id,
-                            entry.year,
-                            field,
-                            conds,
-                            [r for r in rows if isinstance(r, dict)],
-                        )
+                        needs_ref = False
+                        for c in conds:
+                            if not isinstance(c, dict):
+                                continue
+                            if c.get("reference_resolution"):
+                                needs_ref = True
+                                break
+                            fk = c.get("field")
+                            if fk is not None and reference_field_types.get(str(fk)) in ("reference", "multi_reference"):
+                                needs_ref = True
+                                break
+                        if needs_ref:
+                            resolution_maps = await build_reference_resolution_map(
+                                db,
+                                org_id,
+                                entry.year,
+                                field,
+                                conds,
+                                [r for r in rows if isinstance(r, dict)],
+                            )
                     rows = [
                         r
                         for r in rows
@@ -1632,6 +2420,146 @@ async def get_multi_items_add_row_info(
     return {"can_add_row": bool(can_add)}
 
 
+@router.get("/multi-items/page-context", response_model=MultiItemsPageContextResponse)
+async def get_multi_items_page_context(
+    kpi_id: int = Query(..., description="KPI id for the entry"),
+    year: int = Query(..., ge=2000, le=2100),
+    field_id: int = Query(..., description="Multi-line items field id"),
+    period_key: str | None = Query(None, description="Period key: '', H1, H2, Q1-Q4, 01-12"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Multi-line full page view context in a single call:
+    - entry_id (created if missing)
+    - KPI minimal name
+    - the requested multi-line field (with sub_fields + permissions)
+    - can_edit and KPI-level edit
+    - can_add_row for this multi-line field
+    """
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id, org_id=org_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+
+    pk = (period_key or "").strip()[:8]
+    entry, created = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=pk)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
+    if created:
+        await db.commit()
+
+    # KPI minimal
+    kpi_res = await db.execute(select(KPI.id, KPI.name).where(KPI.id == kpi_id, KPI.organization_id == org_id))
+    kpi_row = kpi_res.first()
+    if not kpi_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    kpi_name = str(kpi_row[1] or "")
+
+    # Load just the requested field (fast path) + permissions payload like /entries/fields
+    field_res = await db.execute(
+        select(KPIField)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPIField.id == int(field_id), KPIField.kpi_id == int(kpi_id), KPI.organization_id == org_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    f = field_res.scalar_one_or_none()
+    if not f or getattr(f, "field_type", None) != FieldType.multi_line_items:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    field_access = await get_user_field_access_for_kpi(db, current_user.id, kpi_id)
+    if field_access is None:
+        can_edit = await user_can_edit_kpi(db, current_user.id, kpi_id, org_id=org_id)
+        whole_perm = "data_entry" if can_edit else "view"
+    else:
+        can_edit = any(perm == "data_entry" for perm in field_access.values())
+        whole_perm = field_access.get((f.id, None))
+
+    # KPI-level can_edit (same semantics as /entries/kpi-api-info)
+    if current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        kpi_level_can_edit = True
+    else:
+        kpi_level_res = await db.execute(
+            select(KpiRoleAssignment.id)
+            .join(
+                UserOrganizationRole,
+                UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+            )
+            .where(
+                UserOrganizationRole.user_id == current_user.id,
+                KpiRoleAssignment.kpi_id == kpi_id,
+                KpiRoleAssignment.assignment_type == "data_entry",
+            )
+            .limit(1)
+        )
+        kpi_level_can_edit = kpi_level_res.scalar_one_or_none() is not None
+
+    # Field + sub-field permissions
+    sub_fields = list(getattr(f, "sub_fields", None) or [])
+    sub_payload: list[MultiItemsPageContextSubField] = []
+    if field_access is None:
+        for s in sub_fields:
+            sub_payload.append(
+                MultiItemsPageContextSubField(
+                    id=getattr(s, "id", None),
+                    key=str(getattr(s, "key", "")),
+                    name=str(getattr(s, "name", getattr(s, "key", ""))),
+                    field_type=getattr(getattr(s, "field_type", None), "value", getattr(s, "field_type", None)),
+                    is_required=bool(getattr(s, "is_required", False)),
+                    sort_order=getattr(s, "sort_order", None),
+                    config=getattr(s, "config", None),
+                    can_view=True,
+                    can_edit=bool(can_edit),
+                )
+            )
+    else:
+        for s in sub_fields:
+            sid = getattr(s, "id", None)
+            if sid is None:
+                continue
+            sub_perm = field_access.get((f.id, int(sid))) or whole_perm
+            if not sub_perm:
+                continue
+            sub_payload.append(
+                MultiItemsPageContextSubField(
+                    id=int(sid),
+                    key=str(getattr(s, "key", "")),
+                    name=str(getattr(s, "name", getattr(s, "key", ""))),
+                    field_type=getattr(getattr(s, "field_type", None), "value", getattr(s, "field_type", None)),
+                    is_required=bool(getattr(s, "is_required", False)),
+                    sort_order=getattr(s, "sort_order", None),
+                    config=getattr(s, "config", None),
+                    can_view=sub_perm in ("view", "data_entry"),
+                    can_edit=sub_perm == "data_entry",
+                )
+            )
+
+    out_field = MultiItemsPageContextField(
+        id=int(f.id),
+        kpi_id=int(f.kpi_id),
+        name=str(f.name or ""),
+        key=str(f.key or ""),
+        field_type=getattr(getattr(f, "field_type", None), "value", str(getattr(f, "field_type", ""))),
+        full_page_multi_items=bool(getattr(f, "full_page_multi_items", False)),
+        row_level_user_access_enabled=bool(getattr(f, "row_level_user_access_enabled", False)),
+        config=getattr(f, "config", None),
+        sub_fields=sub_payload,
+    )
+
+    can_add = await user_can_add_row_multi_line_field(db, current_user.id, kpi_id, int(f.id))
+
+    return MultiItemsPageContextResponse(
+        entry_id=int(entry.id),
+        kpi_id=int(kpi_id),
+        kpi_name=kpi_name,
+        field=out_field,
+        can_edit=bool(can_edit),
+        kpi_level_can_edit=bool(kpi_level_can_edit),
+        can_add_row=bool(can_add),
+    )
+
+
 @router.post("/sync-from-api")
 async def entry_sync_from_api(
     kpi_id: int = Query(...),
@@ -1676,6 +2604,8 @@ async def entry_sync_from_api(
 @router.get("/fields")
 async def get_entry_fields(
     kpi_id: int = Query(...),
+    field_id: int | None = Query(None, description="Optional: return only this field id (fast path for entry pages)"),
+    minimal: bool = Query(False, description="When true, omit options and other non-essential payload."),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -1686,7 +2616,27 @@ async def get_entry_fields(
     can_view_kpi = await user_can_view_kpi(db, current_user.id, kpi_id, org_id=org_id)
     if not can_view_kpi:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not assigned to this KPI")
-    fields = await list_kpi_fields_service(db, kpi_id, org_id)
+    if field_id is not None:
+        # True fast path: load only the requested field (and its options/sub_fields) from DB.
+        # Avoid loading all fields for the KPI and filtering in Python.
+        load_options = not minimal
+        field_res = await db.execute(
+            select(KPIField)
+            .join(KPI, KPI.id == KPIField.kpi_id)
+            .where(
+                KPIField.id == int(field_id),
+                KPIField.kpi_id == int(kpi_id),
+                KPI.organization_id == org_id,
+            )
+            .options(
+                *( [selectinload(KPIField.options)] if load_options else [] ),
+                selectinload(KPIField.sub_fields),
+            )
+        )
+        one = field_res.scalar_one_or_none()
+        fields = [one] if one is not None else []
+    else:
+        fields = await list_kpi_fields_service(db, kpi_id, org_id)
     field_access = await get_user_field_access_for_kpi(db, current_user.id, kpi_id)
 
     if field_access is None:
@@ -1707,7 +2657,7 @@ async def get_entry_fields(
                 "row_level_user_access_enabled": getattr(f, "row_level_user_access_enabled", False),
                 "can_view": True,
                 "can_edit": can_edit_kpi,
-                "options": [{"value": o.value, "label": o.label} for o in (f.options or [])],
+                "options": [] if minimal else [{"value": o.value, "label": o.label} for o in (f.options or [])],
                 "sub_fields": [
                     {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order, "config": getattr(s, "config", None), "can_view": True, "can_edit": can_edit_kpi}
                     for s in (getattr(f, "sub_fields", None) or [])
@@ -1759,7 +2709,7 @@ async def get_entry_fields(
             "row_level_user_access_enabled": getattr(f, "row_level_user_access_enabled", False),
             "can_view": whole_perm in ("view", "data_entry") if whole_perm else bool(sub_payload),
             "can_edit": whole_perm == "data_entry" if whole_perm else any(sp.get("can_edit") for sp in sub_payload),
-            "options": [{"value": o.value, "label": o.label} for o in (f.options or [])],
+            "options": [] if minimal else [{"value": o.value, "label": o.label} for o in (f.options or [])],
             "sub_fields": sub_payload if sub_payload else [
                 {"id": s.id, "field_id": s.field_id, "name": s.name, "key": s.key, "field_type": s.field_type.value, "is_required": s.is_required, "sort_order": s.sort_order, "config": getattr(s, "config", None), "can_view": True, "can_edit": whole_perm == "data_entry"}
                 for s in sub_fields_list
@@ -1775,7 +2725,7 @@ def _excel_sheet_name(name: str, max_len: int = 31) -> str:
     return out[:max_len].strip() or "Sheet"
 
 
-def _build_kpi_entry_xlsx(
+async def _build_kpi_entry_xlsx(
     kpi_name: str,
     year: int,
     org_id: int,
@@ -1844,8 +2794,8 @@ def _build_kpi_entry_xlsx(
             sheet_name = _excel_sheet_name(f"{f.name}_{idx}") or f"Table_{idx + 1}"
         ws = wb.create_sheet(title=sheet_name)
         ws.append(keys)
-        fv = value_by_field_id.get(f.id)
-        rows = list(fv.value_json) if (fv and isinstance(getattr(fv, "value_json", None), list)) else []
+        pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+        rows = [r for _, r in pairs] if pairs else []
         key_to_sf = {s.key: s for s in sub_fields}
         for row in rows:
             if not isinstance(row, dict):
@@ -1901,7 +2851,7 @@ async def export_entry_excel(
         .options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
     )
     entry = entry_res.scalar_one_or_none()
-    xlsx_bytes = _build_kpi_entry_xlsx(
+    xlsx_bytes = await _build_kpi_entry_xlsx(
         kpi_name=getattr(kpi, "name", "") or f"KPI_{kpi_id}",
         year=year,
         org_id=org_id,
@@ -2159,6 +3109,20 @@ def _reverse_ref_tokens_from_cell(cell) -> list[tuple[str, str]]:
 async def get_reverse_references_for_entry(
     kpi_id: int = Query(..., description="Parent KPI id"),
     entry_id: int = Query(..., description="Parent KPI entry id"),
+    include_rows: bool = Query(
+        False,
+        description="When false, return only KPI names + value tokens/counts without embedding row data.",
+    ),
+    values_limit: int = Query(
+        500,
+        ge=1,
+        le=5000,
+        description="When include_rows is false, maximum number of dropdown values to return per related KPI.",
+    ),
+    values_search: str | None = Query(
+        None,
+        description="When include_rows is false, optional case-insensitive search over value token/label.",
+    ),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -2243,40 +3207,50 @@ async def get_reverse_references_for_entry(
     parent_fields_by_key = {f.key: f for f in getattr(parent_kpi, "fields", []) or []}
     parent_fv_by_field_id = {fv.field_id: fv for fv in getattr(parent_entry, "field_values", []) or []}
 
-    # Load all KPI fields in this org with sub_fields, to find reference sub-fields pointing to this KPI
-    fields_res = await db.execute(
-        select(KPIField)
+    # Build descriptors for reference sub-fields that point to this parent KPI.
+    # Critical for performance: do NOT load all fields+sub_fields in the org.
+    sub_fields_res = await db.execute(
+        select(
+            KPIField.kpi_id,
+            KPIField.id,
+            KPIField.key,
+            KPIField.name,
+            KPIFieldSubField.id,
+            KPIFieldSubField.key,
+            KPIFieldSubField.name,
+            KPIFieldSubField.config,
+        )
+        .select_from(KPIFieldSubField)
+        .join(KPIField, KPIField.id == KPIFieldSubField.field_id)
         .join(KPI, KPI.id == KPIField.kpi_id)
-        .where(KPI.organization_id == org_id)
-        .options(selectinload(KPIField.sub_fields))
+        .where(
+            KPI.organization_id == org_id,
+            KPIFieldSubField.field_type.in_([FieldType.reference, FieldType.multi_reference]),
+        )
     )
-    all_fields = list(fields_res.scalars().all())
 
-    # Build descriptors for reference sub-fields that point to this parent KPI
     descriptors_by_child_kpi: dict[int, list[dict]] = {}
-    for f in all_fields:
-        for sf in getattr(f, "sub_fields", []) or []:
-            if getattr(sf, "field_type", None) not in (FieldType.reference, FieldType.multi_reference):
-                continue
-            cfg = getattr(sf, "config", None) or {}
-            sid = cfg.get("reference_source_kpi_id")
-            if not sid or int(sid) != kpi_id:
-                continue
-            skey = cfg.get("reference_source_field_key")
-            if not skey:
-                continue
-            parent_sub_key = cfg.get("reference_source_sub_field_key")
-            desc = {
-                "child_kpi_id": f.kpi_id,
-                "child_field_id": f.id,
-                "child_field_key": f.key,
-                "child_field_name": f.name,
-                "child_sub_field_key": sf.key,
-                "child_sub_field_name": sf.name,
-                "parent_field_key": str(skey),
-                "parent_sub_field_key": str(parent_sub_key) if parent_sub_key else None,
-            }
-            descriptors_by_child_kpi.setdefault(f.kpi_id, []).append(desc)
+    for child_kpi_id, child_field_id, child_field_key, child_field_name, child_sub_field_id, child_sub_field_key, child_sub_field_name, cfg in sub_fields_res.all():
+        cfg = cfg or {}
+        sid = cfg.get("reference_source_kpi_id")
+        if not sid or int(sid) != kpi_id:
+            continue
+        skey = cfg.get("reference_source_field_key")
+        if not skey:
+            continue
+        parent_sub_key = cfg.get("reference_source_sub_field_key")
+        desc = {
+            "child_kpi_id": int(child_kpi_id),
+            "child_field_id": int(child_field_id),
+            "child_field_key": str(child_field_key),
+            "child_field_name": str(child_field_name),
+            "child_sub_field_id": int(child_sub_field_id),
+            "child_sub_field_key": str(child_sub_field_key),
+            "child_sub_field_name": str(child_sub_field_name),
+            "parent_field_key": str(skey),
+            "parent_sub_field_key": str(parent_sub_key) if parent_sub_key else None,
+        }
+        descriptors_by_child_kpi.setdefault(int(child_kpi_id), []).append(desc)
 
     if not descriptors_by_child_kpi:
         return {
@@ -2295,6 +3269,175 @@ async def get_reverse_references_for_entry(
 
     response_tabs: list[dict] = []
 
+    # Fast path for the UI: include_rows=false only needs token counts and deep-link defaults.
+    # Avoid scanning all child multi_line rows in Python and avoid returning 20k dropdown options in one response.
+    if not include_rows:
+        parent_multi_cache: dict[int, list[tuple[int, dict]]] = {}
+
+        for child_kpi_id, desc_list in descriptors_by_child_kpi.items():
+            child_kpi = child_kpis.get(child_kpi_id)
+            child_kpi_name = getattr(child_kpi, "name", f"KPI #{child_kpi_id}")
+
+            # Compute parent tokens (token -> label) once for this child KPI's descriptors.
+            descriptor_tokens: dict[str, dict[str, str]] = {}
+            for d in desc_list:
+                p_key = d["parent_field_key"]
+                p_sub = d["parent_sub_field_key"]
+                parent_field = parent_fields_by_key.get(p_key)
+                if not parent_field:
+                    continue
+                fv = parent_fv_by_field_id.get(parent_field.id)
+                if not fv:
+                    continue
+                if p_sub:
+                    # Parent is a multi_line_items field: load from relational rows (cached per field id).
+                    if parent_field.id not in parent_multi_cache:
+                        parent_multi_cache[parent_field.id] = await _load_multi_line_row_dicts(
+                            db, entry_id=parent_entry.id, field=parent_field
+                        )
+                    items = [r for _, r in parent_multi_cache[parent_field.id]] if parent_multi_cache[parent_field.id] else []
+                    for row in items:
+                        if not isinstance(row, dict):
+                            continue
+                        cell = row.get(p_sub)
+                        for label, token in _reverse_ref_tokens_from_cell(cell):
+                            descriptor_tokens.setdefault(token, {"label": label})
+                else:
+                    p_ft = getattr(parent_field, "field_type", None)
+                    if p_ft == FieldType.multi_reference:
+                        arr = fv.value_json if isinstance(fv.value_json, list) else []
+                        for x in arr:
+                            label = str(x).strip() if x is not None else ""
+                            token = _normalize_reference_value(label)
+                            if token:
+                                descriptor_tokens.setdefault(token, {"label": label})
+                    else:
+                        raw_val = None
+                        if fv.value_text not in (None, ""):
+                            raw_val = fv.value_text
+                        elif fv.value_number is not None:
+                            raw_val = fv.value_number
+                        elif fv.value_boolean is not None:
+                            raw_val = fv.value_boolean
+                        elif fv.value_date is not None:
+                            raw_val = fv.value_date.isoformat()
+                        if raw_val is not None:
+                            label = (str(raw_val)).strip()
+                            token = _normalize_reference_value(label)
+                            if token:
+                                descriptor_tokens.setdefault(token, {"label": label})
+
+            if not descriptor_tokens:
+                continue
+
+            # Count matches in SQL per descriptor and merge results.
+            # IMPORTANT: Do NOT pass 20k tokens in an IN (...) list (very slow / huge query).
+            # Instead, aggregate counts for child tokens then intersect with parent tokens in Python.
+            token_counts: dict[str, int] = {}
+            for d in desc_list:
+                child_field_id = int(d["child_field_id"])
+                child_sub_field_id = int(d["child_sub_field_id"])
+
+                # Find the single child entry id for this KPI+year+period in this org (1 row).
+                child_entry_id_res = await db.execute(
+                    select(KPIEntry.id).where(
+                        KPIEntry.organization_id == org_id,
+                        KPIEntry.kpi_id == child_kpi_id,
+                        KPIEntry.year == parent_year,
+                        KPIEntry.period_key == parent_period_key,
+                    )
+                )
+                child_entry_id = child_entry_id_res.scalar_one_or_none()
+                if child_entry_id is None:
+                    continue
+
+                # Normalize reference token in SQL similar to _normalize_reference_value (strip + lower),
+                # but also keep the original-case label for UI + deep links.
+                cell = KpiMultiLineCell
+                raw_expr = func.trim(
+                    func.coalesce(
+                        cast(cell.value_text, String()),
+                        func.json_extract_path_text(cell.value_json, "label"),
+                        func.json_extract_path_text(cell.value_json, "value"),
+                        func.json_extract_path_text(cell.value_json, "token"),
+                        cast(cell.value_json, String()),
+                    )
+                )
+                token_expr = func.lower(raw_expr)
+                label_expr = raw_expr
+
+                base_q = (
+                    select(
+                        token_expr.label("t"),
+                        func.min(label_expr).label("label"),
+                        func.count().label("c"),
+                    )
+                    .select_from(KpiMultiLineRow)
+                    .join(KpiMultiLineCell, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+                    .where(
+                        KpiMultiLineRow.entry_id == int(child_entry_id),
+                        KpiMultiLineRow.field_id == child_field_id,
+                        KpiMultiLineCell.sub_field_id == child_sub_field_id,
+                        token_expr.isnot(None),
+                        token_expr != "",
+                    )
+                    .group_by(token_expr)
+                )
+
+                # Optional server-side search to keep payload small.
+                if values_search and values_search.strip():
+                    q = values_search.strip()
+                    base_q = base_q.where(token_expr.ilike(f"%{q.lower()}%"))
+
+                q = (
+                    base_q.order_by(token_expr.asc()).limit(int(values_limit))
+                )
+                res = await db.execute(q)
+                for t, label, c in res.all():
+                    if not t:
+                        continue
+                    token_counts[str(t)] = token_counts.get(str(t), 0) + int(c or 0)
+                    # Prefer a real original-case label from child rows.
+                    if label:
+                        descriptor_tokens.setdefault(str(t), {"label": str(label)})
+
+            if not token_counts:
+                continue
+
+            # Build payload from tokens that actually exist in the child KPI (keeps response small).
+            values_payload = []
+            for token, count in token_counts.items():
+                meta = descriptor_tokens.get(token)
+                label = meta["label"] if meta else token
+                if int(count or 0) <= 0:
+                    continue
+                values_payload.append({"token": token, "label": label, "count": int(count)})
+            if not values_payload:
+                continue
+            values_payload.sort(key=lambda x: x["label"])
+
+            default_target = desc_list[0] if desc_list else None
+            response_tabs.append(
+                {
+                    "child_kpi_id": child_kpi_id,
+                    "child_kpi_name": child_kpi_name,
+                    "child_field_id": default_target.get("child_field_id") if default_target else None,
+                    "child_sub_field_key": default_target.get("child_sub_field_key") if default_target else None,
+                    "values": values_payload,
+                    "rows": [],
+                    "sub_fields": [],
+                }
+            )
+
+        return {
+            "time_filter": {
+                "year": parent_year,
+                "period_key": parent_period_key,
+                "effective_time_dimension": effective_td.value if hasattr(effective_td, "value") else str(effective_td),
+            },
+            "tabs": response_tabs,
+        }
+
     for child_kpi_id, desc_list in descriptors_by_child_kpi.items():
         child_kpi = child_kpis.get(child_kpi_id)
         child_kpi_name = getattr(child_kpi, "name", f"KPI #{child_kpi_id}")
@@ -2311,7 +3454,9 @@ async def get_reverse_references_for_entry(
             if not fv:
                 continue
             if p_sub:
-                items = fv.value_json if isinstance(fv.value_json, list) else []
+                # Parent is a multi_line_items field: load from relational rows.
+                parent_field_rows = await _load_multi_line_row_dicts(db, entry_id=parent_entry.id, field=parent_field)
+                items = [r for _, r in parent_field_rows] if parent_field_rows else []
                 for row in items:
                     if not isinstance(row, dict):
                         continue
@@ -2360,28 +3505,55 @@ async def get_reverse_references_for_entry(
         )
         child_entries = list(child_entries_res.scalars().all())
 
-        # For table headers we can reuse the sub_fields of the first descriptor's field
+        # For table headers we can reuse the sub_fields of the first descriptor's field (slow path only).
+        # We no longer have `all_fields` loaded; fetch only needed fields.
+        child_field_cache: dict[int, KPIField] = {}
         first_desc = desc_list[0]
-        child_field = next((f for f in all_fields if f.id == first_desc["child_field_id"]), None)
+        first_child_field_id = int(first_desc["child_field_id"])
+        if first_child_field_id not in child_field_cache:
+            cf_res = await db.execute(
+                select(KPIField)
+                .join(KPI, KPI.id == KPIField.kpi_id)
+                .where(KPIField.id == first_child_field_id, KPI.organization_id == org_id)
+                .options(selectinload(KPIField.sub_fields))
+            )
+            cf = cf_res.scalar_one_or_none()
+            if cf is not None:
+                child_field_cache[first_child_field_id] = cf
+        child_field = child_field_cache.get(first_child_field_id)
         sub_fields_payload = []
         if child_field is not None:
             for sf in getattr(child_field, "sub_fields", []) or []:
                 sub_fields_payload.append({"key": sf.key, "name": getattr(sf, "name", sf.key)})
 
-        rows_payload: list[dict] = []
+        rows_payload: list[dict] = [] if include_rows else []
         token_counts: dict[str, int] = {t: 0 for t in descriptor_tokens.keys()}
         tokens_set = set(descriptor_tokens.keys())
 
         # Scan child entries for matching reference sub-field values
+        multi_cache: dict[tuple[int, int], list[tuple[int, dict]]] = {}
         for entry in child_entries:
             field_values = getattr(entry, "field_values", []) or []
             for d in desc_list:
-                child_field_id = d["child_field_id"]
+                child_field_id = int(d["child_field_id"])
                 child_sub_key = d["child_sub_field_key"]
-                fv = next((x for x in field_values if x.field_id == child_field_id), None)
-                if not fv or not isinstance(fv.value_json, list):
+                if child_field_id not in child_field_cache:
+                    cf_res = await db.execute(
+                        select(KPIField)
+                        .join(KPI, KPI.id == KPIField.kpi_id)
+                        .where(KPIField.id == child_field_id, KPI.organization_id == org_id)
+                        .options(selectinload(KPIField.sub_fields))
+                    )
+                    cf = cf_res.scalar_one_or_none()
+                    if cf is not None:
+                        child_field_cache[child_field_id] = cf
+                child_field = child_field_cache.get(child_field_id)
+                if child_field is None:
                     continue
-                for idx, row in enumerate(fv.value_json):
+                cache_key = (int(entry.id), int(child_field_id))
+                if cache_key not in multi_cache:
+                    multi_cache[cache_key] = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=child_field)
+                for idx, row in multi_cache[cache_key]:
                     if not isinstance(row, dict):
                         continue
                     cell = row.get(child_sub_key)
@@ -2389,25 +3561,26 @@ async def get_reverse_references_for_entry(
                         if token not in tokens_set:
                             continue
                         token_counts[token] = token_counts.get(token, 0) + 1
-                        rows_payload.append(
-                            {
-                                "entry_id": entry.id,
-                                "year": entry.year,
-                                "period_key": getattr(entry, "period_key", "") or "",
-                                "value_token": token,
-                                "value_display": label,
-                                "child_field_id": child_field_id,
-                                "child_field_key": d["child_field_key"],
-                                "child_field_name": d["child_field_name"],
-                                "child_sub_field_key": child_sub_key,
-                                "child_sub_field_name": d["child_sub_field_name"],
-                                "row_index": idx,
-                                "row": row,
-                            }
-                        )
+                        if include_rows:
+                            rows_payload.append(
+                                {
+                                    "entry_id": entry.id,
+                                    "year": entry.year,
+                                    "period_key": getattr(entry, "period_key", "") or "",
+                                    "value_token": token,
+                                    "value_display": label,
+                                    "child_field_id": child_field_id,
+                                    "child_field_key": d["child_field_key"],
+                                    "child_field_name": d["child_field_name"],
+                                    "child_sub_field_key": child_sub_key,
+                                    "child_sub_field_name": d["child_sub_field_name"],
+                                    "row_index": idx,
+                                    "row": row,
+                                }
+                            )
 
-        # Only include child KPI if we found any rows
-        if not rows_payload:
+        # Only include child KPI if we found any matching tokens
+        if not any((c or 0) > 0 for c in token_counts.values()):
             continue
 
         values_payload = []
@@ -2425,13 +3598,17 @@ async def get_reverse_references_for_entry(
         # Sort dropdown values by label
         values_payload.sort(key=lambda x: x["label"])
 
+        # Provide a default target field+sub_field for deep-linking into the child multi-line full page.
+        default_target = desc_list[0] if desc_list else None
         response_tabs.append(
             {
                 "child_kpi_id": child_kpi_id,
                 "child_kpi_name": child_kpi_name,
+                "child_field_id": default_target.get("child_field_id") if default_target else None,
+                "child_sub_field_key": default_target.get("child_sub_field_key") if default_target else None,
                 "values": values_payload,
-                "rows": rows_payload,
-                "sub_fields": sub_fields_payload,
+                "rows": rows_payload if include_rows else [],
+                "sub_fields": sub_fields_payload if include_rows else [],
             }
         )
 
@@ -2467,6 +3644,32 @@ async def get_or_create_entry_for_period(
         await db.commit()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
     return _entry_to_response(entry)
+
+
+@router.get("/for-period-id", response_model=EntryIdResponse)
+async def get_or_create_entry_for_period_id(
+    kpi_id: int = Query(...),
+    year: int = Query(...),
+    period_key: str | None = Query(None, description="Period key: '', H1, H2, Q1-Q4, 01-12"),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Lightweight variant of /entries/for-period that returns only the entry id.
+    Avoids loading/serializing field values (used by list pages that only need entry_id).
+    """
+    org_id = _org_id(current_user, organization_id)
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+    pk = (period_key or "").strip()[:8]
+    entry, created = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=pk)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
+    if created:
+        await db.commit()
+    return EntryIdResponse(id=int(entry.id), created=bool(created))
 
 
 @router.get("", response_model=list[EntryResponse])

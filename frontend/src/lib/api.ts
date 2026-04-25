@@ -130,6 +130,43 @@ export async function api<T>(
 ): Promise<T> {
   const { token, body, ...init } = options;
   const url = getApiUrl(path);
+  const method = (init.method || "GET").toUpperCase();
+
+  // Fast cache for /auth/me to avoid repeating this call across pages/components.
+  // Token-scoped and short-lived to prevent stale UI after role/org changes.
+  if ((method === "GET" || method === "HEAD") && url.endsWith("/api/auth/me") && token) {
+    const cached = meCacheByToken.get(token);
+    if (cached && Date.now() - cached.ts < ME_CACHE_TTL_MS) {
+      return cached.data as T;
+    }
+  }
+
+  // In-flight de-duplication: if multiple components trigger the exact same request at the same time
+  // (common with React strict mode + shared layout fetching), share one Promise and one network call.
+  // Key includes token because auth can change the response.
+  const dedupeKey = (() => {
+    const b =
+      body === undefined || body === null
+        ? ""
+        : typeof body === "string"
+          ? body
+          : (() => {
+              try {
+                return JSON.stringify(body);
+              } catch {
+                return String(body);
+              }
+            })();
+    return `${method} ${url} token=${token || ""} body=${b}`;
+  })();
+
+  // Only dedupe safe idempotent methods by default.
+  const canDedupe = method === "GET" || method === "HEAD";
+  if (canDedupe) {
+    const existing = inflightRequests.get(dedupeKey);
+    if (existing) return existing as Promise<T>;
+  }
+
   const headers: HeadersInit = {
     ...(init.headers as Record<string, string>),
   };
@@ -139,21 +176,46 @@ export async function api<T>(
   if (token) {
     (headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
   }
-  const res = await fetch(url, { ...init, body, headers });
-  if (!res.ok) {
-    if (res.status === 401 && typeof window !== "undefined") {
-      import("./auth").then(({ clearTokens }) => {
-        clearTokens();
-        window.location.href = "/login";
-      });
-      return new Promise(() => {}) as Promise<T>;
+
+  const run = (async () => {
+    const res = await fetch(url, { ...init, body, headers });
+    if (!res.ok) {
+      if (res.status === 401 && typeof window !== "undefined") {
+        import("./auth").then(({ clearTokens }) => {
+          clearTokens();
+          window.location.href = "/login";
+        });
+        return new Promise(() => {}) as Promise<T>;
+      }
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      const message = Array.isArray(err.detail)
+        ? err.detail.map((e: { msg: string }) => e.msg).join(", ")
+        : (err.detail || res.statusText);
+      const error = new Error(typeof message === "string" ? message : "Request failed") as Error & {
+        errors?: unknown[];
+      };
+      if (Array.isArray(err.errors)) error.errors = err.errors;
+      throw error;
     }
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    const message = Array.isArray(err.detail) ? err.detail.map((e: { msg: string }) => e.msg).join(", ") : (err.detail || res.statusText);
-    const error = new Error(typeof message === "string" ? message : "Request failed") as Error & { errors?: unknown[] };
-    if (Array.isArray(err.errors)) error.errors = err.errors;
-    throw error;
+    if (res.status === 204) return undefined as T;
+    const json = (await res.json()) as T;
+    if ((method === "GET" || method === "HEAD") && url.endsWith("/api/auth/me") && token) {
+      meCacheByToken.set(token, { ts: Date.now(), data: json as unknown });
+    }
+    return json;
+  })();
+
+  if (canDedupe) {
+    inflightRequests.set(dedupeKey, run);
+    run.finally(() => {
+      inflightRequests.delete(dedupeKey);
+    });
   }
-  if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+
+  return run;
 }
+
+const inflightRequests = new Map<string, Promise<unknown>>();
+
+const ME_CACHE_TTL_MS = 30_000;
+const meCacheByToken = new Map<string, { ts: number; data: unknown }>();

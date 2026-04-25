@@ -1,5 +1,9 @@
 """FastAPI application entry point."""
 
+import logging
+import time
+import traceback
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -18,8 +22,10 @@ from app.entries.routes import router as entries_router
 from app.reports.routes import router as reports_router
 from app.chat.routes import router as chat_router
 from app.dashboards.routes import router as dashboards_router
+from app.widget_data.routes import router as widget_data_router
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -46,7 +52,28 @@ app.include_router(fields_router, prefix="/api")
 app.include_router(entries_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(dashboards_router, prefix="/api")
+app.include_router(widget_data_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+
+@app.middleware("http")
+async def _log_widget_data_batch_requests(request, call_next):
+    # Uvicorn access logs only print after response; for hangs/timeouts we need a "start" log.
+    path = getattr(request, "url", None)
+    path_s = str(path) if path is not None else ""
+    if "/api/widget-data/chart/batch" in path_s:
+        logger.info("BEGIN %s %s", getattr(request, "method", ""), path_s)
+        t0 = time.perf_counter()
+        try:
+            resp = await call_next(request)
+            dt = (time.perf_counter() - t0) * 1000.0
+            logger.info("END %s %s -> %s (%.1fms)", getattr(request, "method", ""), path_s, getattr(resp, "status_code", "?"), dt)
+            return resp
+        except Exception:
+            dt = (time.perf_counter() - t0) * 1000.0
+            logger.exception("CRASH %s %s (%.1fms)", getattr(request, "method", ""), path_s, dt)
+            traceback.print_exc()
+            raise
+    return await call_next(request)
 
 
 @app.exception_handler(EntryValidationError)
@@ -56,6 +83,14 @@ async def entry_validation_exception_handler(_request, exc: EntryValidationError
         status_code=400,
         content={"detail": "Validation failed", "errors": exc.errors},
     )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc: Exception):
+    # Ensure we always see a traceback in dev logs for 500s (especially when behind Next.js proxy).
+    logger.exception("Unhandled server error on %s %s", getattr(request, "method", ""), getattr(request, "url", ""))
+    traceback.print_exc()
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
 @app.get("/health")

@@ -488,6 +488,9 @@ export default function FullPageMultiItems() {
   const [showColumnsPopup, setShowColumnsPopup] = useState(false);
   const [columnsPopupSearch, setColumnsPopupSearch] = useState("");
   const [columnsPopupDraft, setColumnsPopupDraft] = useState<string[]>([]);
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
+  const [maxAutoColumns, setMaxAutoColumns] = useState<number>(5);
+  const [manualColumnsMode, setManualColumnsMode] = useState(false);
   const [canEditKpi, setCanEditKpi] = useState<boolean>(true);
   const [kpiLevelCanEdit, setKpiLevelCanEdit] = useState<boolean>(false);
   const [userRole, setUserRole] = useState<string | null>(null);
@@ -499,6 +502,7 @@ export default function FullPageMultiItems() {
   const [rowAccessAddAccess, setRowAccessAddAccess] = useState<"view" | "edit" | "edit_delete">("edit_delete");
   const [rowAccessSaving, setRowAccessSaving] = useState(false);
   const [rowAccessUserSearch, setRowAccessUserSearch] = useState("");
+  const [includeExistingRowsInTemplate, setIncludeExistingRowsInTemplate] = useState(false);
 
   /** Ignore stale API responses when year/org/field changes quickly (fixes missing rows / wrong permissions UI). */
   const multiPageContextLoadGenRef = useRef(0);
@@ -578,43 +582,35 @@ export default function FullPageMultiItems() {
     const loadId = ++multiPageContextLoadGenRef.current;
     setError(null);
     try {
-      // Load KPI name
-      const kpi = await api<KpiInfo>(`/kpis/${kpiId}?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`, { token }).catch(() => null);
-      if (loadId !== multiPageContextLoadGenRef.current) return;
-      if (kpi?.name) setKpiName(kpi.name);
-      // Load fields and find this multi_line_items field
-      const fields = await api<FieldSummary[]>(`/entries/fields?${new URLSearchParams({ kpi_id: String(kpiId), organization_id: String(effectiveOrgId) }).toString()}`, { token }).catch(() => []);
-      if (loadId !== multiPageContextLoadGenRef.current) return;
-      const f = fields.find((x) => x.id === fieldId && x.field_type === "multi_line_items") || null;
-      setField(f);
-      // Ensure entry exists for this period
-      const forPeriod = await api<{ id: number }>(
-        `/entries/for-period?${new URLSearchParams({
+      const ctx = await api<{
+        entry_id: number;
+        kpi_id: number;
+        kpi_name: string;
+        field: FieldSummary;
+        can_edit: boolean;
+        kpi_level_can_edit: boolean;
+        can_add_row: boolean;
+      }>(
+        `/entries/multi-items/page-context?${new URLSearchParams({
           kpi_id: String(kpiId),
           year: String(year),
           period_key: periodKey || "",
+          field_id: String(fieldId),
           organization_id: String(effectiveOrgId),
         }).toString()}`,
         { token }
       );
       if (loadId !== multiPageContextLoadGenRef.current) return;
-      setEntryId(forPeriod.id);
-      // User's edit rights for this KPI (view-only users get can_edit: false)
-      const apiInfo = await api<{ can_edit?: boolean; kpi_level_can_edit?: boolean }>(
-        `/entries/kpi-api-info?${new URLSearchParams({ kpi_id: String(kpiId), organization_id: String(effectiveOrgId) }).toString()}`,
-        { token }
-      ).catch(() => ({ can_edit: false, kpi_level_can_edit: false }));
-      if (loadId !== multiPageContextLoadGenRef.current) return;
-      setCanEditKpi(apiInfo?.can_edit !== false);
-      setKpiLevelCanEdit(apiInfo?.kpi_level_can_edit === true);
-
-      // Add-row permission is field-specific (not KPI-level)
-      const addRowInfo = await api<{ can_add_row?: boolean }>(
-        `/entries/multi-items/add-row-info?${new URLSearchParams({ field_id: String(fieldId), organization_id: String(effectiveOrgId) }).toString()}`,
-        { token }
-      ).catch(() => ({ can_add_row: false }));
-      if (loadId !== multiPageContextLoadGenRef.current) return;
-      setCanAddRow(addRowInfo?.can_add_row === true);
+      setKpiName(ctx?.kpi_name || "");
+      setField(ctx?.field ?? null);
+      // Initialize sort before entry_id triggers first rows load to avoid a duplicate fetch.
+      if (sortBy === null && ctx?.field?.sub_fields?.length) {
+        setSortBy(ctx.field.sub_fields[0].key);
+      }
+      setEntryId(ctx.entry_id);
+      setCanEditKpi(ctx?.can_edit !== false);
+      setKpiLevelCanEdit(ctx?.kpi_level_can_edit === true);
+      setCanAddRow(ctx?.can_add_row === true);
     } catch (e) {
       if (loadId === multiPageContextLoadGenRef.current) {
         setError(e instanceof Error ? e.message : "Failed to load context");
@@ -792,18 +788,15 @@ export default function FullPageMultiItems() {
     }
   }, []);
 
-  // Default sort by first column when sub_fields become available
-  useEffect(() => {
-    if (subFields.length > 0 && sortBy === null) {
-      setSortBy(subFields[0].key);
-    }
-  }, [subFields, sortBy]);
+  // Note: sortBy is initialized during context load to prevent double row fetches on first render.
 
   // Initialize visible columns (persisted per KPI/field; dashboard-origin can override via ?cols=)
   useEffect(() => {
     if (subFields.length === 0) return;
     const storageKey = `multi_visible_cols:${kpiId}:${fieldId}`;
+    const manualKey = `multi_manual_cols:${kpiId}:${fieldId}`;
     let initial: string[] | null = null;
+    let manualStored: boolean | null = null;
 
     if (cameFromDashboard && colsFromUrl) {
       const parsed = String(colsFromUrl)
@@ -826,28 +819,58 @@ export default function FullPageMultiItems() {
             initial = parsed.filter((k) => subFields.some((sf) => sf.key === k));
           }
         }
+        const m = window.localStorage.getItem(manualKey);
+        if (m != null) manualStored = m === "true";
       } catch {
         // ignore
       }
     }
+    if (manualStored != null) setManualColumnsMode(manualStored);
     if (!initial || initial.length === 0) {
-      const attachmentKeys = subFields
-        .filter((sf) => sf.field_type === "attachment")
-        .map((sf) => sf.key);
-      const otherKeys = subFields
-        .filter((sf) => sf.field_type !== "attachment")
-        .map((sf) => sf.key);
-      const combined: string[] = [];
-      attachmentKeys.forEach((k) => {
-        if (!combined.includes(k)) combined.push(k);
-      });
-      otherKeys.forEach((k) => {
-        if (!combined.includes(k)) combined.push(k);
-      });
-      initial = combined.length > 0 ? combined : subFields.map((sf) => sf.key);
+      // Default to as many columns as fit in the available width.
+      initial = subFields.slice(0, Math.max(1, maxAutoColumns)).map((sf) => sf.key);
     }
-    setVisibleColumns(initial);
-  }, [subFields, kpiId, fieldId, cameFromDashboard, colsFromUrl]);
+    setVisibleColumns(manualStored ? initial : initial.slice(0, Math.max(1, maxAutoColumns)));
+  }, [subFields, kpiId, fieldId, cameFromDashboard, colsFromUrl, maxAutoColumns]);
+
+  // Compute how many columns fit in the available table width and trim selection if needed.
+  useEffect(() => {
+    const el = tableWrapRef.current;
+    if (!el) return;
+
+    const compute = () => {
+      const w = el.getBoundingClientRect().width;
+      // Reserve space for non-data columns: checkbox + row number + actions.
+      const reserved = canManageRowAccess ? 240 : 190;
+      // Conservative per-column width; we want to avoid horizontal overflow.
+      const perCol = 220;
+      const fit = Math.max(1, Math.floor((Math.max(0, w - reserved)) / perCol));
+      setMaxAutoColumns(fit);
+    };
+
+    compute();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => compute());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [canManageRowAccess]);
+
+  useEffect(() => {
+    if (manualColumnsMode) return;
+    if (visibleColumns.length <= maxAutoColumns) return;
+    setVisibleColumns((prev) => prev.slice(0, Math.max(1, maxAutoColumns)));
+  }, [manualColumnsMode, maxAutoColumns, visibleColumns.length]);
+
+  // Persist manual columns preference
+  useEffect(() => {
+    const manualKey = `multi_manual_cols:${kpiId}:${fieldId}`;
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(manualKey, manualColumnsMode ? "true" : "false");
+    } catch {
+      // ignore
+    }
+  }, [manualColumnsMode, kpiId, fieldId]);
 
   // Persist visible columns
   useEffect(() => {
@@ -1790,8 +1813,8 @@ export default function FullPageMultiItems() {
                   const url = getApiUrl(
                     `/entries/multi-items/template?${new URLSearchParams({
                       field_id: String(fieldId),
-                      entry_id: String(entryId),
                       organization_id: String(effectiveOrgId),
+                      ...(includeExistingRowsInTemplate ? { entry_id: String(entryId), include_existing_rows: "true" } : {}),
                     }).toString()}`
                   );
                   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -1818,6 +1841,14 @@ export default function FullPageMultiItems() {
                 >
                   Download Excel template
                 </button>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", color: "var(--muted)", fontSize: "0.9rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={includeExistingRowsInTemplate}
+                    onChange={(e) => setIncludeExistingRowsInTemplate(e.target.checked)}
+                  />
+                  Include existing rows (slow for large datasets)
+                </label>
                 <label
                   className="btn btn-primary"
                   style={{
@@ -2320,6 +2351,25 @@ export default function FullPageMultiItems() {
                   }}
                   autoFocus
                 />
+                <label style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginTop: "0.65rem", fontSize: "0.9rem", color: "var(--muted)" }}>
+                  <input
+                    type="checkbox"
+                    checked={manualColumnsMode}
+                    onChange={(e) => {
+                      const next = e.target.checked;
+                      setManualColumnsMode(next);
+                      if (!next) {
+                        setColumnsPopupDraft((prev) => prev.slice(0, Math.max(1, maxAutoColumns)));
+                      }
+                    }}
+                  />
+                  Manual column adjustment (may overflow)
+                </label>
+                {!manualColumnsMode && (
+                  <div style={{ marginTop: "0.35rem", fontSize: "0.85rem", color: "var(--muted)" }}>
+                    Auto-fit is enabled. You can select up to <strong>{Math.max(1, maxAutoColumns)}</strong> columns based on available width.
+                  </div>
+                )}
               </div>
               <div
                 style={{
@@ -2338,7 +2388,7 @@ export default function FullPageMultiItems() {
                   })
                   .map((sf) => {
                     const selected = columnsPopupDraft.includes(sf.key);
-                    const atLimit = false;
+                    const atLimit = !manualColumnsMode && !selected && columnsPopupDraft.length >= Math.max(1, maxAutoColumns);
                     return (
                       <label
                         key={sf.key}
@@ -2357,7 +2407,11 @@ export default function FullPageMultiItems() {
                           disabled={atLimit}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              setColumnsPopupDraft((prev) => (prev.includes(sf.key) ? prev : [...prev, sf.key]));
+                              setColumnsPopupDraft((prev) => {
+                                const next = prev.includes(sf.key) ? prev : [...prev, sf.key];
+                                // If user goes beyond available area, auto-trim.
+                                return manualColumnsMode ? next : next.slice(0, Math.max(1, maxAutoColumns));
+                              });
                             } else {
                               setColumnsPopupDraft((prev) => prev.filter((k) => k !== sf.key));
                             }
@@ -2396,7 +2450,9 @@ export default function FullPageMultiItems() {
                   type="button"
                   className="btn btn-primary"
                   onClick={() => {
-                    setVisibleColumns(columnsPopupDraft.length > 0 ? columnsPopupDraft : subFields.map((sf) => sf.key));
+                    const draft = columnsPopupDraft.length > 0 ? columnsPopupDraft : subFields.map((sf) => sf.key);
+                    const next = manualColumnsMode ? draft : draft.slice(0, Math.max(1, maxAutoColumns));
+                    setVisibleColumns(next);
                     setShowColumnsPopup(false);
                   }}
                 >
@@ -2413,6 +2469,7 @@ export default function FullPageMultiItems() {
             {canEditKpi ? 'No rows yet. Use "Add row" above to create one.' : "No rows in this field."}
           </p>
         ) : (
+          <div ref={tableWrapRef} style={{ width: "100%", overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
             <thead>
               <tr>
@@ -2737,6 +2794,7 @@ export default function FullPageMultiItems() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
         {/* Table footer: paging + export */}
         {!loading && total > 0 && (

@@ -18,6 +18,8 @@ from app.core.models import (
     KpiFieldAccess,
     KpiFieldAccessByRole,
     KpiMultiLineRowAccess,
+    KpiMultiLineRow,
+    KpiMultiLineCell,
     User,
     UserOrganizationRole,
     OrganizationRole,
@@ -44,6 +46,106 @@ from app.entries.schemas import FieldValueInput, EntryCreate
 from app.formula_engine.evaluator import evaluate_formula, OtherKpiValues
 
 
+def _ml_cell_raw(c: KpiMultiLineCell) -> Any:
+    if getattr(c, "value_json", None) is not None:
+        return c.value_json
+    if getattr(c, "value_text", None) is not None:
+        return c.value_text
+    if getattr(c, "value_number", None) is not None:
+        return c.value_number
+    if getattr(c, "value_boolean", None) is not None:
+        return c.value_boolean
+    if getattr(c, "value_date", None) is not None:
+        try:
+            return c.value_date.isoformat()
+        except Exception:
+            return str(c.value_date)
+    return None
+
+
+async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField) -> list[dict]:
+    """Load relational multi_line_items rows into legacy list-of-dicts shape."""
+    res = await db.execute(
+        select(KpiMultiLineRow)
+        .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
+        .order_by(KpiMultiLineRow.row_index)
+        .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
+    )
+    rows_orm = list(res.scalars().all())
+    out: list[dict] = []
+    for r in rows_orm:
+        d: dict[str, Any] = {}
+        for c in getattr(r, "cells", None) or []:
+            sf = getattr(c, "sub_field", None)
+            key = getattr(sf, "key", None) if sf is not None else None
+            if not key:
+                continue
+            d[str(key)] = _ml_cell_raw(c)
+        out.append(d)
+    return out
+
+
+async def replace_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField, rows: list[dict]) -> None:
+    """Replace relational multi_line_items rows/cells for (entry, field) from list-of-dicts."""
+    existing = await db.execute(
+        select(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
+    )
+    for r in list(existing.scalars().all()):
+        await db.delete(r)
+    await db.flush()
+
+    key_to_sub = {getattr(s, "key", None): s for s in (getattr(field, "sub_fields", None) or []) if getattr(s, "key", None)}
+
+    def _add_cell(row_id: int, sub: Any, raw_val: Any) -> None:
+        c = KpiMultiLineCell(row_id=row_id, sub_field_id=int(getattr(sub, "id")))
+        ft = getattr(sub, "field_type", None)
+        ft_s = ft.value if hasattr(ft, "value") else str(ft)
+        if raw_val is None:
+            pass
+        elif ft_s == "number":
+            try:
+                c.value_number = float(raw_val)
+            except Exception:
+                c.value_text = str(raw_val)
+        elif ft_s == "boolean":
+            if isinstance(raw_val, bool):
+                c.value_boolean = raw_val
+            else:
+                s = str(raw_val).strip().lower()
+                if s in ("true", "yes", "1"):
+                    c.value_boolean = True
+                elif s in ("false", "no", "0"):
+                    c.value_boolean = False
+                else:
+                    c.value_text = str(raw_val)
+        elif ft_s == "date":
+            c.value_text = str(raw_val)
+        elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
+            if isinstance(raw_val, (dict, list)):
+                c.value_json = raw_val
+            else:
+                c.value_text = str(raw_val)
+        else:
+            if isinstance(raw_val, (dict, list)):
+                c.value_json = raw_val
+            else:
+                c.value_text = str(raw_val)
+        db.add(c)
+
+    for idx, row in enumerate(rows or []):
+        rdict = row if isinstance(row, dict) else {}
+        mlr = KpiMultiLineRow(entry_id=entry_id, field_id=field.id, row_index=int(idx))
+        db.add(mlr)
+        await db.flush()
+        for k, v in rdict.items():
+            sub = key_to_sub.get(k)
+            if not sub:
+                continue
+            if getattr(sub, "field_type", None) == FieldType.mixed_list:
+                v = coerce_mixed_list_raw(v) or None
+            _add_cell(mlr.id, sub, v)
+
+
 async def _resolve_org_and_kpi(db: AsyncSession, kpi_id: int) -> int | None:
     """Return organization_id for KPI or None (KPI has organization_id directly)."""
     result = await db.execute(select(KPI.organization_id).where(KPI.id == kpi_id))
@@ -67,6 +169,7 @@ async def get_reference_allowed_values(
             KPIField.key == source_field_key,
             KPI.organization_id == org_id,
         )
+        .options(selectinload(KPIField.sub_fields))
     )
     source_field = result.scalar_one_or_none()
     if not source_field:
@@ -74,27 +177,45 @@ async def get_reference_allowed_values(
     subq = select(KPIEntry.id).where(KPIEntry.organization_id == org_id)
 
     if source_field.field_type == FieldType.multi_line_items and source_sub_field_key:
-        # Collect distinct values from value_json[*][source_sub_field_key] across all entries
-        rows = await db.execute(
-            select(KPIFieldValue.value_json).where(
-                KPIFieldValue.field_id == source_field.id,
-                KPIFieldValue.entry_id.in_(subq),
-                KPIFieldValue.value_json.isnot(None),
+        sf = next((s for s in (getattr(source_field, "sub_fields", None) or []) if getattr(s, "key", None) == source_sub_field_key), None)
+        if sf is None:
+            return []
+        q = (
+            select(
+                KpiMultiLineCell.value_text,
+                KpiMultiLineCell.value_number,
+                KpiMultiLineCell.value_boolean,
+                KpiMultiLineCell.value_date,
+                KpiMultiLineCell.value_json,
+            )
+            .select_from(KpiMultiLineRow)
+            .join(KpiMultiLineCell, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+            .where(
+                KpiMultiLineRow.field_id == source_field.id,
+                KpiMultiLineRow.entry_id.in_(subq),
+                KpiMultiLineCell.sub_field_id == int(getattr(sf, "id")),
             )
         )
+        rows = await db.execute(q)
         values_set: set[str] = set()
-        for (value_json,) in rows.all():
-            if not isinstance(value_json, list):
+        for vt, vn, vb, vd, vj in rows.all():
+            raw = None
+            if vt is not None and str(vt).strip() != "":
+                raw = vt
+            elif vn is not None:
+                raw = vn
+            elif vb is not None:
+                raw = str(vb).lower()
+            elif vd is not None:
+                raw = vd.isoformat() if hasattr(vd, "isoformat") else str(vd)
+            elif vj is not None:
+                raw = vj
+            if raw is None:
                 continue
-            for row in value_json:
-                if not isinstance(row, dict):
-                    continue
-                cell = row.get(source_sub_field_key)
-                if cell is None or cell == "":
-                    continue
-                s = str(cell).strip()
-                if s.lower() in ("true", "false"):
-                    s = s.lower()
+            s = str(raw).strip()
+            if s.lower() in ("true", "false"):
+                s = s.lower()
+            if s:
                 values_set.add(s)
         return sorted(values_set)
     if source_field.field_type == FieldType.number:
@@ -595,21 +716,16 @@ def _assignment_type_value(a) -> str:
     return t.value if hasattr(t, "value") else str(t)
 
 
-async def user_can_view_kpi(
-    db: AsyncSession, user_id: int, kpi_id: int, org_id: int | None = None
+async def can_view_kpi_for_user(
+    db: AsyncSession, user: User, kpi_id: int, org_id: int | None = None
 ) -> bool:
-    """Check if user can view KPI.
-
-    - SUPER_ADMIN: full access.
-    - ORG_ADMIN: full access within their organization (ignores assignments).
-    - Other users: no implicit access; visibility is based on organization roles:
-        * KPI-level role assignments (KpiRoleAssignment) with view/data_entry, OR
-        * Field-level role access (KpiFieldAccessByRole) that grants at least view to any field.
     """
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    Check if the given (already-loaded) user can view the KPI.
+    Avoids a redundant SELECT on `users` (use with User from get_current_user).
+    """
+    if not user or user.id is None:
         return False
+    user_id = int(user.id)
     if user.role.value == "SUPER_ADMIN":
         return True
     if user.role.value == "ORG_ADMIN":
@@ -619,8 +735,6 @@ async def user_can_view_kpi(
             return False
         effective_org = org_id if org_id is not None else getattr(user, "organization_id", None)
         return effective_org is not None and kpi_org == effective_org
-    # Non-admins: derive visibility from role-based KPI/field access only
-    # 1) Any KPI-level role assignment for this user?
     kpi_role_res = await db.execute(
         select(KpiRoleAssignment)
         .join(
@@ -634,11 +748,28 @@ async def user_can_view_kpi(
     )
     if kpi_role_res.scalar_one_or_none() is not None:
         return True
-    # 2) Any field-level role access that grants at least view for any field?
     access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
     if not access_map:
         return False
     return any(perm in ("view", "data_entry") for perm in access_map.values())
+
+
+async def user_can_view_kpi(
+    db: AsyncSession, user_id: int, kpi_id: int, org_id: int | None = None
+) -> bool:
+    """Check if user can view KPI.
+
+    - SUPER_ADMIN: full access.
+    - ORG_ADMIN: full access within their organization (ignores assignments).
+    - Other users: no implicit access; visibility is based on organization roles:
+        * KPI-level role assignments (KpiRoleAssignment) with view/data_entry, OR
+        * Field-level role access (KpiFieldAccessByRole) that grants at least view to any field.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    u = result.scalar_one_or_none()
+    if not u:
+        return False
+    return await can_view_kpi_for_user(db, u, kpi_id, org_id=org_id)
 
 
 async def user_can_edit_kpi(
@@ -1192,20 +1323,19 @@ async def save_entry_values(
             num_val = float(v.value_number) if not isinstance(v.value_number, (int, float)) else v.value_number
         if f.field_type == FieldType.number and num_val is not None:
             value_by_key[f.key] = num_val
-        if f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
-            multi_line_items_data[f.key] = v.value_json
         if fv is None:
             fv = KPIFieldValue(entry_id=entry_id, field_id=v.field_id)
             db.add(fv)
         fv.value_text = v.value_text
         fv.value_number = v.value_number
         if f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
+            multi_line_items_data[f.key] = v.value_json
             if access_map is None:
-                # No field-level ACL (e.g. org/super admin): accept full value
-                fv.value_json = v.value_json
+                # No field-level ACL (e.g. org/super admin): accept full value.
+                await replace_multi_line_items_rows(db, entry_id=entry_id, field=f, rows=v.value_json)
             else:
-                # Merge by column: only update cells for sub_fields the user can edit; keep rest from existing
-                existing_list = fv.value_json if isinstance(fv.value_json, list) else []
+                # Merge by column: only update sub_fields the user can edit; keep the rest from existing relational rows.
+                existing_list = await load_multi_line_items_rows(db, entry_id=entry_id, field=f)
                 merged_rows: list[dict] = []
                 sub_fields = getattr(f, "sub_fields", None) or []
                 for i, inc_row in enumerate(v.value_json):
@@ -1222,7 +1352,9 @@ async def save_entry_values(
                         else:
                             new_row[sub_key] = exist_row.get(sub_key)
                     merged_rows.append(new_row)
-                fv.value_json = merged_rows
+                await replace_multi_line_items_rows(db, entry_id=entry_id, field=f, rows=merged_rows)
+            # Do not store the potentially large multi-line JSON array in kpi_field_values.
+            fv.value_json = None
         else:
             fv.value_json = v.value_json
         fv.value_boolean = v.value_boolean
@@ -1245,16 +1377,9 @@ async def save_entry_values(
     for f in kpi.fields:
         if f.field_type != FieldType.multi_line_items or f.key in multi_line_items_data:
             continue
-        existing = (
-            await db.execute(
-                select(KPIFieldValue).where(
-                    KPIFieldValue.entry_id == entry_id,
-                    KPIFieldValue.field_id == f.id,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing and isinstance(existing.value_json, list):
-            multi_line_items_data[f.key] = existing.value_json
+        existing_rows = await load_multi_line_items_rows(db, entry_id=entry_id, field=f)
+        if existing_rows:
+            multi_line_items_data[f.key] = existing_rows
 
     # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
     other_kpi_values = await _load_other_kpi_values(db, entry.year, org_id, kpi_id)
@@ -1334,8 +1459,8 @@ async def recompute_formula_fields_for_kpi(
                     value_by_key[f.key] = float(fv.value_number)
                 except (TypeError, ValueError):
                     pass
-            elif f.field_type == FieldType.multi_line_items and isinstance(fv.value_json, list):
-                multi_line_items_data[f.key] = fv.value_json
+            elif f.field_type == FieldType.multi_line_items:
+                multi_line_items_data[f.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=f)
             elif f.field_type == FieldType.formula and fv.value_number is not None:
                 # Keep existing formula values as baseline; overridden when recomputed below.
                 try:
@@ -1607,6 +1732,10 @@ async def get_entries_for_kpis(
 
 def _format_field_value(fv) -> str:
     """Format a field value for display."""
+    if getattr(getattr(fv, "field", None), "field_type", None) == FieldType.multi_line_items:
+        # Multi-line items are stored relationally (not in KPIFieldValue.value_json).
+        # Avoid triggering expensive loads in overview endpoints.
+        return "Multi-line items"
     if fv.value_text is not None:
         return str(fv.value_text)[:80]
     if fv.value_number is not None:
@@ -1616,30 +1745,8 @@ def _format_field_value(fv) -> str:
     if fv.value_date is not None:
         return str(fv.value_date)[:10] if hasattr(fv.value_date, "isoformat") else str(fv.value_date)
     if fv.value_json is not None:
-        # multi_line_items: use sub_fields for readable summary when available
-        if getattr(fv.field, "field_type", None) == FieldType.multi_line_items and isinstance(fv.value_json, list):
-            return _format_multi_line_for_display(fv)
         return str(fv.value_json)[:80]
     return ""
-
-
-def _format_multi_line_for_display(fv) -> str:
-    """Format multi_line_items value_json as a short summary using sub_field keys (for NLP/chat)."""
-    if not isinstance(fv.value_json, list) or not fv.field:
-        return str(fv.value_json)[:80] if fv.value_json else ""
-    sub_fields = getattr(fv.field, "sub_fields", None) or []
-    keys = [sf.key for sf in sorted(sub_fields, key=lambda x: getattr(x, "sort_order", 0))]
-    parts = []
-    for item in fv.value_json[:5]:  # first 5 items
-        if not isinstance(item, dict):
-            parts.append(str(item)[:40])
-            continue
-        if not keys:
-            keys = list(item.keys())[:5]
-        pair_str = ", ".join(f"{k}={str(item.get(k, ''))[:25]}" for k in keys)
-        parts.append(pair_str[:60])
-    out = f"{len(fv.value_json)} item(s): " + "; ".join(parts) if parts else f"{len(fv.value_json)} item(s)"
-    return out[:250]
 
 
 def _expected_period_keys(dimension: TimeDimension) -> list[str]:

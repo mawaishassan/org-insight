@@ -3,7 +3,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.models import Dashboard, DashboardAccessPermission, User
+from app.core.models import Dashboard, DashboardAccessPermission, KPI, User
 
 
 async def list_all_dashboards(db: AsyncSession) -> list[Dashboard]:
@@ -138,6 +138,81 @@ async def list_dashboard_assignments(db: AsyncSession, dashboard_id: int, org_id
         }
         for perm, user in rows
     ]
+
+
+async def can_view_dashboard_for_user(
+    db: AsyncSession, user: User, dashboard_id: int, org_id: int
+) -> bool:
+    """
+    True if `dashboard_id` belongs to `org_id` and the user may view that dashboard.
+    Uses the already-loaded User (no extra SELECT on users). Skips KPI/field-level checks.
+    """
+    if not user or user.id is None:
+        return False
+    uid = int(user.id)
+    dash = (
+        await db.execute(
+            select(Dashboard.id).where(
+                Dashboard.id == dashboard_id,
+                Dashboard.organization_id == org_id,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if dash is None:
+        return False
+    if user.role.value == "SUPER_ADMIN":
+        return True
+    if user.role.value == "ORG_ADMIN":
+        return user.organization_id == org_id
+    perm = (
+        await db.execute(
+            select(DashboardAccessPermission.can_view).where(
+                DashboardAccessPermission.dashboard_id == dashboard_id,
+                DashboardAccessPermission.user_id == uid,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    return bool(perm)
+
+
+async def can_view_dashboard_for_kpi_chart(
+    db: AsyncSession, user: User, dashboard_id: int, org_id: int, kpi_id: int
+) -> bool:
+    """
+    One indexed round-trip: dashboard in org + KPI in same org (tenant-safe).
+    Then role/assignment checks (same rules as can_view_dashboard_for_user).
+    """
+    if not user or user.id is None or kpi_id <= 0:
+        return False
+    uid = int(user.id)
+    ok = (
+        await db.execute(
+            select(Dashboard.id)
+            .join(KPI, KPI.organization_id == Dashboard.organization_id)
+            .where(
+                Dashboard.id == dashboard_id,
+                Dashboard.organization_id == org_id,
+                KPI.id == int(kpi_id),
+                KPI.organization_id == org_id,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if ok is None:
+        return False
+    if user.role.value == "SUPER_ADMIN":
+        return True
+    if user.role.value == "ORG_ADMIN":
+        return user.organization_id == org_id
+    perm = (
+        await db.execute(
+            select(DashboardAccessPermission.can_view).where(
+                DashboardAccessPermission.dashboard_id == dashboard_id,
+                DashboardAccessPermission.user_id == uid,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    return bool(perm)
 
 
 async def user_can_access_dashboard(
