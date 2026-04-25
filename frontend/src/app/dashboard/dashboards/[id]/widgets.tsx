@@ -4,7 +4,77 @@ import Link from "next/link";
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { fetchAllMultiItemsRows, getKpiFieldsWithSubs, type KpiFieldWithSubs } from "@/lib/fetchMultiItemsRows";
 import type { MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
+import {
+  isLikelyAbortError,
+  isWidgetDataBundleEnabled,
+  postDashboardChartWidgetData,
+  postDashboardChartWidgetDataBatch,
+  postDashboardCardWidgetData,
+  postDashboardLineWidgetData,
+  postDashboardSingleValueWidgetData,
+  postDashboardKvTableWidgetData,
+  postDashboardTableWidgetData,
+  postDashboardTrendWidgetData,
+  postWidgetData,
+} from "@/lib/widgetData";
+
+// Batch bar/pie chart loads to avoid browser connection queuing when dashboards contain many charts.
+type ChartBatchKey = string;
+type PendingChart = {
+  token: string;
+  organizationId: number;
+  dashboardId: number;
+  widgetId: string;
+  widget: Record<string, unknown>;
+  overrides?: Record<string, unknown>;
+  resolve: (v: any) => void;
+  reject: (e: any) => void;
+};
+const pendingChartBatches = new Map<
+  ChartBatchKey,
+  { timer: any; items: PendingChart[]; inFlight?: Promise<void> }
+>();
+
+function enqueueDashboardChartBatch(req: Omit<PendingChart, "resolve" | "reject">): Promise<any> {
+  const key = `${req.token}::${req.organizationId}::${req.dashboardId}`;
+  return new Promise((resolve, reject) => {
+    const item: PendingChart = { ...req, resolve, reject };
+    const cur = pendingChartBatches.get(key) ?? { timer: null, items: [] as PendingChart[] };
+    cur.items.push(item);
+    if (!cur.timer) {
+      cur.timer = setTimeout(async () => {
+        const batch = pendingChartBatches.get(key);
+        if (!batch) return;
+        pendingChartBatches.delete(key);
+        const items = batch.items;
+        if (items.length === 0) return;
+        try {
+          const res = await postDashboardChartWidgetDataBatch(
+            req.token,
+            {
+              version: 1,
+              organization_id: req.organizationId,
+              dashboard_id: req.dashboardId,
+              items: items.map((x) => ({ widget: x.widget, overrides: x.overrides })),
+            },
+            undefined
+          );
+          items.forEach((x, idx) => {
+            const k = x.widgetId || `idx:${idx}`;
+            const r = res?.results?.[k] ?? res?.results?.[`idx:${idx}`];
+            if (r && r.ok) x.resolve(r);
+            else x.reject(new Error(r?.error || "Chart batch failed"));
+          });
+        } catch (e) {
+          items.forEach((x) => x.reject(e));
+        }
+      }, 0);
+    }
+    pendingChartBatches.set(key, cur);
+  });
+}
 export type WidgetDesignMenuActions = {
   onEdit: () => void;
   onDelete: () => void;
@@ -214,36 +284,21 @@ export type Widget =
     };
 
 type KpiFieldMap = { idByKey: Record<string, number>; keyById: Record<number, string>; nameByKey: Record<string, string> };
-type KpiFieldWithSubs = {
-  id: number;
-  key: string;
-  name: string;
-  field_type: string;
-  sub_fields?: Array<{ id: number; key: string; name: string; field_type: string }>;
-};
 
-type MultiItemsRowsResponse = {
-  rows: Array<{ index: number; data: Record<string, unknown> }>;
-  total: number;
-  page: number;
-  page_size: number;
-};
-const _kpiFieldsDetailCache: Record<string, Promise<KpiFieldWithSubs[]> | undefined> = {};
-
-async function getKpiFieldsWithSubs(token: string, organizationId: number, kpiId: number): Promise<KpiFieldWithSubs[]> {
-  const cacheKey = `${organizationId}:${kpiId}:subs`;
-  if (_kpiFieldsDetailCache[cacheKey]) return _kpiFieldsDetailCache[cacheKey];
-  // Prefer /entries/fields for viewer contexts (often less strict than /fields),
-  // but fall back to /fields so dashboard viewers can still resolve widget configs
-  // even if field-level rights aren't assigned.
-  _kpiFieldsDetailCache[cacheKey] = api<KpiFieldWithSubs[]>(
-    `/entries/fields?kpi_id=${kpiId}&organization_id=${organizationId}`,
-    { token }
-  )
-    .then((rows) => (Array.isArray(rows) && rows.length ? rows : api<KpiFieldWithSubs[]>(`/fields?kpi_id=${kpiId}&organization_id=${organizationId}`, { token })))
-    .catch(() => []);
-  return _kpiFieldsDetailCache[cacheKey];
+function fieldMapFromServerBundle(
+  d: Record<string, unknown>
+): { idByKey: Record<string, number>; nameByKey: Record<string, string>; keyById: Record<number, string> } {
+  const fm = d.field_map as { id_by_key?: Record<string, number>; name_by_key?: Record<string, string> } | undefined;
+  if (!fm?.id_by_key) return { idByKey: {}, nameByKey: {}, keyById: {} };
+  const idByKey = { ...fm.id_by_key };
+  const nameByKey: Record<string, string> = { ...(fm.name_by_key || {}) };
+  const keyById: Record<number, string> = {};
+  Object.entries(idByKey).forEach(([k, id]) => {
+    keyById[Number(id)] = k;
+  });
+  return { idByKey, nameByKey, keyById };
 }
+
 const _kpiFieldMapCache: Record<string, Promise<KpiFieldMap> | undefined> = {};
 
 async function getKpiFieldMap(token: string, organizationId: number, kpiId: number): Promise<KpiFieldMap> {
@@ -569,22 +624,64 @@ export function WidgetRenderer({
     );
   }
   if (widget.type === "kpi_single_value") {
-    return <KpiSingleValueWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+    return (
+      <KpiSingleValueWidget
+        widget={widget}
+        organizationId={organizationId}
+        designActions={designActions}
+        dashboardId={dashboardId}
+      />
+    );
   }
   if (widget.type === "kpi_table") {
-    return <KpiTableWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+    return (
+      <KpiTableWidget
+        widget={widget}
+        organizationId={organizationId}
+        designActions={designActions}
+        dashboardId={dashboardId}
+      />
+    );
   }
   if (widget.type === "kpi_line_chart") {
-    return <KpiLineChartWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+    return (
+      <KpiLineChartWidget
+        widget={widget}
+        organizationId={organizationId}
+        designActions={designActions}
+        dashboardId={dashboardId}
+      />
+    );
   }
   if (widget.type === "kpi_bar_chart") {
-    return <KpiBarChartWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+    return (
+      <KpiBarChartWidget
+        widget={widget}
+        organizationId={organizationId}
+        dashboardId={dashboardId}
+        designActions={designActions}
+      />
+    );
   }
   if (widget.type === "kpi_trend") {
-    return <KpiTrendWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+    return (
+      <KpiTrendWidget
+        widget={widget}
+        organizationId={organizationId}
+        designActions={designActions}
+        dashboardId={dashboardId}
+      />
+    );
   }
   if (widget.type === "kpi_card_single_value") {
-    return <KpiCardSingleValueWidget widget={widget} organizationId={organizationId} designActions={designActions} />;
+    return (
+      <KpiCardSingleValueWidget
+        widget={widget}
+        organizationId={organizationId}
+        designActions={designActions}
+        dashboardId={dashboardId}
+      />
+    );
   }
   if (widget.type === "kpi_multi_line_table") {
     return (
@@ -695,61 +792,16 @@ async function fetchEntryForPeriod(
   return api<any>(`/entries/for-period?${q.toString()}`, { token });
 }
 
-async function fetchAllFilteredMultiItemsRows(opts: {
-  token: string;
-  organizationId: number;
-  kpiId: number;
-  year: number;
-  periodKey?: string | null;
-  sourceFieldKey: string;
-  filters: MultiItemsFilterPayloadV2;
-}): Promise<Record<string, unknown>[]> {
-  const { token, organizationId, kpiId, year, periodKey, sourceFieldKey, filters } = opts;
-  if (!filters || !Array.isArray((filters as any).conditions) || (filters as any).conditions.length === 0) return [];
-
-  const fields = await getKpiFieldsWithSubs(token, organizationId, kpiId);
-  const sourceField = fields.find((f) => f.key === sourceFieldKey && f.field_type === "multi_line_items");
-  const fieldId = sourceField?.id;
-  if (!fieldId) return [];
-
-  const entry = await fetchEntryForPeriod(token, organizationId, kpiId, year, periodKey);
-  const entryId = entry?.id;
-  if (!entryId) return [];
-
-  const pageSize = 200;
-  let page = 1;
-  const out: Array<{ index: number; data: Record<string, unknown> }> = [];
-
-  while (true) {
-    const params = new URLSearchParams({
-      entry_id: String(entryId),
-      field_id: String(fieldId),
-      organization_id: String(organizationId),
-      page: String(page),
-      page_size: String(pageSize),
-      filters: JSON.stringify(filters),
-    });
-    const res = await api<MultiItemsRowsResponse>(`/entries/multi-items/rows?${params.toString()}`, { token });
-    const rows = Array.isArray(res?.rows) ? res.rows : [];
-    rows.forEach((r) => out.push(r));
-    const total = typeof res?.total === "number" ? res.total : out.length;
-    if (out.length >= total) break;
-    if (rows.length === 0) break;
-    page += 1;
-  }
-
-  out.sort((a, b) => a.index - b.index);
-  return out.map((r) => r.data || {});
-}
-
 function KpiSingleValueWidget({
   widget,
   organizationId,
   designActions,
+  dashboardId,
 }: {
   widget: Extract<Widget, { type: "kpi_single_value" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
+  dashboardId?: number;
 }) {
   const token = getAccessToken();
   const [value, setValue] = useState<string>("");
@@ -760,6 +812,31 @@ function KpiSingleValueWidget({
     if (!token) return;
     setLoading(true);
     setError(null);
+    if (isWidgetDataBundleEnabled()) {
+      const ac = new AbortController();
+      const w = { ...(widget as unknown as Record<string, unknown>) };
+      const bundleReq =
+        dashboardId != null
+          ? postDashboardSingleValueWidgetData(
+              token,
+              { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
+              { signal: ac.signal }
+            )
+          : postWidgetData(token, { version: 1, organization_id: organizationId, widget: w }, { signal: ac.signal });
+      bundleReq
+        .then((res) => {
+          const raw = (res.data as { raw?: unknown }).raw;
+          setValue(raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw));
+        })
+        .catch((e) => {
+          if (isLikelyAbortError(e)) return;
+          setError(e instanceof Error ? e.message : "Failed to load KPI value");
+        })
+        .finally(() => {
+          if (!ac.signal.aborted) setLoading(false);
+        });
+      return () => ac.abort();
+    }
     Promise.all([
       getKpiFieldMap(token, organizationId, widget.kpi_id),
       (async () => {
@@ -798,10 +875,12 @@ function KpiCardSingleValueWidget({
   widget,
   organizationId,
   designActions,
+  dashboardId,
 }: {
   widget: Extract<Widget, { type: "kpi_card_single_value" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
+  dashboardId?: number;
 }) {
   const token = getAccessToken();
   const [value, setValue] = useState<string>("");
@@ -822,22 +901,60 @@ function KpiCardSingleValueWidget({
       return;
     }
 
+    if (isWidgetDataBundleEnabled()) {
+      const ac = new AbortController();
+      const w = { ...(widget as unknown as Record<string, unknown>) };
+      const bundleReq =
+        dashboardId != null && (widget.source_mode === "field" || widget.source_mode === "static")
+          ? postDashboardCardWidgetData(
+              token,
+              { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
+              { signal: ac.signal }
+            )
+          : postWidgetData(token, { version: 1, organization_id: organizationId, widget: w }, { signal: ac.signal });
+      bundleReq
+        .then((res) => {
+          const d = res.data;
+          if (d.source_mode === "field" || (!d.source_mode && widget.source_mode === "field")) {
+            const raw = d.raw;
+            const n = toNumeric(raw);
+            if (n != null) setValue(formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
+            else setValue(raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw));
+            return;
+          }
+          if (d.source_mode === "multi_line_agg" || (!d.source_mode && widget.source_mode === "multi_line_agg")) {
+            const n = toNumeric(d.numeric);
+            setValue(n == null ? "" : formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
+            return;
+          }
+          setValue("");
+        })
+        .catch((e) => {
+          if (isLikelyAbortError(e)) return;
+          setError(e instanceof Error ? e.message : "Failed to load KPI value");
+        })
+        .finally(() => {
+          if (!ac.signal.aborted) setLoading(false);
+        });
+      return () => ac.abort();
+    }
+
     Promise.all([
       getKpiFieldMap(token, organizationId, widget.kpi_id),
       fetchEntryForPeriod(token, organizationId, widget.kpi_id, widget.year, widget.period_key),
-      widget.source_mode === "multi_line_agg" && widget.source_field_key && widget.filters && widget.filters.conditions?.length
-        ? fetchAllFilteredMultiItemsRows({
+      widget.source_mode === "multi_line_agg" && widget.source_field_key
+        ? fetchAllMultiItemsRows({
             token,
             organizationId,
             kpiId: widget.kpi_id,
             year: widget.year,
             periodKey: widget.period_key,
             sourceFieldKey: widget.source_field_key,
-            filters: widget.filters,
+            filters: widget.filters ?? null,
           })
         : Promise.resolve(null),
     ])
-      .then(([map, entry, filteredRows]) => {
+      .then(([map, entry, multiLineRows]) => {
         if (widget.source_mode === "field") {
           const key = widget.field_key || "";
           const fid = key ? map.idByKey[key] : undefined;
@@ -848,10 +965,7 @@ function KpiCardSingleValueWidget({
           return;
         }
         if (widget.source_mode === "multi_line_agg") {
-          const sourceKey = widget.source_field_key || "";
-          const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
-          const raw = sourceId ? rawFieldFromEntry(entry, sourceId) : null;
-          const items = Array.isArray(filteredRows) ? filteredRows : Array.isArray(raw) ? raw : [];
+          const items = Array.isArray(multiLineRows) ? multiLineRows : [];
           const agg = widget.agg ?? "sum";
           const n = aggregateSingleValue(items, { agg, valueKey: widget.value_sub_field_key });
           setValue(n == null ? "" : formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
@@ -875,6 +989,7 @@ function KpiCardSingleValueWidget({
     widget.static_value,
     widget.decimals,
     widget.thousand_sep,
+    JSON.stringify(widget.filters ?? null),
   ]);
 
   const theme = useMemo(() => KPI_CARD_THEMES.find((t) => t.id === (widget.theme || "")) ?? KPI_CARD_THEMES[0], [widget.theme]);
@@ -931,10 +1046,12 @@ function KpiLineChartWidget({
   widget,
   organizationId,
   designActions,
+  dashboardId,
 }: {
   widget: Extract<Widget, { type: "kpi_line_chart" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
+  dashboardId?: number;
 }) {
   const token = getAccessToken();
   const [points, setPoints] = useState<Array<{ year: number; value: number | null }>>([]);
@@ -951,6 +1068,40 @@ function KpiLineChartWidget({
     const end = Math.max(widget.start_year, widget.end_year);
     const years: number[] = [];
     for (let y = start; y <= end; y++) years.push(y);
+    if (isWidgetDataBundleEnabled()) {
+      const ac = new AbortController();
+      const w = { ...(widget as unknown as Record<string, unknown>) };
+      const bundleReq =
+        dashboardId != null
+          ? postDashboardLineWidgetData(
+              token,
+              { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
+              { signal: ac.signal }
+            )
+          : postWidgetData(token, { version: 1, organization_id: organizationId, widget: w }, { signal: ac.signal });
+      bundleReq
+        .then((res) => {
+          const pts = res.data.points as Array<{ year: number; value: unknown }> | undefined;
+          if (Array.isArray(pts)) {
+            setPoints(
+              pts.map((p) => ({
+                year: p.year,
+                value: p.value != null && p.value !== "" ? toNumeric(p.value) : null,
+              }))
+            );
+          } else {
+            setPoints([]);
+          }
+        })
+        .catch((e) => {
+          if (isLikelyAbortError(e)) return;
+          setError(e instanceof Error ? e.message : "Failed to load chart data");
+        })
+        .finally(() => {
+          if (!ac.signal.aborted) setLoading(false);
+        });
+      return () => ac.abort();
+    }
     Promise.all([getKpiFieldMap(token, organizationId, widget.kpi_id)]).then(([map]) => {
       const fid = map.idByKey[widget.field_key];
       if (!fid) {
@@ -1214,6 +1365,33 @@ function aggregateMultiLine(
   return out;
 }
 
+/** Roll up server-side SQL buckets (group × optional filter) after chip filter selection. */
+function rollupSqlBuckets(
+  buckets: Array<{ g: string; f: string | null; n: number; s: number }>,
+  agg: "count_rows" | "sum" | "avg",
+  filterKey: string,
+  selectedFilterValues: string[]
+): Array<{ label: string; value: number }> {
+  const byLabel = new Map<string, { n: number; s: number }>();
+  for (const b of buckets) {
+    if (filterKey && selectedFilterValues.length > 0) {
+      const fv = safeKey(b.f);
+      if (!selectedFilterValues.includes(fv)) continue;
+    }
+    const cur = byLabel.get(b.g) ?? { n: 0, s: 0 };
+    cur.n += b.n;
+    cur.s += b.s;
+    byLabel.set(b.g, cur);
+  }
+  const out: Array<{ label: string; value: number }> = [];
+  for (const [label, { n, s }] of byLabel) {
+    if (agg === "count_rows") out.push({ label, value: n });
+    else if (agg === "sum") out.push({ label, value: s });
+    else out.push({ label, value: n ? s / n : 0 });
+  }
+  return out;
+}
+
 function polarToCartesian(cx: number, cy: number, r: number, angleRad: number) {
   return { x: cx + r * Math.cos(angleRad), y: cy + r * Math.sin(angleRad) };
 }
@@ -1228,9 +1406,12 @@ function pieArcPath(cx: number, cy: number, r: number, start: number, end: numbe
 function KpiBarChartWidgetInner({
   widget,
   organizationId,
+  dashboardId,
 }: {
   widget: Extract<Widget, { type: "kpi_bar_chart" }>;
   organizationId: number;
+  /** When set with bundle mode, uses fast `POST /widget-data/chart` (dashboard auth only). */
+  dashboardId?: number;
 }) {
   const token = getAccessToken();
   const setViewerMenu = useWidgetViewerMenuSetter();
@@ -1252,6 +1433,12 @@ function KpiBarChartWidgetInner({
   const [hoverBarPt, setHoverBarPt] = useState<{ x: number; y: number; label: string; value: number } | null>(null);
   const [hoverPieKey, setHoverPieKey] = useState<string | null>(null);
   const [hoverPiePt, setHoverPiePt] = useState<{ x: number; y: number; label: string; value: number } | null>(null);
+  /** Full multi-line row list for the viewer year (client-side filter only; do not refetch when selectedFilterValues changes). */
+  const [rawMultiLineItems, setRawMultiLineItems] = useState<any[]>([]);
+  /** Pre-aggregated (group×filter) buckets from SQL when structured row filters are not used. */
+  const [sqlAggBuckets, setSqlAggBuckets] = useState<Array<{ g: string; f: string | null; n: number; s: number }> | null>(
+    null
+  );
 
   useEffect(() => {
     setViewerChartType(widget.chart_type || "bar");
@@ -1260,6 +1447,7 @@ function KpiBarChartWidgetInner({
     setSelectedFilterValues([]);
     setFilterSearch("");
     setFilterEditing(false);
+    setSqlAggBuckets(null);
   }, [widget.id, widget.chart_type, widget.mode]);
 
   useEffect(() => {
@@ -1284,22 +1472,114 @@ function KpiBarChartWidgetInner({
     if (!token) return;
     setLoading(true);
     setError(null);
+    if (isWidgetDataBundleEnabled()) {
+      const ac = new AbortController();
+      const w = { ...(widget as unknown as Record<string, unknown>) };
+      const bundleReq =
+        dashboardId != null
+          ? enqueueDashboardChartBatch({
+              token,
+              organizationId,
+              dashboardId,
+              widgetId: String((w as any)?.id ?? ""),
+              widget: w,
+              overrides: { year: viewerYear },
+            }).then((r) => ({
+              version: 1,
+              widget_type: "kpi_bar_chart",
+              meta: r.meta ?? {},
+              data: r.data ?? {},
+              entry_revision: r.entry_revision ?? null,
+            }))
+          : postWidgetData(
+              token,
+              { version: 1, organization_id: organizationId, widget: w, overrides: { year: viewerYear } },
+              { signal: ac.signal }
+            );
+      bundleReq
+        .then((res) => {
+          const d = res.data;
+          const mode = (d.mode as string) || (widget.mode || "fields");
+          if (mode === "multi_line_items") {
+            const sourceKey = widget.source_field_key || "";
+            const groupBy = widget.group_by_sub_field_key || "";
+            const map = fieldMapFromServerBundle(d);
+            const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
+            if (!sourceId || !groupBy) {
+              setRawMultiLineItems([]);
+              setSqlAggBuckets(null);
+              setGroups([]);
+            } else if (Array.isArray(d.multi_line_agg_buckets)) {
+              const buckets = d.multi_line_agg_buckets as Array<{ g: string; f: string | null; n: number; s: number }>;
+              setSqlAggBuckets(buckets);
+              setRawMultiLineItems([]);
+              const filterKey = widget.filter_sub_field_key || "";
+              if (filterKey) {
+                const uniq = Array.from(
+                  new Set(buckets.map((b) => safeKey(b.f)).filter((v) => v && v !== "(empty)"))
+                ).sort((a, b) => a.localeCompare(b));
+                setFilterValues(uniq);
+                setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
+              } else {
+                setFilterValues([]);
+                setSelectedFilterValues([]);
+              }
+            } else {
+              setSqlAggBuckets(null);
+              const items = Array.isArray(d.raw_rows) ? d.raw_rows : [];
+              setRawMultiLineItems(items);
+              const filterKey = widget.filter_sub_field_key || "";
+              if (filterKey) {
+                const uniq = Array.from(
+                  new Set(items.map((r: any) => safeKey(r?.[filterKey])).filter((v) => v && v !== "(empty)"))
+                ).sort((a, b) => a.localeCompare(b));
+                setFilterValues(uniq);
+                setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
+              } else {
+                setFilterValues([]);
+                setSelectedFilterValues([]);
+              }
+            }
+            setBars([]);
+            return;
+          }
+          setSqlAggBuckets(null);
+          setRawMultiLineItems([]);
+          const br = Array.isArray(d.bars) ? d.bars : [];
+          setBars(
+            br.map((b: { key: string; label: string; value: unknown }) => ({
+              key: b.key,
+              label: b.label,
+              value: b.value != null && b.value !== "" ? toNumeric(b.value) : null,
+            }))
+          );
+          setGroups([]);
+        })
+        .catch((e) => {
+          if (isLikelyAbortError(e)) return;
+          setError(e instanceof Error ? e.message : "Failed to load chart data");
+        })
+        .finally(() => {
+          if (!ac.signal.aborted) setLoading(false);
+        });
+      return () => ac.abort();
+    }
     Promise.all([
       getKpiFieldMap(token, organizationId, widget.kpi_id),
       fetchEntryForPeriod(token, organizationId, widget.kpi_id, viewerYear, widget.period_key),
-      widget.mode === "multi_line_items" && widget.source_field_key && widget.filters && widget.filters.conditions?.length
-        ? fetchAllFilteredMultiItemsRows({
+      widget.mode === "multi_line_items" && widget.source_field_key
+        ? fetchAllMultiItemsRows({
             token,
             organizationId,
             kpiId: widget.kpi_id,
             year: viewerYear,
             periodKey: widget.period_key,
             sourceFieldKey: widget.source_field_key,
-            filters: widget.filters,
+            filters: widget.filters ?? null,
           })
         : Promise.resolve(null),
     ])
-      .then(([map, entry, filteredRows]) => {
+      .then(([map, entry, multiLineRows]) => {
         const mode = widget.mode || "fields";
         if (mode === "multi_line_items") {
           const sourceKey = widget.source_field_key || "";
@@ -1309,11 +1589,12 @@ function KpiBarChartWidgetInner({
           const filterKey = widget.filter_sub_field_key || "";
           const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
           if (!sourceId || !groupBy) {
+            setRawMultiLineItems([]);
             setGroups([]);
             return;
           }
-          const raw = rawFieldFromEntry(entry, sourceId);
-          const items = Array.isArray(filteredRows) ? filteredRows : Array.isArray(raw) ? raw : [];
+          const items = Array.isArray(multiLineRows) ? multiLineRows : [];
+          setRawMultiLineItems(items);
           if (filterKey) {
             const uniq = Array.from(new Set(items.map((r: any) => safeKey(r?.[filterKey])).filter((v) => v && v !== "(empty)"))).sort((a, b) =>
               a.localeCompare(b)
@@ -1324,15 +1605,10 @@ function KpiBarChartWidgetInner({
             setFilterValues([]);
             setSelectedFilterValues([]);
           }
-          const filtered =
-            filterKey && selectedFilterValues.length > 0
-              ? items.filter((r: any) => selectedFilterValues.includes(safeKey(r?.[filterKey])))
-              : items;
-          const aggRows = aggregateMultiLine(filtered, { groupByKey: groupBy, agg, valueKey });
-          setGroups(aggRows);
           setBars([]);
           return;
         }
+        setRawMultiLineItems([]);
         const keys = widget.field_keys || [];
         setBars(
           keys.map((key) => {
@@ -1359,7 +1635,38 @@ function KpiBarChartWidgetInner({
     widget.value_sub_field_key,
     widget.filter_sub_field_key,
     JSON.stringify(widget.filters ?? null),
-    JSON.stringify(selectedFilterValues),
+    dashboardId,
+  ]);
+
+  useEffect(() => {
+    const mode = widget.mode || "fields";
+    if (mode !== "multi_line_items") return;
+    const groupBy = widget.group_by_sub_field_key || "";
+    const agg = (widget.agg || "count_rows") as "count_rows" | "sum" | "avg";
+    const valueKey = widget.value_sub_field_key;
+    const filterKey = widget.filter_sub_field_key || "";
+    if (!groupBy) {
+      setGroups([]);
+      return;
+    }
+    if (sqlAggBuckets != null) {
+      setGroups(rollupSqlBuckets(sqlAggBuckets, agg, filterKey, selectedFilterValues));
+      return;
+    }
+    const filtered =
+      filterKey && selectedFilterValues.length > 0
+        ? rawMultiLineItems.filter((r: any) => selectedFilterValues.includes(safeKey(r?.[filterKey])))
+        : rawMultiLineItems;
+    setGroups(aggregateMultiLine(filtered, { groupByKey: groupBy, agg, valueKey }));
+  }, [
+    sqlAggBuckets,
+    rawMultiLineItems,
+    selectedFilterValues,
+    widget.mode,
+    widget.group_by_sub_field_key,
+    widget.agg,
+    widget.value_sub_field_key,
+    widget.filter_sub_field_key,
   ]);
 
   const mode = widget.mode || "fields";
@@ -2343,15 +2650,17 @@ function KpiBarChartWidgetInner({
 function KpiBarChartWidget({
   widget,
   organizationId,
+  dashboardId,
   designActions,
 }: {
   widget: Extract<Widget, { type: "kpi_bar_chart" }>;
   organizationId: number;
+  dashboardId?: number;
   designActions?: WidgetDesignMenuActions;
 }) {
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
-      <KpiBarChartWidgetInner widget={widget} organizationId={organizationId} />
+      <KpiBarChartWidgetInner widget={widget} organizationId={organizationId} dashboardId={dashboardId} />
     </WidgetSettingsShell>
   );
 }
@@ -2370,14 +2679,16 @@ function KpiTrendWidget({
   widget,
   organizationId,
   designActions,
+  dashboardId,
 }: {
   widget: Extract<Widget, { type: "kpi_trend" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
+  dashboardId?: number;
 }) {
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
-      <KpiTrendWidgetInner widget={widget} organizationId={organizationId} />
+      <KpiTrendWidgetInner widget={widget} organizationId={organizationId} dashboardId={dashboardId} />
     </WidgetSettingsShell>
   );
 }
@@ -2385,9 +2696,11 @@ function KpiTrendWidget({
 function KpiTrendWidgetInner({
   widget,
   organizationId,
+  dashboardId,
 }: {
   widget: Extract<Widget, { type: "kpi_trend" }>;
   organizationId: number;
+  dashboardId?: number;
 }) {
   const token = getAccessToken();
   const setViewerMenu = useWidgetViewerMenuSetter();
@@ -2413,6 +2726,9 @@ function KpiTrendWidgetInner({
   const [error, setError] = useState<string | null>(null);
   const [seriesByYear, setSeriesByYear] = useState<Record<number, Array<{ label: string; value: number }>>>({});
   const [fieldBarsByYear, setFieldBarsByYear] = useState<Record<number, Array<{ key: string; label: string; value: number | null }>>>({});
+  /** Multi-line rows per year after fetch (viewer filter is client-side only). */
+  const [rawMultiLineByYear, setRawMultiLineByYear] = useState<Record<number, any[]>>({});
+  const [bucketsByYear, setBucketsByYear] = useState<Record<number, Array<{ g: string; f: string | null; n: number; s: number }>>>({});
 
   useEffect(() => {
     setViewerView(widget.view || "bar");
@@ -2442,29 +2758,149 @@ function KpiTrendWidgetInner({
     if (selectedYears.length === 0) return;
     setLoading(true);
     setError(null);
+    if (isWidgetDataBundleEnabled()) {
+      const ac = new AbortController();
+      const w = { ...(widget as unknown as Record<string, unknown>) };
+      const bundleReq =
+        dashboardId != null
+          ? postDashboardTrendWidgetData(
+              token,
+              {
+                version: 1,
+                organization_id: organizationId,
+                dashboard_id: dashboardId,
+                widget: w,
+                overrides: { selected_years: selectedYears },
+              },
+              { signal: ac.signal }
+            )
+          : postWidgetData(
+              token,
+              {
+                version: 1,
+                organization_id: organizationId,
+                widget: w,
+                overrides: { selected_years: selectedYears },
+              },
+              { signal: ac.signal }
+            );
+      bundleReq
+        .then((res) => {
+          const d = res.data;
+          const m = (d.mode as string) || (widget.mode || "fields");
+          if (m === "multi_line_items") {
+            const sourceKey = widget.source_field_key || "";
+            const groupBy = widget.group_by_sub_field_key || "";
+            if (!groupBy) {
+              setRawMultiLineByYear({});
+              setBucketsByYear({});
+              setSeriesByYear({});
+              setFilterValues([]);
+              setSelectedFilterValues([]);
+              setFieldBarsByYear({});
+              return;
+            }
+            const years = [...selectedYears].sort((a, b) => b - a);
+            const filterKey = widget.filter_sub_field_key || "";
+            const bby = d.multi_line_agg_buckets_by_year as Record<string, any[]> | undefined;
+            if (bby) {
+              const next: Record<number, Array<{ g: string; f: string | null; n: number; s: number }>> = {};
+              const allF: string[] = [];
+              years.forEach((y) => {
+                const buckets = (bby && bby[String(y)]) || [];
+                next[y] = buckets as any;
+                if (filterKey) {
+                  (buckets as any[]).forEach((b: any) => {
+                    const fv = safeKey(b?.f);
+                    if (fv && fv !== "(empty)") allF.push(fv);
+                  });
+                }
+              });
+              setBucketsByYear(next);
+              setRawMultiLineByYear({});
+              if (filterKey) {
+                const uniq = Array.from(new Set(allF)).sort((a, b) => a.localeCompare(b));
+                setFilterValues(uniq);
+                setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
+              } else {
+                setFilterValues([]);
+                setSelectedFilterValues([]);
+              }
+            } else {
+              const rby = d.raw_rows_by_year as Record<string, unknown[]> | undefined;
+              const raw: Record<number, any[]> = {};
+              const allItems: any[] = [];
+              years.forEach((y) => {
+                const items = (rby && rby[String(y)]) || [];
+                raw[y] = items;
+                allItems.push(...items);
+              });
+              setBucketsByYear({});
+              if (filterKey) {
+                const uniq = Array.from(
+                  new Set(allItems.map((r: any) => safeKey(r?.[filterKey])).filter((v) => v && v !== "(empty)"))
+                ).sort((a, b) => a.localeCompare(b));
+                setFilterValues(uniq);
+                setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
+              } else {
+                setFilterValues([]);
+                setSelectedFilterValues([]);
+              }
+              setRawMultiLineByYear(raw);
+            }
+            setFieldBarsByYear({});
+            return;
+          }
+          setRawMultiLineByYear({});
+          setBucketsByYear({});
+          const fby = d.field_bars_by_year as Record<string, Array<{ key: string; label: string; value: unknown }>> | undefined;
+          const outByYear: Record<number, Array<{ key: string; label: string; value: number | null }>> = {};
+          if (fby) {
+            Object.keys(fby).forEach((k) => {
+              outByYear[Number(k)] = (fby[k] || []).map((row) => ({
+                key: row.key,
+                label: row.label,
+                value: row.value != null && row.value !== "" ? toNumeric(row.value) : null,
+              }));
+            });
+          }
+          setFieldBarsByYear(outByYear);
+          setSeriesByYear({});
+          setFilterValues([]);
+          setSelectedFilterValues([]);
+        })
+        .catch((e) => {
+          if (isLikelyAbortError(e)) return;
+          setError(e instanceof Error ? e.message : "Failed to load trend data");
+        })
+        .finally(() => {
+          if (!ac.signal.aborted) setLoading(false);
+        });
+      return () => ac.abort();
+    }
     Promise.all([
       getKpiFieldMap(token, organizationId, widget.kpi_id),
       Promise.all(selectedYears.map((y) => fetchEntryForPeriod(token, organizationId, widget.kpi_id, y, widget.period_key))),
-      mode === "multi_line_items" && widget.source_field_key && widget.filters && widget.filters.conditions?.length
+      mode === "multi_line_items" && widget.source_field_key
         ? Promise.all(
             selectedYears.map((y) =>
-              fetchAllFilteredMultiItemsRows({
+              fetchAllMultiItemsRows({
                 token,
                 organizationId,
                 kpiId: widget.kpi_id,
                 year: y,
                 periodKey: widget.period_key,
                 sourceFieldKey: widget.source_field_key || "",
-                filters: widget.filters!,
+                filters: widget.filters ?? null,
               })
             )
           )
         : Promise.resolve(null),
     ])
-      .then(([map, entries, filteredRowsByYear]) => {
+      .then(([map, entries, rowsByYear]) => {
         const years = [...selectedYears].sort((a, b) => b - a);
         const entryByYear = new Map<number, any>();
-        years.forEach((y, idx) => entryByYear.set(y, entries[idx]));
+        selectedYears.forEach((y, i) => entryByYear.set(y, entries[i]));
 
         if (mode === "multi_line_items") {
           const sourceKey = widget.source_field_key || "";
@@ -2474,6 +2910,7 @@ function KpiTrendWidgetInner({
           const filterKey = widget.filter_sub_field_key || "";
           const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
           if (!sourceId || !groupBy) {
+            setRawMultiLineByYear({});
             setSeriesByYear({});
             setFilterValues([]);
             setSelectedFilterValues([]);
@@ -2484,11 +2921,8 @@ function KpiTrendWidgetInner({
           const allItems: any[] = [];
           const rawItemsByYear = new Map<number, any[]>();
           years.forEach((y) => {
-            const entry = entryByYear.get(y);
-            const raw = rawFieldFromEntry(entry, sourceId);
             const idx = selectedYears.indexOf(y);
-            const prefiltered = Array.isArray(filteredRowsByYear) ? filteredRowsByYear[idx] : null;
-            const items = Array.isArray(prefiltered) ? prefiltered : Array.isArray(raw) ? raw : [];
+            const items = Array.isArray(rowsByYear) && idx >= 0 ? rowsByYear[idx] ?? [] : [];
             rawItemsByYear.set(y, items);
             allItems.push(...items);
           });
@@ -2502,18 +2936,16 @@ function KpiTrendWidgetInner({
             setSelectedFilterValues([]);
           }
 
-          const byYear: Record<number, Array<{ label: string; value: number }>> = {};
+          const raw: Record<number, any[]> = {};
           years.forEach((y) => {
-            const items = rawItemsByYear.get(y) ?? [];
-            const filtered =
-              filterKey && selectedFilterValues.length > 0 ? items.filter((r: any) => selectedFilterValues.includes(safeKey(r?.[filterKey]))) : items;
-            byYear[y] = aggregateMultiLine(filtered, { groupByKey: groupBy, agg, valueKey });
+            raw[y] = rawItemsByYear.get(y) ?? [];
           });
-          setSeriesByYear(byYear);
+          setRawMultiLineByYear(raw);
           setFieldBarsByYear({});
           return;
         }
 
+        setRawMultiLineByYear({});
         const keys = widget.field_keys || [];
         const outByYear: Record<number, Array<{ key: string; label: string; value: number | null }>> = {};
         selectedYears.forEach((y) => {
@@ -2545,7 +2977,44 @@ function KpiTrendWidgetInner({
     JSON.stringify(widget.filters ?? null),
     JSON.stringify(widget.field_keys || []),
     JSON.stringify(selectedYears),
-    JSON.stringify(selectedFilterValues),
+  ]);
+
+  useEffect(() => {
+    if (mode !== "multi_line_items") return;
+    const groupBy = widget.group_by_sub_field_key || "";
+    const agg = widget.agg || "count_rows";
+    const valueKey = widget.value_sub_field_key;
+    const filterKey = widget.filter_sub_field_key || "";
+    if (!groupBy || selectedYears.length === 0) {
+      setSeriesByYear({});
+      return;
+    }
+    const years = [...selectedYears].sort((a, b) => b - a);
+    const byYear: Record<number, Array<{ label: string; value: number }>> = {};
+    years.forEach((y) => {
+      const buckets = bucketsByYear[y];
+      if (Array.isArray(buckets) && buckets.length > 0) {
+        byYear[y] = rollupSqlBuckets(buckets as any, agg as any, filterKey, selectedFilterValues);
+      } else {
+        const items = rawMultiLineByYear[y] ?? [];
+        const filtered =
+          filterKey && selectedFilterValues.length > 0
+            ? items.filter((r: any) => selectedFilterValues.includes(safeKey(r?.[filterKey])))
+            : items;
+        byYear[y] = aggregateMultiLine(filtered, { groupByKey: groupBy, agg, valueKey });
+      }
+    });
+    setSeriesByYear(byYear);
+  }, [
+    mode,
+    rawMultiLineByYear,
+    bucketsByYear,
+    selectedFilterValues,
+    JSON.stringify(selectedYears),
+    widget.group_by_sub_field_key,
+    widget.agg,
+    widget.value_sub_field_key,
+    widget.filter_sub_field_key,
   ]);
 
   const toggleYear = (y: number) => {
@@ -3395,10 +3864,12 @@ function KpiTableWidget({
   widget,
   organizationId,
   designActions,
+  dashboardId,
 }: {
   widget: Extract<Widget, { type: "kpi_table" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
+  dashboardId?: number;
 }) {
   const token = getAccessToken();
   const [rows, setRows] = useState<Array<{ label: string; value: string }>>([]);
@@ -3409,6 +3880,40 @@ function KpiTableWidget({
     if (!token) return;
     setLoading(true);
     setError(null);
+    if (isWidgetDataBundleEnabled()) {
+      const ac = new AbortController();
+      const w = { ...(widget as unknown as Record<string, unknown>) };
+      const bundleReq =
+        dashboardId != null
+          ? postDashboardKvTableWidgetData(
+              token,
+              { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
+              { signal: ac.signal }
+            )
+          : postWidgetData(token, { version: 1, organization_id: organizationId, widget: w }, { signal: ac.signal });
+      bundleReq
+        .then((res) => {
+          const drows = res.data.rows as Array<{ label: string; value: string }> | undefined;
+          if (Array.isArray(drows)) {
+            setRows(
+              drows.map((r) => ({
+                label: r.label,
+                value: r.value || "",
+              }))
+            );
+          } else {
+            setRows([]);
+          }
+        })
+        .catch((e) => {
+          if (isLikelyAbortError(e)) return;
+          setError(e instanceof Error ? e.message : "Failed to load KPI entry");
+        })
+        .finally(() => {
+          if (!ac.signal.aborted) setLoading(false);
+        });
+      return () => ac.abort();
+    }
     Promise.all([
       getKpiFieldMap(token, organizationId, widget.kpi_id),
       (async () => {
@@ -3578,33 +4083,107 @@ function KpiMultiLineTableWidgetInner({
     if (!token) return;
     setLoading(true);
     setError(null);
+    if (isWidgetDataBundleEnabled()) {
+      const ac = new AbortController();
+      const w = { ...(widget as unknown as Record<string, unknown>) };
+      const bundleReq =
+        dashboardId != null
+          ? postDashboardTableWidgetData(
+              token,
+              {
+                version: 1,
+                organization_id: organizationId,
+                dashboard_id: dashboardId,
+                widget: w,
+                overrides: { year: viewerYear },
+              },
+              { signal: ac.signal }
+            )
+          : postWidgetData(
+              token,
+              { version: 1, organization_id: organizationId, widget: w, overrides: { year: viewerYear } },
+              { signal: ac.signal }
+            );
+      bundleReq
+        .then((res) => {
+          const d = res.data;
+          const sid = d.source_field_id;
+          setSourceFieldId(typeof sid === "number" ? sid : null);
+          const rows = Array.isArray(d.rows) ? (d.rows as Record<string, unknown>[]) : [];
+          setItems(rows);
+          setLabelByKey((d.sub_field_labels as Record<string, string>) || {});
+
+          const jpack = (d.joins as Array<{ rows?: unknown; sub_field_labels?: Record<string, string> }>) || [];
+          const nextJoinLabels: Array<Record<string, string>> = [];
+          const nextJoinIndexes: Array<Record<string, Record<string, unknown>>> = [];
+          if (joinSpecs.length === 0) {
+            setJoinLabels([]);
+            setJoinIndexes([]);
+            return;
+          }
+          jpack.forEach((j, idx) => {
+            const spec = joinSpecs[idx];
+            if (!spec) return;
+            nextJoinLabels[idx] = j.sub_field_labels || {};
+            const joinRows = Array.isArray(j.rows) ? (j.rows as Record<string, unknown>[]) : [];
+            const ix: Record<string, Record<string, unknown>> = {};
+            const rightKey = spec.on_right_sub_field_key;
+            joinRows.forEach((r) => {
+              const k = rightKey ? String((r as any)?.[rightKey] ?? "").trim() : "";
+              if (!k) return;
+              if (!ix[k]) ix[k] = r;
+            });
+            nextJoinIndexes[idx] = ix;
+          });
+          setJoinLabels(nextJoinLabels);
+          setJoinIndexes(nextJoinIndexes);
+        })
+        .catch((e) => {
+          if (isLikelyAbortError(e)) return;
+          setError(e instanceof Error ? e.message : "Failed to load table data");
+        })
+        .finally(() => {
+          if (!ac.signal.aborted) setLoading(false);
+        });
+      return () => ac.abort();
+    }
     Promise.all([
       getKpiFieldsWithSubs(token, organizationId, widget.kpi_id),
       fetchEntryForPeriod(token, organizationId, widget.kpi_id, viewerYear, widget.period_key),
-      widget.source_field_key && widget.filters && widget.filters.conditions?.length
-        ? fetchAllFilteredMultiItemsRows({
+      widget.source_field_key
+        ? fetchAllMultiItemsRows({
             token,
             organizationId,
             kpiId: widget.kpi_id,
             year: viewerYear,
             periodKey: widget.period_key,
             sourceFieldKey: widget.source_field_key,
-            filters: widget.filters,
+            filters: widget.filters ?? null,
           })
-        : Promise.resolve(null),
+        : Promise.resolve([]),
       ...joinSpecs.map((j) =>
         Promise.all([
           getKpiFieldsWithSubs(token, organizationId, j.kpi_id),
           fetchEntryForPeriod(token, organizationId, j.kpi_id, viewerYear, widget.period_key),
+          j.source_field_key
+            ? fetchAllMultiItemsRows({
+                token,
+                organizationId,
+                kpiId: j.kpi_id,
+                year: viewerYear,
+                periodKey: widget.period_key,
+                sourceFieldKey: j.source_field_key,
+                filters: null,
+              })
+            : Promise.resolve([]),
         ])
       ),
     ])
-      .then(([fields, entry, filteredRows, ...joinResults]) => {
+      .then(([fields, entry, primaryRows, ...joinResults]) => {
         const source = fields.find((f) => f.key === widget.source_field_key && f.field_type === "multi_line_items");
         const fid = source?.id;
         setSourceFieldId(typeof fid === "number" ? fid : null);
-        const raw = fid ? rawFieldFromEntry(entry, fid) : null;
-        const rows = Array.isArray(filteredRows) ? filteredRows : Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
+        const rows = Array.isArray(primaryRows) ? (primaryRows as Record<string, unknown>[]) : [];
         setItems(rows);
         const labels: Record<string, string> = {};
         (source?.sub_fields ?? []).forEach((sf) => {
@@ -3616,11 +4195,9 @@ function KpiMultiLineTableWidgetInner({
         const nextJoinIndexes: Array<Record<string, Record<string, unknown>>> = [];
         joinResults.forEach((jr, idx) => {
           const spec = joinSpecs[idx];
-          const [joinFields, joinEntry] = jr as any;
+          const [joinFields, _joinEntry, joinRowsFetched] = jr as any;
           const joinSource = joinFields.find((f: any) => f.key === spec.source_field_key && f.field_type === "multi_line_items");
-          const joinFid = joinSource?.id;
-          const joinRaw = joinFid ? rawFieldFromEntry(joinEntry, joinFid) : null;
-          const joinRows = Array.isArray(joinRaw) ? (joinRaw as Record<string, unknown>[]) : [];
+          const joinRows = Array.isArray(joinRowsFetched) ? (joinRowsFetched as Record<string, unknown>[]) : [];
           const labels: Record<string, string> = {};
           (joinSource?.sub_fields ?? []).forEach((sf: any) => {
             labels[sf.key] = sf.name;

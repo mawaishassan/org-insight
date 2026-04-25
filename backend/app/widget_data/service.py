@@ -1,0 +1,1912 @@
+"""
+Resolve per-widget `data` for POST /api/widget-data.
+
+Loads KPI/field metadata, entry for period (read-only, no create), and multi_line rows
+in one server round-trip; applies structured row filters in-process (aligns with export/list paths).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from typing import Any, Callable, Awaitable
+
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.models import FieldType, KPI, KPIEntry, KPIField, KPIFieldValue, User
+from app.entries.multi_item_filters import row_passes_filters
+from app.entries.reference_filter_resolve import build_reference_resolution_map
+from app.entries.multi_line_load import load_multi_line_row_dicts
+from app.dashboards.service import can_view_dashboard_for_kpi_chart
+from app.entries.service import can_view_kpi_for_user
+from app.fields.service import get_field_with_subfields_only, list_kpi_field_definitions
+from app.widget_data.multiline_chart_sql import (
+    compile_multiline_row_filters_sql,
+    fetch_multiline_bar_agg_buckets,
+)
+
+# ---------------------------------------------------------------------------
+# Limits (table widgets: protect memory / payload size)
+# ---------------------------------------------------------------------------
+MAX_MULTILINE_TABLE_ROWS = 2000
+
+
+# ---------------------------------------------------------------------------
+# Small numeric / aggregation helpers (mirror frontend toNumeric / aggregateMultiLine)
+# ---------------------------------------------------------------------------
+def to_numeric(v: Any) -> float | None:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return 1.0 if v else 0.0
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return None
+        return float(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        n = float(s.replace(",", ""))
+        if math.isnan(n) or math.isinf(n):
+            return None
+        return n
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_key(x: Any) -> str:
+    s = "" if x is None else str(x).strip()
+    return s or "(empty)"
+
+
+def aggregate_multi_line(
+    items: list[dict[str, Any]],
+    *,
+    group_by_key: str,
+    agg: str,
+    value_key: str | None = None,
+) -> list[dict[str, Any]]:
+    m: dict[str, dict[str, float]] = {}
+    for row in items:
+        if not row:
+            continue
+        label = safe_key(row.get(group_by_key))
+        cur = m.get(label) or {"sum": 0.0, "count": 0.0}
+        cur["count"] += 1.0
+        if agg in ("sum", "avg") and value_key:
+            n = to_numeric(row.get(value_key))
+            if n is not None:
+                cur["sum"] += n
+        m[label] = cur
+    out: list[dict[str, Any]] = []
+    for label, v in m.items():
+        cnt, s = v["count"], v["sum"]
+        if agg == "count_rows":
+            out.append({"label": label, "value": cnt})
+        elif agg == "sum":
+            out.append({"label": label, "value": s})
+        else:  # avg
+            out.append({"label": label, "value": s / cnt if cnt else 0.0})
+    return out
+
+
+def aggregate_single_value(
+    items: list[dict[str, Any]],
+    *,
+    agg: str,
+    value_key: str | None = None,
+) -> float | None:
+    if agg == "count":
+        return float(len(items))
+    nums: list[float] = []
+    for row in items:
+        if not row:
+            continue
+        n = to_numeric(row.get(value_key or ""))
+        if n is not None:
+            nums.append(n)
+    if not nums:
+        return None
+    if agg == "sum":
+        return float(sum(nums))
+    if agg == "avg":
+        return sum(nums) / len(nums)
+    if agg == "min":
+        return min(nums)
+    if agg == "max":
+        return max(nums)
+    return None
+
+
+def _period_key_norm(period_key: str | None) -> str:
+    return (period_key or "").strip()[:8]
+
+
+def _merge_overrides(w: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
+    out = dict(w)
+    if not overrides:
+        return out
+    for k, v in overrides.items():
+        out[k] = v
+    return out
+
+
+def _field_value_raw(fv: KPIFieldValue) -> Any:
+    for attr in ("value_text", "value_number", "value_boolean", "value_date", "value_json"):
+        val = getattr(fv, attr, None)
+        if val is not None:
+            if attr == "value_date" and hasattr(val, "isoformat"):
+                try:
+                    return val.isoformat()
+                except Exception:  # noqa: S110
+                    return str(val)
+            return val
+    return None
+
+
+def raw_field_from_entry(entry: KPIEntry | None, field_id: int) -> Any:
+    if not entry or not field_id:
+        return None
+    for fv in entry.field_values or []:
+        if int(fv.field_id) == int(field_id):
+            return _field_value_raw(fv)
+    return None
+
+
+def raw_field_from_fv_map(fv_by_id: dict[int, KPIFieldValue], field_id: int) -> Any:
+    if not field_id:
+        return None
+    fv = fv_by_id.get(int(field_id))
+    return _field_value_raw(fv) if fv else None
+
+
+def build_kpi_field_maps(fields: list[KPIField]) -> dict[str, Any]:
+    id_by_key: dict[str, int] = {}
+    name_by_key: dict[str, str] = {}
+    for f in fields:
+        if f.key is not None:
+            id_by_key[str(f.key)] = int(f.id)
+            name_by_key[str(f.key)] = f.name
+    return {"id_by_key": id_by_key, "name_by_key": name_by_key}
+
+
+async def get_entry_readonly(
+    db: AsyncSession,
+    *,
+    org_id: int,
+    kpi_id: int,
+    year: int,
+    period_key: str | None,
+) -> KPIEntry | None:
+    """Full entry with all field values — avoid for hot widget paths; use get_entry_id_updated + targeted FVs."""
+    pk = _period_key_norm(period_key)
+    res = await db.execute(
+        select(KPIEntry)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == int(year),
+            KPIEntry.period_key == pk,
+        )
+        .options(selectinload(KPIEntry.field_values))
+    )
+    return res.scalar_one_or_none()
+
+
+async def get_entry_id_updated(
+    db: AsyncSession,
+    *,
+    org_id: int,
+    kpi_id: int,
+    year: int,
+    period_key: str | None,
+) -> tuple[int | None, Any]:
+    """
+    One lightweight query: entry id + updated_at only.
+    Avoids selectinload of every KPIFieldValue (can be 100+ rows and megabytes for large KPIs).
+    """
+    pk = _period_key_norm(period_key)
+    r = await db.execute(
+        select(KPIEntry.id, KPIEntry.updated_at)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == int(year),
+            KPIEntry.period_key == pk,
+        )
+    )
+    row = r.one_or_none()
+    if not row:
+        return None, None
+    return int(row[0]), row[1]
+
+
+async def get_field_values_for_field_ids(
+    db: AsyncSession, *, entry_id: int, field_ids: list[int]
+) -> dict[int, KPIFieldValue]:
+    if not field_ids:
+        return {}
+    uq = sorted({int(x) for x in field_ids})
+    res = await db.execute(
+        select(KPIFieldValue).where(
+            KPIFieldValue.entry_id == entry_id,
+            KPIFieldValue.field_id.in_(uq),
+        )
+    )
+    rows = res.scalars().all()
+    return {int(fv.field_id): fv for fv in rows}
+
+
+async def fetch_entry_revision_and_field_values(
+    db: AsyncSession,
+    *,
+    org_id: int,
+    kpi_id: int,
+    year: int,
+    period_key: str | None,
+    field_ids: list[int],
+) -> tuple[int | None, Any, dict[int, KPIFieldValue]]:
+    """
+    One round-trip: resolve (entry id, updated_at) and all KPIFieldValue rows for those field_ids.
+    Replaces get_entry_id_updated + get_field_values_for_field_ids for hot scalar widget paths.
+    """
+    pk = _period_key_norm(period_key)
+    uq = sorted({int(x) for x in field_ids})
+    if not uq:
+        eid, e_ts = await get_entry_id_updated(
+            db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+        )
+        return eid, e_ts, {}
+    res = await db.execute(
+        select(KPIEntry.id, KPIEntry.updated_at, KPIFieldValue)
+        .select_from(KPIEntry)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == int(year),
+            KPIEntry.period_key == pk,
+        )
+        .outerjoin(
+            KPIFieldValue,
+            and_(
+                KPIFieldValue.entry_id == KPIEntry.id,
+                KPIFieldValue.field_id.in_(uq),
+            ),
+        )
+    )
+    flat = res.all()
+    if not flat:
+        return None, None, {}
+    eid: int | None = None
+    e_ts: Any = None
+    fv_by_id: dict[int, KPIFieldValue] = {}
+    for r in flat:
+        if eid is None and r[0] is not None:
+            eid = int(r[0])
+            e_ts = r[1]
+        fv = r[2]
+        if fv is not None:
+            fv_by_id[int(fv.field_id)] = fv
+    return eid, e_ts, fv_by_id
+
+
+async def fetch_scalar_bar_chart_bundle(
+    db: AsyncSession,
+    *,
+    org_id: int,
+    kpi_id: int,
+    year: int,
+    period_key: str | None,
+) -> tuple[dict[str, Any], int | None, Any, dict[int, KPIFieldValue]]:
+    """
+    Single SQL for scalar bar/pie: all KPI fields (for field_map) + entry id/updated_at + field values.
+    Avoids separate list_kpi_field_definitions + fetch_entry_revision_and_field_values round-trips.
+    """
+    pk = _period_key_norm(period_key)
+    res = await db.execute(
+        select(
+            KPIField.id,
+            KPIField.key,
+            KPIField.name,
+            KPIField.sort_order,
+            KPIEntry.id,
+            KPIEntry.updated_at,
+            KPIFieldValue,
+        )
+        .select_from(KPIField)
+        .join(
+            KPI,
+            and_(KPI.id == KPIField.kpi_id, KPI.id == int(kpi_id), KPI.organization_id == org_id),
+        )
+        .outerjoin(
+            KPIEntry,
+            and_(
+                KPIEntry.kpi_id == int(kpi_id),
+                KPIEntry.organization_id == org_id,
+                KPIEntry.year == int(year),
+                KPIEntry.period_key == pk,
+            ),
+        )
+        .outerjoin(
+            KPIFieldValue,
+            and_(
+                KPIFieldValue.entry_id == KPIEntry.id,
+                KPIFieldValue.field_id == KPIField.id,
+            ),
+        )
+        .order_by(KPIField.sort_order, KPIField.id)
+    )
+    flat = res.all()
+    id_by_key: dict[str, int] = {}
+    name_by_key: dict[str, str] = {}
+    eid: int | None = None
+    e_ts: Any = None
+    fv_by_id: dict[int, KPIFieldValue] = {}
+    for r in flat:
+        fid, key, name, _so, e_row_id, e_row_ts, fv = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
+        if fid is None:
+            continue
+        if key is not None and str(key).strip():
+            id_by_key[str(key)] = int(fid)
+            name_by_key[str(key)] = str(name or key)
+        if eid is None and e_row_id is not None:
+            eid = int(e_row_id)
+            e_ts = e_row_ts
+        if fv is not None:
+            fv_by_id[int(fv.field_id)] = fv
+    fmap: dict[str, Any] = {"id_by_key": id_by_key, "name_by_key": name_by_key}
+    return fmap, eid, e_ts, fv_by_id
+
+
+def entry_revision_for(entry: KPIEntry | None) -> str | None:
+    if not entry:
+        return None
+    ts = getattr(entry, "updated_at", None)
+    ts_s = ts.isoformat() if ts is not None and hasattr(ts, "isoformat") else ""
+    return f"{entry.id}:{ts_s}"
+
+
+def revision_for_parts(entry_id: int | None, updated_at: Any) -> str | None:
+    if not entry_id:
+        return None
+    ts = updated_at
+    ts_s = ts.isoformat() if ts is not None and hasattr(ts, "isoformat") else ""
+    return f"{entry_id}:{ts_s}"
+
+
+async def _apply_row_filters(
+    db: AsyncSession,
+    org_id: int,
+    field: KPIField,
+    year_for_ref: int | None,
+    raw_filters: Any,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if raw_filters is None or raw_filters == {}:
+        return rows
+    if isinstance(raw_filters, str) and not raw_filters.strip():
+        return rows
+    if isinstance(raw_filters, str):
+        try:
+            raw_filters = json.loads(raw_filters)
+        except json.JSONDecodeError:
+            return rows
+    if not isinstance(raw_filters, dict):
+        return rows
+    if raw_filters.get("_version") == 2:
+        conds = raw_filters.get("conditions")
+        reference_field_types: dict[str, str] = {}
+        for sf in field.sub_fields or []:
+            k = getattr(sf, "key", "")
+            ft = getattr(getattr(sf, "field_type", None), "value", sf.field_type)
+            reference_field_types[str(k)] = str(ft or "")
+        resolution_maps = None
+        if isinstance(conds, list):
+            needs_ref = False
+            for c in conds:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("reference_resolution"):
+                    needs_ref = True
+                    break
+                fk = c.get("field")
+                if fk is not None and reference_field_types.get(str(fk)) in ("reference", "multi_reference"):
+                    needs_ref = True
+                    break
+            if needs_ref:
+                resolution_maps = await build_reference_resolution_map(
+                    db, org_id, year_for_ref, field, conds, [r for r in rows if isinstance(r, dict)]
+                )
+        return [r for r in rows if isinstance(r, dict) and row_passes_filters(r, raw_filters, resolution_maps=resolution_maps, reference_field_types=reference_field_types)]
+    return [r for r in rows if isinstance(r, dict) and row_passes_filters(r, raw_filters)]
+
+
+async def load_multi_line_row_dicts_filtered(
+    db: AsyncSession,
+    org_id: int,
+    *,
+    entry_id: int,
+    field: KPIField,
+    kpi_id: int,
+    year: int,
+    raw_filters: Any,
+) -> tuple[list[dict[str, Any]], int]:
+    pairs = await load_multi_line_row_dicts(db, entry_id=entry_id, field=field)
+    rows = [d for _i, d in pairs if isinstance(d, dict)]
+    n_before = len(rows)
+    filtered = await _apply_row_filters(
+        db,
+        org_id,
+        field,
+        int(year) if year else None,
+        raw_filters,
+        rows,
+    )
+    return filtered, n_before
+
+
+def _multi_line_needs_subfield_rows_for_filters(raw_filters: Any) -> bool:
+    """
+    _apply_row_filters with empty/None does not use field.sub_fields.
+    Row filters and reference resolution use subfield metadata — load those only when needed.
+    """
+    if raw_filters is None or raw_filters == {}:
+        return False
+    if isinstance(raw_filters, str) and not str(raw_filters).strip():
+        return False
+    return True
+
+
+async def _field_with_subs_if_mline_filters(
+    db: AsyncSession,
+    org_id: int,
+    f: KPIField | None,
+    raw_filters: Any,
+) -> KPIField | None:
+    if not f:
+        return None
+    if not _multi_line_needs_subfield_rows_for_filters(raw_filters):
+        return f
+    return await get_field_with_subfields_only(db, f.id, org_id) or f
+
+
+# ---------------------------------------------------------------------------
+# Resolvers: (db, user, org_id, merged) -> (meta, data, etag)
+# ---------------------------------------------------------------------------
+WidgetResolver = Callable[[AsyncSession, User, int, dict[str, Any]], Awaitable[tuple[dict[str, Any], dict[str, Any], str | None]]]
+
+
+async def _kpi_bar_chart_payload(
+    db: AsyncSession, org_id: int, w: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """
+    Bar/pie widget data after tenant KPI existence is verified.
+    No permission checks — callers must enforce KPI or dashboard access.
+    """
+    kpi_id = int(w.get("kpi_id") or 0)
+    year = int(w.get("year") or 0)
+    period_key = w.get("period_key")
+    mode = w.get("mode") or "fields"
+    if not kpi_id or not year:
+        return (
+            {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": None},
+            {"error": "missing kpi_id or year"},
+            None,
+        )
+    kpi = (await db.execute(select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id))).scalar_one_or_none()
+    if not kpi:
+        return (
+            {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": None},
+            {"error": "KPI not found"},
+            None,
+        )
+
+    if mode == "multi_line_items":
+        fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+        fmap = build_kpi_field_maps(fields)
+        eid, e_ts = await get_entry_id_updated(
+            db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+        )
+        e_rev = revision_for_parts(eid, e_ts)
+        source_key = (w.get("source_field_key") or "").strip()
+        f_obj = next((f for f in fields if f.key == source_key and f.field_type == FieldType.multi_line_items), None)
+        if not f_obj or not eid:
+            return (
+                {
+                    "kpi_id": kpi_id,
+                    "year": year,
+                    "period_key": _period_key_norm(period_key),
+                    "entry_id": eid,
+                    "row_count": 0,
+                    "source_field_id": f_obj.id if f_obj else None,
+                },
+                {
+                    "mode": "multi_line_items",
+                    "raw_rows": [],
+                },
+                e_rev,
+            )
+        raw_filters = w.get("filters")
+        agg_w = str(w.get("agg") or "count_rows").strip().lower()
+        group_key = (w.get("group_by_sub_field_key") or "").strip()
+        filt_key = (w.get("filter_sub_field_key") or "").strip()
+        val_key = (w.get("value_sub_field_key") or "").strip()
+        use_sql_agg = agg_w in ("count_rows", "sum", "avg")
+        filter_where_sql: str | None = None
+        filter_sql_params: dict[str, Any] | None = None
+        if use_sql_agg:
+            f_full = await get_field_with_subfields_only(db, int(f_obj.id), org_id) or f_obj
+            sub_id_by_key: dict[str, int] = {}
+            reference_field_types: dict[str, str] = {}
+            for sf in getattr(f_full, "sub_fields", None) or []:
+                sk = getattr(sf, "key", None)
+                if sk:
+                    sks = str(sk)
+                    sub_id_by_key[sks] = int(sf.id)
+                    ft = getattr(getattr(sf, "field_type", None), "value", sf.field_type)
+                    reference_field_types[sks] = str(ft or "")
+            gid = sub_id_by_key.get(group_key)
+            fid = sub_id_by_key.get(filt_key) if filt_key else None
+            vid = sub_id_by_key.get(val_key) if val_key else None
+            if filt_key and fid is None:
+                use_sql_agg = False
+            if agg_w in ("sum", "avg") and val_key and vid is None:
+                use_sql_agg = False
+            if use_sql_agg:
+                compiled = compile_multiline_row_filters_sql(
+                    raw_filters,
+                    sub_id_by_key=sub_id_by_key,
+                    reference_field_types=reference_field_types,
+                )
+                if compiled is None:
+                    use_sql_agg = False
+                else:
+                    filter_where_sql, filter_sql_params = compiled
+                    if not (filter_where_sql or "").strip():
+                        filter_where_sql = None
+                        filter_sql_params = None
+            if gid is not None and use_sql_agg:
+                try:
+                    buckets = await fetch_multiline_bar_agg_buckets(
+                        db,
+                        entry_id=int(eid),
+                        multiline_field_id=int(f_obj.id),
+                        group_sub_field_id=int(gid),
+                        filter_sub_field_id=int(fid) if fid is not None else None,
+                        value_sub_field_id=int(vid) if vid is not None else None,
+                        agg=agg_w,
+                        filter_where_sql=filter_where_sql,
+                        filter_params=filter_sql_params,
+                    )
+                except Exception:
+                    buckets = None
+                if buckets is not None:
+                    row_count = sum(int(b["n"]) for b in buckets)
+                    return (
+                        {
+                            "kpi_id": kpi_id,
+                            "year": year,
+                            "period_key": _period_key_norm(period_key),
+                            "entry_id": eid,
+                            "row_count": row_count,
+                            "source_field_id": int(f_obj.id),
+                        },
+                        {
+                            "mode": "multi_line_items",
+                            "multi_line_agg_buckets": buckets,
+                            "raw_rows": [],
+                            "field_map": fmap,
+                        },
+                        e_rev,
+                    )
+        f_obj = await _field_with_subs_if_mline_filters(
+            db, org_id, f_obj, raw_filters
+        )
+        rows, _n_before = await load_multi_line_row_dicts_filtered(
+            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=raw_filters
+        )
+        return (
+            {
+                "kpi_id": kpi_id,
+                "year": year,
+                "period_key": _period_key_norm(period_key),
+                "entry_id": eid,
+                "row_count": len(rows),
+                "source_field_id": int(f_obj.id),
+            },
+            {"mode": "multi_line_items", "raw_rows": rows, "field_map": fmap},
+            e_rev,
+        )
+
+    fmap, eid, e_ts, fv_by_id = await fetch_scalar_bar_chart_bundle(
+        db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+    )
+    e_rev = revision_for_parts(eid, e_ts)
+    keys: list[str] = list(w.get("field_keys") or [])
+    bars: list[dict[str, Any]] = []
+    if not eid:
+        for key in keys:
+            bars.append({"key": key, "label": fmap["name_by_key"].get(key) or key, "value": None})
+        return (
+            {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": None, "row_count": 0},
+            {"mode": "fields", "bars": bars, "field_map": fmap},
+            None,
+        )
+    for key in keys:
+        fid = fmap["id_by_key"].get(key)
+        val = to_numeric(raw_field_from_fv_map(fv_by_id, int(fid))) if fid else None
+        bars.append({"key": key, "label": fmap["name_by_key"].get(key) or key, "value": val})
+    return (
+        {
+            "kpi_id": kpi_id,
+            "year": year,
+            "period_key": _period_key_norm(period_key),
+            "entry_id": eid,
+            "row_count": 0,
+        },
+        {"mode": "fields", "bars": bars, "field_map": fmap},
+        e_rev,
+    )
+
+
+async def _resolve_kpi_bar_chart(
+    db: AsyncSession, user: User, org_id: int, w: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    kpi_id = int(w.get("kpi_id") or 0)
+    year = int(w.get("year") or 0)
+    period_key = w.get("period_key")
+    if not kpi_id or not year:
+        return (
+            {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": None},
+            {"error": "missing kpi_id or year"},
+            None,
+        )
+    if not await can_view_kpi_for_user(db, user, kpi_id, org_id=org_id):
+        return (
+            {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": None},
+            {"error": "forbidden"},
+            None,
+        )
+    return await _kpi_bar_chart_payload(db, org_id, w)
+
+
+async def _resolve_kpi_trend(db: AsyncSession, user: User, org_id: int, w: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    kpi_id = int(w.get("kpi_id") or 0)
+    if not kpi_id:
+        return ({"kpi_id": 0, "row_count": 0}, {"error": "missing kpi_id"}, None)
+    if not await can_view_kpi_for_user(db, user, kpi_id, org_id=org_id):
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "forbidden"}, None)
+    kpi = (await db.execute(select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id))).scalar_one_or_none()
+    if not kpi:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "KPI not found"}, None)
+
+    start_y = int(w.get("start_year") or 0)
+    end_y = int(w.get("end_year") or 0)
+    lo, hi = (min(start_y, end_y), max(start_y, end_y)) if start_y and end_y else (0, 0)
+
+    def _y_int(x: Any) -> int | None:
+        if x is None or isinstance(x, bool):
+            return None
+        if isinstance(x, int):
+            return int(x)
+        if isinstance(x, float):
+            if math.isnan(x) or math.isinf(x):
+                return None
+            return int(x)
+        s = str(x).strip()
+        if not s:
+            return None
+        s2 = s[1:] if s.startswith(("-", "+")) else s
+        if s2.isdigit() or (("." in s2) and s2.replace(".", "", 1).isdigit()):
+            try:
+                return int(float(s))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    selected = w.get("selected_years")
+    years: list[int] = []
+    if isinstance(selected, list) and selected:
+        years = sorted({yy for v in selected if (yy := _y_int(v)) is not None}, reverse=True)
+    if not years:
+        dy = w.get("default_years")
+        if isinstance(dy, list) and dy:
+            years = sorted({yy for v in dy if (yy := _y_int(v)) is not None}, reverse=True)
+    if not years and hi:
+        years = [hi]
+    if years and lo and hi and lo <= hi:
+        years = [yy for yy in years if lo <= yy <= hi]
+    period_key = w.get("period_key")
+    mode = w.get("mode") or "fields"
+    fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+    fmap = build_kpi_field_maps(fields)
+
+    revisions: list[str] = []
+    if mode == "multi_line_items":
+        source_key = (w.get("source_field_key") or "").strip()
+        f_obj = next((f for f in fields if f.key == source_key and f.field_type == FieldType.multi_line_items), None)
+        f_obj = await _field_with_subs_if_mline_filters(db, org_id, f_obj, w.get("filters"))
+        raw_by_year: dict[str, list[dict[str, Any]]] = {}
+        for yy in years:
+            eid_y, e_ts = await get_entry_id_updated(
+                db, org_id=org_id, kpi_id=kpi_id, year=yy, period_key=period_key
+            )
+            r = revision_for_parts(eid_y, e_ts)
+            if r:
+                revisions.append(r)
+            if not f_obj or not eid_y:
+                raw_by_year[str(yy)] = []
+                continue
+            row_list, _n = await load_multi_line_row_dicts_filtered(
+                db, org_id, entry_id=eid_y, field=f_obj, kpi_id=kpi_id, year=yy, raw_filters=w.get("filters")
+            )
+            raw_by_year[str(yy)] = row_list
+        e_rev = "|".join(revisions) if revisions else None
+        return (
+            {
+                "kpi_id": kpi_id,
+                "period_key": _period_key_norm(period_key),
+                "row_count": sum(len(v) for v in raw_by_year.values()),
+                "years": years,
+            },
+            {"mode": "multi_line_items", "raw_rows_by_year": raw_by_year, "field_map": fmap},
+            e_rev,
+        )
+
+    keys: list[str] = list(w.get("field_keys") or [])
+    fids = [fmap["id_by_key"][k] for k in keys if fmap["id_by_key"].get(k)]
+    field_bars: dict[str, list[dict[str, Any]]] = {}
+    for yy in years:
+        eid_y, e_ts = await get_entry_id_updated(
+            db, org_id=org_id, kpi_id=kpi_id, year=yy, period_key=period_key
+        )
+        r = revision_for_parts(eid_y, e_ts)
+        if r:
+            revisions.append(r)
+        bars: list[dict[str, Any]] = []
+        if not eid_y:
+            for key in keys:
+                bars.append({"key": key, "label": fmap["name_by_key"].get(key) or key, "value": None})
+        else:
+            fv_by_id = await get_field_values_for_field_ids(db, entry_id=eid_y, field_ids=fids)
+            for key in keys:
+                fid = fmap["id_by_key"].get(key)
+                v = to_numeric(raw_field_from_fv_map(fv_by_id, int(fid))) if fid else None
+                bars.append({"key": key, "label": fmap["name_by_key"].get(key) or key, "value": v})
+        field_bars[str(yy)] = bars
+    e_rev = "|".join(revisions) if revisions else None
+    return (
+        {"kpi_id": kpi_id, "period_key": _period_key_norm(period_key), "row_count": 0, "years": years},
+        {"mode": "fields", "field_bars_by_year": field_bars, "field_map": fmap},
+        e_rev,
+    )
+
+
+async def _resolve_kpi_line_chart(
+    db: AsyncSession, user: User, org_id: int, w: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    kpi_id = int(w.get("kpi_id") or 0)
+    fk = (w.get("field_key") or "").strip()
+    s = int(w.get("start_year") or 0)
+    e = int(w.get("end_year") or 0)
+    period_key = w.get("period_key")
+    if not kpi_id or not fk or not s or not e:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
+    if not await can_view_kpi_for_user(db, user, kpi_id, org_id=org_id):
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "forbidden"}, None)
+    fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+    fmap = build_kpi_field_maps(fields)
+    fid = fmap["id_by_key"].get(fk)
+    if not fid:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "unknown field_key", "field_map": fmap}, None)
+    lo, hi = min(s, e), max(s, e)
+    years = list(range(lo, hi + 1))
+    points: list[dict[str, Any]] = []
+    revisions: list[str] = []
+    for y in years:
+        eid_y, e_ts = await get_entry_id_updated(
+            db, org_id=org_id, kpi_id=kpi_id, year=y, period_key=period_key
+        )
+        r = revision_for_parts(eid_y, e_ts)
+        if r:
+            revisions.append(r)
+        if not eid_y:
+            points.append({"year": y, "value": None})
+            continue
+        fv_by_id = await get_field_values_for_field_ids(db, entry_id=eid_y, field_ids=[int(fid)])
+        v = to_numeric(raw_field_from_fv_map(fv_by_id, int(fid)))
+        points.append({"year": y, "value": v})
+    e_rev = "|".join(revisions) if revisions else None
+    return (
+        {"kpi_id": kpi_id, "row_count": 0, "field_key": fk, "field_id": int(fid)},
+        {"points": points, "field_map": fmap},
+        e_rev,
+    )
+
+
+async def _resolve_kpi_table(db: AsyncSession, user: User, org_id: int, w: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    kpi_id = int(w.get("kpi_id") or 0)
+    year = int(w.get("year") or 0)
+    period_key = w.get("period_key")
+    if not kpi_id or not year:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
+    if not await can_view_kpi_for_user(db, user, kpi_id, org_id=org_id):
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "forbidden"}, None)
+    fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+    fmap = build_kpi_field_maps(fields)
+    fkeys: list[str] = list(w.get("field_keys") or []) if w.get("field_keys") else list(fmap["id_by_key"].keys())
+    eid, e_ts = await get_entry_id_updated(
+        db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+    )
+    fids = [fmap["id_by_key"][k] for k in fkeys if fmap["id_by_key"].get(k)]
+    fv_by_id = await get_field_values_for_field_ids(db, entry_id=eid, field_ids=fids) if eid else {}
+    rows_out: list[dict[str, Any]] = []
+    for k in fkeys:
+        fid = fmap["id_by_key"].get(k)
+        raw = raw_field_from_fv_map(fv_by_id, int(fid)) if (eid and fid) else None
+        sval = "" if raw is None else (json.dumps(raw) if isinstance(raw, (dict, list)) else str(raw))
+        rows_out.append({"label": fmap["name_by_key"].get(k) or k, "value": sval})
+    return (
+        {
+            "kpi_id": kpi_id,
+            "year": year,
+            "period_key": _period_key_norm(period_key),
+            "entry_id": eid,
+            "row_count": len(rows_out),
+        },
+        {"rows": rows_out, "field_map": fmap},
+        revision_for_parts(eid, e_ts),
+    )
+
+
+async def _resolve_kpi_single_value(
+    db: AsyncSession, user: User, org_id: int, w: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    kpi_id = int(w.get("kpi_id") or 0)
+    year = int(w.get("year") or 0)
+    period_key = w.get("period_key")
+    field_key = (w.get("field_key") or "").strip()
+    if not kpi_id or not year or not field_key:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
+    if not await can_view_kpi_for_user(db, user, kpi_id, org_id=org_id):
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "forbidden"}, None)
+    fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+    fmap = build_kpi_field_maps(fields)
+    fid = fmap["id_by_key"].get(field_key)
+    eid, e_ts = await get_entry_id_updated(
+        db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+    )
+    raw = None
+    if eid and fid:
+        fvm = await get_field_values_for_field_ids(db, entry_id=eid, field_ids=[int(fid)])
+        raw = raw_field_from_fv_map(fvm, int(fid))
+    return (
+        {
+            "kpi_id": kpi_id,
+            "year": year,
+            "period_key": _period_key_norm(period_key),
+            "entry_id": eid,
+            "row_count": 0,
+        },
+        {
+            "raw": raw,
+            "display": raw,
+            "field_map": fmap,
+        },
+        revision_for_parts(eid, e_ts),
+    )
+
+
+async def _resolve_kpi_card_single_value(
+    db: AsyncSession, user: User, org_id: int, w: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    kpi_id = int(w.get("kpi_id") or 0)
+    year = int(w.get("year") or 0)
+    period_key = w.get("period_key")
+    if not kpi_id or not year:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
+    if not await can_view_kpi_for_user(db, user, kpi_id, org_id=org_id):
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "forbidden"}, None)
+    sm = w.get("source_mode") or "field"
+    if sm == "static":
+        return (
+            {"kpi_id": kpi_id, "year": year, "row_count": 0},
+            {"source_mode": "static", "static_value": w.get("static_value")},
+            None,
+        )
+    fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+    fmap = build_kpi_field_maps(fields)
+    if sm == "field":
+        fk = (w.get("field_key") or "").strip()
+        eid, e_ts = await get_entry_id_updated(
+            db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+        )
+        fid = fmap["id_by_key"].get(fk)
+        raw = None
+        if eid and fid:
+            fvm = await get_field_values_for_field_ids(db, entry_id=eid, field_ids=[int(fid)])
+            raw = raw_field_from_fv_map(fvm, int(fid))
+        n = to_numeric(raw)
+        return (
+            {
+                "kpi_id": kpi_id,
+                "year": year,
+                "period_key": _period_key_norm(period_key),
+                "entry_id": eid,
+                "row_count": 0,
+            },
+            {"source_mode": "field", "numeric": n, "raw": raw, "field_map": fmap},
+            revision_for_parts(eid, e_ts),
+        )
+    if sm == "multi_line_agg":
+        mls = (w.get("source_field_key") or "").strip()
+        f_obj = next((f for f in fields if f.key == mls and f.field_type == FieldType.multi_line_items), None)
+        eid, e_ts = await get_entry_id_updated(
+            db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+        )
+        e_rev = revision_for_parts(eid, e_ts)
+        if not f_obj or not eid:
+            return (
+                {
+                    "kpi_id": kpi_id,
+                    "year": year,
+                    "period_key": _period_key_norm(period_key),
+                    "entry_id": eid,
+                    "row_count": 0,
+                },
+                {"source_mode": "multi_line_agg", "numeric": None, "raw_rows": []},
+                e_rev,
+            )
+        f_obj = await _field_with_subs_if_mline_filters(
+            db, org_id, f_obj, w.get("filters")
+        )
+        rows, _n = await load_multi_line_row_dicts_filtered(
+            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters")
+        )
+        agg = w.get("agg") or "sum"
+        n = aggregate_single_value(rows, agg=agg, value_key=w.get("value_sub_field_key") or None)
+        return (
+            {
+                "kpi_id": kpi_id,
+                "year": year,
+                "period_key": _period_key_norm(period_key),
+                "entry_id": eid,
+                "row_count": len(rows),
+            },
+            {"source_mode": "multi_line_agg", "numeric": n, "raw_rows": rows, "field_map": fmap},
+            e_rev,
+        )
+    return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "unknown source_mode"}, None)
+
+
+async def _resolve_kpi_multi_line_table(
+    db: AsyncSession, user: User, org_id: int, w: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    kpi_id = int(w.get("kpi_id") or 0)
+    year = int(w.get("year") or 0)
+    period_key = w.get("period_key")
+    mls = (w.get("source_field_key") or "").strip()
+    if not kpi_id or not year or not mls:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
+    if not await can_view_kpi_for_user(db, user, kpi_id, org_id=org_id):
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "forbidden"}, None)
+    fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+    fmap = build_kpi_field_maps(fields)
+    f_light = next((f for f in fields if f.key == mls and f.field_type == FieldType.multi_line_items), None)
+    f_obj = (
+        await get_field_with_subfields_only(db, f_light.id, org_id) if f_light is not None else None
+    )
+    eid, e_ts = await get_entry_id_updated(
+        db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+    )
+    e_rev = revision_for_parts(eid, e_ts)
+    label_by_key: dict[str, str] = {}
+    if f_obj and f_obj.sub_fields:
+        for sf in f_obj.sub_fields:
+            label_by_key[str(sf.key)] = str(sf.name or sf.key)
+    if not f_obj or not eid:
+        return (
+            {
+                "kpi_id": kpi_id,
+                "year": year,
+                "period_key": _period_key_norm(period_key),
+                "entry_id": eid,
+                "row_count": 0,
+            },
+            {
+                "rows": [],
+                "sub_field_labels": label_by_key,
+                "joins": [],
+                "source_field_id": f_obj.id if f_obj else (f_light.id if f_light else None),
+                "field_map": fmap,
+            },
+            e_rev,
+        )
+    # f_obj already has sub_fields from get_field_with_subfields_only (labels + row filters)
+    rows, _n = await load_multi_line_row_dicts_filtered(
+        db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters")
+    )
+    truncated = len(rows) > MAX_MULTILINE_TABLE_ROWS
+    if truncated:
+        rows = rows[:MAX_MULTILINE_TABLE_ROWS]
+    # Joins: legacy single `join` or `joins` list (same as frontend)
+    join_specs: list[dict[str, Any]] = []
+    if isinstance(w.get("joins"), list):
+        for j in w.get("joins") or []:
+            if isinstance(j, dict) and j.get("kpi_id") and j.get("source_field_key"):
+                join_specs.append(j)
+    elif isinstance(w.get("join"), dict) and w.get("join", {}).get("kpi_id"):
+        join_specs.append(w["join"])
+    joins_data: list[dict[str, Any]] = []
+    for j in join_specs:
+        jkpi = int(j.get("kpi_id") or 0)
+        if not jkpi or not await can_view_kpi_for_user(db, user, jkpi, org_id=org_id):
+            joins_data.append(
+                {
+                    "kpi_id": jkpi,
+                    "rows": [],
+                    "sub_field_labels": {},
+                    "error": "forbidden" if jkpi else "bad_spec",
+                }
+            )
+            continue
+        jfields = await list_kpi_field_definitions(db, jkpi, org_id)
+        j_sk = (j.get("source_field_key") or "").strip()
+        jf = next((f for f in jfields if f.key == j_sk and f.field_type == FieldType.multi_line_items), None)
+        jeid, _jts = await get_entry_id_updated(
+            db, org_id=org_id, kpi_id=jkpi, year=year, period_key=period_key
+        )
+        jrows: list[dict[str, Any]] = []
+        jlabels: dict[str, str] = {}
+        if jf and jeid:
+            jf = await get_field_with_subfields_only(db, jf.id, org_id) or jf
+            jrows_full, _ = await load_multi_line_row_dicts_filtered(
+                db, org_id, entry_id=jeid, field=jf, kpi_id=jkpi, year=year, raw_filters=None
+            )
+            jrows = jrows_full[:MAX_MULTILINE_TABLE_ROWS]
+            if jf.sub_fields:
+                for sf in jf.sub_fields:
+                    jlabels[str(sf.key)] = str(sf.name or sf.key)
+        joins_data.append({"kpi_id": jkpi, "rows": jrows, "sub_field_labels": jlabels, "on_right": j.get("on_right_sub_field_key") or ""})
+    return (
+        {
+            "kpi_id": kpi_id,
+            "year": year,
+            "period_key": _period_key_norm(period_key),
+            "entry_id": eid,
+            "row_count": len(rows) if not truncated else MAX_MULTILINE_TABLE_ROWS,
+            "truncated": truncated,
+        },
+        {
+            "rows": rows,
+            "sub_field_labels": label_by_key,
+            "joins": joins_data,
+            "source_field_id": int(f_obj.id),
+            "field_map": fmap,
+        },
+        e_rev,
+    )
+
+
+async def _resolve_text(
+    _db: AsyncSession, _user: User, _org_id: int, w: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    return ({"row_count": 0}, {"text": w.get("text") or "", "title": w.get("title") or ""}, None)
+
+
+WIDGET_RESOLVERS: dict[str, WidgetResolver] = {
+    "kpi_bar_chart": _resolve_kpi_bar_chart,
+    "kpi_trend": _resolve_kpi_trend,
+    "kpi_line_chart": _resolve_kpi_line_chart,
+    "kpi_table": _resolve_kpi_table,
+    "kpi_single_value": _resolve_kpi_single_value,
+    "kpi_card_single_value": _resolve_kpi_card_single_value,
+    "kpi_multi_line_table": _resolve_kpi_multi_line_table,
+    "text": _resolve_text,
+}
+
+
+async def resolve_dashboard_chart_widget_data(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
+    """
+    Bar/pie (`kpi_bar_chart`) data when the client is on a dashboard view.
+    Authorizes with dashboard view only — skips KPI-level and field-level permission queries.
+    """
+    merged = _merge_overrides(widget, overrides)
+    if str(merged.get("type") or "") != "kpi_bar_chart":
+        return (
+            {"error": "unsupported_widget_type"},
+            {"supported": ["kpi_bar_chart"], "type": merged.get("type")},
+            "error",
+            None,
+        )
+    kpi_id = int(merged.get("kpi_id") or 0)
+    if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+        return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
+    meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, merged)
+    err = data.get("error")
+    if err == "KPI not found" or err == "missing kpi_id or year":
+        return meta, data, "error", e_rev
+    return meta, data, "kpi_bar_chart", e_rev
+
+
+async def _field_id_for_kpi_key(db: AsyncSession, *, org_id: int, kpi_id: int, field_key: str) -> int | None:
+    fk = (field_key or "").strip()
+    if not fk:
+        return None
+    # Ensure KPI belongs to org and field belongs to KPI.
+    stmt = (
+        select(KPIField.id)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPI.id == int(kpi_id), KPI.organization_id == int(org_id), KPIField.key == fk)
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def _dashboard_card_payload(
+    db: AsyncSession, org_id: int, merged: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """
+    Fast path for `kpi_card_single_value`:
+    - Avoids loading full field definitions/map.
+    - Reads only the requested field value (or returns static).
+    """
+    kpi_id = int(merged.get("kpi_id") or 0)
+    year = int(merged.get("year") or 0)
+    period_key = merged.get("period_key")
+    if not kpi_id or not year:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
+
+    sm = merged.get("source_mode") or "field"
+    if sm == "static":
+        return (
+            {"kpi_id": kpi_id, "year": year, "row_count": 0},
+            {"source_mode": "static", "static_value": merged.get("static_value")},
+            None,
+        )
+
+    eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+    e_rev = revision_for_parts(eid, e_ts)
+    if sm == "field":
+        fk = (merged.get("field_key") or "").strip()
+        fid = await _field_id_for_kpi_key(db, org_id=org_id, kpi_id=kpi_id, field_key=fk)
+        raw = None
+        if eid and fid:
+            fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=[int(fid)])
+            raw = raw_field_from_fv_map(fvm, int(fid))
+        n = to_numeric(raw)
+        return (
+            {
+                "kpi_id": kpi_id,
+                "year": year,
+                "period_key": _period_key_norm(period_key),
+                "entry_id": eid,
+                "row_count": 0,
+            },
+            {"source_mode": "field", "numeric": n, "raw": raw},
+            e_rev,
+        )
+
+    return (
+        {"kpi_id": kpi_id, "year": year, "row_count": 0},
+        {"error": "unsupported source_mode for fast card endpoint", "source_mode": sm},
+        e_rev,
+    )
+
+
+async def resolve_dashboard_card_widget_data(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
+    merged = _merge_overrides(widget, overrides)
+    if str(merged.get("type") or "") != "kpi_card_single_value":
+        return (
+            {"error": "unsupported_widget_type"},
+            {"supported": ["kpi_card_single_value"], "type": merged.get("type")},
+            "error",
+            None,
+        )
+    kpi_id = int(merged.get("kpi_id") or 0)
+    if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+        return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
+    meta, data, e_rev = await _dashboard_card_payload(db, org_id, merged)
+    err = data.get("error")
+    if err == "KPI not found" or err == "missing parameters":
+        return meta, data, "error", e_rev
+    return meta, data, "kpi_card_single_value", e_rev
+
+
+async def resolve_dashboard_table_widget_data(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
+    merged = _merge_overrides(widget, overrides)
+    if str(merged.get("type") or "") != "kpi_multi_line_table":
+        return (
+            {"error": "unsupported_widget_type"},
+            {"supported": ["kpi_multi_line_table"], "type": merged.get("type")},
+            "error",
+            None,
+        )
+    kpi_id = int(merged.get("kpi_id") or 0)
+    if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+        return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
+    meta, data, e_rev = await _dashboard_multi_line_table_payload(db, org_id, merged)
+    err = data.get("error")
+    if err == "KPI not found" or err == "missing parameters":
+        return meta, data, "error", e_rev
+    return meta, data, "kpi_multi_line_table", e_rev
+
+
+def _parse_join_specs(w: dict[str, Any]) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    if isinstance(w.get("joins"), list):
+        for j in w.get("joins") or []:
+            if not isinstance(j, dict):
+                continue
+            specs.append(j)
+    if isinstance(w.get("join"), dict):
+        specs.append(w.get("join") or {})
+    out: list[dict[str, Any]] = []
+    for j in specs:
+        try:
+            out.append(
+                {
+                    "kpi_id": int(j.get("kpi_id") or 0),
+                    "source_field_key": str(j.get("source_field_key") or "").strip(),
+                    "on_left_sub_field_key": str(j.get("on_left_sub_field_key") or "").strip(),
+                    "on_right_sub_field_key": str(j.get("on_right_sub_field_key") or "").strip(),
+                    "sub_field_keys": [str(x) for x in (j.get("sub_field_keys") or []) if str(x).strip()],
+                }
+            )
+        except Exception:
+            continue
+    return [
+        j
+        for j in out
+        if j["kpi_id"]
+        and j["source_field_key"]
+        and j["on_left_sub_field_key"]
+        and j["on_right_sub_field_key"]
+    ]
+
+
+async def _dashboard_multi_line_table_payload(
+    db: AsyncSession, org_id: int, w: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """
+    Dashboard fast path for `kpi_multi_line_table`:
+    - Dashboard auth already checked by caller.
+    - Avoids loading full KPI field definitions/map.
+    """
+    kpi_id = int(w.get("kpi_id") or 0)
+    year = int(w.get("year") or 0)
+    period_key = w.get("period_key")
+    mls = (w.get("source_field_key") or "").strip()
+    if not kpi_id or not year or not mls:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
+
+    kpi = (await db.execute(select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id))).scalar_one_or_none()
+    if not kpi:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "KPI not found"}, None)
+
+    f_light = (
+        await db.execute(
+            select(KPIField).where(
+                KPIField.kpi_id == int(kpi_id),
+                KPIField.key == mls,
+                KPIField.field_type == FieldType.multi_line_items,
+            )
+        )
+    ).scalars().first()
+    f_obj = await get_field_with_subfields_only(db, int(f_light.id), org_id) if f_light is not None else None
+
+    eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+    e_rev = revision_for_parts(eid, e_ts)
+
+    label_by_key: dict[str, str] = {}
+    if f_obj and f_obj.sub_fields:
+        for sf in f_obj.sub_fields:
+            label_by_key[str(sf.key)] = str(sf.name or sf.key)
+
+    if not f_obj or not eid:
+        return (
+            {
+                "kpi_id": kpi_id,
+                "year": year,
+                "period_key": _period_key_norm(period_key),
+                "entry_id": eid,
+                "row_count": 0,
+            },
+            {
+                "rows": [],
+                "sub_field_labels": label_by_key,
+                "joins": [],
+                "source_field_id": f_obj.id if f_obj else (f_light.id if f_light else None),
+            },
+            e_rev,
+        )
+
+    rows, _n = await load_multi_line_row_dicts_filtered(
+        db, org_id, entry_id=int(eid), field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters")
+    )
+    truncated = len(rows) > MAX_MULTILINE_TABLE_ROWS
+    if truncated:
+        rows = rows[:MAX_MULTILINE_TABLE_ROWS]
+
+    join_specs = _parse_join_specs(w)
+    joins_pack: list[dict[str, Any]] = []
+    for j in join_specs:
+        jkpi = int(j["kpi_id"])
+        jsrc = str(j["source_field_key"])
+        jf_light = (
+            await db.execute(
+                select(KPIField).join(KPI, KPI.id == KPIField.kpi_id).where(
+                    KPI.id == jkpi,
+                    KPI.organization_id == org_id,
+                    KPIField.key == jsrc,
+                    KPIField.field_type == FieldType.multi_line_items,
+                )
+            )
+        ).scalars().first()
+        jf_obj = await get_field_with_subfields_only(db, int(jf_light.id), org_id) if jf_light is not None else None
+        jeid, _je_ts = await get_entry_id_updated(
+            db, org_id=org_id, kpi_id=jkpi, year=year, period_key=period_key
+        )
+        j_labels: dict[str, str] = {}
+        if jf_obj and jf_obj.sub_fields:
+            for sf in jf_obj.sub_fields:
+                j_labels[str(sf.key)] = str(sf.name or sf.key)
+        if not jf_obj or not jeid:
+            joins_pack.append(
+                {
+                    "rows": [],
+                    "sub_field_labels": j_labels,
+                    "source_field_id": jf_obj.id if jf_obj else (jf_light.id if jf_light else None),
+                }
+            )
+            continue
+        jrows, _jn = await load_multi_line_row_dicts_filtered(
+            db, org_id, entry_id=int(jeid), field=jf_obj, kpi_id=jkpi, year=year, raw_filters=j.get("filters")
+        )
+        if len(jrows) > MAX_MULTILINE_TABLE_ROWS:
+            jrows = jrows[:MAX_MULTILINE_TABLE_ROWS]
+        joins_pack.append(
+            {
+                "rows": jrows,
+                "sub_field_labels": j_labels,
+                "source_field_id": int(jf_obj.id),
+            }
+        )
+
+    return (
+        {
+            "kpi_id": kpi_id,
+            "year": year,
+            "period_key": _period_key_norm(period_key),
+            "entry_id": eid,
+            "row_count": len(rows),
+            "truncated": truncated,
+        },
+        {
+            "rows": rows,
+            "sub_field_labels": label_by_key,
+            "joins": joins_pack,
+            "source_field_id": int(f_obj.id),
+        },
+        e_rev,
+    )
+
+
+async def _fast_line_points(
+    db: AsyncSession,
+    *,
+    org_id: int,
+    kpi_id: int,
+    field_key: str,
+    start_year: int,
+    end_year: int,
+    period_key: Any,
+) -> tuple[list[dict[str, Any]], str | None, int | None]:
+    fid = await _field_id_for_kpi_key(db, org_id=org_id, kpi_id=kpi_id, field_key=field_key)
+    if not fid:
+        return ([], None, None)
+    lo, hi = min(int(start_year), int(end_year)), max(int(start_year), int(end_year))
+    years = list(range(lo, hi + 1))
+    stmt = (
+        select(
+            KPIEntry.year,
+            KPIEntry.id,
+            KPIEntry.updated_at,
+            KPIFieldValue.value_text,
+            KPIFieldValue.value_number,
+            KPIFieldValue.value_json,
+            KPIFieldValue.value_boolean,
+            KPIFieldValue.value_date,
+        )
+        .select_from(KPIEntry)
+        .join(KPI, KPI.id == KPIEntry.kpi_id)
+        .outerjoin(
+            KPIFieldValue,
+            and_(KPIFieldValue.entry_id == KPIEntry.id, KPIFieldValue.field_id == int(fid)),
+        )
+        .where(
+            KPIEntry.kpi_id == int(kpi_id),
+            KPI.organization_id == int(org_id),
+            KPIEntry.year.in_(years),
+            KPIEntry.period_key == _period_key_norm(period_key),
+        )
+        .order_by(KPIEntry.year.asc())
+    )
+    res = await db.execute(stmt)
+    points_by_year: dict[int, Any] = {int(y): None for y in years}
+    revisions: list[str] = []
+    for row in res.mappings().all():
+        y = int(row["year"])
+        eid = row["id"]
+        r = revision_for_parts(eid, row["updated_at"])
+        if r:
+            revisions.append(r)
+        # mimic raw_field_from_fv_map for one field id
+        raw = (
+            row["value_number"]
+            if row["value_number"] is not None
+            else row["value_text"]
+            if row["value_text"] is not None
+            else row["value_boolean"]
+            if row["value_boolean"] is not None
+            else row["value_date"]
+            if row["value_date"] is not None
+            else row["value_json"]
+        )
+        points_by_year[y] = to_numeric(raw)
+    points = [{"year": int(y), "value": points_by_year.get(int(y))} for y in years]
+    e_rev = "|".join(revisions) if revisions else None
+    return (points, e_rev, int(fid))
+
+
+async def resolve_dashboard_line_widget_data(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
+    merged = _merge_overrides(widget, overrides)
+    if str(merged.get("type") or "") != "kpi_line_chart":
+        return (
+            {"error": "unsupported_widget_type"},
+            {"supported": ["kpi_line_chart"], "type": merged.get("type")},
+            "error",
+            None,
+        )
+    kpi_id = int(merged.get("kpi_id") or 0)
+    if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+        return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
+    fk = (merged.get("field_key") or "").strip()
+    s = int(merged.get("start_year") or 0)
+    e = int(merged.get("end_year") or 0)
+    period_key = merged.get("period_key")
+    if not kpi_id or not fk or not s or not e:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, "error", None)
+    points, e_rev, fid = await _fast_line_points(
+        db,
+        org_id=org_id,
+        kpi_id=kpi_id,
+        field_key=fk,
+        start_year=s,
+        end_year=e,
+        period_key=period_key,
+    )
+    return (
+        {"kpi_id": kpi_id, "row_count": 0, "field_key": fk, "field_id": fid},
+        {"points": points},
+        "kpi_line_chart",
+        e_rev,
+    )
+
+
+async def resolve_dashboard_single_value_widget_data(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
+    merged = _merge_overrides(widget, overrides)
+    if str(merged.get("type") or "") != "kpi_single_value":
+        return (
+            {"error": "unsupported_widget_type"},
+            {"supported": ["kpi_single_value"], "type": merged.get("type")},
+            "error",
+            None,
+        )
+    kpi_id = int(merged.get("kpi_id") or 0)
+    if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+        return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
+    year = int(merged.get("year") or 0)
+    period_key = merged.get("period_key")
+    fk = (merged.get("field_key") or "").strip()
+    if not kpi_id or not year or not fk:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, "error", None)
+    fid = await _field_id_for_kpi_key(db, org_id=org_id, kpi_id=kpi_id, field_key=fk)
+    eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+    e_rev = revision_for_parts(eid, e_ts)
+    raw = None
+    if eid and fid:
+        fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=[int(fid)])
+        raw = raw_field_from_fv_map(fvm, int(fid))
+    return (
+        {
+            "kpi_id": kpi_id,
+            "year": year,
+            "period_key": _period_key_norm(period_key),
+            "entry_id": eid,
+            "row_count": 0,
+            "field_key": fk,
+            "field_id": fid,
+        },
+        {"raw": raw, "display": raw},
+        "kpi_single_value",
+        e_rev,
+    )
+
+
+async def resolve_dashboard_trend_widget_data(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
+    merged = _merge_overrides(widget, overrides)
+    if str(merged.get("type") or "") != "kpi_trend":
+        return (
+            {"error": "unsupported_widget_type"},
+            {"supported": ["kpi_trend"], "type": merged.get("type")},
+            "error",
+            None,
+        )
+    kpi_id = int(merged.get("kpi_id") or 0)
+    if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+        return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
+
+    # Reuse existing resolver logic, but skip KPI permission by calling its internals with a pre-checked KPI.
+    # We still optimize the heavy "fields" mode by fetching all years in one SQL query.
+    start_y = int(merged.get("start_year") or 0)
+    end_y = int(merged.get("end_year") or 0)
+    lo, hi = (min(start_y, end_y), max(start_y, end_y)) if start_y and end_y else (0, 0)
+
+    def _y_int(x: Any) -> int | None:
+        if x is None or isinstance(x, bool):
+            return None
+        if isinstance(x, int):
+            return int(x)
+        if isinstance(x, float):
+            if math.isnan(x) or math.isinf(x):
+                return None
+            return int(x)
+        s = str(x).strip()
+        if not s:
+            return None
+        s2 = s[1:] if s.startswith(("-", "+")) else s
+        if s2.isdigit() or (("." in s2) and s2.replace(".", "", 1).isdigit()):
+            try:
+                return int(float(s))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    selected = merged.get("selected_years")
+    years: list[int] = []
+    if isinstance(selected, list) and selected:
+        years = sorted({yy for v in selected if (yy := _y_int(v)) is not None}, reverse=True)
+    if not years:
+        dy = merged.get("default_years")
+        if isinstance(dy, list) and dy:
+            years = sorted({yy for v in dy if (yy := _y_int(v)) is not None}, reverse=True)
+    if not years and hi:
+        years = [hi]
+    if years and lo and hi and lo <= hi:
+        years = [yy for yy in years if lo <= yy <= hi]
+
+    period_key = merged.get("period_key")
+    mode = merged.get("mode") or "fields"
+
+    if mode == "fields":
+        keys: list[str] = list(merged.get("field_keys") or [])
+        if not keys:
+            return (
+                {"kpi_id": kpi_id, "period_key": _period_key_norm(period_key), "row_count": 0, "years": years},
+                {"mode": "fields", "field_bars_by_year": {}, "field_map": {}},
+                "kpi_trend",
+                None,
+            )
+        # resolve field ids once
+        fid_by_key: dict[str, int] = {}
+        for k in keys:
+            fid = await _field_id_for_kpi_key(db, org_id=org_id, kpi_id=kpi_id, field_key=str(k))
+            if fid:
+                fid_by_key[str(k)] = int(fid)
+
+        if not fid_by_key:
+            return (
+                {"kpi_id": kpi_id, "period_key": _period_key_norm(period_key), "row_count": 0, "years": years},
+                {"mode": "fields", "field_bars_by_year": {}, "field_map": {}},
+                "kpi_trend",
+                None,
+            )
+
+        stmt = (
+            select(
+                KPIEntry.year,
+                KPIEntry.id.label("entry_id"),
+                KPIEntry.updated_at,
+                KPIFieldValue.field_id,
+                KPIFieldValue.value_text,
+                KPIFieldValue.value_number,
+                KPIFieldValue.value_json,
+                KPIFieldValue.value_boolean,
+                KPIFieldValue.value_date,
+            )
+            .select_from(KPIEntry)
+            .join(KPI, KPI.id == KPIEntry.kpi_id)
+            .outerjoin(
+                KPIFieldValue,
+                and_(KPIFieldValue.entry_id == KPIEntry.id, KPIFieldValue.field_id.in_(list(fid_by_key.values()))),
+            )
+            .where(
+                KPIEntry.kpi_id == int(kpi_id),
+                KPI.organization_id == int(org_id),
+                KPIEntry.year.in_(years if years else [0]),
+                KPIEntry.period_key == _period_key_norm(period_key),
+            )
+            .order_by(KPIEntry.year.desc())
+        )
+        res = await db.execute(stmt)
+        # build per-year map for raw values
+        by_year_field: dict[int, dict[int, Any]] = {int(y): {} for y in years}
+        revisions: list[str] = []
+        for row in res.mappings().all():
+            yy = int(row["year"])
+            eid = row["entry_id"]
+            r = revision_for_parts(eid, row["updated_at"])
+            if r:
+                revisions.append(r)
+            fid = row["field_id"]
+            if fid is None:
+                continue
+            raw = (
+                row["value_number"]
+                if row["value_number"] is not None
+                else row["value_text"]
+                if row["value_text"] is not None
+                else row["value_boolean"]
+                if row["value_boolean"] is not None
+                else row["value_date"]
+                if row["value_date"] is not None
+                else row["value_json"]
+            )
+            by_year_field.setdefault(yy, {})[int(fid)] = raw
+
+        field_bars: dict[str, list[dict[str, Any]]] = {}
+        for yy in years:
+            bars: list[dict[str, Any]] = []
+            fvals = by_year_field.get(int(yy), {})
+            for k in keys:
+                fid = fid_by_key.get(str(k))
+                v = to_numeric(fvals.get(int(fid))) if fid else None
+                bars.append({"key": str(k), "label": str(k), "value": v})
+            field_bars[str(yy)] = bars
+        e_rev = "|".join(revisions) if revisions else None
+        return (
+            {"kpi_id": kpi_id, "period_key": _period_key_norm(period_key), "row_count": 0, "years": years},
+            {"mode": "fields", "field_bars_by_year": field_bars},
+            "kpi_trend",
+            e_rev,
+        )
+
+    # For multi_line_items: prefer SQL buckets per year (no raw rows).
+    if mode == "multi_line_items":
+        source_key = (merged.get("source_field_key") or "").strip()
+        group_key = (merged.get("group_by_sub_field_key") or "").strip()
+        filt_key = (merged.get("filter_sub_field_key") or "").strip()
+        val_key = (merged.get("value_sub_field_key") or "").strip()
+        agg_w = str(merged.get("agg") or "count_rows").strip().lower()
+        kpi = (await db.execute(select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id))).scalar_one_or_none()
+        if not kpi:
+            return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "KPI not found"}, "error", None)
+        f_light = (
+            await db.execute(
+                select(KPIField).where(
+                    KPIField.kpi_id == int(kpi_id),
+                    KPIField.key == source_key,
+                    KPIField.field_type == FieldType.multi_line_items,
+                )
+            )
+        ).scalars().first()
+        f_full = await get_field_with_subfields_only(db, int(f_light.id), org_id) if f_light is not None else None
+        if not f_full or not group_key:
+            return (
+                {"kpi_id": kpi_id, "period_key": _period_key_norm(period_key), "row_count": 0, "years": years},
+                {"mode": "multi_line_items", "multi_line_agg_buckets_by_year": {}},
+                "kpi_trend",
+                None,
+            )
+        sub_id_by_key: dict[str, int] = {}
+        reference_field_types: dict[str, str] = {}
+        for sf in getattr(f_full, "sub_fields", None) or []:
+            if getattr(sf, "key", None):
+                sk = str(sf.key)
+                sub_id_by_key[sk] = int(sf.id)
+                ft = getattr(getattr(sf, "field_type", None), "value", sf.field_type)
+                reference_field_types[sk] = str(ft or "")
+        gid = sub_id_by_key.get(group_key)
+        fid = sub_id_by_key.get(filt_key) if filt_key else None
+        vid = sub_id_by_key.get(val_key) if val_key else None
+        if gid is None:
+            return (
+                {"kpi_id": kpi_id, "period_key": _period_key_norm(period_key), "row_count": 0, "years": years},
+                {"mode": "multi_line_items", "multi_line_agg_buckets_by_year": {}},
+                "kpi_trend",
+                None,
+            )
+
+        compiled = compile_multiline_row_filters_sql(
+            merged.get("filters"),
+            sub_id_by_key=sub_id_by_key,
+            reference_field_types=reference_field_types,
+        )
+        filter_where_sql, filter_params = (None, None)
+        if compiled is not None:
+            filter_where_sql, filter_params = compiled
+            if not (filter_where_sql or "").strip():
+                filter_where_sql, filter_params = (None, None)
+
+        buckets_by_year: dict[str, Any] = {}
+        revisions: list[str] = []
+        for yy in years:
+            eid_y, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=int(yy), period_key=period_key)
+            r = revision_for_parts(eid_y, e_ts)
+            if r:
+                revisions.append(r)
+            if not eid_y:
+                buckets_by_year[str(yy)] = []
+                continue
+            try:
+                buckets = await fetch_multiline_bar_agg_buckets(
+                    db,
+                    entry_id=int(eid_y),
+                    multiline_field_id=int(f_full.id),
+                    group_sub_field_id=int(gid),
+                    filter_sub_field_id=int(fid) if fid is not None else None,
+                    value_sub_field_id=int(vid) if vid is not None else None,
+                    agg=agg_w,
+                    filter_where_sql=filter_where_sql,
+                    filter_params=filter_params,
+                )
+            except Exception:
+                buckets = []
+            buckets_by_year[str(yy)] = buckets
+        e_rev = "|".join(revisions) if revisions else None
+        return (
+            {"kpi_id": kpi_id, "period_key": _period_key_norm(period_key), "row_count": 0, "years": years},
+            {"mode": "multi_line_items", "multi_line_agg_buckets_by_year": buckets_by_year},
+            "kpi_trend",
+            e_rev,
+        )
+
+    return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "unknown mode"}, "error", None)
+
+
+async def resolve_dashboard_kpi_table_widget_data(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
+    merged = _merge_overrides(widget, overrides)
+    if str(merged.get("type") or "") != "kpi_table":
+        return (
+            {"error": "unsupported_widget_type"},
+            {"supported": ["kpi_table"], "type": merged.get("type")},
+            "error",
+            None,
+        )
+    kpi_id = int(merged.get("kpi_id") or 0)
+    if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+        return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
+    year = int(merged.get("year") or 0)
+    period_key = merged.get("period_key")
+    if not kpi_id or not year:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, "error", None)
+    kpi = (await db.execute(select(KPI).where(KPI.id == kpi_id, KPI.organization_id == org_id))).scalar_one_or_none()
+    if not kpi:
+        return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "KPI not found"}, "error", None)
+
+    req_keys: list[str] = [str(x) for x in (merged.get("field_keys") or []) if str(x).strip()]
+    if req_keys:
+        frows = (
+            await db.execute(
+                select(KPIField.id, KPIField.key, KPIField.name).where(
+                    KPIField.kpi_id == int(kpi_id), KPIField.key.in_(req_keys)
+                )
+            )
+        ).all()
+    else:
+        frows = (
+            await db.execute(
+                select(KPIField.id, KPIField.key, KPIField.name).where(KPIField.kpi_id == int(kpi_id))
+            )
+        ).all()
+    fields = [{"id": int(r[0]), "key": str(r[1]), "name": str(r[2] or r[1])} for r in frows]
+    key_order = req_keys if req_keys else [f["key"] for f in fields]
+    id_by_key = {f["key"]: int(f["id"]) for f in fields}
+    name_by_key = {f["key"]: str(f["name"]) for f in fields}
+
+    eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+    e_rev = revision_for_parts(eid, e_ts)
+    fv_by_id = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=list(id_by_key.values())) if eid else {}
+
+    rows_out: list[dict[str, Any]] = []
+    for k in key_order:
+        fid = id_by_key.get(k)
+        raw = raw_field_from_fv_map(fv_by_id, int(fid)) if (eid and fid) else None
+        sval = "" if raw is None else (json.dumps(raw) if isinstance(raw, (dict, list)) else str(raw))
+        rows_out.append({"label": name_by_key.get(k) or k, "value": sval})
+
+    return (
+        {
+            "kpi_id": kpi_id,
+            "year": year,
+            "period_key": _period_key_norm(period_key),
+            "entry_id": eid,
+            "row_count": len(rows_out),
+        },
+        {"rows": rows_out},
+        "kpi_table",
+        e_rev,
+    )
+
+
+async def resolve_widget_data(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    version: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
+    if version != 1:
+        return ({"error": f"Unsupported version: {version}"}, {"supported": 1}, "error", None)
+    merged = _merge_overrides(widget, overrides)
+    wtype = str(merged.get("type") or "")
+    resolver = WIDGET_RESOLVERS.get(wtype)
+    if not resolver:
+        rt = wtype or "unknown"
+        return ({"error": f"Unknown widget type: {rt}"}, {"known": list(WIDGET_RESOLVERS.keys())}, rt, None)
+    meta, data, e_rev = await resolver(db, user, org_id, merged)
+    return meta, data, wtype, e_rev

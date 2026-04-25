@@ -716,21 +716,16 @@ def _assignment_type_value(a) -> str:
     return t.value if hasattr(t, "value") else str(t)
 
 
-async def user_can_view_kpi(
-    db: AsyncSession, user_id: int, kpi_id: int, org_id: int | None = None
+async def can_view_kpi_for_user(
+    db: AsyncSession, user: User, kpi_id: int, org_id: int | None = None
 ) -> bool:
-    """Check if user can view KPI.
-
-    - SUPER_ADMIN: full access.
-    - ORG_ADMIN: full access within their organization (ignores assignments).
-    - Other users: no implicit access; visibility is based on organization roles:
-        * KPI-level role assignments (KpiRoleAssignment) with view/data_entry, OR
-        * Field-level role access (KpiFieldAccessByRole) that grants at least view to any field.
     """
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    Check if the given (already-loaded) user can view the KPI.
+    Avoids a redundant SELECT on `users` (use with User from get_current_user).
+    """
+    if not user or user.id is None:
         return False
+    user_id = int(user.id)
     if user.role.value == "SUPER_ADMIN":
         return True
     if user.role.value == "ORG_ADMIN":
@@ -740,8 +735,6 @@ async def user_can_view_kpi(
             return False
         effective_org = org_id if org_id is not None else getattr(user, "organization_id", None)
         return effective_org is not None and kpi_org == effective_org
-    # Non-admins: derive visibility from role-based KPI/field access only
-    # 1) Any KPI-level role assignment for this user?
     kpi_role_res = await db.execute(
         select(KpiRoleAssignment)
         .join(
@@ -755,11 +748,28 @@ async def user_can_view_kpi(
     )
     if kpi_role_res.scalar_one_or_none() is not None:
         return True
-    # 2) Any field-level role access that grants at least view for any field?
     access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
     if not access_map:
         return False
     return any(perm in ("view", "data_entry") for perm in access_map.values())
+
+
+async def user_can_view_kpi(
+    db: AsyncSession, user_id: int, kpi_id: int, org_id: int | None = None
+) -> bool:
+    """Check if user can view KPI.
+
+    - SUPER_ADMIN: full access.
+    - ORG_ADMIN: full access within their organization (ignores assignments).
+    - Other users: no implicit access; visibility is based on organization roles:
+        * KPI-level role assignments (KpiRoleAssignment) with view/data_entry, OR
+        * Field-level role access (KpiFieldAccessByRole) that grants at least view to any field.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    u = result.scalar_one_or_none()
+    if not u:
+        return False
+    return await can_view_kpi_for_user(db, u, kpi_id, org_id=org_id)
 
 
 async def user_can_edit_kpi(

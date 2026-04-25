@@ -6,6 +6,7 @@ import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
+import { fetchMultiLineRowsForEntry } from "@/lib/fetchMultiItemsRows";
 import {
   coerceScalarValueTextFromApi,
   getAttachmentDisplayName,
@@ -119,7 +120,7 @@ type SecuritySection =
   | "add_row_rights"
   | "grant_revoke_all";
 
-function qs(params: Record<string, string | number | undefined>) {
+function qs(params: Record<string, string | number | boolean | undefined>) {
   const entries = Object.entries(params)
     .filter(([, v]) => v !== undefined && v !== "")
     .map(([k, v]) => [k, String(v)] as [string, string]);
@@ -148,7 +149,12 @@ function expectedPeriods(dimension: string): string[] {
   return [""];
 }
 
-function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
+function formatValue(
+  f: FieldDef,
+  v: FieldValueResp | undefined,
+  /** Relational multi-line rows loaded separately (field id → rows); when a key exists, row count comes from here. */
+  multiLineRowsByFieldId?: Record<number, Record<string, unknown>[]>
+): string {
   if (!v) return "—";
   if (f.field_type === "multi_reference" && Array.isArray(v.value_json)) {
     return (v.value_json as string[]).join(", ") || "—";
@@ -164,7 +170,14 @@ function formatValue(f: FieldDef, v: FieldValueResp | undefined): string {
   if (v.value_number != null) return String(v.value_number);
   if (v.value_boolean != null) return v.value_boolean ? "Yes" : "No";
   if (v.value_date) return String(v.value_date).slice(0, 10);
-  if (f.field_type === "multi_line_items" && Array.isArray(v.value_json)) return `${v.value_json.length} row(s)`;
+  if (f.field_type === "multi_line_items") {
+    if (multiLineRowsByFieldId && Object.prototype.hasOwnProperty.call(multiLineRowsByFieldId, f.id)) {
+      const rows = multiLineRowsByFieldId[f.id];
+      return `${Array.isArray(rows) ? rows.length : 0} row(s)`;
+    }
+    if (Array.isArray(v.value_json)) return `${v.value_json.length} row(s)`;
+    return "—";
+  }
   if (v.value_json != null) return String(v.value_json).slice(0, 50);
   return "—";
 }
@@ -317,6 +330,8 @@ export default function DomainKpiDetailPage() {
     value_json?: Record<string, unknown>[] | (string | number)[];
   };
   const [formValues, setFormValues] = useState<Record<number, FormCell>>({});
+  /** Relational multi_line_items rows keyed by field id (loaded from `/entries/multi-items/rows`). */
+  const [multiLineRowsByFieldId, setMultiLineRowsByFieldId] = useState<Record<number, Record<string, unknown>[]>>({});
 
   const token = getAccessToken();
   const effectiveOrgId = organizationIdFromUrl ?? meOrgId ?? kpiOrgId ?? entry?.organization_id ?? undefined;
@@ -328,6 +343,39 @@ export default function DomainKpiDetailPage() {
     (entry?.values ?? []).forEach((v) => map.set(v.field_id, v));
     return map;
   }, [entry?.values]);
+
+  // Load relational multi_line_items rows (value_json on entry is cleared after save for these fields).
+  useEffect(() => {
+    if (!token || !entry?.id || effectiveOrgId == null || fields.length === 0) {
+      setMultiLineRowsByFieldId({});
+      return;
+    }
+    const mlFields = fields.filter((f) => f.field_type === "multi_line_items");
+    if (mlFields.length === 0) {
+      setMultiLineRowsByFieldId({});
+      return;
+    }
+    const loadId = entryDetailLoadGenRef.current;
+    void Promise.all(
+      mlFields.map((f) =>
+        fetchMultiLineRowsForEntry({
+          token,
+          organizationId: effectiveOrgId,
+          entryId: entry.id,
+          fieldId: f.id,
+        })
+          .then((rows) => [f.id, rows] as const)
+          .catch(() => [f.id, [] as Record<string, unknown>[]] as const)
+      )
+    ).then((pairs) => {
+      if (loadId !== entryDetailLoadGenRef.current) return;
+      const next: Record<number, Record<string, unknown>[]> = {};
+      pairs.forEach(([id, rows]) => {
+        next[id] = rows;
+      });
+      setMultiLineRowsByFieldId(next);
+    });
+  }, [token, entry?.id, effectiveOrgId, fields, year, periodKeyFromUrl, isEntriesRoute]);
 
   const fetchFullRowAccessUsers = useCallback(
     async (fieldId: number, entryId: number) => {
@@ -922,14 +970,22 @@ export default function DomainKpiDetailPage() {
     });
   }, [token, effectiveOrgId, fields]);
 
-  const buildFormValuesFromEntry = (e: EntryRow | null): Record<number, FormCell> => {
+  const buildFormValuesFromEntry = (
+    e: EntryRow | null,
+    mlRows: Record<number, Record<string, unknown>[]>
+  ): Record<number, FormCell> => {
     const out: Record<number, FormCell> = {};
     const valueMap = new Map((e?.values ?? []).map((v) => [v.field_id, v]));
     fields.forEach((f) => {
       if (f.field_type === "formula") return;
       const v = valueMap.get(f.id);
       if (f.field_type === "multi_line_items") {
-        out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [] };
+        const fromRelational = mlRows[f.id];
+        if (Object.prototype.hasOwnProperty.call(mlRows, f.id) && Array.isArray(fromRelational)) {
+          out[f.id] = { value_json: fromRelational.map((row) => ({ ...row })) };
+        } else {
+          out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [] };
+        }
       } else if (f.field_type === "multi_reference") {
         out[f.id] = { value_json: Array.isArray(v?.value_json) ? (v!.value_json as string[]) : [] };
       } else if (f.field_type === "mixed_list") {
@@ -953,12 +1009,33 @@ export default function DomainKpiDetailPage() {
   };
 
   const startEditing = () => {
-    setFormValues(buildFormValuesFromEntry(entry));
+    setFormValues(buildFormValuesFromEntry(entry, multiLineRowsByFieldId));
     setEditAssignments(assignedUsers.map((u) => ({ user_id: u.id, permission: u.permission || "data_entry" })));
     setIsEditing(true);
     setEditRoleAssignments(assignedRoles.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })));
     setSaveError(null);
   };
+
+  /** If relational multi-line rows finish loading after Edit was opened, hydrate empty draft rows from API. */
+  useEffect(() => {
+    if (!isEditing || !entry?.id) return;
+    const ml = fields.filter((f) => f.field_type === "multi_line_items");
+    if (ml.length === 0) return;
+    setFormValues((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const f of ml) {
+        if (!Object.prototype.hasOwnProperty.call(multiLineRowsByFieldId, f.id)) continue;
+        const loaded = multiLineRowsByFieldId[f.id];
+        if (!Array.isArray(loaded)) continue;
+        const cur = prev[f.id]?.value_json;
+        if (Array.isArray(cur) && cur.length > 0) continue;
+        next[f.id] = { ...prev[f.id], value_json: loaded.map((row) => ({ ...row })) };
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [isEditing, entry?.id, fields, multiLineRowsByFieldId]);
 
   // Keep role assignment editor state in sync outside global edit mode.
   useEffect(() => {
@@ -2199,7 +2276,7 @@ export default function DomainKpiDetailPage() {
                       return (
                         <div key={f.id} style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
                           <label style={{ minWidth: 160, fontWeight: 500 }}>{f.name} (formula)</label>
-                          <span style={{ color: "var(--muted)" }}>{formatValue(f, valuesByFieldId.get(f.id))}</span>
+                          <span style={{ color: "var(--muted)" }}>{formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}</span>
                         </div>
                       );
                     }
@@ -2426,7 +2503,7 @@ export default function DomainKpiDetailPage() {
                         {f.field_type === "formula" && " (formula)"}
                       </td>
                       <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
-                        {formatValue(f, valuesByFieldId.get(f.id))}
+                        {formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}
                       </td>
                     </tr>
                   ))}
@@ -2454,7 +2531,7 @@ export default function DomainKpiDetailPage() {
                       <tr key={f.id}>
                         <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{f.name}</td>
                         <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
-                          {formatValue(f, valuesByFieldId.get(f.id))}
+                          {formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}
                         </td>
                       </tr>
                     ))}
@@ -3826,13 +3903,19 @@ export default function DomainKpiDetailPage() {
           if (activeTab !== f.id) return null;
           const v = valuesByFieldId.get(f.id);
           const multiFieldCanEdit = (f as FieldDef).can_edit !== false;
+          const relationalLoaded = Object.prototype.hasOwnProperty.call(multiLineRowsByFieldId, f.id);
+          const relationalRows = relationalLoaded ? multiLineRowsByFieldId[f.id] : null;
+          const legacyRows = Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [];
+          const viewRows = relationalRows != null ? relationalRows : legacyRows;
           const formRows: Record<string, unknown>[] =
             isEditing && multiFieldCanEdit && Array.isArray(formValues[f.id]?.value_json)
               ? (formValues[f.id]!.value_json as Record<string, unknown>[])
               : [];
           const rows: Record<string, unknown>[] = !multiFieldCanEdit
-            ? (Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : [])
-            : (isEditing ? formRows : (Array.isArray(v?.value_json) ? (v!.value_json as Record<string, unknown>[]) : []));
+            ? viewRows
+            : isEditing
+              ? formRows
+              : viewRows;
           const subFields = f.sub_fields ?? [];
           const setRows = (next: Record<string, unknown>[]) => updateField(f.id, "value_json", next);
           const fieldQuery = `?field_id=${f.id}&organization_id=${effectiveOrgId}`;

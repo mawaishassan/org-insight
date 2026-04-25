@@ -78,6 +78,38 @@ async def get_field(db: AsyncSession, field_id: int, org_id: int) -> KPIField | 
     return result.scalar_one_or_none()
 
 
+async def list_kpi_field_definitions(
+    db: AsyncSession, kpi_id: int, org_id: int
+) -> list[KPIField]:
+    """
+    Field rows for a KPI (id, key, name, field_type, etc.) with no options/sub_fields.
+    Use for read-heavy paths (e.g. widget-data) to avoid loading thousands of option/child rows
+    that are not needed to build a key→id map.
+    """
+    result = await db.execute(
+        select(KPIField)
+        .join(KPIField.kpi)
+        .where(KPIField.kpi_id == kpi_id, KPI.organization_id == org_id)
+        .order_by(KPIField.sort_order, KPIField.id)
+    )
+    return list(result.scalars().all())
+
+
+async def get_field_with_subfields_only(
+    db: AsyncSession, field_id: int, org_id: int
+) -> KPIField | None:
+    """
+    One field with sub_fields loaded; options excluded (faster than full get_field for multi-line work).
+    """
+    result = await db.execute(
+        select(KPIField)
+        .join(KPIField.kpi)
+        .where(KPIField.id == field_id, KPI.organization_id == org_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    return result.scalar_one_or_none()
+
+
 async def list_fields(db: AsyncSession, kpi_id: int, org_id: int) -> list[KPIField]:
     """List fields for KPI (KPI must belong to org)."""
     result = await db.execute(

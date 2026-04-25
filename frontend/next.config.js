@@ -2,8 +2,12 @@
 const nextConfig = {
   reactStrictMode: true,
   async rewrites() {
-    // Must match backend port (start.bat and README use 8080)
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8080';
+    // Proxy browser `/api/*` to FastAPI. Use the same port as your uvicorn (start.bat uses 8080).
+    // Set NEXT_PUBLIC_BACKEND_URL or NEXT_PUBLIC_API_URL if the backend is not on the default.
+    const backendUrl =
+      process.env.NEXT_PUBLIC_BACKEND_URL ||
+      process.env.NEXT_PUBLIC_API_URL ||
+      'http://localhost:8080';
     return [
       { source: '/api/:path*', destination: `${backendUrl}/api/:path*` },
     ];
