@@ -284,7 +284,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       const params = qs({
         kpi_id: kpiId,
         field_id: fieldId,
-        minimal: true,
+        minimal: 1,
         organization_id: orgForQuery,
       });
 
@@ -332,7 +332,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       const params = qs({
         kpi_id: kpiId,
         field_id: fieldId,
-        minimal: true,
+        minimal: 1,
         organization_id: orgForQuery,
       });
 

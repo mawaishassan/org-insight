@@ -1590,7 +1590,11 @@ function KpiBarChartWidgetInner({
               const filterKey = widget.filter_sub_field_key || "";
               if (filterKey) {
                 const uniq = Array.from(
-                  new Set(items.map((r: any) => safeKey(r?.[filterKey])).filter((v) => v && v !== "(empty)"))
+                  new Set<string>(
+                    items
+                      .map((r: any) => safeKey(r?.[filterKey]))
+                      .filter((v: string): v is string => Boolean(v && v !== "(empty)"))
+                  )
                 ).sort((a, b) => a.localeCompare(b));
                 setFilterValues(uniq);
                 setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
