@@ -58,6 +58,7 @@ export default function EntriesPage() {
 
   const token = getAccessToken();
   const canFetchKpis = userRole && canManageKpis(userRole as "SUPER_ADMIN" | "ORG_ADMIN" | "USER" | "REPORT_VIEWER");
+  const isOrgAdmin = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
   const hasKpiFilters = domainIdParam || categoryIdParam || tagIdParam;
 
   useEffect(() => {
@@ -89,7 +90,8 @@ export default function EntriesPage() {
   }, [token, organizationId, canFetchKpis, domainIdParam, categoryIdParam, tagIdParam, hasKpiFilters]);
 
   useEffect(() => {
-    if (!token || !organizationId || !domainIdParam) {
+    // /domains is Org Admin (or Super Admin) only; avoid calling for normal users.
+    if (!token || !organizationId || !domainIdParam || !isOrgAdmin) {
       setDomainName(null);
       return;
     }
@@ -102,7 +104,8 @@ export default function EntriesPage() {
   }, [token, organizationId, domainIdParam]);
 
   useEffect(() => {
-    if (!token || !organizationId || !domainIdParam || !categoryIdParam) {
+    // /categories is Org Admin (or Super Admin) only; avoid calling for normal users.
+    if (!token || !organizationId || !domainIdParam || !categoryIdParam || !isOrgAdmin) {
       setCategoryName(null);
       return;
     }
@@ -115,7 +118,8 @@ export default function EntriesPage() {
   }, [token, organizationId, domainIdParam, categoryIdParam]);
 
   useEffect(() => {
-    if (!token || !organizationId || !tagIdParam) {
+    // /organizations/{id}/tags is Org Admin (or Super Admin) only; avoid calling for normal users.
+    if (!token || !organizationId || !tagIdParam || !isOrgAdmin) {
       setTagName(null);
       return;
     }
@@ -161,7 +165,7 @@ export default function EntriesPage() {
             statusFilter={status}
             assignedToMeOnly={assignedToMeOnly}
             onFilteredCountChange={setFilteredKpiCount}
-            cardLayout="org_admin"
+            cardLayout={isOrgAdmin ? "org_admin" : "default"}
             emptyMessage={
               filterTags.length > 0 || q.trim() || status !== "all" || assignedToMeOnly
                 ? "No KPIs match the filters. Change filters or ask your admin to add or assign KPIs."

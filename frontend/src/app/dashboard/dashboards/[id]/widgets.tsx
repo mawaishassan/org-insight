@@ -840,7 +840,9 @@ async function fetchEntryForPeriod(
     organization_id: String(organizationId),
   });
   if (periodKey) q.set("period_key", periodKey);
-  return api<any>(`/entries/for-period?${q.toString()}`, { token });
+  // Dashboard viewers may not be assigned to the underlying KPI. Some widget code paths still
+  // probe /entries/for-period (e.g. year option discovery). Treat permission errors as "no entry".
+  return api<any>(`/entries/for-period?${q.toString()}`, { token }).catch(() => null);
 }
 
 function KpiSingleValueWidget({
@@ -873,7 +875,16 @@ function KpiSingleValueWidget({
               { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
               { signal: ac.signal }
             )
-          : postWidgetData(token, { version: 1, organization_id: organizationId, widget: w }, { signal: ac.signal });
+          : postWidgetData(
+              token,
+              {
+                version: 1,
+                organization_id: organizationId,
+                ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
+                widget: w,
+              },
+              { signal: ac.signal }
+            );
       bundleReq
         .then((res) => {
           const raw = (res.data as { raw?: unknown }).raw;
@@ -970,7 +981,16 @@ function KpiCardSingleValueWidget({
               data: r.data ?? {},
               entry_revision: r.entry_revision ?? null,
             }))
-          : postWidgetData(token, { version: 1, organization_id: organizationId, widget: w }, { signal: ac.signal });
+          : postWidgetData(
+              token,
+              {
+                version: 1,
+                organization_id: organizationId,
+                ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
+                widget: w,
+              },
+              { signal: ac.signal }
+            );
       bundleReq
         .then((res) => {
           const d = res.data;
@@ -1137,7 +1157,16 @@ function KpiLineChartWidget({
               { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
               { signal: ac.signal }
             )
-          : postWidgetData(token, { version: 1, organization_id: organizationId, widget: w }, { signal: ac.signal });
+          : postWidgetData(
+              token,
+              {
+                version: 1,
+                organization_id: organizationId,
+                ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
+                widget: w,
+              },
+              { signal: ac.signal }
+            );
       bundleReq
         .then((res) => {
           const pts = res.data.points as Array<{ year: number; value: unknown }> | undefined;
@@ -1552,7 +1581,13 @@ function KpiBarChartWidgetInner({
             }))
           : postWidgetData(
               token,
-              { version: 1, organization_id: organizationId, widget: w, overrides: { year: viewerYear } },
+              {
+                version: 1,
+                organization_id: organizationId,
+                ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
+                widget: w,
+                overrides: { year: viewerYear },
+              },
               { signal: ac.signal }
             );
       bundleReq
@@ -2842,6 +2877,7 @@ function KpiTrendWidgetInner({
               {
                 version: 1,
                 organization_id: organizationId,
+                ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
                 widget: w,
                 overrides: { selected_years: selectedYears },
               },
@@ -3953,7 +3989,16 @@ function KpiTableWidget({
               { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
               { signal: ac.signal }
             )
-          : postWidgetData(token, { version: 1, organization_id: organizationId, widget: w }, { signal: ac.signal });
+          : postWidgetData(
+              token,
+              {
+                version: 1,
+                organization_id: organizationId,
+                ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
+                widget: w,
+              },
+              { signal: ac.signal }
+            );
       bundleReq
         .then((res) => {
           const drows = res.data.rows as Array<{ label: string; value: string }> | undefined;
@@ -4171,7 +4216,13 @@ function KpiMultiLineTableWidgetInner({
             )
           : postWidgetData(
               token,
-              { version: 1, organization_id: organizationId, widget: w, overrides: { year: viewerYear } },
+              {
+                version: 1,
+                organization_id: organizationId,
+                ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
+                widget: w,
+                overrides: { year: viewerYear },
+              },
               { signal: ac.signal }
             );
       bundleReq

@@ -8,6 +8,8 @@ import { api } from "@/lib/api";
 export type WidgetDataRequestV1 = {
   version: 1;
   organization_id: number;
+  /** Optional: when rendering on a dashboard, include dashboard context for auth. */
+  dashboard_id?: number;
   /** Same shape as widget in dashboard layout (id, type, options). */
   widget: Record<string, unknown>;
   /** Runtime: year, period_key, selected_years (kpi_trend) without mutating `widget`. */

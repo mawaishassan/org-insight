@@ -462,19 +462,65 @@ async def post_widget_data(
         )
     widget_type = str((body.widget or {}).get("type") or "")
 
-    meta, data, resolved_type, entry_revision = await resolve_widget_data(
-        db,
-        current_user,
-        org_id,
-        body.version,
-        body.widget,
-        body.overrides,
-    )
-    if data.get("error") == "forbidden" or meta.get("error") == "forbidden":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not allowed to view this KPI or resource",
+    # If the request includes a dashboard context, authorize using dashboard view permissions.
+    # This allows users assigned to a dashboard to view widget data even if they are not directly
+    # assigned to the underlying KPI.
+    if body.dashboard_id:
+        try:
+            if widget_type == "kpi_bar_chart":
+                meta, data, resolved_type, entry_revision = await resolve_dashboard_chart_widget_data(
+                    db, current_user, org_id, int(body.dashboard_id), body.widget, body.overrides
+                )
+            elif widget_type == "kpi_card_single_value":
+                meta, data, resolved_type, entry_revision = await resolve_dashboard_card_widget_data(
+                    db, current_user, org_id, int(body.dashboard_id), body.widget, body.overrides
+                )
+            elif widget_type == "kpi_multi_line_table":
+                meta, data, resolved_type, entry_revision = await resolve_dashboard_table_widget_data(
+                    db, current_user, org_id, int(body.dashboard_id), body.widget, body.overrides
+                )
+            elif widget_type == "kpi_line_chart":
+                meta, data, resolved_type, entry_revision = await resolve_dashboard_line_widget_data(
+                    db, current_user, org_id, int(body.dashboard_id), body.widget, body.overrides
+                )
+            elif widget_type == "kpi_trend":
+                meta, data, resolved_type, entry_revision = await resolve_dashboard_trend_widget_data(
+                    db, current_user, org_id, int(body.dashboard_id), body.widget, body.overrides
+                )
+            elif widget_type == "kpi_single_value":
+                meta, data, resolved_type, entry_revision = await resolve_dashboard_single_value_widget_data(
+                    db, current_user, org_id, int(body.dashboard_id), body.widget, body.overrides
+                )
+            elif widget_type == "kpi_table":
+                meta, data, resolved_type, entry_revision = await resolve_dashboard_kpi_table_widget_data(
+                    db, current_user, org_id, int(body.dashboard_id), body.widget, body.overrides
+                )
+            else:
+                meta, data, resolved_type, entry_revision = await resolve_widget_data(
+                    db,
+                    current_user,
+                    org_id,
+                    body.version,
+                    body.widget,
+                    body.overrides,
+                )
+        except Exception:
+            # Keep behavior consistent with the dashboard-scoped endpoints: surface dashboard-level forbidden.
+            raise
+    else:
+        meta, data, resolved_type, entry_revision = await resolve_widget_data(
+            db,
+            current_user,
+            org_id,
+            body.version,
+            body.widget,
+            body.overrides,
         )
+    if data.get("error") == "forbidden" or meta.get("error") == "forbidden":
+        # If dashboard context was used, the forbidden is about the dashboard access.
+        if body.dashboard_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this dashboard")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI or resource")
     if data.get("error") == "KPI not found" or meta.get("error") == "KPI not found":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
     if resolved_type == "error":
