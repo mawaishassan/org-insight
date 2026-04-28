@@ -36,9 +36,33 @@ export default function LoginPage() {
         }
       );
       setTokens(res.access_token, res.refresh_token);
-      const me = await api<{ role: string }>("/auth/me", { token: res.access_token });
+      const me = await api<{ role: string; organization_id: number | null }>("/auth/me", { token: res.access_token });
       toast.success("Logged in successfully");
-      router.push(me.role === "SUPER_ADMIN" ? "/dashboard/organizations" : "/dashboard/entries");
+      if (me.role === "SUPER_ADMIN") {
+        router.push("/dashboard/organizations");
+        router.refresh();
+        return;
+      }
+
+      const orgId = me.organization_id;
+      if (!orgId) {
+        router.push("/dashboard/no-access");
+        router.refresh();
+        return;
+      }
+
+      // Prefer a dashboard/report the user can view.
+      const [dashboards, reports] = await Promise.all([
+        api<Array<{ id: number }>>(`/dashboards?organization_id=${orgId}`, { token: res.access_token }).catch(() => []),
+        api<Array<{ id: number }>>(`/reports/templates?organization_id=${orgId}`, { token: res.access_token }).catch(() => []),
+      ]);
+      if (Array.isArray(dashboards) && dashboards.length > 0) {
+        router.push(`/dashboard/dashboards/${dashboards[0]!.id}?organization_id=${orgId}`);
+      } else if (Array.isArray(reports) && reports.length > 0) {
+        router.push(`/dashboard/reports/${reports[0]!.id}?organization_id=${orgId}`);
+      } else {
+        router.push("/dashboard/entries");
+      }
       router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Login failed");

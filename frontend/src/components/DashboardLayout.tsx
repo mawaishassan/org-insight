@@ -119,6 +119,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     if (!getAccessToken() || !orgId || !onEntries) return;
+    // /domains, /categories and org tags endpoints are Org Admin (or Super Admin) only.
+    // Avoid triggering 403s for normal users on the entries landing page.
+    if (user?.role !== "ORG_ADMIN" && user?.role !== "SUPER_ADMIN") {
+      setDomains([]);
+      setOrgTags([]);
+      return;
+    }
     const query = `?${qs({ organization_id: orgId })}`;
     api<DomainRow[]>(`/domains${query}`, { token: getAccessToken() })
       .then(setDomains)
@@ -126,7 +133,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     api<OrgTagRow[]>(`/organizations/${orgId}/tags`, { token: getAccessToken() })
       .then(setOrgTags)
       .catch(() => setOrgTags([]));
-  }, [orgId, onEntries]);
+  }, [orgId, onEntries, user?.role]);
 
   useEffect(() => {
     const domainId = searchParams.get("domain_id");
@@ -134,11 +141,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       setCategories([]);
       return;
     }
+    // Categories list endpoint is Org Admin (or Super Admin) only.
+    if (user?.role !== "ORG_ADMIN" && user?.role !== "SUPER_ADMIN") {
+      setCategories([]);
+      return;
+    }
     const query = `?${qs({ domain_id: Number(domainId), organization_id: orgId })}`;
     api<CategoryRow[]>(`/categories${query}`, { token: getAccessToken() })
       .then(setCategories)
       .catch(() => setCategories([]));
-  }, [searchParams.get("domain_id"), orgId]);
+  }, [searchParams.get("domain_id"), orgId, user?.role]);
 
   useEffect(() => {
     // Organization detail endpoint is Super Admin only; avoid triggering 403 spam for org admins.

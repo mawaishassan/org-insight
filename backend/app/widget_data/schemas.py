@@ -15,6 +15,11 @@ class WidgetDataRequestV1(BaseModel):
 
     version: int = Field(1, ge=1, le=1, description="API version")
     organization_id: int
+    dashboard_id: int | None = Field(
+        None,
+        ge=1,
+        description="Optional: dashboard context. When provided, authorization may rely on dashboard view instead of KPI assignment.",
+    )
     widget: dict[str, Any]
     overrides: dict[str, Any] | None = None
 

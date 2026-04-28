@@ -8,7 +8,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     // Chat is temporarily disabled. Send users back to a safe page.
-    router.replace("/dashboard/entries");
+    router.replace("/dashboard");
   }, [router]);
 
   return (

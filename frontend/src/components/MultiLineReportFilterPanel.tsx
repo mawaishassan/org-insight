@@ -25,13 +25,15 @@ import {
 type Props = {
   organizationId: number;
   token: string | null;
+  /** When set, fetch source KPI fields via dashboard-scoped endpoint (for dashboard viewers). */
+  dashboardId?: number;
   fieldKey: string;
   subFields: MultiFilterSubField[];
   value: MultiItemsFilterPayloadV2 | null;
   onChange: (payload: MultiItemsFilterPayloadV2 | null) => void;
 };
 
-export function MultiLineReportFilterPanel({ organizationId, token, fieldKey, subFields, value, onChange }: Props) {
+export function MultiLineReportFilterPanel({ organizationId, token, dashboardId, fieldKey, subFields, value, onChange }: Props) {
   const [filterDraft, setFilterDraft] = useState<MultiFilterConditionRow[]>(() => payloadToFilterDraft(value));
   const [sourceKpiFieldsById, setSourceKpiFieldsById] = useState<Record<number, FieldSummaryLike[]>>({});
   const [refFilterOptions, setRefFilterOptions] = useState<Record<string, string[]>>({});
@@ -60,17 +62,22 @@ export function MultiLineReportFilterPanel({ organizationId, token, fieldKey, su
     });
     needed.forEach((kid) => {
       if (sourceKpiFieldsById[kid]?.length) return;
-      api<FieldSummaryLike[]>(
-        `/fields?${new URLSearchParams({
-          kpi_id: String(kid),
-          organization_id: String(organizationId),
-        }).toString()}`,
-        { token }
-      )
+      const url =
+        dashboardId != null
+          ? `/widget-data/dashboard-kpi-fields?${new URLSearchParams({
+              dashboard_id: String(dashboardId),
+              kpi_id: String(kid),
+              organization_id: String(organizationId),
+            }).toString()}`
+          : `/fields?${new URLSearchParams({
+              kpi_id: String(kid),
+              organization_id: String(organizationId),
+            }).toString()}`;
+      api<FieldSummaryLike[]>(url, { token })
         .then((list) => setSourceKpiFieldsById((prev) => ({ ...prev, [kid]: list })))
         .catch(() => setSourceKpiFieldsById((prev) => ({ ...prev, [kid]: [] })));
     });
-  }, [token, organizationId, filterDraft, subFields, sourceKpiFieldsById]);
+  }, [token, organizationId, dashboardId, filterDraft, subFields, sourceKpiFieldsById]);
 
   useEffect(() => {
     if (!token) return;
