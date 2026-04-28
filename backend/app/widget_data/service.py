@@ -12,7 +12,7 @@ import math
 import asyncio
 from typing import Any, Callable, Awaitable
 
-from sqlalchemy import and_, cast, func, or_, select, text
+from sqlalchemy import and_, bindparam, cast, func, or_, select, text
 from sqlalchemy.sql import nulls_last
 from sqlalchemy.types import String
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,7 +39,10 @@ from app.formula_engine.evaluator import match_cell_value
 from app.widget_data.multiline_chart_sql import (
     compile_multiline_row_filters_sql,
     fetch_multiline_bar_agg_buckets,
+    _wf_alias,
 )
+from app.core.database import AsyncSessionLocal
+from app.core.config import get_settings
 
 
 async def resolve_dashboard_chart_widget_data_batch(
@@ -242,9 +245,10 @@ async def resolve_dashboard_chart_widget_data_batch(
             meta, data, e_rev2 = await _kpi_bar_chart_payload(db, org_id, w)
             results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": meta, "data": data, "entry_revision": e_rev2}
             continue
-        filter_where_sql, filter_params = compiled
+        filter_where_sql, filter_params, filter_sid_params = compiled
         if not (filter_where_sql or "").strip():
             filter_where_sql, filter_params = (None, None)
+            filter_sid_params = []
 
         sig = (
             int(eid),
@@ -255,6 +259,7 @@ async def resolve_dashboard_chart_widget_data_batch(
             agg_w,
             filter_where_sql or "",
             repr(sorted((filter_params or {}).items())),
+            repr(filter_sid_params or []),
         )
         sig_to_widgets.setdefault(sig, []).append(key)
         sig_to_args[sig] = {
@@ -266,29 +271,68 @@ async def resolve_dashboard_chart_widget_data_batch(
             "agg": agg_w,
             "filter_where_sql": filter_where_sql,
             "filter_params": filter_params,
+            "filter_sid_params": filter_sid_params or [],
         }
         sig_to_rev[sig] = e_rev
 
-    # Execute unique aggregates (concurrently).
-    sem = asyncio.Semaphore(6)
-
-    async def _run_sig(sig: tuple[Any, ...]) -> tuple[tuple[Any, ...], list[dict[str, Any]] | None, str | None]:
-        args = sig_to_args[sig]
-        async with sem:
-            try:
-                buckets = await fetch_multiline_bar_agg_buckets(db, **args)
-                return (sig, buckets, None)
-            except Exception as e:
-                return (sig, None, str(e))
+    # Execute unique aggregates.
+    #
+    # NOTE: We must not run concurrent `db.execute(...)` calls on the same AsyncSession; that can hang.
+    # To regain performance on dashboards with many chart widgets, we run aggregates concurrently but
+    # each aggregate uses its own short-lived session.
+    #
+    # Also: prefer DB-level statement timeout (via SET LOCAL) rather than Python cancellation; it
+    # avoids leaving connections/transactions in a broken state.
+    settings = get_settings()
+    # Default to 30s; can be lowered/raised per deployment.
+    timeout_ms = int(getattr(settings, "WIDGET_CHART_STATEMENT_TIMEOUT_MS", 30000) or 30000)
+    # Keep concurrency modest; each aggregate can be heavy on large multi-line KPIs.
+    max_concurrency = int(getattr(settings, "WIDGET_CHART_MAX_CONCURRENCY", 2) or 2)
 
     sigs = list(sig_to_widgets.keys())
-    runs = await asyncio.gather(*[_run_sig(s) for s in sigs], return_exceptions=False)
+    sem = asyncio.Semaphore(max(1, min(8, max_concurrency)))
+
+    async def _run_sig(sig: tuple[Any, ...]) -> tuple[tuple[Any, ...], list[dict[str, Any]] | None, str | None]:
+        args = sig_to_args.get(sig) or {}
+        async with sem:
+            try:
+                async with AsyncSessionLocal() as s:
+                    # asyncpg does not support bind params in `SET LOCAL ...` statements.
+                    # timeout_ms is int-coerced above; clamp to a reasonable range and inline as literal.
+                    ms = int(timeout_ms)
+                    if ms < 1000:
+                        ms = 1000
+                    if ms > 300_000:
+                        ms = 300_000
+                    await s.execute(text(f"SET LOCAL statement_timeout = {ms}"))
+                    buckets = await fetch_multiline_bar_agg_buckets(s, **args)
+                    return (sig, buckets, None)
+            except Exception as e:
+                # Best-effort logging for timeouts/slowness triage.
+                try:
+                    if "statement timeout" in str(e).lower():
+                        # Include minimal identifiers (no PII): entry_id/field ids only.
+                        print(
+                            "[widget-data] chart aggregate timeout "
+                            f"dashboard_id={dashboard_id} org_id={org_id} "
+                            f"entry_id={args.get('entry_id')} field_id={args.get('multiline_field_id')} "
+                            f"group_sid={args.get('group_sub_field_id')} filter_sid={args.get('filter_sub_field_id')} "
+                            f"agg={args.get('agg')} timeout_ms={timeout_ms}"
+                        )
+                except Exception:
+                    pass
+                return (sig, None, str(e))
+
+    runs = await asyncio.gather(*[_run_sig(sig) for sig in sigs], return_exceptions=False)
+
     for sig, buckets, err in runs:
         keys = sig_to_widgets.get(sig) or []
         args = sig_to_args.get(sig) or {}
         if err or buckets is None:
             for key in keys:
-                results[key] = {"ok": False, "error": err or "aggregate failed"}
+                # Unify timeout messaging for UI.
+                msg = "aggregate timed out" if "statement timeout" in str(err or "").lower() else (err or "aggregate failed")
+                results[key] = {"ok": False, "error": msg}
             continue
         row_count = sum(int(b["n"]) for b in buckets)
         for key in keys:
@@ -1965,7 +2009,13 @@ async def resolve_dashboard_table_rows_widget_data(
     )
     filter_params: dict[str, Any] = {}
     if compiled is not None:
-        where_sql, p = compiled
+        where_sql, p, sid_params = compiled
+        # Compiled predicates may reference joined cell aliases like `wf_wf_0_sid`.
+        # Add the required LEFT JOIN(s) so those aliases exist in the FROM clause.
+        for sp in sid_params or []:
+            spk = str(sp)
+            alias = KpiMultiLineCell.__table__.alias(_wf_alias(spk))
+            stmt = stmt.outerjoin(alias, and_(alias.c.row_id == r.c.id, alias.c.sub_field_id == bindparam(spk)))
         if where_sql.strip():
             stmt = stmt.where(text(where_sql))
             filter_params.update(p)
@@ -2504,11 +2554,11 @@ async def resolve_dashboard_trend_widget_data(
             reference_field_types=reference_field_types,
             resolved_label_sets=None,
         )
-        filter_where_sql, filter_params = (None, None)
+        filter_where_sql, filter_params, filter_sid_params = (None, None, [])
         if compiled is not None:
-            filter_where_sql, filter_params = compiled
+            filter_where_sql, filter_params, filter_sid_params = compiled
             if not (filter_where_sql or "").strip():
-                filter_where_sql, filter_params = (None, None)
+                filter_where_sql, filter_params, filter_sid_params = (None, None, [])
 
         buckets_by_year: dict[str, Any] = {}
         revisions: list[str] = []
@@ -2531,6 +2581,7 @@ async def resolve_dashboard_trend_widget_data(
                     agg=agg_w,
                     filter_where_sql=filter_where_sql,
                     filter_params=filter_params,
+                    filter_sid_params=filter_sid_params,
                 )
             except Exception:
                 buckets = []

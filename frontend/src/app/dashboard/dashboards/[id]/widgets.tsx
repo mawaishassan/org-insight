@@ -5,7 +5,8 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { fetchAllMultiItemsRows, getKpiFieldsWithSubs, type KpiFieldWithSubs } from "@/lib/fetchMultiItemsRows";
-import type { MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
+import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
+import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
 import {
   isLikelyAbortError,
   isWidgetDataBundleEnabled,
@@ -908,7 +909,8 @@ function KpiSingleValueWidget({
           organization_id: String(organizationId),
         });
         if (widget.period_key) q.set("period_key", widget.period_key);
-        return api<any>(`/entries/for-period?${q.toString()}`, { token });
+        // Dashboard viewers may not be assigned to this KPI; treat forbidden as "no entry".
+        return api<any>(`/entries/for-period?${q.toString()}`, { token }).catch(() => null);
       })(),
     ])
       .then(([map, entry]) => {
@@ -1545,6 +1547,13 @@ function KpiBarChartWidgetInner({
     const mustInclude = new Set<number>([widget.year, viewerYear, ...base]);
     const nextYear = now + 1;
     (async () => {
+      // When rendering on a dashboard view, authorization is dashboard-scoped; avoid probing KPI entry endpoints
+      // that may 403 for users not assigned to the underlying KPI.
+      if (dashboardId != null) {
+        const list = Array.from(mustInclude).sort((a, b) => b - a);
+        setYearOptions(list);
+        return;
+      }
       try {
         const en = await fetchEntryForPeriod(token, organizationId, widget.kpi_id, nextYear, widget.period_key);
         if (entryHasAnyData(en)) mustInclude.add(nextYear);
@@ -4031,7 +4040,8 @@ function KpiTableWidget({
           organization_id: String(organizationId),
         });
         if (widget.period_key) q.set("period_key", widget.period_key);
-        return api<any>(`/entries/for-period?${q.toString()}`, { token });
+        // Dashboard viewers may not be assigned to this KPI; treat forbidden as "no entry".
+        return api<any>(`/entries/for-period?${q.toString()}`, { token }).catch(() => null);
       })(),
     ])
       .then(([map, entry]) => {
@@ -4112,6 +4122,11 @@ function KpiMultiLineTableWidgetInner({
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const [viewerYear, setViewerYear] = useState<number>(widget.year);
   const [yearOptions, setYearOptions] = useState<number[]>([]);
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [viewerFilters, setViewerFilters] = useState<MultiItemsFilterPayloadV2 | null>(
+    (widget.filters as MultiItemsFilterPayloadV2 | null) ?? null
+  );
+  const [filterSubFields, setFilterSubFields] = useState<MultiFilterSubField[]>([]);
   const [items, setItems] = useState<Record<string, unknown>[]>([]);
   const [labelByKey, setLabelByKey] = useState<Record<string, string>>({});
   const [sourceFieldId, setSourceFieldId] = useState<number | null>(null);
@@ -4173,11 +4188,39 @@ function KpiMultiLineTableWidgetInner({
 
   useEffect(() => {
     if (!token) return;
+    if (!showAdvancedFilters) return;
+    if (dashboardId == null) return;
+    if (!widget.source_field_key) return;
+    api<Array<{ key: string; field_type: string; sub_fields?: MultiFilterSubField[] }>>(
+      `/widget-data/dashboard-kpi-fields?${new URLSearchParams({
+        dashboard_id: String(dashboardId),
+        kpi_id: String(widget.kpi_id),
+        organization_id: String(organizationId),
+      }).toString()}`,
+      { token }
+    )
+      .then((fields) => {
+        const src = Array.isArray(fields) ? fields.find((f) => f.key === widget.source_field_key) : null;
+        const subs = (src && Array.isArray(src.sub_fields) ? src.sub_fields : []) as MultiFilterSubField[];
+        setFilterSubFields(subs);
+      })
+      .catch(() => setFilterSubFields([]));
+  }, [token, showAdvancedFilters, dashboardId, widget.kpi_id, widget.source_field_key, organizationId]);
+
+  useEffect(() => {
+    if (!token) return;
     const now = new Date().getFullYear();
     const base = Array.from({ length: 12 }, (_, i) => now - i);
     const mustInclude = new Set<number>([widget.year, viewerYear, ...base]);
     const nextYear = now + 1;
     (async () => {
+      // When rendering on a dashboard view, authorization is dashboard-scoped; avoid probing KPI entry endpoints
+      // that may 403 for users not assigned to the underlying KPI.
+      if (dashboardId != null) {
+        const list = Array.from(mustInclude).sort((a, b) => b - a);
+        setYearOptions(list);
+        return;
+      }
       try {
         const en = await fetchEntryForPeriod(token, organizationId, widget.kpi_id, nextYear, widget.period_key);
         if (entryHasAnyData(en)) mustInclude.add(nextYear);
@@ -4195,7 +4238,7 @@ function KpiMultiLineTableWidgetInner({
     setError(null);
     if (isWidgetDataBundleEnabled()) {
       const ac = new AbortController();
-      const w = { ...(widget as unknown as Record<string, unknown>) };
+      const w = { ...(widget as unknown as Record<string, unknown>), filters: viewerFilters };
       const bundleReq =
         dashboardId != null
           ? postDashboardTableWidgetRows(
@@ -4346,7 +4389,7 @@ function KpiMultiLineTableWidgetInner({
     viewerYear,
     widget.period_key,
     widget.source_field_key,
-    JSON.stringify(widget.filters ?? null),
+    JSON.stringify(viewerFilters ?? null),
     JSON.stringify((widget as any).joins ?? null),
     JSON.stringify((widget as any).join ?? null),
     dashboardId,
@@ -4426,6 +4469,12 @@ function KpiMultiLineTableWidgetInner({
   useEffect(() => {
     if (!setHeaderAddon) return;
     const now = new Date().getFullYear();
+    const filtersObj = viewerFilters as any;
+    const hasAdvancedFilters =
+      filtersObj != null &&
+      typeof filtersObj === "object" &&
+      Array.isArray(filtersObj.conditions) &&
+      filtersObj.conditions.length > 0;
     const yearSelect = (
       <select
         value={viewerYear}
@@ -4444,19 +4493,37 @@ function KpiMultiLineTableWidgetInner({
     setHeaderAddon(
       <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
         {yearSelect}
+        <button
+          type="button"
+          className="btn"
+          style={{ fontSize: "0.85rem", height: 36, display: "inline-flex", alignItems: "center" }}
+          title={hasAdvancedFilters ? "View advanced filters applied to this widget" : "No advanced filters configured"}
+          onClick={() => {
+            setShowAdvancedFilters((v) => !v);
+          }}
+        >
+          Advanced filters
+        </button>
         {showOpenFullLink ? (
           sourceFieldId != null ? (
             <Link
-              href={`/dashboard/entries/${widget.kpi_id}/${viewerYear}/multi/${sourceFieldId}?${new URLSearchParams({
-                organization_id: String(organizationId),
-                ...(dashboardId != null ? { dashboard_id: String(dashboardId) } : {}),
-                widget_id: String(widget.id),
-                ...(Array.isArray(widget.sub_field_keys) && widget.sub_field_keys.length > 0
-                  ? { cols: widget.sub_field_keys.join(",") }
-                  : {}),
-                ...(widget.filters && widget.filters.conditions?.length ? { filters: JSON.stringify(widget.filters) } : {}),
-                ...(widget.period_key ? { period_key: widget.period_key } : {}),
-              }).toString()}`}
+              // IMPORTANT: When viewing a dashboard, route full-page view through the dashboard widget page
+              // so authorization stays dashboard-scoped (dashboard viewers may not be assigned to the KPI).
+              href={
+                dashboardId != null
+                  ? `/dashboard/dashboards/${dashboardId}/widgets/${widget.id}?${new URLSearchParams({
+                      organization_id: String(organizationId),
+                    }).toString()}`
+                  : `/dashboard/entries/${widget.kpi_id}/${viewerYear}/multi/${sourceFieldId}?${new URLSearchParams({
+                      organization_id: String(organizationId),
+                      widget_id: String(widget.id),
+                      ...(Array.isArray(widget.sub_field_keys) && widget.sub_field_keys.length > 0
+                        ? { cols: widget.sub_field_keys.join(",") }
+                        : {}),
+                      ...(widget.filters && widget.filters.conditions?.length ? { filters: JSON.stringify(widget.filters) } : {}),
+                      ...(widget.period_key ? { period_key: widget.period_key } : {}),
+                    }).toString()}`
+              }
               className="btn"
               style={{ fontSize: "0.85rem", textDecoration: "none", height: 36, display: "inline-flex", alignItems: "center" }}
             >
@@ -4475,7 +4542,19 @@ function KpiMultiLineTableWidgetInner({
       </div>
     );
     return () => setHeaderAddon(null);
-  }, [setHeaderAddon, showOpenFullLink, dashboardId, widget.id, widget.kpi_id, widget.period_key, organizationId, viewerYear, sourceFieldId, JSON.stringify(yearOptions)]);
+  }, [
+    setHeaderAddon,
+    showOpenFullLink,
+    dashboardId,
+    widget.id,
+    widget.kpi_id,
+    widget.period_key,
+    organizationId,
+    viewerYear,
+    sourceFieldId,
+    JSON.stringify(yearOptions),
+    JSON.stringify(viewerFilters ?? null),
+  ]);
 
   useEffect(() => {
     if (!setViewerMenu) return;
@@ -4543,6 +4622,37 @@ function KpiMultiLineTableWidgetInner({
 
   return (
     <>
+      {showAdvancedFilters ? (
+        <div className="card" style={{ padding: "0.75rem", marginBottom: "0.75rem" }}>
+          <MultiLineReportFilterPanel
+            organizationId={organizationId}
+            token={token ?? null}
+            dashboardId={dashboardId}
+            fieldKey={widget.source_field_key}
+            subFields={filterSubFields}
+            value={viewerFilters}
+            onChange={(p) => {
+              setPage(0);
+              setViewerFilters(p);
+            }}
+          />
+          <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button type="button" className="btn" onClick={() => setShowAdvancedFilters(false)}>
+              Close
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setPage(0);
+                setViewerFilters(null);
+              }}
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      ) : null}
       {loading ? (
         <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
       ) : error ? (

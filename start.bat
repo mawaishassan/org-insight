@@ -7,6 +7,6 @@ cd /d "%~dp0backend" ^&^& uvicorn app.main:app --reload --host 0.0.0.0 --port 80
 
 REM --- Start KPI Client---
 @echo off
-start cmd /k "title KPI Client && cd /d "%~dp0frontend" && npm run dev"
+start cmd /k "cd /d "%~dp0frontend" && title KPI Client && npm run dev"
 
 

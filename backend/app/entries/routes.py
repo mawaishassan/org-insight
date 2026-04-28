@@ -805,9 +805,9 @@ async def list_multi_items_rows(
             cast(cell.value_json, String()),
         ]
 
-    def _build_sql_filter_clause(raw: Any) -> Any | None:
+    def _build_sql_filter_spec(raw: Any) -> tuple[list[tuple[Any, int, bool]], Any] | None:
         """
-        Build a SQLAlchemy boolean clause for filters payload when possible.
+        Build a SQLAlchemy boolean clause for filters payload when possible, plus required joins.
         Supports only structured _version=2 scalar filters (no reference_resolution).
         Returns None when payload is unsupported, so we can fall back to the existing slow path.
         """
@@ -827,21 +827,9 @@ async def list_multi_items_rows(
             ft = getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", None))
             sf_map[k] = (int(sid), str(ft or ""))
 
-        def exists_for(sub_field_id: int, pred) -> Any:
-            return (
-                select(func.count())
-                .select_from(KpiMultiLineCell)
-                .where(
-                    and_(
-                        KpiMultiLineCell.row_id == KpiMultiLineRow.id,
-                        KpiMultiLineCell.sub_field_id == sub_field_id,
-                        pred,
-                    )
-                )
-                .correlate(KpiMultiLineRow)
-                .scalar_subquery()
-                > 0
-            )
+        # We avoid correlated subqueries (very slow at scale) by joining the cell table once per
+        # referenced sub-field, then applying predicates to the joined alias.
+        joins: list[tuple[Any, int, bool]] = []  # (cell_alias, sub_field_id, is_outer)
 
         expr = None
         for idx, c in enumerate(conds):
@@ -861,7 +849,12 @@ async def list_multi_items_rows(
             value = c.get("value")
             use_values = isinstance(values, list) and len(values) > 0
 
-            cell = KpiMultiLineCell
+            # Join alias for this condition.
+            ca = KpiMultiLineCell.__table__.alias(f"fc_{idx}")
+            # For negative operators we use OUTER JOIN so missing cell counts as "not equal"/"not contains".
+            is_outer = op in ("neq", "not_contains")
+            joins.append((ca, int(sub_field_id), bool(is_outer)))
+            cell = ca.c
             clause_part = None
 
             if ft == "number":
@@ -877,24 +870,26 @@ async def list_multi_items_rows(
                     nums = [n for n in nums if n is not None]
                     if not nums:
                         return None
-                    pos = exists_for(sub_field_id, cell.value_number.in_(nums))
-                    clause_part = pos if op == "eq" else ~pos
+                    if op == "eq":
+                        clause_part = cell.value_number.in_(nums)
+                    else:
+                        clause_part = (cell.value_number.is_(None)) | (~cell.value_number.in_(nums))
                 else:
                     n = to_num(value)
                     if n is None:
                         return None
                     if op == "eq":
-                        clause_part = exists_for(sub_field_id, cell.value_number == n)
+                        clause_part = cell.value_number == n
                     elif op == "neq":
-                        clause_part = ~exists_for(sub_field_id, cell.value_number == n)
+                        clause_part = (cell.value_number.is_(None)) | (cell.value_number != n)
                     elif op == "gt":
-                        clause_part = exists_for(sub_field_id, cell.value_number > n)
+                        clause_part = cell.value_number > n
                     elif op == "gte":
-                        clause_part = exists_for(sub_field_id, cell.value_number >= n)
+                        clause_part = cell.value_number >= n
                     elif op == "lt":
-                        clause_part = exists_for(sub_field_id, cell.value_number < n)
+                        clause_part = cell.value_number < n
                     elif op == "lte":
-                        clause_part = exists_for(sub_field_id, cell.value_number <= n)
+                        clause_part = cell.value_number <= n
                     else:
                         return None
             elif ft == "date":
@@ -902,17 +897,17 @@ async def list_multi_items_rows(
                 if dt is None:
                     return None
                 if op == "eq":
-                    clause_part = exists_for(sub_field_id, cell.value_date == dt)
+                    clause_part = cell.value_date == dt
                 elif op == "neq":
-                    clause_part = ~exists_for(sub_field_id, cell.value_date == dt)
+                    clause_part = (cell.value_date.is_(None)) | (cell.value_date != dt)
                 elif op == "gt":
-                    clause_part = exists_for(sub_field_id, cell.value_date > dt)
+                    clause_part = cell.value_date > dt
                 elif op == "gte":
-                    clause_part = exists_for(sub_field_id, cell.value_date >= dt)
+                    clause_part = cell.value_date >= dt
                 elif op == "lt":
-                    clause_part = exists_for(sub_field_id, cell.value_date < dt)
+                    clause_part = cell.value_date < dt
                 elif op == "lte":
-                    clause_part = exists_for(sub_field_id, cell.value_date <= dt)
+                    clause_part = cell.value_date <= dt
                 else:
                     return None
             elif ft == "boolean":
@@ -929,9 +924,9 @@ async def list_multi_items_rows(
                 else:
                     return None
                 if op == "eq":
-                    clause_part = exists_for(sub_field_id, cell.value_boolean == b)
+                    clause_part = cell.value_boolean == b
                 elif op == "neq":
-                    clause_part = ~exists_for(sub_field_id, cell.value_boolean == b)
+                    clause_part = (cell.value_boolean.is_(None)) | (cell.value_boolean != b)
                 else:
                     return None
             else:
@@ -944,10 +939,10 @@ async def list_multi_items_rows(
                         # membership match for multi_reference arrays; exact/label match for reference objects
                         candidates = _reference_like_exprs(cell)
                         pred = or_(*[e.in_(vals) for e in candidates if e is not None])
-                        pos = exists_for(sub_field_id, pred)
+                        pos = pred
                     else:
-                        pos = exists_for(sub_field_id, _string_value_expr(cell).in_(vals))
-                    clause_part = pos if op == "eq" else ~pos
+                        pos = _string_value_expr(cell).in_(vals)
+                    clause_part = pos if op == "eq" else (~pos) | (cell.value_text.is_(None) & cell.value_json.is_(None) & cell.value_number.is_(None) & cell.value_boolean.is_(None) & cell.value_date.is_(None))
                 else:
                     if value is None:
                         return None
@@ -962,23 +957,23 @@ async def list_multi_items_rows(
                             pred = or_(*[(e == s) for e in exprs if e is not None])
                             # array membership fallback
                             pred = or_(pred, cast(cell.value_json, String()).ilike(f"%\\\"{s}\\\"%"))
-                            clause_part = exists_for(sub_field_id, pred)
+                            clause_part = pred
                         elif op == "neq":
                             pred = or_(*[(e == s) for e in exprs if e is not None])
                             pred = or_(pred, cast(cell.value_json, String()).ilike(f"%\\\"{s}\\\"%"))
-                            clause_part = ~exists_for(sub_field_id, pred)
+                            clause_part = (~pred) | (cell.row_id.is_(None))
                         elif op == "contains":
                             pred = or_(*[(e.ilike(f"%{s}%")) for e in exprs if e is not None])
-                            clause_part = exists_for(sub_field_id, pred)
+                            clause_part = pred
                         elif op == "not_contains":
                             pred = or_(*[(e.ilike(f"%{s}%")) for e in exprs if e is not None])
-                            clause_part = ~exists_for(sub_field_id, pred)
+                            clause_part = (~pred) | (cell.row_id.is_(None))
                         elif op == "starts_with":
                             pred = or_(*[(e.ilike(f"{s}%")) for e in exprs if e is not None])
-                            clause_part = exists_for(sub_field_id, pred)
+                            clause_part = pred
                         elif op == "ends_with":
                             pred = or_(*[(e.ilike(f"%{s}")) for e in exprs if e is not None])
-                            clause_part = exists_for(sub_field_id, pred)
+                            clause_part = pred
                         else:
                             return None
                         # done
@@ -991,17 +986,17 @@ async def list_multi_items_rows(
 
                     vexpr = _string_value_expr(cell)
                     if op == "eq":
-                        clause_part = exists_for(sub_field_id, vexpr == s)
+                        clause_part = vexpr == s
                     elif op == "neq":
-                        clause_part = ~exists_for(sub_field_id, vexpr == s)
+                        clause_part = (cell.row_id.is_(None)) | (vexpr != s)
                     elif op == "contains":
-                        clause_part = exists_for(sub_field_id, vexpr.ilike(f"%{s}%"))
+                        clause_part = vexpr.ilike(f"%{s}%")
                     elif op == "not_contains":
-                        clause_part = ~exists_for(sub_field_id, vexpr.ilike(f"%{s}%"))
+                        clause_part = (cell.row_id.is_(None)) | (~vexpr.ilike(f"%{s}%"))
                     elif op == "starts_with":
-                        clause_part = exists_for(sub_field_id, vexpr.ilike(f"{s}%"))
+                        clause_part = vexpr.ilike(f"{s}%")
                     elif op == "ends_with":
-                        clause_part = exists_for(sub_field_id, vexpr.ilike(f"%{s}"))
+                        clause_part = vexpr.ilike(f"%{s}")
                     else:
                         return None
 
@@ -1011,21 +1006,21 @@ async def list_multi_items_rows(
             else:
                 expr = or_(expr, clause_part) if logic == "or" else and_(expr, clause_part)
 
-        return expr
+        return (joins, expr)
 
     raw_filters: Any | None = None
-    sql_filters_clause = None
+    sql_filters_spec: tuple[list[tuple[Any, int, bool]], Any] | None = None
     if filters and not search:
         try:
             raw_filters = json.loads(filters)
-            sql_filters_clause = _build_sql_filter_clause(raw_filters)
+            sql_filters_spec = _build_sql_filter_spec(raw_filters)
         except json.JSONDecodeError:
             raw_filters = None
-            sql_filters_clause = None
+            sql_filters_spec = None
 
     # Fast path: if caller isn't using search and filters are SQL-able, do true SQL pagination.
     # If filters are present but unsupported (e.g. reference_resolution), fall back to the existing slow path.
-    use_fast_sql_paging = not search and (not filters or sql_filters_clause is not None)
+    use_fast_sql_paging = not search and (not filters or sql_filters_spec is not None)
     rows: list[tuple[int, dict]] = []
 
     # Restrict to sub_fields (columns) the user can view.
@@ -1204,8 +1199,16 @@ async def list_multi_items_rows(
             KpiMultiLineRow.entry_id == entry.id,
             KpiMultiLineRow.field_id == field.id,
         )
-        if sql_filters_clause is not None:
-            base_rows_stmt = base_rows_stmt.where(sql_filters_clause)
+        if sql_filters_spec is not None:
+            joins, clause = sql_filters_spec
+            # Apply joins first, then predicate.
+            for ca, sid, is_outer in joins:
+                base_rows_stmt = base_rows_stmt.join(
+                    ca,
+                    and_(ca.c.row_id == KpiMultiLineRow.id, ca.c.sub_field_id == int(sid)),
+                    isouter=bool(is_outer),
+                )
+            base_rows_stmt = base_rows_stmt.where(clause)
         if field_row_access_enabled and not is_org_admin:
             # Only rows with an access record for this user are visible.
             base_rows_stmt = (

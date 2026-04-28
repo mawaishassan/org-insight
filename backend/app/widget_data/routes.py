@@ -9,12 +9,14 @@ import logging
 import time
 import traceback
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
 from app.core.database import get_db
 from app.core.models import User
+from app.dashboards.service import can_view_dashboard_for_kpi_chart
+from app.fields.service import list_kpi_field_definitions
 from app.widget_data.schemas import (
     ChartWidgetDataRequestV1,
     DashboardChartBatchRequestV1,
@@ -55,6 +57,49 @@ logger = logging.getLogger(__name__)
 async def widget_data_health():
     """Lightweight check that this router is mounted (useful behind Next.js `/api` proxy)."""
     return {"status": "ok"}
+
+
+@router.get("/dashboard-kpi-fields")
+async def list_dashboard_kpi_fields(
+    dashboard_id: int = Query(..., ge=1),
+    kpi_id: int = Query(..., ge=1),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Dashboard-scoped field definitions for advanced filters.
+    Allows dashboard viewers (not assigned to KPI) to fetch field metadata needed to build reference-resolution filters.
+    """
+    org_id = _org_id(current_user, organization_id)
+    ok = await can_view_dashboard_for_kpi_chart(db, current_user, int(dashboard_id), int(org_id), int(kpi_id))
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this dashboard")
+    fields = await list_kpi_field_definitions(db, int(kpi_id), int(org_id))
+    out: list[dict[str, object]] = []
+    for f in fields:
+        ft = getattr(getattr(f, "field_type", None), "value", getattr(f, "field_type", None))
+        item: dict[str, object] = {
+            "key": str(getattr(f, "key", "")),
+            "name": str(getattr(f, "name", None) or getattr(f, "key", "")),
+            "field_type": str(ft or ""),
+            "config": getattr(f, "config", None),
+        }
+        if str(ft or "") == "multi_line_items":
+            subs = []
+            for sf in getattr(f, "sub_fields", None) or []:
+                sft = getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", None))
+                subs.append(
+                    {
+                        "key": str(getattr(sf, "key", "")),
+                        "name": str(getattr(sf, "name", None) or getattr(sf, "key", "")),
+                        "field_type": str(sft or ""),
+                        "config": getattr(sf, "config", None),
+                    }
+                )
+            item["sub_fields"] = subs
+        out.append(item)
+    return out
 
 
 def _chart_response(meta: dict, data: dict, resolved_type: str, entry_revision: str | None) -> WidgetDataResponseV1:
