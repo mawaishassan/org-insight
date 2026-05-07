@@ -8,6 +8,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import noload, load_only
 
 from app.core.database import get_db
 from app.core.models import User, UserRole, ExportAPIToken
@@ -46,7 +47,25 @@ async def get_current_user(
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    result = await db.execute(select(User).where(User.id == int(user_id)))
+    # IMPORTANT: User has many relationships configured with lazy="selectin" which can trigger
+    # a large number of secondary queries on load. For auth checks we only need core columns.
+    result = await db.execute(
+        select(User)
+        .where(User.id == int(user_id))
+        .options(
+            noload("*"),
+            # Include fields needed by /api/auth/me and common UI headers.
+            load_only(
+                User.id,
+                User.username,
+                User.email,
+                User.full_name,
+                User.role,
+                User.organization_id,
+                User.is_active,
+            ),
+        )
+    )
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
@@ -68,7 +87,22 @@ async def get_current_user_optional(
     user_id = payload.get("sub")
     if not user_id:
         return None
-    result = await db.execute(select(User).where(User.id == int(user_id)))
+    result = await db.execute(
+        select(User)
+        .where(User.id == int(user_id))
+        .options(
+            noload("*"),
+            load_only(
+                User.id,
+                User.username,
+                User.email,
+                User.full_name,
+                User.role,
+                User.organization_id,
+                User.is_active,
+            ),
+        )
+    )
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
         return None
@@ -144,7 +178,22 @@ async def get_data_export_auth(
         user_id = payload.get("sub")
         if not user_id:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-        result = await db.execute(select(User).where(User.id == int(user_id)))
+        result = await db.execute(
+            select(User)
+            .where(User.id == int(user_id))
+            .options(
+                noload("*"),
+                load_only(
+                    User.id,
+                    User.username,
+                    User.email,
+                    User.full_name,
+                    User.role,
+                    User.organization_id,
+                    User.is_active,
+                ),
+            )
+        )
         user = result.scalar_one_or_none()
         if not user or not user.is_active:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")

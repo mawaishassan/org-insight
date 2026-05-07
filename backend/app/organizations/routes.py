@@ -29,6 +29,7 @@ from app.organizations.service import (
     get_organization,
     list_organizations,
     get_organization_summary,
+    get_organization_summaries_by_id,
     update_organization,
     get_organization_filter_options,
     create_export_api_token,
@@ -69,19 +70,17 @@ async def list_orgs(
     )
     if not with_summary:
         return [OrganizationResponse.model_validate(o) for o in orgs]
-    result = []
-    for o in orgs:
-        summary = await get_organization_summary(db, o.id)
-        result.append(
-            OrganizationWithSummary(
-                id=o.id,
-                name=o.name,
-                description=o.description,
-                is_active=o.is_active,
-                summary=summary or _default_summary(),
-            )
+    summaries = await get_organization_summaries_by_id(db, [o.id for o in orgs])
+    return [
+        OrganizationWithSummary(
+            id=o.id,
+            name=o.name,
+            description=o.description,
+            is_active=o.is_active,
+            summary=summaries.get(o.id) or _default_summary(),
         )
-    return result
+        for o in orgs
+    ]
 
 
 @router.get("/filter-options")

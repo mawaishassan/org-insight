@@ -132,6 +132,49 @@ async def get_organization_summary(db: AsyncSession, org_id: int) -> Organizatio
     )
 
 
+async def get_organization_summaries_by_id(
+    db: AsyncSession, org_ids: list[int]
+) -> dict[int, OrganizationSummary]:
+    """
+    Batch summary counts for many organizations.
+
+    This is used by the organizations list page, which needs summary for every org and must
+    avoid N+1 query patterns.
+    """
+    ids = [int(x) for x in org_ids if x is not None]
+    if not ids:
+        return {}
+
+    users_r = await db.execute(
+        select(User.organization_id, func.count(User.id))
+        .where(User.organization_id.in_(ids))
+        .group_by(User.organization_id)
+    )
+    domains_r = await db.execute(
+        select(Domain.organization_id, func.count(Domain.id))
+        .where(Domain.organization_id.in_(ids))
+        .group_by(Domain.organization_id)
+    )
+    kpis_r = await db.execute(
+        select(KPI.organization_id, func.count(KPI.id))
+        .where(KPI.organization_id.in_(ids))
+        .group_by(KPI.organization_id)
+    )
+
+    user_counts = {int(org_id): int(cnt) for org_id, cnt in users_r.all() if org_id is not None}
+    domain_counts = {int(org_id): int(cnt) for org_id, cnt in domains_r.all() if org_id is not None}
+    kpi_counts = {int(org_id): int(cnt) for org_id, cnt in kpis_r.all() if org_id is not None}
+
+    out: dict[int, OrganizationSummary] = {}
+    for oid in ids:
+        out[int(oid)] = OrganizationSummary(
+            user_count=user_counts.get(int(oid), 0),
+            domain_count=domain_counts.get(int(oid), 0),
+            kpi_count=kpi_counts.get(int(oid), 0),
+        )
+    return out
+
+
 async def update_organization(
     db: AsyncSession, org_id: int, data: OrganizationUpdate
 ) -> Organization | None:

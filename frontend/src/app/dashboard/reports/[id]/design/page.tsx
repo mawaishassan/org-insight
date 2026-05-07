@@ -73,6 +73,8 @@ interface TemplateDetail {
   body_blocks: ReportBlock[] | null;
   attached_domains: AttachedDomain[];
   kpis_from_domains: KpiFromDomain[];
+  /** KPI id string keys → field definitions (same shape as GET /fields per KPI). */
+  fields_by_kpi_id?: Record<string, FieldOption[]>;
 }
 
 export type ReportBlock =
@@ -886,6 +888,15 @@ export default function ReportDesignPage() {
         const mode: "designer" | "code" =
           d.template_mode === "code" ? "code" : "designer";
         setTemplateMode(mode);
+        if (d.fields_by_kpi_id && typeof d.fields_by_kpi_id === "object") {
+          const next: Record<number, FieldOption[]> = {};
+          for (const [key, fields] of Object.entries(d.fields_by_kpi_id)) {
+            const kid = Number(key);
+            if (!Number.isFinite(kid)) continue;
+            next[kid] = Array.isArray(fields) ? fields : [];
+          }
+          setFieldsByKpiId(next);
+        }
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
       .finally(() => setLoading(false));
@@ -2091,6 +2102,10 @@ function BlockCard({
     async (kpiId: number) => {
       if (!token || detail.organization_id == null) return;
       if (refFieldsByKpiId[kpiId]) return;
+      if (kpiId in fieldsByKpiId) {
+        setRefFieldsByKpiId((prev) => ({ ...prev, [kpiId]: fieldsByKpiId[kpiId] }));
+        return;
+      }
       try {
         const fields = await api<FieldOption[]>(
           `/fields?${qs({ kpi_id: kpiId, organization_id: detail.organization_id })}`,
@@ -2101,7 +2116,7 @@ function BlockCard({
         setRefFieldsByKpiId((prev) => ({ ...prev, [kpiId]: [] }));
       }
     },
-    [token, detail.organization_id, refFieldsByKpiId]
+    [token, detail.organization_id, refFieldsByKpiId, fieldsByKpiId]
   );
 
   const referenceAttributeOptions = useCallback((fields: FieldOption[]): Array<{ value: string; label: string; fieldType?: string }> => {

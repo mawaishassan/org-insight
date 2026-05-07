@@ -1,6 +1,10 @@
 """Report template CRUD, KPI/field selection, access control, and report generation."""
 
 import datetime
+import re
+from contextvars import ContextVar
+import os
+import time
 from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -28,6 +32,7 @@ from app.core.models import (
     period_key_sort_order,
 )
 from app.reports.schemas import ReportTemplateCreate, ReportTemplateUpdate, ReportTemplateKPIAdd
+from app.fields.schemas import KPIFieldResponse
 from app.formula_engine.evaluator import evaluate_formula
 from app.core.models import FieldType
 from app.entries.service import _load_other_kpi_values
@@ -40,6 +45,69 @@ from app.entries.reference_filter_resolve import (
 from app.entries.multi_item_filters import row_passes_filters
 from jinja2 import Environment, BaseLoader, select_autoescape
 from markupsafe import escape as html_escape
+
+
+# Cache within a single request/preview render to avoid repeating the same expensive
+# reference-resolution work across blocks/entries. Key format is opaque to callers.
+_report_preview_cache: ContextVar[dict[tuple, object] | None] = ContextVar(
+    "_report_preview_cache", default=None
+)
+
+
+def _get_report_preview_cache() -> dict[tuple, object]:
+    cache = _report_preview_cache.get()
+    if cache is None:
+        cache = {}
+        _report_preview_cache.set(cache)
+    return cache
+
+
+def _report_profile_enabled() -> bool:
+    return os.environ.get("REPORT_PREVIEW_PROFILE", "").strip().lower() in ("1", "true", "yes")
+
+
+def _prof(msg: str) -> None:
+    if _report_profile_enabled():
+        print(f"[report-profile] {msg}", flush=True)
+
+
+def _report_data_cache_ttl_s() -> float:
+    """Optional short TTL cache for preview/generate hot reload loops."""
+    raw = os.environ.get("REPORT_DATA_CACHE_SECONDS", "").strip()
+    if not raw:
+        return 0.0
+    try:
+        v = float(raw)
+        return v if v > 0 else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+_report_data_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def _cache_get(key: tuple) -> dict | None:
+    ttl = _report_data_cache_ttl_s()
+    if ttl <= 0:
+        return None
+    hit = _report_data_cache.get(key)
+    if not hit:
+        return None
+    ts, val = hit
+    if (time.time() - ts) > ttl:
+        _report_data_cache.pop(key, None)
+        return None
+    return val
+
+
+def _cache_set(key: tuple, val: dict) -> None:
+    ttl = _report_data_cache_ttl_s()
+    if ttl <= 0:
+        return
+    # Best-effort bounded cache (avoid unbounded growth in dev).
+    if len(_report_data_cache) > 64:
+        _report_data_cache.clear()
+    _report_data_cache[key] = (time.time(), val)
 
 
 def _ml_cell_raw(c: KpiMultiLineCell):
@@ -59,24 +127,44 @@ def _ml_cell_raw(c: KpiMultiLineCell):
     return None
 
 
-async def _load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField) -> list[dict]:
+def _kpi_multi_line_orm_row_to_dict(r: KpiMultiLineRow) -> dict:
+    d: dict = {}
+    for c in getattr(r, "cells", None) or []:
+        sf = getattr(c, "sub_field", None)
+        key = getattr(sf, "key", None) if sf is not None else None
+        if not key:
+            continue
+        d[str(key)] = _ml_cell_raw(c)
+    return d
+
+
+async def _load_multi_line_items_rows_batch(
+    db: AsyncSession, *, entry_ids: list[int], field: KPIField
+) -> dict[int, list[dict]]:
+    """Load multi-line rows for many entries in one query (report preview was N entries × M fields round-trips)."""
+    if not entry_ids:
+        return {}
     res = await db.execute(
         select(KpiMultiLineRow)
-        .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
-        .order_by(KpiMultiLineRow.row_index)
+        .where(
+            KpiMultiLineRow.entry_id.in_(entry_ids),
+            KpiMultiLineRow.field_id == field.id,
+        )
+        .order_by(KpiMultiLineRow.entry_id, KpiMultiLineRow.row_index)
         .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
     )
-    out: list[dict] = []
-    for r in list(res.scalars().all()):
-        d = {}
-        for c in getattr(r, "cells", None) or []:
-            sf = getattr(c, "sub_field", None)
-            key = getattr(sf, "key", None) if sf is not None else None
-            if not key:
-                continue
-            d[str(key)] = _ml_cell_raw(c)
-        out.append(d)
-    return out
+    by_entry: dict[int, list[dict]] = defaultdict(list)
+    for r in res.scalars().all():
+        eid = getattr(r, "entry_id", None)
+        if eid is None:
+            continue
+        by_entry[int(eid)].append(_kpi_multi_line_orm_row_to_dict(r))
+    return dict(by_entry)
+
+
+async def _load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField) -> list[dict]:
+    m = await _load_multi_line_items_rows_batch(db, entry_ids=[entry_id], field=field)
+    return m.get(entry_id, [])
 
 
 async def create_report_template(
@@ -110,7 +198,7 @@ async def get_report_template(
 async def get_report_template_detail(
     db: AsyncSession, template_id: int, org_id: int
 ) -> dict | None:
-    """Get template with body_template and kpis_from_domains (all KPIs in org; read-only)."""
+    """Get template with body_template, kpis_from_domains, and fields_by_kpi_id (all KPIs in org; read-only)."""
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
@@ -135,8 +223,12 @@ async def get_report_template_detail(
         select(KPI)
         .where(KPI.organization_id == org_id)
         .order_by(KPI.sort_order, KPI.name)
-        .options(selectinload(KPI.fields))
+        .options(
+            selectinload(KPI.fields).selectinload(KPIField.options),
+            selectinload(KPI.fields).selectinload(KPIField.sub_fields),
+        )
     )
+    fields_by_kpi_id: dict[str, list] = {}
     for kpi in result.unique().scalars().all():
         field_count = len(kpi.fields) if kpi.fields else 0
         kpi_year = getattr(kpi, "year", None)
@@ -153,6 +245,11 @@ async def get_report_template_detail(
             "fields_count": field_count,
             "time_dimension": effective_td.value,
         })
+        raw_fields = list(kpi.fields) if kpi.fields else []
+        raw_fields.sort(key=lambda f: (f.sort_order, f.id))
+        fields_by_kpi_id[str(kpi.id)] = [
+            KPIFieldResponse.model_validate(f).model_dump(mode="json") for f in raw_fields
+        ]
 
     return {
         "id": rt.id,
@@ -165,6 +262,7 @@ async def get_report_template_detail(
         "body_blocks": getattr(rt, "body_blocks", None),
         "attached_domains": [],
         "kpis_from_domains": kpis_from_domains,
+        "fields_by_kpi_id": fields_by_kpi_id,
     }
 
 
@@ -588,6 +686,23 @@ def _build_formula_context_from_report(kpis: list, kpi_id: int, entry_index: int
     return value_by_key, multi_line_items_data, other_kpi_values
 
 
+def _normalize_report_formula_expression(expression: str) -> str:
+    """
+    Collapse accidental duplicate paste: the same expression concatenated back-to-back
+    (e.g. COUNT_ITEMS(a,b)COUNT_ITEMS(a,b)) which is invalid Python and breaks simpleeval.
+    Repeatedly halve while the string is two identical halves.
+    """
+    s = (expression or "").strip()
+    while len(s) >= 4 and len(s) % 2 == 0:
+        mid = len(s) // 2
+        left, right = s[:mid], s[mid:]
+        if left == right:
+            s = left.strip()
+        else:
+            break
+    return s
+
+
 def _evaluate_report_formula(kpis: list, expression: str, kpi_id: int, entry_index: int = 0):
     """
     Jinja-accessible helper: evaluate a full formula expression in report context.
@@ -595,7 +710,7 @@ def _evaluate_report_formula(kpis: list, expression: str, kpi_id: int, entry_ind
     """
     if not expression or not str(expression).strip():
         return ""
-    expression = str(expression).strip()
+    expression = _normalize_report_formula_expression(str(expression))
     value_by_key, multi_line_items_data, other_kpi_values = _build_formula_context_from_report(
         kpis, kpi_id, entry_index
     )
@@ -1381,9 +1496,38 @@ async def _build_multi_line_block_rows(
                     ft = getattr(sf.field_type, "value", sf.field_type)
                     reference_field_types[str(fk)] = str(ft)
 
-                for entry in kpi_payload.get("entries") or []:
-                    if not isinstance(entry, dict):
-                        continue
+                entries_list = [e for e in (kpi_payload.get("entries") or []) if isinstance(e, dict)]
+
+                resolution_maps = None
+                if raw_filters.get("_version") == 2:
+                    conds = raw_filters.get("conditions")
+                    if isinstance(conds, list) and conds:
+                        # One resolver pass for all rows in this KPI/block (was: once per entry → huge duplicate DB work).
+                        all_rows_for_resolve: list[dict] = []
+                        for ent in entries_list:
+                            field_pl = None
+                            for fp in ent.get("fields") or []:
+                                if isinstance(fp, dict) and fp.get("field_key") == multi_field_key:
+                                    field_pl = fp
+                                    break
+                            if not field_pl:
+                                continue
+                            raw_items = field_pl.get("value_items")
+                            if not isinstance(raw_items, list):
+                                continue
+                            for r in raw_items:
+                                if isinstance(r, dict):
+                                    all_rows_for_resolve.append(r)
+                        resolution_maps = await build_reference_resolution_map(
+                            db,
+                            org_id,
+                            prefer_year,
+                            field_orm,
+                            conds,
+                            all_rows_for_resolve,
+                        )
+
+                for entry in entries_list:
                     entry_id = entry.get("entry_id")
                     eid_key = str(entry_id) if entry_id is not None else "__none__"
                     field_pl = None
@@ -1397,18 +1541,7 @@ async def _build_multi_line_block_rows(
                     if not isinstance(raw_items, list):
                         continue
                     rows_copy = [dict(r) for r in raw_items if isinstance(r, dict)]
-                    resolution_maps = None
                     if raw_filters.get("_version") == 2:
-                        conds = raw_filters.get("conditions")
-                        if isinstance(conds, list) and conds:
-                            resolution_maps = await build_reference_resolution_map(
-                                db,
-                                org_id,
-                                prefer_year,
-                                field_orm,
-                                conds,
-                                rows_copy,
-                            )
                         filtered = [
                             r
                             for r in rows_copy
@@ -1427,6 +1560,129 @@ async def _build_multi_line_block_rows(
                     ] = filtered
 
     return out
+
+
+def _formulas_need_other_kpi_values(fields: list[KPIField]) -> bool:
+    """True if any formula uses KPI_FIELD(...) — only then we need _load_other_kpi_values."""
+    if not fields:
+        return False
+    pat = re.compile(r"\bKPI_FIELD\s*\(", re.IGNORECASE)
+    for f in fields:
+        if getattr(f, "field_type", None) != FieldType.formula:
+            continue
+        expr = getattr(f, "formula_expression", None) or ""
+        if pat.search(str(expr)):
+            return True
+    return False
+
+
+def _extract_kpi_ids_from_blocks(body_blocks: list) -> set[int]:
+    """
+    Extract KPI ids referenced by designer blocks.
+
+    The frontend stores targeted KPIs on blocks as:
+      - kpiIds: number[]
+      - kpiId: number (rare, single-target blocks)
+
+    Empty means "all" in the designer UI, so this only returns ids when explicitly provided.
+    """
+    out: set[int] = set()
+    if not isinstance(body_blocks, list) or not body_blocks:
+        return out
+
+    stack: list[object] = list(body_blocks)
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            kids = cur.get("kpiIds") or cur.get("kpi_ids") or []
+            if isinstance(kids, list):
+                for x in kids:
+                    try:
+                        out.add(int(x))
+                    except (TypeError, ValueError):
+                        continue
+            kid = cur.get("kpiId") or cur.get("kpi_id")
+            if kid is not None and kid != "":
+                try:
+                    out.add(int(kid))
+                except (TypeError, ValueError):
+                    pass
+            # Traverse nested structures defensively (some blocks nest config objects/lists).
+            for v in cur.values():
+                if isinstance(v, (dict, list)):
+                    stack.append(v)
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return out
+
+
+def _block_targets_for_time_scope(b: dict, template_kpi_ids: set[int]) -> set[int]:
+    """KPI ids a block applies to; empty kpiIds means all template KPIs."""
+    raw = b.get("kpiIds") or b.get("kpi_ids") or []
+    if not isinstance(raw, list) or not raw:
+        return set(template_kpi_ids)
+    out: set[int] = set()
+    for x in raw:
+        try:
+            out.add(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out & template_kpi_ids
+
+
+def _resolve_kpi_time_scope_from_blocks(
+    body_blocks: list,
+    template_kpi_ids: set[int],
+) -> tuple[dict[int, str], dict[int, str]]:
+    """
+    Match generate_report_data entry loading to designer time settings (kpi_table / grid / list).
+
+    Previously Jinja filtered to latest period at render time only; the backend still loaded every
+    period (heavy multi-line + reference resolution). Scope:
+      - 'all' — keep all entries for the year
+      - 'single' — one period_key
+      - 'latest' — last entry after period sort (default in designer)
+    """
+    scope: dict[int, str] = {k: "latest" for k in template_kpi_ids}
+    single_period: dict[int, str] = {}
+    if not body_blocks or not template_kpi_ids:
+        return scope, single_period
+
+    blocks = [b for b in body_blocks if isinstance(b, dict)]
+
+    for b in blocks:
+        bt = (b.get("type") or "").strip()
+        if bt not in ("kpi_table", "kpi_grid", "kpi_list"):
+            continue
+        targets = _block_targets_for_time_scope(b, template_kpi_ids)
+        if not targets:
+            continue
+        mode = (b.get("timeDimensionMode") or b.get("time_dimension_mode") or "latest").strip().lower()
+        if mode in ("all_periods", "all"):
+            for kid in targets:
+                scope[kid] = "all"
+
+    for b in blocks:
+        bt = (b.get("type") or "").strip()
+        if bt not in ("kpi_table", "kpi_grid", "kpi_list"):
+            continue
+        targets = _block_targets_for_time_scope(b, template_kpi_ids)
+        if not targets:
+            continue
+        mode = (b.get("timeDimensionMode") or b.get("time_dimension_mode") or "latest").strip().lower()
+        if mode != "single_period":
+            continue
+        pk = b.get("periodKey") or b.get("period_key") or ""
+        pk = str(pk).strip() if pk is not None else ""
+        if not pk:
+            continue
+        for kid in targets:
+            if scope.get(kid) == "all":
+                continue
+            scope[kid] = "single"
+            single_period[kid] = pk
+
+    return scope, single_period
 
 
 def _report_period_display(year: int, period_key: str, dimension: TimeDimension) -> str:
@@ -1453,7 +1709,7 @@ async def generate_report_data(
 ) -> dict | None:
     """
     Compile report data from KPI entries for the template.
-    Uses all KPIs in the same organization.
+    Uses KPIs linked on the report template (ReportTemplateKPI); if none are linked, falls back to all org KPIs.
     Returns structured dict: { template_name, year, kpis: [ { kpi_name, entries: [ { fields } ] } ] }
     Formula fields are evaluated.
     """
@@ -1461,6 +1717,12 @@ async def generate_report_data(
     if not rt:
         return None
     yr = year if year is not None else datetime.date.today().year
+    t0 = time.perf_counter()
+    cache_key = (template_id, org_id, int(yr), bool(include_drafts), "v3")
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        _prof(f"CACHE HIT key={cache_key}")
+        return cached
 
     # Collect requested reference-derived columns for multi-line items from designer blocks.
     # Frontend encodes a reference-derived column key as "__ref__{subKey}__{encodedChain}" where encodedChain is
@@ -1499,17 +1761,96 @@ async def generate_report_data(
                     ref_cols_by_multi_field.setdefault(str(multi_field_key), []).append((k, sub_key, chain))
     except Exception:
         ref_cols_by_multi_field = {}
+    _prof(f"template={template_id} org={org_id} year={yr} ref_col_fields={len(ref_cols_by_multi_field)}")
 
-    # All KPIs in the same organization
-    result = await db.execute(
-        select(KPI)
-        .where(KPI.organization_id == org_id)
-        .order_by(KPI.sort_order, KPI.name)
-        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+    # KPIs attached to this template (not the whole org — that was O(org_kpis × entries) and unusably slow).
+    t_kpis0 = time.perf_counter()
+    rtk_result = await db.execute(
+        select(ReportTemplateKPI)
+        .where(ReportTemplateKPI.report_template_id == template_id)
+        .order_by(ReportTemplateKPI.sort_order, ReportTemplateKPI.id)
+        .options(
+            selectinload(ReportTemplateKPI.kpi).selectinload(KPI.fields).selectinload(KPIField.sub_fields),
+            selectinload(ReportTemplateKPI.fields),
+        )
     )
-    template_kpis = list(result.unique().scalars().all())
+    rtk_list = list(rtk_result.scalars().unique().all())
+
+    kpi_worklist: list[tuple[KPI, list[KPIField]]] = []
+    if rtk_list:
+        seen_kpi_ids: set[int] = set()
+        for rtk in rtk_list:
+            kpi = rtk.kpi
+            if not kpi or kpi.id in seen_kpi_ids:
+                continue
+            seen_kpi_ids.add(kpi.id)
+            if rtk.include_all_fields:
+                fts = sorted(list(kpi.fields or []), key=lambda f: (f.sort_order, f.id))
+            else:
+                tf_by_field_id = {tf.kpi_field_id: tf for tf in (rtk.fields or [])}
+                fts = [f for f in (kpi.fields or []) if f.id in tf_by_field_id]
+                fts.sort(
+                    key=lambda f: (
+                        tf_by_field_id[f.id].sort_order,
+                        f.sort_order,
+                        f.id,
+                    )
+                )
+            kpi_worklist.append((kpi, fts))
+    else:
+        # Template has no attached KPI list yet.
+        # For designer templates, use block-scoped KPI ids to avoid loading the entire org
+        # (which can be very slow with multi_line_items).
+        raw_blocks = getattr(rt, "body_blocks", None) or []
+        block_kpi_ids = _extract_kpi_ids_from_blocks(raw_blocks)
+        if block_kpi_ids:
+            result = await db.execute(
+                select(KPI)
+                .where(KPI.organization_id == org_id, KPI.id.in_(block_kpi_ids))
+                .order_by(KPI.sort_order, KPI.name)
+                .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+            )
+        else:
+            # Legacy/code templates: fall back to all org KPIs (previous behavior).
+            result = await db.execute(
+                select(KPI)
+                .where(KPI.organization_id == org_id)
+                .order_by(KPI.sort_order, KPI.name)
+                .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+            )
+        for kpi in result.unique().scalars().all():
+            fts = sorted(list(kpi.fields or []), key=lambda f: (f.sort_order, f.id))
+            kpi_worklist.append((kpi, fts))
+
+    template_kpis = [kp for kp, _ in kpi_worklist]
+    _prof(
+        f"loaded_kpis={len(template_kpis)} rtk={len(rtk_list)} ms={(time.perf_counter()-t_kpis0)*1000:.1f}"
+    )
+
+    raw_blocks = getattr(rt, "body_blocks", None) or []
+    template_kpi_ids_set = {kp.id for kp, _ in kpi_worklist}
+    if not raw_blocks:
+        # Code-only / legacy templates: keep full year (same as before visual blocks).
+        kpi_td_scope = {kid: "all" for kid in template_kpi_ids_set}
+        kpi_td_single_period: dict[int, str] = {}
+    else:
+        kpi_td_scope, kpi_td_single_period = _resolve_kpi_time_scope_from_blocks(
+            raw_blocks, template_kpi_ids_set
+        )
+
+    # Only build domains/categories when the template actually uses domain-driven blocks.
+    _has_domain_blocks = False
+    if isinstance(raw_blocks, list) and raw_blocks:
+        for b in raw_blocks:
+            if not isinstance(b, dict):
+                continue
+            bt = (b.get("type") or "").strip()
+            if bt in ("domain_list", "domain_categories", "domain_kpis"):
+                _has_domain_blocks = True
+                break
 
     # Load text blocks
+    t_tb0 = time.perf_counter()
     text_blocks_result = await db.execute(
         select(ReportTemplateTextBlock)
         .where(ReportTemplateTextBlock.report_template_id == template_id)
@@ -1519,6 +1860,7 @@ async def generate_report_data(
         {"id": tb.id, "title": tb.title, "content": tb.content, "sort_order": tb.sort_order}
         for tb in text_blocks_result.scalars().all()
     ]
+    _prof(f"text_blocks={len(text_blocks)} ms={(time.perf_counter()-t_tb0)*1000:.1f}")
 
     out = {
         "template_name": rt.name,
@@ -1530,8 +1872,14 @@ async def generate_report_data(
     org = await db.get(Organization, org_id)
     org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
 
-    for kpi in template_kpis:
-        fields_to_include = list(kpi.fields)
+    total_entries_loaded = 0
+    total_ml_rows = 0
+    total_entries_query_ms = 0.0
+    total_ml_load_ms = 0.0
+    total_ref_col_ms = 0.0
+
+    for kpi, fields_to_include in kpi_worklist:
+        t_kpi0 = time.perf_counter()
         kpi_td_raw = getattr(kpi, "time_dimension", None)
         kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
         effective_td = effective_kpi_time_dimension(kpi_td, org_td)
@@ -1543,17 +1891,50 @@ async def generate_report_data(
         ]
         if not include_drafts:
             entry_filters.append(KPIEntry.is_draft == False)
+        t_eq0 = time.perf_counter()
         entries_result = await db.execute(
             select(KPIEntry)
             .where(*entry_filters)
             .options(selectinload(KPIEntry.field_values))
         )
+        total_entries_query_ms += (time.perf_counter() - t_eq0) * 1000.0
         all_entries = list(entries_result.scalars().all())
         # Sort by period (e.g. Q1, Q2, Q3, Q4) so "latest" filter returns last; report can show all or one period
         entries_sorted = sorted(
             all_entries,
             key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td),
         )
+        # Match designer time filter (latest / single period / all) — was Jinja-only; loading all periods was the main cost.
+        td_scope = kpi_td_scope.get(kpi.id, "latest")
+        td_pk = kpi_td_single_period.get(kpi.id)
+        if td_scope == "latest" and len(entries_sorted) > 1:
+            entries_sorted = [entries_sorted[-1]]
+        elif td_scope == "single" and td_pk is not None:
+            pk_s = str(td_pk).strip()
+            entries_sorted = [
+                e
+                for e in entries_sorted
+                if (getattr(e, "period_key", "") or "").strip() == pk_s
+            ]
+
+        need_cross_kpi = _formulas_need_other_kpi_values(fields_to_include)
+        other_kpi_values = (
+            await _load_other_kpi_values(db, yr, org_id, kpi.id)
+            if entries_sorted and need_cross_kpi
+            else {}
+        )
+        entry_ids_sorted = [e.id for e in entries_sorted]
+        total_entries_loaded += len(entry_ids_sorted)
+        ml_fields = [f for f in fields_to_include if f.field_type == FieldType.multi_line_items]
+        ml_rows_by_field_id: dict[int, dict[int, list[dict]]] = {}
+        for mf in ml_fields:
+            t_ml0 = time.perf_counter()
+            ml_rows_by_field_id[mf.id] = await _load_multi_line_items_rows_batch(
+                db, entry_ids=entry_ids_sorted, field=mf
+            )
+            total_ml_load_ms += (time.perf_counter() - t_ml0) * 1000.0
+            for _eid, _rows in ml_rows_by_field_id[mf.id].items():
+                total_ml_rows += len(_rows or [])
         # Build value by entry and field (one row per entry; each row has period_key and period_display)
         rows = []
         if not entries_sorted:
@@ -1578,6 +1959,44 @@ async def generate_report_data(
                 field_values_out.append(field_payload)
             rows.append({"entry_id": None, "fields": field_values_out, "period_key": "", "period_display": str(yr)})
         else:
+            # One reference-resolution pass per multi-line field (was: once per time period / entry).
+            ref_col_resolve_by_field_id: dict[int, tuple[list[tuple[str, str, dict]], dict]] = {}
+            for f in fields_to_include:
+                if f.field_type != FieldType.multi_line_items:
+                    continue
+                requested_pre = ref_cols_by_multi_field.get(str(f.key), [])
+                if not requested_pre:
+                    continue
+                conditions_pre: list[dict] = []
+                syn_meta_pre: list[tuple[str, str, dict]] = []
+                for syn_key, sub_key, chain in requested_pre:
+                    steps = []
+                    for p in chain:
+                        if "|" in p:
+                            fk, sk = p.split("|", 1)
+                            steps.append({"compare_field_key": fk, "compare_sub_field_key": sk})
+                        else:
+                            steps.append({"compare_field_key": p})
+                    rr = {"chain": steps}
+                    conditions_pre.append({"field": sub_key, "reference_resolution": rr})
+                    syn_meta_pre.append((syn_key, sub_key, rr))
+                all_rows_merge: list[dict] = []
+                for ent in entries_sorted:
+                    for r in ml_rows_by_field_id.get(f.id, {}).get(ent.id, []):
+                        if isinstance(r, dict):
+                            all_rows_merge.append(r)
+                t_ref0 = time.perf_counter()
+                res_map_pre = await build_reference_resolution_map(
+                    db,
+                    org_id,
+                    prefer_year=yr,
+                    field=f,
+                    conditions=conditions_pre,
+                    row_dicts=all_rows_merge,
+                )
+                total_ref_col_ms += (time.perf_counter() - t_ref0) * 1000.0
+                ref_col_resolve_by_field_id[f.id] = (syn_meta_pre, res_map_pre)
+
             for entry in entries_sorted:
                 _pk = getattr(entry, "period_key", "") or ""
                 _pd = _report_period_display(yr, _pk, effective_td)
@@ -1606,8 +2025,8 @@ async def generate_report_data(
                         if f.field_type == FieldType.number and fv.value_number is not None:
                             value_by_key[f.key] = fv.value_number
                         if f.field_type == FieldType.multi_line_items:
-                            # Multi-line items are stored relationally.
-                            rows_items = await _load_multi_line_items_rows(db, entry_id=entry.id, field=f)
+                            # Multi-line items are stored relationally (loaded in batch per KPI above).
+                            rows_items = ml_rows_by_field_id.get(f.id, {}).get(entry.id, [])
                             multi_line_items_data[f.key] = rows_items
                             val = rows_items
                     card_ids = kpi.card_display_field_ids or []
@@ -1631,30 +2050,12 @@ async def generate_report_data(
                         requested = ref_cols_by_multi_field.get(str(f.key), [])
                         if requested and isinstance(field_payload.get("value_items"), list):
                             rows_list = field_payload["value_items"]
-                            # Build conditions for batch resolving (one condition per synthetic column).
-                            conditions: list[dict] = []
-                            syn_meta: list[tuple[str, str, dict]] = []
-                            for syn_key, sub_key, chain in requested:
-                                # reference_resolution chain uses compare_field_key/compare_sub_field_key.
-                                steps = []
-                                for p in chain:
-                                    if "|" in p:
-                                        fk, sk = p.split("|", 1)
-                                        steps.append({"compare_field_key": fk, "compare_sub_field_key": sk})
-                                    else:
-                                        steps.append({"compare_field_key": p})
-                                rr = {"chain": steps}
-                                conditions.append({"field": sub_key, "reference_resolution": rr})
-                                syn_meta.append((syn_key, sub_key, rr))
-                            # Ask resolver to compute values per normalized label.
-                            res_map = await build_reference_resolution_map(
-                                db,
-                                org_id,
-                                prefer_year=yr,
-                                field=f,
-                                conditions=conditions,
-                                row_dicts=[r for r in rows_list if isinstance(r, dict)],
-                            )
+                            packed_ref = ref_col_resolve_by_field_id.get(f.id)
+                            if not packed_ref:
+                                syn_meta = []
+                                res_map = {}
+                            else:
+                                syn_meta, res_map = packed_ref
                             # Apply to each row; keep raw ref cell for lookup.
                             for row in rows_list:
                                 if not isinstance(row, dict):
@@ -1708,10 +2109,6 @@ async def generate_report_data(
                     except (TypeError, ValueError):
                         continue
 
-                # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
-                other_kpi_values = await _load_other_kpi_values(
-                    db, entry.year, org_id, kpi.id
-                )
                 # Formula fields (with multi_line_items support for SUM_ITEMS etc.)
                 for f in fields_to_include:
                     if f.field_type == FieldType.formula and f.formula_expression:
@@ -1764,19 +2161,41 @@ async def generate_report_data(
             "period_display": _latest_display,
             "time_dimension_used": effective_td.value,
         })
+        _prof(
+            f"kpi={kpi.id} scope={td_scope} entries={len(entries_sorted)} ml_fields={len(ml_fields)} ms={(time.perf_counter()-t_kpi0)*1000:.1f}"
+        )
 
-    out["multi_line_block_rows"] = await _build_multi_line_block_rows(
-        db,
-        org_id,
-        yr,
-        getattr(rt, "body_blocks", None) or [],
-        out["kpis"],
-        template_kpis,
-    )
+    t_bl0 = time.perf_counter()
+    # Only build multi_line_block_rows when there are active multi-line filters in blocks.
+    # Otherwise the Jinja template falls back to f.value_items directly and this work is wasted.
+    body_blocks = getattr(rt, "body_blocks", None) or []
+    has_ml_filters = False
+    if isinstance(body_blocks, list) and body_blocks:
+        for b in body_blocks:
+            if not isinstance(b, dict):
+                continue
+            mfilters = b.get("multiLineFilters") or b.get("multi_line_filters") or {}
+            if isinstance(mfilters, dict) and any(_multi_line_filter_payload_nonempty(v) for v in mfilters.values()):
+                has_ml_filters = True
+                break
+    if has_ml_filters:
+        out["multi_line_block_rows"] = await _build_multi_line_block_rows(
+            db,
+            org_id,
+            yr,
+            body_blocks,
+            out["kpis"],
+            template_kpis,
+        )
+        _prof(f"multi_line_block_rows ms={(time.perf_counter()-t_bl0)*1000:.1f}")
+    else:
+        out["multi_line_block_rows"] = {}
+        _prof("multi_line_block_rows skipped (no active multi-line filters)")
 
     # Build domains → categories → KPIs for template access (all org domains; KPIs in template)
     out["domains"] = []
-    if out["kpis"]:
+    if _has_domain_blocks and out["kpis"]:
+        t_dom0 = time.perf_counter()
         kpi_payload_by_id = {p["kpi_id"]: p for p in out["kpis"]}
         template_kpi_ids = set(kpi_payload_by_id.keys())
         domains_result = await db.execute(
@@ -1812,7 +2231,14 @@ async def generate_report_data(
                 "name": d.name,
                 "categories": categories_out,
             })
+        _prof(f"domains ms={(time.perf_counter()-t_dom0)*1000:.1f}")
 
+    _prof(
+        f"TOTAL entries={total_entries_loaded} ml_rows={total_ml_rows} "
+        f"entries_q_ms={total_entries_query_ms:.1f} ml_ms={total_ml_load_ms:.1f} refcol_ms={total_ref_col_ms:.1f} "
+        f"total_ms={(time.perf_counter()-t0)*1000:.1f}"
+    )
+    _cache_set(cache_key, out)
     return out
 
 
@@ -1822,11 +2248,13 @@ async def render_report_html(
     org_id: int,
     year: int | None = None,
     include_drafts: bool = False,
+    report_data: dict | None = None,
 ) -> str | None:
     """
     Render report using the template's body_template or body_blocks and
     the structured KPI data produced by generate_report_data.
     When body_blocks is set, body_template is generated from it first.
+    Pass report_data to reuse data from a prior generate_report_data call.
     """
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
@@ -1844,6 +2272,7 @@ async def render_report_html(
         year=year,
         body_template_override=body_template,
         include_drafts=include_drafts,
+        report_data=report_data,
     )
 
 
@@ -1854,18 +2283,23 @@ async def render_report_html_with_template(
     year: int | None = None,
     body_template_override: str | None = None,
     include_drafts: bool = False,
+    report_data: dict | None = None,
 ) -> str | None:
     """
     Render report with given template string (for live preview) or from DB.
     Uses generate_report_data and Jinja2 render.
+    If report_data is provided (e.g. caller already ran generate_report_data), skips regenerating.
     """
-    data = await generate_report_data(
-        db,
-        template_id,
-        org_id,
-        year=year,
-        include_drafts=include_drafts,
-    )
+    if report_data is not None:
+        data = report_data
+    else:
+        data = await generate_report_data(
+            db,
+            template_id,
+            org_id,
+            year=year,
+            include_drafts=include_drafts,
+        )
     if not data:
         return None
     if body_template_override:

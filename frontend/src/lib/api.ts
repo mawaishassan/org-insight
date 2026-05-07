@@ -2,8 +2,24 @@
  * API client: base URL and fetch with JWT.
  */
 
-const getBaseUrl = () =>
-  typeof window !== "undefined" ? "" : process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+/**
+ * Base URL for API requests (no trailing slash).
+ * - In the browser, when `NEXT_PUBLIC_API_URL` or `NEXT_PUBLIC_BACKEND_URL` is set, requests go
+ *   straight to FastAPI. That avoids the Next.js dev-server rewrite proxy, which can drop long
+ *   requests (report preview, exports) with ECONNRESET / "socket hang up".
+ * - Otherwise the browser uses same-origin `/api/*` (rewritten in next.config.js).
+ * - During SSR, uses env or falls back to the same port as start.bat / next.config (8080).
+ */
+function getBaseUrl(): string {
+  const fromEnv = (process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_BACKEND_URL || "").trim();
+  if (typeof window !== "undefined") {
+    if (fromEnv) {
+      return fromEnv.replace(/\/+$/, "");
+    }
+    return "";
+  }
+  return fromEnv.replace(/\/+$/, "") || "http://localhost:8080";
+}
 
 export function getApiUrl(path: string): string {
   const base = getBaseUrl();
