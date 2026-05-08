@@ -68,27 +68,39 @@ export async function fetchMultiLineRowsForEntry(opts: {
     ((filters as MultiItemsFilterPayloadV2).conditions?.length ?? 0) > 0;
 
   const pageSize = 200;
-  let page = 1;
   const out: Array<{ index: number; data: Record<string, unknown> }> = [];
 
-  while (true) {
+  if (!hasStructuredFilters) {
     const params = new URLSearchParams({
       entry_id: String(entryId),
       field_id: String(fieldId),
       organization_id: String(organizationId),
-      page: String(page),
+      page: "1",
       page_size: String(pageSize),
+      fetch_all: "true",
     });
-    if (hasStructuredFilters) {
-      params.set("filters", JSON.stringify(filters));
-    }
     const res = await api<MultiItemsRowsResponse>(`/entries/multi-items/rows?${params.toString()}`, { token });
     const rows = Array.isArray(res?.rows) ? res.rows : [];
     rows.forEach((r) => out.push(r));
-    const total = typeof res?.total === "number" ? res.total : out.length;
-    if (out.length >= total) break;
-    if (rows.length === 0) break;
-    page += 1;
+  } else {
+    let page = 1;
+    while (true) {
+      const params = new URLSearchParams({
+        entry_id: String(entryId),
+        field_id: String(fieldId),
+        organization_id: String(organizationId),
+        page: String(page),
+        page_size: String(pageSize),
+      });
+      params.set("filters", JSON.stringify(filters));
+      const res = await api<MultiItemsRowsResponse>(`/entries/multi-items/rows?${params.toString()}`, { token });
+      const rows = Array.isArray(res?.rows) ? res.rows : [];
+      rows.forEach((r) => out.push(r));
+      const total = typeof res?.total === "number" ? res.total : out.length;
+      if (out.length >= total) break;
+      if (rows.length === 0) break;
+      page += 1;
+    }
   }
 
   out.sort((a, b) => a.index - b.index);

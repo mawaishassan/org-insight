@@ -1,8 +1,10 @@
 """Application configuration loaded from environment."""
 
+import json
 from pathlib import Path
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 # Load .env from backend directory so it works when running from project root or backend/
@@ -33,6 +35,30 @@ class Settings(BaseSettings):
         "http://localhost:3001",
         "http://127.0.0.1:3001",
     ]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, v):
+        # Allow env var formats:
+        # - JSON list: ["http://localhost:3001", ...]
+        # - Comma-separated: http://localhost:3001,http://127.0.0.1:3001
+        if v is None:
+            return v
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            if s.startswith("["):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+            return [x.strip() for x in s.split(",") if x.strip()]
+        return v
 
     # Local storage (when storage_type=local)
     UPLOAD_BASE_PATH: str = "uploads"

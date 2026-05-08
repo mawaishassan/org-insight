@@ -235,3 +235,93 @@ const inflightRequests = new Map<string, Promise<unknown>>();
 
 const ME_CACHE_TTL_MS = 30_000;
 const meCacheByToken = new Map<string, { ts: number; data: unknown }>();
+
+/** Human-readable duration for bulk-upload timing (toasts and summaries). */
+export function formatElapsedMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "0 ms";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  if (s < 60) return s >= 10 ? `${s.toFixed(1)} s` : `${s.toFixed(2)} s`;
+  const m = Math.floor(s / 60);
+  const r = s - m * 60;
+  return `${m}m ${r < 10 ? r.toFixed(1) : Math.round(r)}s`;
+}
+
+/** Live elapsed clock for upload UI (updates every tick). */
+export function formatElapsedClockSec(totalSec: number): string {
+  const sec = Math.max(0, Math.floor(totalSec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? `${m}:${s.toString().padStart(2, "0")}` : `${sec}s`;
+}
+
+/** Default cap for large Excel imports (server processing may run long after the upload bytes finish). */
+const DEFAULT_FORM_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * POST multipart form data with XMLHttpRequest so we can report upload progress (bytes sent to the server).
+ * After the request body is sent, the server may still be parsing/validating/saving; use `onRequestSent` for that phase.
+ */
+export function postFormDataWithUploadProgress(
+  path: string,
+  formData: FormData,
+  options: {
+    token: string;
+    onUploadProgress?: (ev: ProgressEvent) => void;
+    /** Called when the browser has finished sending the request body (server may still be working). */
+    onRequestSent?: () => void;
+    signal?: AbortSignal;
+    /** 0 disables the XHR timeout (not recommended). */
+    timeoutMs?: number;
+  }
+): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> {
+  const url = getApiUrl(path);
+  const { token, onUploadProgress, onRequestSent, signal, timeoutMs = DEFAULT_FORM_UPLOAD_TIMEOUT_MS } = options;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    if (timeoutMs > 0) {
+      xhr.timeout = timeoutMs;
+    }
+    xhr.upload.onprogress = (ev) => {
+      onUploadProgress?.(ev);
+    };
+    xhr.upload.onload = () => {
+      onRequestSent?.();
+    };
+    xhr.onload = () => {
+      resolve({
+        ok: xhr.status >= 200 && xhr.status < 300,
+        status: xhr.status,
+        json: async () => {
+          const t = xhr.responseText;
+          if (!t) return {};
+          try {
+            return JSON.parse(t) as unknown;
+          } catch {
+            return {};
+          }
+        },
+      });
+    };
+    xhr.onerror = () => reject(new Error("Network error"));
+    xhr.onabort = () => reject(new DOMException("Aborted", "AbortError"));
+    xhr.ontimeout = () => reject(new Error("Request timed out"));
+
+    const onAbort = () => xhr.abort();
+    if (signal) {
+      signal.addEventListener("abort", onAbort);
+      xhr.addEventListener(
+        "loadend",
+        () => {
+          signal.removeEventListener("abort", onAbort);
+        },
+        { once: true }
+      );
+    }
+
+    xhr.send(formData);
+  });
+}

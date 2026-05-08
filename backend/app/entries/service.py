@@ -159,6 +159,8 @@ async def get_reference_allowed_values(
     source_field_key: str,
     org_id: int,
     source_sub_field_key: str | None = None,
+    *,
+    year: int | None = None,
 ) -> list[str]:
     """Return distinct values from a source KPI field (or multi_line_items sub-field) for reference. Same org only."""
     result = await db.execute(
@@ -175,6 +177,8 @@ async def get_reference_allowed_values(
     if not source_field:
         return []
     subq = select(KPIEntry.id).where(KPIEntry.organization_id == org_id)
+    if year is not None:
+        subq = subq.where(KPIEntry.year == int(year))
 
     if source_field.field_type == FieldType.multi_line_items and source_sub_field_key:
         sf = next((s for s in (getattr(source_field, "sub_fields", None) or []) if getattr(s, "key", None) == source_sub_field_key), None)
