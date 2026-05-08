@@ -330,7 +330,9 @@ async def generate_report(
     # so the report view shows the same content as the design live preview.
     can_render = bool(rt.body_template or getattr(rt, "body_blocks", None))
     if format == "json" and can_render:
-        html = await render_report_html(db, template_id, rt.organization_id, year=year, include_drafts=False)
+        html = await render_report_html(
+            db, template_id, rt.organization_id, year=year, include_drafts=False, report_data=data
+        )
         if html is not None:
             data["rendered_html"] = html
     if not data:

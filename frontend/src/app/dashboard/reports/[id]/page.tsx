@@ -47,13 +47,23 @@ export default function ReportViewPage() {
     if (!data || !token) return;
     setPopupBlockedMsg(null);
     setPrintLoading(true);
+    const useCached = data.year === reportYear;
+    const run = (reportData: ReportData) => {
+      const doc = buildReportPrintDocument(reportData);
+      const opened = openReportPrintWindow(doc, true);
+      if (!opened) setPopupBlockedMsg("Pop-up was blocked. Allow pop-ups for this site to open print/PDF in a new tab.");
+    };
+    if (useCached) {
+      try {
+        run(data);
+      } finally {
+        setPrintLoading(false);
+      }
+      return;
+    }
     const url = `/reports/templates/${id}/generate?format=json&year=${reportYear}&_t=${Date.now()}`;
     api<ReportData>(url, { token, cache: "no-store" })
-      .then((reportData) => {
-        const doc = buildReportPrintDocument(reportData);
-        const opened = openReportPrintWindow(doc, true);
-        if (!opened) setPopupBlockedMsg("Pop-up was blocked. Allow pop-ups for this site to open print/PDF in a new tab.");
-      })
+      .then(run)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load report"))
       .finally(() => setPrintLoading(false));
   };

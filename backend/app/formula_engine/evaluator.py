@@ -445,5 +445,6 @@ def evaluate_formula(
         if isinstance(result, (int, float)):
             return result
         return None
-    except (NameNotDefined, ZeroDivisionError, TypeError, KeyError):
+    except (NameNotDefined, ZeroDivisionError, TypeError, KeyError, SyntaxError, ValueError):
+        # SyntaxError: malformed expression (e.g. stray paste); avoid crashing report render
         return None

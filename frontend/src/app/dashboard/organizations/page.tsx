@@ -26,18 +26,11 @@ function SettingsIcon({ orgId }: { orgId: number }) {
   );
 }
 
-interface OrgSummary {
-  user_count: number;
-  domain_count: number;
-  kpi_count: number;
-}
-
-interface OrgWithSummary {
+interface OrgListItem {
   id: number;
   name: string;
   description: string | null;
   is_active: boolean;
-  summary: OrgSummary;
 }
 
 const createSchema = z.object({
@@ -52,7 +45,7 @@ const createSchema = z.object({
 type CreateFormData = z.infer<typeof createSchema>;
 
 export default function OrganizationsPage() {
-  const [list, setList] = useState<OrgWithSummary[]>([]);
+  const [list, setList] = useState<OrgListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -62,7 +55,8 @@ export default function OrganizationsPage() {
   const loadList = () => {
     if (!token) return;
     setLoading(true);
-    api<OrgWithSummary[]>(`/organizations?with_summary=true`, { token })
+    // This page only needs the organizations list; summary counts are expensive (and grow with data volume).
+    api<OrgListItem[]>(`/organizations`, { token })
       .then(setList)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
@@ -225,18 +219,7 @@ export default function OrganizationsPage() {
                     {o.is_active ? "Active" : "Inactive"}
                   </span>
                 </div>
-                {/* Section 4: Summary */}
-                <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginTop: "auto" }}>
-                  <span style={{ color: "var(--muted)", fontSize: "0.85rem" }} title="Users">
-                    {o.summary.user_count} users
-                  </span>
-                  <span style={{ color: "var(--muted)", fontSize: "0.85rem" }} title="Domains">
-                    {o.summary.domain_count} domains
-                  </span>
-                  <span style={{ color: "var(--muted)", fontSize: "0.85rem" }} title="KPIs">
-                    {o.summary.kpi_count} KPIs
-                  </span>
-                </div>
+                <div style={{ marginTop: "auto" }} />
               </Link>
               <SettingsIcon orgId={o.id} />
             </div>
