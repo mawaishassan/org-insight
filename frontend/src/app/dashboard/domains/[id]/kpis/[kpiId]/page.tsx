@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken, clearTokens } from "@/lib/auth";
-import { api, getApiUrl, postFormDataWithUploadProgress } from "@/lib/api";
+import { api, formatElapsedClockSec, formatElapsedMs, getApiUrl, postFormDataWithUploadProgress } from "@/lib/api";
 import { fetchMultiLineRowsForEntry } from "@/lib/fetchMultiItemsRows";
 import {
   coerceScalarValueTextFromApi,
@@ -223,6 +223,8 @@ export default function DomainKpiDetailPage() {
   const [savingRoleAssignments, setSavingRoleAssignments] = useState(false);
   const [uploadingFieldId, setUploadingFieldId] = useState<number | null>(null);
   const [excelBulkUploadProgress, setExcelBulkUploadProgress] = useState<string | null>(null);
+  const [excelBulkUploadElapsed, setExcelBulkUploadElapsed] = useState<string | null>(null);
+  const excelBulkUploadTickRef = useRef<number | null>(null);
   const [uploadOption, setUploadOption] = useState<"append" | "override" | "upsert" | null>(null);
   const [upsertMatchKeyByFieldId, setUpsertMatchKeyByFieldId] = useState<Record<number, string>>({});
   const [syncOption, setSyncOption] = useState<"append" | "override" | "upsert" | null>(null);
@@ -4173,6 +4175,11 @@ export default function DomainKpiDetailPage() {
                                 }
                                 setUploadingFieldId(f.id);
                                 setExcelBulkUploadProgress("Starting upload…");
+                                setExcelBulkUploadElapsed("0s");
+                                const tStart = performance.now();
+                                excelBulkUploadTickRef.current = window.setInterval(() => {
+                                  setExcelBulkUploadElapsed(formatElapsedClockSec((performance.now() - tStart) / 1000));
+                                }, 500);
                                 try {
                                   const form = new FormData();
                                   form.append("file", file);
@@ -4196,16 +4203,20 @@ export default function DomainKpiDetailPage() {
                                   }
                                   if (res.ok) {
                                     const payload = (await res.json()) as Record<string, unknown>;
+                                    const elapsedMs = performance.now() - tStart;
+                                    const timeSuffix = ` · ${formatElapsedMs(elapsedMs)}`;
                                     await loadData(entryDetailLoadGenRef.current);
                                     if (uploadOption === "upsert") {
                                       const u = Number(payload.rows_updated ?? 0);
                                       const a = Number(payload.rows_added ?? 0);
-                                      toast.success(`Update or add: ${u} row(s) updated, ${a} new row(s) added`);
+                                      toast.success(`Update or add: ${u} row(s) updated, ${a} new row(s) added${timeSuffix}`);
                                     } else {
-                                      toast.success("Excel uploaded successfully");
+                                      toast.success(`Excel uploaded successfully${timeSuffix}`);
                                     }
                                   } else {
-                                    const err = (await res.json().catch(() => ({}))) as {
+                                    const elapsedMsFail = performance.now() - tStart;
+                                    const failSuffix = ` (${formatElapsedMs(elapsedMsFail)})`;
+                                    const err = (await res.json()) as {
                                       errors?: unknown[];
                                       detail?: unknown;
                                     };
@@ -4235,34 +4246,44 @@ export default function DomainKpiDetailPage() {
                                           : "";
                                       const msg = `Consistency check failed:\n${loc}: value "${first.value ?? ""}" ${
                                         first.message ?? "not allowed"
-                                      }${details}`;
+                                      }${details}${failSuffix}`;
                                       setBulkUploadError(msg);
                                       window.scrollTo({ top: 0, behavior: "smooth" });
                                     } else {
-                                      setBulkUploadError("Excel upload failed");
+                                      const detail =
+                                        err?.detail != null ? String(err.detail) : "Excel upload failed";
+                                      setBulkUploadError(`${detail}${failSuffix}`);
                                       window.scrollTo({ top: 0, behavior: "smooth" });
                                     }
                                   }
                                 } catch (ex) {
+                                  const elapsedMs = performance.now() - tStart;
+                                  const timePart = ` (${formatElapsedMs(elapsedMs)})`;
                                   const msg = ex instanceof Error ? ex.message : "Excel upload failed";
                                   if (msg.includes("timed out")) {
                                     setBulkUploadError(
-                                      "Upload or processing timed out. For very large files, try again or ask your administrator about proxy/server timeouts."
+                                      `Upload or processing timed out. For very large files, try again or ask your administrator about proxy/server timeouts${timePart}`
                                     );
                                   } else {
-                                    setBulkUploadError(msg);
+                                    setBulkUploadError(`${msg}${timePart}`);
                                   }
                                   window.scrollTo({ top: 0, behavior: "smooth" });
                                 } finally {
+                                  if (excelBulkUploadTickRef.current != null) {
+                                    window.clearInterval(excelBulkUploadTickRef.current);
+                                    excelBulkUploadTickRef.current = null;
+                                  }
+                                  setExcelBulkUploadElapsed(null);
                                   setExcelBulkUploadProgress(null);
                                   setUploadingFieldId(null);
                                 }
                               }}
                             />
                           </label>
-                          {uploadingFieldId === f.id && excelBulkUploadProgress ? (
+                          {uploadingFieldId === f.id && (excelBulkUploadProgress || excelBulkUploadElapsed) ? (
                             <span style={{ fontSize: "0.85rem", color: "var(--muted)", alignSelf: "center" }}>
                               {excelBulkUploadProgress}
+                              {excelBulkUploadElapsed ? ` · ${excelBulkUploadElapsed}` : ""}
                             </span>
                           ) : null}
                         </div>

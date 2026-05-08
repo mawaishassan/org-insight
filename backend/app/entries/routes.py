@@ -7,12 +7,13 @@ from datetime import datetime
 import csv
 import json
 import logging
+import asyncio
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, distinct, func, and_, cast, or_, delete
+from sqlalchemy import select, distinct, func, and_, cast, or_, delete, insert
 from sqlalchemy.sql import nulls_last
 from sqlalchemy.types import String
 from sqlalchemy.orm import selectinload
@@ -37,6 +38,7 @@ from app.core.models import (
     KpiMultiLineCell,
     KpiRoleAssignment,
     UserOrganizationRole,
+    utc_now,
 )
 from app.entries.schemas import EntryCreate, EntrySubmit, EntryLock, EntryResponse, FieldValueResponse
 
@@ -162,6 +164,53 @@ async def _reindex_multi_line_rows(
     await db.flush()
 
 
+def _multi_line_cell_insert_row(row_id: int, sub: Any, raw_val: Any) -> dict[str, Any]:
+    """Build ORM-equivalent column dict for Core INSERT into kpi_multi_line_cells."""
+    sid = int(getattr(sub, "id"))
+    ft = getattr(sub, "field_type", None)
+    ft_s = ft.value if hasattr(ft, "value") else str(ft)
+    row: dict[str, Any] = {
+        "row_id": row_id,
+        "sub_field_id": sid,
+        "value_text": None,
+        "value_number": None,
+        "value_json": None,
+        "value_boolean": None,
+        "value_date": None,
+    }
+    if raw_val is None:
+        return row
+    if ft_s == "number":
+        try:
+            row["value_number"] = float(raw_val)
+        except Exception:
+            row["value_text"] = str(raw_val)
+    elif ft_s == "boolean":
+        if isinstance(raw_val, bool):
+            row["value_boolean"] = raw_val
+        else:
+            s = str(raw_val).strip().lower()
+            if s in ("true", "yes", "1"):
+                row["value_boolean"] = True
+            elif s in ("false", "no", "0"):
+                row["value_boolean"] = False
+            else:
+                row["value_text"] = str(raw_val)
+    elif ft_s == "date":
+        row["value_text"] = str(raw_val)
+    elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
+        if isinstance(raw_val, (dict, list)):
+            row["value_json"] = raw_val
+        else:
+            row["value_text"] = str(raw_val)
+    else:
+        if isinstance(raw_val, (dict, list)):
+            row["value_json"] = raw_val
+        else:
+            row["value_text"] = str(raw_val)
+    return row
+
+
 async def _replace_multi_line_rows_from_dicts(
     db: AsyncSession,
     *,
@@ -169,7 +218,13 @@ async def _replace_multi_line_rows_from_dicts(
     field: KPIField,
     rows: list[dict],
 ) -> None:
-    """Replace relational multi-line rows/cells for (entry, field) from legacy list-of-dicts."""
+    """Replace relational multi-line rows/cells using bulk Core INSERT (fast path for large imports)."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    # SQLite default max host parameters per statement is often 999 — keep chunks small.
+    cell_chunk = 60 if "sqlite" in settings.DATABASE_URL.lower() else 8000
+
     await db.execute(
         delete(KpiMultiLineRow).where(
             KpiMultiLineRow.entry_id == entry_id,
@@ -178,65 +233,66 @@ async def _replace_multi_line_rows_from_dicts(
     )
     await db.flush()
 
+    rows_list = [r if isinstance(r, dict) else {} for r in (rows or [])]
     key_to_sub = {getattr(s, "key", None): s for s in (field.sub_fields or []) if getattr(s, "key", None)}
 
-    def _add_cell(row_id: int, sub: Any, raw_val: Any) -> None:
-        c = KpiMultiLineCell(row_id=row_id, sub_field_id=int(getattr(sub, "id")))
-        ft = getattr(sub, "field_type", None)
-        ft_s = ft.value if hasattr(ft, "value") else str(ft)
-        if raw_val is None:
-            pass
-        elif ft_s == "number":
-            try:
-                c.value_number = float(raw_val)
-            except Exception:
-                c.value_text = str(raw_val)
-        elif ft_s == "boolean":
-            if isinstance(raw_val, bool):
-                c.value_boolean = raw_val
-            else:
-                s = str(raw_val).strip().lower()
-                if s in ("true", "yes", "1"):
-                    c.value_boolean = True
-                elif s in ("false", "no", "0"):
-                    c.value_boolean = False
-                else:
-                    c.value_text = str(raw_val)
-        elif ft_s == "date":
-            c.value_text = str(raw_val)
-        elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
-            if isinstance(raw_val, (dict, list)):
-                c.value_json = raw_val
-            else:
-                c.value_text = str(raw_val)
-        else:
-            if isinstance(raw_val, (dict, list)):
-                c.value_json = raw_val
-            else:
-                c.value_text = str(raw_val)
-        db.add(c)
+    if not rows_list:
+        return
 
-    row_pairs: list[tuple[KpiMultiLineRow, dict]] = []
-    for idx, row in enumerate(rows or []):
-        rdict = row if isinstance(row, dict) else {}
-        mlr = KpiMultiLineRow(entry_id=entry_id, field_id=field.id, row_index=int(idx))
-        db.add(mlr)
-        row_pairs.append((mlr, rdict))
+    ts = utc_now()
+    await db.execute(
+        insert(KpiMultiLineRow),
+        [
+            {
+                "entry_id": entry_id,
+                "field_id": field.id,
+                "row_index": idx,
+                "created_at": ts,
+                "updated_at": ts,
+            }
+            for idx in range(len(rows_list))
+        ],
+    )
+    await db.flush()
 
-    if row_pairs:
-        await db.flush()
+    res_ids = await db.execute(
+        select(KpiMultiLineRow.id).where(
+            KpiMultiLineRow.entry_id == entry_id,
+            KpiMultiLineRow.field_id == field.id,
+        ).order_by(KpiMultiLineRow.row_index)
+    )
+    ids_ordered = [int(x[0]) for x in res_ids.all()]
+    if len(ids_ordered) != len(rows_list):
+        logger.error(
+            "bulk multi-line row id mismatch entry_id=%s field_id=%s expected=%s got=%s",
+            entry_id,
+            field.id,
+            len(rows_list),
+            len(ids_ordered),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Multi-line import failed (row insert mismatch). Please retry.",
+        )
 
-    for mlr, rdict in row_pairs:
+    cell_ts = utc_now()
+    cell_rows: list[dict[str, Any]] = []
+    for idx, rdict in enumerate(rows_list):
+        mlr_id = ids_ordered[idx]
         for k, v in rdict.items():
             sub = key_to_sub.get(k)
             if not sub:
                 continue
             if getattr(sub, "field_type", None) == FieldType.mixed_list:
                 v = coerce_mixed_list_raw(v) or None
-            _add_cell(mlr.id, sub, v)
+            m = _multi_line_cell_insert_row(mlr_id, sub, v)
+            m["created_at"] = cell_ts
+            m["updated_at"] = cell_ts
+            cell_rows.append(m)
 
-    if row_pairs:
-        await db.flush()
+    for i in range(0, len(cell_rows), cell_chunk):
+        await db.execute(insert(KpiMultiLineCell), cell_rows[i : i + cell_chunk])
+    await db.flush()
 
 
 def _entry_to_response(entry):
@@ -368,93 +424,98 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
     """Parse uploaded xlsx into list[dict[sub_key] = value] for the field's sub_fields."""
     from openpyxl import load_workbook
 
-    wb = load_workbook(filename=BytesIO(content), data_only=True)
-    ws = wb.active
+    bio = BytesIO(content)
+    # read_only streams rows — avoids building the full sheet matrix twice (faster + lower RAM on large files).
+    wb = load_workbook(filename=bio, read_only=True, data_only=True)
+    try:
+        ws = wb[wb.sheetnames[0]]
+        row_iter = ws.iter_rows(values_only=True)
+        header_row = next(row_iter, None)
+        if header_row is None:
+            return []
 
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return []
+        def _norm_header(x: object) -> str:
+            # Be forgiving: Excel users often tweak casing/spaces in the header row.
+            return str(x).strip() if x is not None else ""
 
-    def _norm_header(x: object) -> str:
-        # Be forgiving: Excel users often tweak casing/spaces in the header row.
-        return str(x).strip() if x is not None else ""
+        header = [_norm_header(x) for x in header_row]
+        # Keep original header labels but also support case-insensitive matching.
+        key_to_idx = {k: i for i, k in enumerate(header) if k}
+        allowed = {s.key: s for s in (field.sub_fields or [])}
+        allowed_lower = {str(k).strip().lower(): k for k in allowed.keys()}
 
-    header = [_norm_header(x) for x in rows[0]]
-    # Keep original header labels but also support case-insensitive matching.
-    key_to_idx = {k: i for i, k in enumerate(header) if k}
-    allowed = {s.key: s for s in (field.sub_fields or [])}
-    allowed_lower = {str(k).strip().lower(): k for k in allowed.keys()}
+        # Accept either key or name as column header (keys preferred).
+        name_to_key = {s.name.strip(): s.key for s in (field.sub_fields or []) if s.name}
+        name_to_key_lower = {str(k).strip().lower(): v for k, v in name_to_key.items()}
 
-    # Accept either key or name as column header (keys preferred).
-    name_to_key = {s.name.strip(): s.key for s in (field.sub_fields or []) if s.name}
-    name_to_key_lower = {str(k).strip().lower(): v for k, v in name_to_key.items()}
-
-    def resolve_col_to_key(col: str) -> str | None:
-        col_s = str(col or "").strip()
-        if not col_s:
+        def resolve_col_to_key(col: str) -> str | None:
+            col_s = str(col or "").strip()
+            if not col_s:
+                return None
+            if col_s in allowed:
+                return col_s
+            if col_s in name_to_key:
+                return name_to_key[col_s]
+            c_low = col_s.lower()
+            if c_low in allowed_lower:
+                return allowed_lower[c_low]
+            if c_low in name_to_key_lower:
+                return name_to_key_lower[c_low]
             return None
-        if col_s in allowed:
-            return col_s
-        if col_s in name_to_key:
-            return name_to_key[col_s]
-        c_low = col_s.lower()
-        if c_low in allowed_lower:
-            return allowed_lower[c_low]
-        if c_low in name_to_key_lower:
-            return name_to_key_lower[c_low]
-        return None
 
-    out: list[dict] = []
-    for r in rows[1:]:
-        if r is None:
-            continue
-        item: dict = {}
-        empty = True
-        for col, idx in key_to_idx.items():
-            key = resolve_col_to_key(col)
-            if not key:
+        out: list[dict] = []
+        for r in row_iter:
+            if r is None:
                 continue
-            raw = r[idx] if idx < len(r) else None
-            if raw is None or raw == "":
-                continue
-            empty = False
-            sf = allowed[key]
-            if sf.field_type == FieldType.number:
-                try:
-                    item[key] = float(raw)
-                except Exception:
-                    # keep as string if can't coerce
-                    item[key] = str(raw)
-            elif sf.field_type == FieldType.boolean:
-                if isinstance(raw, bool):
-                    item[key] = raw
-                else:
-                    s = str(raw).strip().lower()
-                    item[key] = s in ("1", "true", "yes", "y")
-            elif sf.field_type == FieldType.date:
-                # Store ISO date string (matches UI expectation for <input type=\"date\">)
-                if hasattr(raw, "date"):
+            item: dict = {}
+            empty = True
+            for col, idx in key_to_idx.items():
+                key = resolve_col_to_key(col)
+                if not key:
+                    continue
+                raw = r[idx] if idx < len(r) else None
+                if raw is None or raw == "":
+                    continue
+                empty = False
+                sf = allowed[key]
+                if sf.field_type == FieldType.number:
                     try:
-                        item[key] = raw.date().isoformat()
+                        item[key] = float(raw)
                     except Exception:
+                        # keep as string if can't coerce
                         item[key] = str(raw)
+                elif sf.field_type == FieldType.boolean:
+                    if isinstance(raw, bool):
+                        item[key] = raw
+                    else:
+                        s = str(raw).strip().lower()
+                        item[key] = s in ("1", "true", "yes", "y")
+                elif sf.field_type == FieldType.date:
+                    # Store ISO date string (matches UI expectation for <input type=\"date\">)
+                    if hasattr(raw, "date"):
+                        try:
+                            item[key] = raw.date().isoformat()
+                        except Exception:
+                            item[key] = str(raw)
+                    else:
+                        item[key] = str(raw)
+                elif sf.field_type == FieldType.multi_reference:
+                    # Semicolon (or comma) separated in Excel; validated on upload.
+                    item[key] = str(raw).strip() if raw is not None else ""
+                elif sf.field_type == FieldType.mixed_list:
+                    # Semicolon separated values in Excel; infer number/date/string.
+                    item[key] = coerce_mixed_list_raw(str(raw) if raw is not None else "") or None
                 else:
-                    item[key] = str(raw)
-            elif sf.field_type == FieldType.multi_reference:
-                # Semicolon (or comma) separated in Excel; validated on upload.
-                item[key] = str(raw).strip() if raw is not None else ""
-            elif sf.field_type == FieldType.mixed_list:
-                # Semicolon separated values in Excel; infer number/date/string.
-                item[key] = coerce_mixed_list_raw(str(raw) if raw is not None else "") or None
-            else:
-                # Text / reference / attachment: Excel often stores numeric ids as float (e.g. 42.0).
-                if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-                    item[key] = _stringify_for_upsert_match_key(raw)
-                else:
-                    item[key] = str(raw) if raw is not None else ""
-        if not empty and not _is_multi_items_row_effectively_empty(item):
-            out.append(item)
-    return out
+                    # Text / reference / attachment: Excel often stores numeric ids as float (e.g. 42.0).
+                    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                        item[key] = _stringify_for_upsert_match_key(raw)
+                    else:
+                        item[key] = str(raw) if raw is not None else ""
+            if not empty and not _is_multi_items_row_effectively_empty(item):
+                out.append(item)
+        return out
+    finally:
+        wb.close()
 
 
 class MultiItemsRow(BaseModel):
@@ -623,9 +684,49 @@ async def upload_multi_items_excel(
         coerce_multi_reference_raw,
         filter_multi_reference_to_allowed,
     )
+
     validation_errors: list[dict] = []
     ref_sub_fields = [s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.reference]
-    allowed_cache: dict[tuple[int, str, str | None], set[str]] = {}
+    multif_sub_fields = [
+        s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.multi_reference
+    ]
+
+    # One DB round-trip per distinct referenced KPI field (parallelized); shared by reference + multi_reference columns.
+    seen_ck: set[tuple[int, str, str | None]] = set()
+    ordered_ck: list[tuple[int, str, str | None]] = []
+    for sf in (*ref_sub_fields, *multif_sub_fields):
+        cfg = getattr(sf, "config", None) or {}
+        sid = cfg.get("reference_source_kpi_id")
+        skey = cfg.get("reference_source_field_key")
+        subkey = cfg.get("reference_source_sub_field_key")
+        if not sid or not skey:
+            continue
+        ck = (int(sid), str(skey), str(subkey) if subkey else None)
+        if ck not in seen_ck:
+            seen_ck.add(ck)
+            ordered_ck.append(ck)
+
+    ref_list_by_ck: dict[tuple[int, str, str | None], list[str]] = {}
+    if ordered_ck:
+
+        async def _fetch_allowed(ck: tuple[int, str, str | None]) -> tuple[tuple[int, str, str | None], list[str]]:
+            sid, skey, subkey = ck
+            lst = await get_reference_allowed_values(
+                db,
+                int(sid),
+                str(skey),
+                org_id,
+                source_sub_field_key=(str(subkey) if subkey else None),
+                year=entry.year,
+            )
+            return ck, lst
+
+        ref_list_by_ck = dict(await asyncio.gather(*[_fetch_allowed(ck) for ck in ordered_ck]))
+
+    allowed_cache: dict[tuple[int, str, str | None], set[str]] = {
+        ck: {_normalize_reference_value(a) for a in lst} for ck, lst in ref_list_by_ck.items()
+    }
+
     for row_idx, item in enumerate(items):
         if not isinstance(item, dict):
             continue
@@ -637,24 +738,13 @@ async def upload_multi_items_excel(
             if not sid or not skey:
                 continue
             cache_key = (int(sid), str(skey), str(subkey) if subkey else None)
-            if cache_key not in allowed_cache:
-                allowed = await get_reference_allowed_values(
-                    db,
-                    int(sid),
-                    str(skey),
-                    org_id,
-                    source_sub_field_key=(str(subkey) if subkey else None),
-                    year=entry.year,
-                )
-                allowed_cache[cache_key] = {_normalize_reference_value(a) for a in allowed}
             cell = item.get(sf.key)
             raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
             normalized = _normalize_reference_value(raw)
             if _is_reference_empty_or_sentinel(normalized):
-                # Normalize empty/NA-like values to None so downstream uses nulls.
                 item[sf.key] = None
                 continue
-            if normalized not in allowed_cache[cache_key]:
+            if normalized not in allowed_cache.get(cache_key, set()):
                 validation_errors.append(
                     {
                         "field_key": field.key,
@@ -665,10 +755,6 @@ async def upload_multi_items_excel(
                         "message": "Value does not exist in the referenced KPI field.",
                     }
                 )
-    multif_sub_fields = [
-        s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.multi_reference
-    ]
-    multif_allowed_list: dict[tuple[int, str, str | None], list[str]] = {}
     for row_idx, item in enumerate(items):
         if not isinstance(item, dict):
             continue
@@ -680,17 +766,8 @@ async def upload_multi_items_excel(
             if not sid or not skey:
                 continue
             cache_key = (int(sid), str(skey), str(subkey) if subkey else None)
-            if cache_key not in multif_allowed_list:
-                multif_allowed_list[cache_key] = await get_reference_allowed_values(
-                    db,
-                    int(sid),
-                    str(skey),
-                    org_id,
-                    source_sub_field_key=(str(subkey) if subkey else None),
-                    year=entry.year,
-                )
-            allowed_list = multif_allowed_list[cache_key]
-            allowed_norm = {_normalize_reference_value(a) for a in allowed_list}
+            allowed_list = ref_list_by_ck.get(cache_key, [])
+            allowed_norm = allowed_cache.get(cache_key, set())
             cell = item.get(sf.key)
             for tok in coerce_multi_reference_raw(cell):
                 if isinstance(tok, dict):
@@ -745,26 +822,37 @@ async def upload_multi_items_excel(
         mk = None
         match_ft = None
 
-    existing_pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
-    existing_list = [r for _, r in existing_pairs] if existing_pairs else []
-    prev_count = len(existing_list)
     imported_count = len(items) if isinstance(items, list) else 0
-
     rows_updated = 0
-    if mode == "append":
-        new_rows = existing_list + items
-        rows_added = imported_count
-        rows_overridden = 0
-    elif mode == "upsert":
-        merged, rows_updated, rows_added = _upsert_merge_multi_line_items(
-            existing_list, items, mk, match_ft
+
+    if mode == "replace":
+        # Override/replace: do not load existing row dicts — we delete all rows anyway; loading was O(old rows) and dominated runtime.
+        prev_row_res = await db.execute(
+            select(func.count())
+            .select_from(KpiMultiLineRow)
+            .where(
+                KpiMultiLineRow.entry_id == entry.id,
+                KpiMultiLineRow.field_id == field.id,
+            )
         )
-        new_rows = merged
-        rows_overridden = 0
-    else:
+        prev_count = int(prev_row_res.scalar_one() or 0)
         new_rows = items
         rows_added = imported_count
         rows_overridden = prev_count
+    else:
+        existing_pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+        existing_list = [r for _, r in existing_pairs] if existing_pairs else []
+
+        if mode == "append":
+            new_rows = existing_list + items
+            rows_added = imported_count
+            rows_overridden = 0
+        else:
+            merged, rows_updated, rows_added = _upsert_merge_multi_line_items(
+                existing_list, items, mk, match_ft
+            )
+            new_rows = merged
+            rows_overridden = 0
     entry.user_id = current_user.id  # track last editor (optional)
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
     await db.commit()

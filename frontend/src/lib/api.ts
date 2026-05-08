@@ -236,6 +236,25 @@ const inflightRequests = new Map<string, Promise<unknown>>();
 const ME_CACHE_TTL_MS = 30_000;
 const meCacheByToken = new Map<string, { ts: number; data: unknown }>();
 
+/** Human-readable duration for bulk-upload timing (toasts and summaries). */
+export function formatElapsedMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "0 ms";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  if (s < 60) return s >= 10 ? `${s.toFixed(1)} s` : `${s.toFixed(2)} s`;
+  const m = Math.floor(s / 60);
+  const r = s - m * 60;
+  return `${m}m ${r < 10 ? r.toFixed(1) : Math.round(r)}s`;
+}
+
+/** Live elapsed clock for upload UI (updates every tick). */
+export function formatElapsedClockSec(totalSec: number): string {
+  const sec = Math.max(0, Math.floor(totalSec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? `${m}:${s.toString().padStart(2, "0")}` : `${sec}s`;
+}
+
 /** Default cap for large Excel imports (server processing may run long after the upload bytes finish). */
 const DEFAULT_FORM_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 

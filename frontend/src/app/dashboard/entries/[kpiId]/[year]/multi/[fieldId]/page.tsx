@@ -4,7 +4,14 @@ import { useEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken, clearTokens } from "@/lib/auth";
-import { api, getApiUrl, openKpiStoredFileInNewTab, postFormDataWithUploadProgress } from "@/lib/api";
+import {
+  api,
+  formatElapsedClockSec,
+  formatElapsedMs,
+  getApiUrl,
+  openKpiStoredFileInNewTab,
+  postFormDataWithUploadProgress,
+} from "@/lib/api";
 import { getAttachmentDisplayName, getAttachmentUrl } from "@/lib/attachmentCellValue";
 import toast from "react-hot-toast";
 import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
@@ -450,6 +457,8 @@ export default function FullPageMultiItems() {
   const [upsertMatchSubFieldKey, setUpsertMatchSubFieldKey] = useState<string>("");
   const [uploading, setUploading] = useState(false);
   const [uploadProgressHint, setUploadProgressHint] = useState<string | null>(null);
+  const [uploadElapsedClock, setUploadElapsedClock] = useState<string | null>(null);
+  const bulkUploadTickRef = useRef<number | null>(null);
   const parsedFiltersFromUrl = useMemo(() => {
     if (!filtersFromUrl) return null;
     try {
@@ -1890,6 +1899,11 @@ export default function FullPageMultiItems() {
                       }
                       setUploading(true);
                       setUploadProgressHint("Starting upload…");
+                      setUploadElapsedClock("0s");
+                      const tStart = performance.now();
+                      bulkUploadTickRef.current = window.setInterval(() => {
+                        setUploadElapsedClock(formatElapsedClockSec((performance.now() - tStart) / 1000));
+                      }, 500);
                       try {
                         const form = new FormData();
                         form.append("file", file);
@@ -1927,22 +1941,26 @@ export default function FullPageMultiItems() {
                           const added = Number(payload?.rows_added ?? 0);
                           const overridden = Number(payload?.rows_overridden ?? 0);
                           const updated = Number(payload?.rows_updated ?? 0);
+                          const elapsedMs = performance.now() - tStart;
+                          const timeSuffix = ` · ${formatElapsedMs(elapsedMs)}`;
                           if (uploadOption === "upsert") {
                             toast.success(
-                              `Update or add: ${updated} row(s) updated, ${added} new row(s) added`
+                              `Update or add: ${updated} row(s) updated, ${added} new row(s) added${timeSuffix}`
                             );
                           } else {
                             const modeLabel = uploadOption === "append" ? "Appended" : "Replaced";
                             toast.success(
                               overridden > 0
-                                ? `${modeLabel}: ${added} rows imported (overrode ${overridden} existing)`
-                                : `${modeLabel}: ${added} rows imported`
+                                ? `${modeLabel}: ${added} rows imported (overrode ${overridden} existing)${timeSuffix}`
+                                : `${modeLabel}: ${added} rows imported${timeSuffix}`
                             );
                           }
                           await loadRows();
                           setBulkPanelOpen(false);
                           setUploadOption(null);
                         } else {
+                          const elapsedMsFail = performance.now() - tStart;
+                          const failSuffix = ` (${formatElapsedMs(elapsedMsFail)})`;
                           const err = (await res.json()) as any;
                           const validationErrors = Array.isArray(err?.errors) ? err.errors : [];
                           if (validationErrors.length > 0) {
@@ -1966,39 +1984,49 @@ export default function FullPageMultiItems() {
                                 : "";
                             const msg = `Consistency check failed:\n${loc}: value "${first.value ?? ""}" ${
                               first.message ?? "not allowed"
-                            }${details}`;
+                            }${details}${failSuffix}`;
                             toast.error(msg);
                           } else {
                             const detail =
                               err?.detail != null ? String(err.detail) : "Excel upload failed";
-                            toast.error(detail);
+                            toast.error(`${detail}${failSuffix}`);
                           }
                         }
                       } catch (err) {
+                        const elapsedMs = performance.now() - tStart;
+                        const timePart = ` (${formatElapsedMs(elapsedMs)})`;
                         if (err instanceof DOMException && err.name === "AbortError") {
-                          toast.error("Upload was cancelled.");
+                          toast.error(`Upload was cancelled${timePart}`);
                           return;
                         }
                         const msg = err instanceof Error ? err.message : "";
                         if (msg.includes("timed out")) {
                           toast.error(
-                            "Upload or processing timed out. For very large files, try again or contact your administrator about proxy/server timeouts."
+                            `Upload or processing timed out. For very large files, try again or contact your administrator about proxy/server timeouts${timePart}`
                           );
                           return;
                         }
                         toast.error(
-                          err instanceof Error ? `Excel upload failed: ${err.message}` : "Excel upload failed"
+                          err instanceof Error
+                            ? `Excel upload failed: ${err.message}${timePart}`
+                            : `Excel upload failed${timePart}`
                         );
                       } finally {
+                        if (bulkUploadTickRef.current != null) {
+                          window.clearInterval(bulkUploadTickRef.current);
+                          bulkUploadTickRef.current = null;
+                        }
+                        setUploadElapsedClock(null);
                         setUploadProgressHint(null);
                         setUploading(false);
                       }
                     }}
                   />
                 </label>
-                {uploadProgressHint ? (
+                {(uploadProgressHint || uploadElapsedClock) ? (
                   <span style={{ fontSize: "0.85rem", color: "var(--muted)", alignSelf: "center" }}>
                     {uploadProgressHint}
+                    {uploadElapsedClock ? ` · ${uploadElapsedClock}` : ""}
                   </span>
                 ) : null}
               </div>
