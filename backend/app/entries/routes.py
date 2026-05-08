@@ -6,12 +6,13 @@ from io import BytesIO
 from datetime import datetime
 import csv
 import json
+import logging
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, distinct, func, and_, cast, or_
+from sqlalchemy import select, distinct, func, and_, cast, or_, delete
 from sqlalchemy.sql import nulls_last
 from sqlalchemy.types import String
 from sqlalchemy.orm import selectinload
@@ -38,6 +39,11 @@ from app.core.models import (
     UserOrganizationRole,
 )
 from app.entries.schemas import EntryCreate, EntrySubmit, EntryLock, EntryResponse, FieldValueResponse
+
+logger = logging.getLogger("uvicorn.error")
+
+# Cap for list_multi_items_rows(fetch_all=True) to bound memory and payload size.
+_MULTI_ITEMS_FETCH_ALL_CAP = 50_000
 from app.entries.service import (
     get_or_create_entry,
     user_can_edit_kpi,
@@ -164,15 +170,12 @@ async def _replace_multi_line_rows_from_dicts(
     rows: list[dict],
 ) -> None:
     """Replace relational multi-line rows/cells for (entry, field) from legacy list-of-dicts."""
-    # Delete existing rows (cells cascade)
-    existing_res = await db.execute(
-        select(KpiMultiLineRow).where(
+    await db.execute(
+        delete(KpiMultiLineRow).where(
             KpiMultiLineRow.entry_id == entry_id,
             KpiMultiLineRow.field_id == field.id,
         )
     )
-    for r in list(existing_res.scalars().all()):
-        await db.delete(r)
     await db.flush()
 
     key_to_sub = {getattr(s, "key", None): s for s in (field.sub_fields or []) if getattr(s, "key", None)}
@@ -213,11 +216,17 @@ async def _replace_multi_line_rows_from_dicts(
                 c.value_text = str(raw_val)
         db.add(c)
 
+    row_pairs: list[tuple[KpiMultiLineRow, dict]] = []
     for idx, row in enumerate(rows or []):
         rdict = row if isinstance(row, dict) else {}
         mlr = KpiMultiLineRow(entry_id=entry_id, field_id=field.id, row_index=int(idx))
         db.add(mlr)
+        row_pairs.append((mlr, rdict))
+
+    if row_pairs:
         await db.flush()
+
+    for mlr, rdict in row_pairs:
         for k, v in rdict.items():
             sub = key_to_sub.get(k)
             if not sub:
@@ -225,6 +234,9 @@ async def _replace_multi_line_rows_from_dicts(
             if getattr(sub, "field_type", None) == FieldType.mixed_list:
                 v = coerce_mixed_list_raw(v) or None
             _add_cell(mlr.id, sub, v)
+
+    if row_pairs:
+        await db.flush()
 
 
 def _entry_to_response(entry):
@@ -363,18 +375,33 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
     if not rows:
         return []
 
-    header = [str(x).strip() if x is not None else "" for x in rows[0]]
+    def _norm_header(x: object) -> str:
+        # Be forgiving: Excel users often tweak casing/spaces in the header row.
+        return str(x).strip() if x is not None else ""
+
+    header = [_norm_header(x) for x in rows[0]]
+    # Keep original header labels but also support case-insensitive matching.
     key_to_idx = {k: i for i, k in enumerate(header) if k}
     allowed = {s.key: s for s in (field.sub_fields or [])}
+    allowed_lower = {str(k).strip().lower(): k for k in allowed.keys()}
 
     # Accept either key or name as column header (keys preferred).
     name_to_key = {s.name.strip(): s.key for s in (field.sub_fields or []) if s.name}
+    name_to_key_lower = {str(k).strip().lower(): v for k, v in name_to_key.items()}
 
     def resolve_col_to_key(col: str) -> str | None:
-        if col in allowed:
-            return col
-        if col in name_to_key:
-            return name_to_key[col]
+        col_s = str(col or "").strip()
+        if not col_s:
+            return None
+        if col_s in allowed:
+            return col_s
+        if col_s in name_to_key:
+            return name_to_key[col_s]
+        c_low = col_s.lower()
+        if c_low in allowed_lower:
+            return allowed_lower[c_low]
+        if c_low in name_to_key_lower:
+            return name_to_key_lower[c_low]
         return None
 
     out: list[dict] = []
@@ -544,6 +571,15 @@ async def upload_multi_items_excel(
     current_user: User = Depends(get_current_user),
 ):
     """Upload Excel and set/append/upsert multi_line_items value_json for an entry+field (requires add_row permission)."""
+    logger.info(
+        "BEGIN multi-items upload: entry_id=%s field_id=%s org_param=%s import_mode=%s append=%s user_id=%s",
+        entry_id,
+        field_id,
+        organization_id,
+        import_mode,
+        append,
+        getattr(current_user, "id", None),
+    )
     org_id = _org_id(current_user, organization_id)
 
     entry_res = await db.execute(
@@ -568,6 +604,13 @@ async def upload_multi_items_excel(
     content = await file.read()
     items = _parse_multi_items_xlsx(content, field)
     items = [it for it in items if isinstance(it, dict) and not _is_multi_items_row_effectively_empty(it)]
+    if not items:
+        # Most common cause: header mismatch (edited column names) or rows are blank/whitespace.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No data rows found in Excel. Please download the template again and ensure the header row matches the template columns.",
+        )
+    logger.info("Parsed %s data row(s) from Excel for entry_id=%s field_id=%s org_id=%s", len(items), entry_id, field_id, org_id)
 
     # Reference consistency check for reference sub-fields (row-level errors)
     # Rules:
@@ -596,7 +639,12 @@ async def upload_multi_items_excel(
             cache_key = (int(sid), str(skey), str(subkey) if subkey else None)
             if cache_key not in allowed_cache:
                 allowed = await get_reference_allowed_values(
-                    db, int(sid), str(skey), org_id, source_sub_field_key=(str(subkey) if subkey else None)
+                    db,
+                    int(sid),
+                    str(skey),
+                    org_id,
+                    source_sub_field_key=(str(subkey) if subkey else None),
+                    year=entry.year,
                 )
                 allowed_cache[cache_key] = {_normalize_reference_value(a) for a in allowed}
             cell = item.get(sf.key)
@@ -634,7 +682,12 @@ async def upload_multi_items_excel(
             cache_key = (int(sid), str(skey), str(subkey) if subkey else None)
             if cache_key not in multif_allowed_list:
                 multif_allowed_list[cache_key] = await get_reference_allowed_values(
-                    db, int(sid), str(skey), org_id, source_sub_field_key=(str(subkey) if subkey else None)
+                    db,
+                    int(sid),
+                    str(skey),
+                    org_id,
+                    source_sub_field_key=(str(subkey) if subkey else None),
+                    year=entry.year,
                 )
             allowed_list = multif_allowed_list[cache_key]
             allowed_norm = {_normalize_reference_value(a) for a in allowed_list}
@@ -715,6 +768,16 @@ async def upload_multi_items_excel(
     entry.user_id = current_user.id  # track last editor (optional)
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
     await db.commit()
+    logger.info(
+        "END multi-items upload: entry_id=%s field_id=%s org_id=%s mode=%s added=%s updated=%s overridden=%s",
+        entry.id,
+        field.id,
+        org_id,
+        mode,
+        rows_added,
+        rows_updated,
+        rows_overridden,
+    )
 
     return {
         "entry_id": entry.id,
@@ -748,6 +811,10 @@ async def list_multi_items_rows(
         False,
         description="When true, only return rows where the current user can edit and/or delete the row.",
     ),
+    fetch_all: bool = Query(
+        False,
+        description="Return all rows in one response (max 50000). For hydration clients only; cannot combine with search.",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -762,6 +829,12 @@ async def list_multi_items_rows(
     field = await _load_multi_items_field(db, org_id, field_id)
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    if fetch_all and search:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="fetch_all cannot be used together with search",
+        )
 
     def _try_parse_iso_datetime(v: Any) -> datetime | None:
         if v is None:
@@ -1245,7 +1318,12 @@ async def list_multi_items_rows(
             ).scalar_one()
             or 0
         )
-        start = (page - 1) * page_size
+        if fetch_all:
+            slice_start = 0
+            slice_limit = min(total, _MULTI_ITEMS_FETCH_ALL_CAP)
+        else:
+            slice_start = (page - 1) * page_size
+            slice_limit = page_size
 
         order_stmt = base_rows_stmt
         if sort_by:
@@ -1286,13 +1364,13 @@ async def list_multi_items_rows(
         else:
             order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
 
-        paged_rows_res = await db.execute(order_stmt.offset(start).limit(page_size))
+        paged_rows_res = await db.execute(order_stmt.offset(slice_start).limit(slice_limit))
         page_rows = list(paged_rows_res.all())  # [(id, row_index)]
         if not page_rows:
             return MultiItemsListResponse(
                 total=total,
                 page=page,
-                page_size=page_size,
+                page_size=slice_limit,
                 rows=[],
                 sub_fields=sub_fields_payload,
             )
@@ -1350,7 +1428,7 @@ async def list_multi_items_rows(
         return MultiItemsListResponse(
             total=total,
             page=page,
-            page_size=page_size,
+            page_size=slice_limit,
             rows=out_rows,
             sub_fields=sub_fields_payload,
         )
@@ -1461,9 +1539,16 @@ async def list_multi_items_rows(
                 rows = []
 
     total = len(rows)
-    start = (page - 1) * page_size
-    end = start + page_size
-    paged_rows = rows[start:end]
+    if fetch_all:
+        slice_start = 0
+        slice_end = min(total, _MULTI_ITEMS_FETCH_ALL_CAP)
+        paged_rows = rows[slice_start:slice_end]
+        resp_page_size = len(paged_rows)
+    else:
+        slice_start = (page - 1) * page_size
+        slice_end = slice_start + page_size
+        paged_rows = rows[slice_start:slice_end]
+        resp_page_size = page_size
 
     for orig_index, r in paged_rows:
         if field_row_access_enabled and not is_org_admin:
@@ -1482,7 +1567,7 @@ async def list_multi_items_rows(
     return MultiItemsListResponse(
         total=total,
         page=page,
-        page_size=page_size,
+        page_size=resp_page_size,
         rows=out_rows,
         sub_fields=sub_fields_payload,
     )

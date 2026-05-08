@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken, clearTokens } from "@/lib/auth";
-import { api, getApiUrl, openKpiStoredFileInNewTab } from "@/lib/api";
+import { api, getApiUrl, openKpiStoredFileInNewTab, postFormDataWithUploadProgress } from "@/lib/api";
 import { getAttachmentDisplayName, getAttachmentUrl } from "@/lib/attachmentCellValue";
 import toast from "react-hot-toast";
 import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
@@ -449,6 +449,7 @@ export default function FullPageMultiItems() {
   const [uploadOption, setUploadOption] = useState<"append" | "override" | "upsert" | null>(null);
   const [upsertMatchSubFieldKey, setUpsertMatchSubFieldKey] = useState<string>("");
   const [uploading, setUploading] = useState(false);
+  const [uploadProgressHint, setUploadProgressHint] = useState<string | null>(null);
   const parsedFiltersFromUrl = useMemo(() => {
     if (!filtersFromUrl) return null;
     try {
@@ -502,7 +503,7 @@ export default function FullPageMultiItems() {
   const [rowAccessAddAccess, setRowAccessAddAccess] = useState<"view" | "edit" | "edit_delete">("edit_delete");
   const [rowAccessSaving, setRowAccessSaving] = useState(false);
   const [rowAccessUserSearch, setRowAccessUserSearch] = useState("");
-  const [includeExistingRowsInTemplate, setIncludeExistingRowsInTemplate] = useState(false);
+  const [includeExistingRowsInTemplate, setIncludeExistingRowsInTemplate] = useState(true);
 
   /** Ignore stale API responses when year/org/field changes quickly (fixes missing rows / wrong permissions UI). */
   const multiPageContextLoadGenRef = useRef(0);
@@ -1888,6 +1889,7 @@ export default function FullPageMultiItems() {
                         }
                       }
                       setUploading(true);
+                      setUploadProgressHint("Starting upload…");
                       try {
                         const form = new FormData();
                         form.append("file", file);
@@ -1902,17 +1904,29 @@ export default function FullPageMultiItems() {
                         } else {
                           q.set("import_mode", uploadOption === "append" ? "append" : "replace");
                         }
-                        const url = getApiUrl(`/entries/multi-items/upload?${q.toString()}`);
-                        const res = await fetch(url, {
-                          method: "POST",
-                          headers: { Authorization: `Bearer ${token}` },
-                          body: form,
+                        const path = `/entries/multi-items/upload?${q.toString()}`;
+                        const res = await postFormDataWithUploadProgress(path, form, {
+                          token: token ?? "",
+                          onUploadProgress: (ev) => {
+                            if (ev.lengthComputable && ev.total > 0) {
+                              setUploadProgressHint(`Uploading ${Math.round((100 * ev.loaded) / ev.total)}%`);
+                            } else if (ev.loaded > 0) {
+                              setUploadProgressHint(`Uploading (${(ev.loaded / 1024 / 1024).toFixed(1)} MB sent)`);
+                            }
+                          },
+                          onRequestSent: () => setUploadProgressHint("Processing on server…"),
                         });
+                        if (res.status === 401 || res.status === 403) {
+                          clearTokens();
+                          toast.error("Session expired. Please log in again.");
+                          router.push("/login");
+                          return;
+                        }
                         if (res.ok) {
-                          const payload = await res.json().catch(() => ({} as any));
-                          const added = Number((payload as any)?.rows_added ?? 0);
-                          const overridden = Number((payload as any)?.rows_overridden ?? 0);
-                          const updated = Number((payload as any)?.rows_updated ?? 0);
+                          const payload = (await res.json()) as any;
+                          const added = Number(payload?.rows_added ?? 0);
+                          const overridden = Number(payload?.rows_overridden ?? 0);
+                          const updated = Number(payload?.rows_updated ?? 0);
                           if (uploadOption === "upsert") {
                             toast.success(
                               `Update or add: ${updated} row(s) updated, ${added} new row(s) added`
@@ -1929,10 +1943,8 @@ export default function FullPageMultiItems() {
                           setBulkPanelOpen(false);
                           setUploadOption(null);
                         } else {
-                          const err = await res.json().catch(() => ({} as any));
-                          const validationErrors = Array.isArray((err as any).errors)
-                            ? ((err as any).errors as any[])
-                            : [];
+                          const err = (await res.json()) as any;
+                          const validationErrors = Array.isArray(err?.errors) ? err.errors : [];
                           if (validationErrors.length > 0) {
                             const first = validationErrors[0] as {
                               field_key?: string;
@@ -1957,19 +1969,38 @@ export default function FullPageMultiItems() {
                             }${details}`;
                             toast.error(msg);
                           } else {
-                            toast.error("Excel upload failed");
+                            const detail =
+                              err?.detail != null ? String(err.detail) : "Excel upload failed";
+                            toast.error(detail);
                           }
                         }
                       } catch (err) {
+                        if (err instanceof DOMException && err.name === "AbortError") {
+                          toast.error("Upload was cancelled.");
+                          return;
+                        }
+                        const msg = err instanceof Error ? err.message : "";
+                        if (msg.includes("timed out")) {
+                          toast.error(
+                            "Upload or processing timed out. For very large files, try again or contact your administrator about proxy/server timeouts."
+                          );
+                          return;
+                        }
                         toast.error(
                           err instanceof Error ? `Excel upload failed: ${err.message}` : "Excel upload failed"
                         );
                       } finally {
+                        setUploadProgressHint(null);
                         setUploading(false);
                       }
                     }}
                   />
                 </label>
+                {uploadProgressHint ? (
+                  <span style={{ fontSize: "0.85rem", color: "var(--muted)", alignSelf: "center" }}>
+                    {uploadProgressHint}
+                  </span>
+                ) : null}
               </div>
               <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
                 Template includes existing records and required columns. Edit or add rows, then upload to import.

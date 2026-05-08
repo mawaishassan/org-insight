@@ -4,8 +4,8 @@ import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
-import { getAccessToken } from "@/lib/auth";
-import { api, getApiUrl } from "@/lib/api";
+import { getAccessToken, clearTokens } from "@/lib/auth";
+import { api, getApiUrl, postFormDataWithUploadProgress } from "@/lib/api";
 import { fetchMultiLineRowsForEntry } from "@/lib/fetchMultiItemsRows";
 import {
   coerceScalarValueTextFromApi,
@@ -222,6 +222,7 @@ export default function DomainKpiDetailPage() {
   /** Saving flag for KPI-level role assignments when edited inline. */
   const [savingRoleAssignments, setSavingRoleAssignments] = useState(false);
   const [uploadingFieldId, setUploadingFieldId] = useState<number | null>(null);
+  const [excelBulkUploadProgress, setExcelBulkUploadProgress] = useState<string | null>(null);
   const [uploadOption, setUploadOption] = useState<"append" | "override" | "upsert" | null>(null);
   const [upsertMatchKeyByFieldId, setUpsertMatchKeyByFieldId] = useState<Record<number, string>>({});
   const [syncOption, setSyncOption] = useState<"append" | "override" | "upsert" | null>(null);
@@ -3919,7 +3920,9 @@ export default function DomainKpiDetailPage() {
           const subFields = f.sub_fields ?? [];
           const setRows = (next: Record<string, unknown>[]) => updateField(f.id, "value_json", next);
           const fieldQuery = `?field_id=${f.id}&organization_id=${effectiveOrgId}`;
-          const templateQuery = entry ? `?field_id=${f.id}&entry_id=${entry.id}&organization_id=${effectiveOrgId}` : fieldQuery;
+          const templateQuery = entry
+            ? `?field_id=${f.id}&entry_id=${entry.id}&include_existing_rows=true&organization_id=${effectiveOrgId}`
+            : fieldQuery;
           const uploadQuery =
             entry && effectiveOrgId != null
               ? (() => {
@@ -4169,17 +4172,30 @@ export default function DomainKpiDetailPage() {
                                   if (!window.confirm(`Are you sure you want to replace all existing data for this field?${periodNote} This cannot be undone.`)) return;
                                 }
                                 setUploadingFieldId(f.id);
+                                setExcelBulkUploadProgress("Starting upload…");
                                 try {
                                   const form = new FormData();
                                   form.append("file", file);
-                                  const url = getApiUrl(`/entries/multi-items/upload${uploadQuery}`);
-                                  const res = await fetch(url, {
-                                    method: "POST",
-                                    headers: { Authorization: `Bearer ${token}` },
-                                    body: form,
+                                  const path = `/entries/multi-items/upload${uploadQuery}`;
+                                  const res = await postFormDataWithUploadProgress(path, form, {
+                                    token: token ?? "",
+                                    onUploadProgress: (ev) => {
+                                      if (ev.lengthComputable && ev.total > 0) {
+                                        setExcelBulkUploadProgress(`Uploading ${Math.round((100 * ev.loaded) / ev.total)}%`);
+                                      } else if (ev.loaded > 0) {
+                                        setExcelBulkUploadProgress(`Uploading (${(ev.loaded / 1024 / 1024).toFixed(1)} MB sent)`);
+                                      }
+                                    },
+                                    onRequestSent: () => setExcelBulkUploadProgress("Processing on server…"),
                                   });
+                                  if (res.status === 401 || res.status === 403) {
+                                    clearTokens();
+                                    toast.error("Session expired. Please log in again.");
+                                    router.push("/login");
+                                    return;
+                                  }
                                   if (res.ok) {
-                                    const payload = await res.json().catch(() => ({} as Record<string, unknown>));
+                                    const payload = (await res.json()) as Record<string, unknown>;
                                     await loadData(entryDetailLoadGenRef.current);
                                     if (uploadOption === "upsert") {
                                       const u = Number(payload.rows_updated ?? 0);
@@ -4189,7 +4205,10 @@ export default function DomainKpiDetailPage() {
                                       toast.success("Excel uploaded successfully");
                                     }
                                   } else {
-                                    const err = await res.json().catch(() => ({}));
+                                    const err = (await res.json().catch(() => ({}))) as {
+                                      errors?: unknown[];
+                                      detail?: unknown;
+                                    };
                                     const validationErrors = Array.isArray(err.errors)
                                       ? (err.errors as Array<{
                                           field_key?: string;
@@ -4224,12 +4243,28 @@ export default function DomainKpiDetailPage() {
                                       window.scrollTo({ top: 0, behavior: "smooth" });
                                     }
                                   }
+                                } catch (ex) {
+                                  const msg = ex instanceof Error ? ex.message : "Excel upload failed";
+                                  if (msg.includes("timed out")) {
+                                    setBulkUploadError(
+                                      "Upload or processing timed out. For very large files, try again or ask your administrator about proxy/server timeouts."
+                                    );
+                                  } else {
+                                    setBulkUploadError(msg);
+                                  }
+                                  window.scrollTo({ top: 0, behavior: "smooth" });
                                 } finally {
+                                  setExcelBulkUploadProgress(null);
                                   setUploadingFieldId(null);
                                 }
                               }}
                             />
                           </label>
+                          {uploadingFieldId === f.id && excelBulkUploadProgress ? (
+                            <span style={{ fontSize: "0.85rem", color: "var(--muted)", alignSelf: "center" }}>
+                              {excelBulkUploadProgress}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     )}
