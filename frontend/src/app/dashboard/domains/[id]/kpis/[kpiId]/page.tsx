@@ -4216,6 +4216,13 @@ export default function DomainKpiDetailPage() {
                                   } else {
                                     const elapsedMsFail = performance.now() - tStart;
                                     const failSuffix = ` (${formatElapsedMs(elapsedMsFail)})`;
+                                    if (res.status === 413) {
+                                      setBulkUploadError(
+                                        `Upload rejected: file exceeds the server upload limit (413). Ask your administrator to increase the limit (e.g. nginx client_max_body_size for /api), or split the spreadsheet.${failSuffix}`
+                                      );
+                                      window.scrollTo({ top: 0, behavior: "smooth" });
+                                      return;
+                                    }
                                     const err = (await res.json()) as {
                                       errors?: unknown[];
                                       detail?: unknown;

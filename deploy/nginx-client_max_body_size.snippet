@@ -1,0 +1,7 @@
+# Multi-line Excel uploads often exceed nginx default (1m) → HTTP 413 Request Entity Too Large.
+# Include inside http { }, server { }, or only under location /api/ { } depending on your layout.
+#
+#   client_max_body_size 100m;
+#
+# Reload nginx after editing. If TLS terminates elsewhere (Cloudflare, Azure Front Door, ALB),
+# raise limits there too — 413 can originate from any hop before uvicorn.

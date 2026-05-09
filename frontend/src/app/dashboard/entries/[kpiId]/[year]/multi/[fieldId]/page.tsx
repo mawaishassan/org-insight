@@ -1961,6 +1961,12 @@ export default function FullPageMultiItems() {
                         } else {
                           const elapsedMsFail = performance.now() - tStart;
                           const failSuffix = ` (${formatElapsedMs(elapsedMsFail)})`;
+                          if (res.status === 413) {
+                            toast.error(
+                              `Upload rejected: file exceeds the server upload limit (413). Ask your administrator to increase the limit (e.g. nginx client_max_body_size for /api), or split the spreadsheet.${failSuffix}`
+                            );
+                            return;
+                          }
                           const err = (await res.json()) as any;
                           const validationErrors = Array.isArray(err?.errors) ? err.errors : [];
                           if (validationErrors.length > 0) {
