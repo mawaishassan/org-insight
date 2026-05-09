@@ -462,6 +462,17 @@ export default function FullPageMultiItems() {
   const [uploadProgressHint, setUploadProgressHint] = useState<string | null>(null);
   const [uploadElapsedClock, setUploadElapsedClock] = useState<string | null>(null);
   const bulkUploadTickRef = useRef<number | null>(null);
+
+  const pageBusy = exportingCsv || loading || uploading || saving;
+  const busyLabel = exportingCsv
+    ? "Exporting CSV…"
+    : uploading
+      ? "Uploading…"
+      : saving
+        ? "Saving…"
+        : loading
+          ? "Loading…"
+          : null;
   const parsedFiltersFromUrl = useMemo(() => {
     if (!filtersFromUrl) return null;
     try {
@@ -1124,6 +1135,94 @@ export default function FullPageMultiItems() {
 
   return (
     <div style={{ padding: "0.75rem 1rem 1rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
+      <style jsx global>{`
+        @keyframes multiSpin {
+          from {
+            transform: rotate(0deg);
+          }
+          to {
+            transform: rotate(360deg);
+          }
+        }
+        @keyframes multiIndeterminate {
+          0% {
+            transform: translateX(-60%);
+          }
+          100% {
+            transform: translateX(160%);
+          }
+        }
+      `}</style>
+      {pageBusy && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.25)",
+            zIndex: 2000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            pointerEvents: "auto",
+          }}
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <div
+            className="card"
+            style={{
+              padding: "0.9rem 1rem",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "stretch",
+              gap: "0.6rem",
+              minWidth: 220,
+              boxShadow: "0 8px 30px rgba(0,0,0,0.25)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+              <span
+                aria-hidden
+                style={{
+                  width: 18,
+                  height: 18,
+                  borderRadius: "50%",
+                  border: "2px solid var(--border)",
+                  borderTopColor: "var(--accent)",
+                  animation: "multiSpin 0.9s linear infinite",
+                  flex: "0 0 auto",
+                }}
+              />
+              <span style={{ color: "var(--text)", fontSize: "0.95rem", fontWeight: 600 }}>
+                {busyLabel ?? "Working…"}
+              </span>
+            </div>
+            <div
+              aria-hidden
+              style={{
+                height: 6,
+                borderRadius: 999,
+                background: "var(--bg-muted, #eef2f7)",
+                overflow: "hidden",
+                position: "relative",
+              }}
+            >
+              <div
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  height: "100%",
+                  width: "45%",
+                  borderRadius: 999,
+                  background: "linear-gradient(90deg, transparent, var(--accent), transparent)",
+                  animation: "multiIndeterminate 1.1s ease-in-out infinite",
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
       {error && (
         <div className="card" style={{ padding: "0.75rem", color: "var(--error)" }}>
           {error}
@@ -1168,6 +1267,7 @@ export default function FullPageMultiItems() {
               setPage(1);
               setAppliedSearch(searchDraft.trim());
             }}
+            disabled={pageBusy}
             style={{ flex: "1 1 220px", minWidth: 160, padding: "0.4rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
           />
           {searchDraft.trim() !== "" && (
@@ -1179,6 +1279,7 @@ export default function FullPageMultiItems() {
                 setPage(1);
                 setAppliedSearch("");
               }}
+              disabled={pageBusy}
               title="Clear search"
             >
               Clear
@@ -1191,7 +1292,7 @@ export default function FullPageMultiItems() {
               setPage(1);
               setAppliedSearch(searchDraft.trim());
             }}
-            disabled={searchDraft.trim() === appliedSearch.trim()}
+            disabled={pageBusy || searchDraft.trim() === appliedSearch.trim()}
             title="Apply search (Enter)"
           >
             Search
@@ -2975,7 +3076,7 @@ export default function FullPageMultiItems() {
               <button
                 type="button"
                 className="btn"
-                disabled={exportingCsv}
+                disabled={pageBusy}
                 onClick={async () => {
                   if (!token || !entryId || !fieldId || effectiveOrgId == null) return;
                   setExportingCsv(true);
@@ -3016,7 +3117,7 @@ export default function FullPageMultiItems() {
                   }
                 }}
               >
-                {exportingCsv ? "Exporting…" : "Export CSV"}
+                {exportingCsv ? "Exporting…" : `Export CSV (${total})`}
               </button>
               <button
                 type="button"
