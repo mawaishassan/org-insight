@@ -1398,6 +1398,15 @@ async def list_multi_items_rows(
                 sub_fields=sub_fields_payload,
             )
 
+        # Fast search: use denormalized row.search_text (GIN trigram index) when available.
+        if search:
+            q = str(search).lower().strip()
+            if q:
+                pat = f"%{q}%"
+                base_rows_stmt = base_rows_stmt.where(
+                    func.lower(func.coalesce(getattr(KpiMultiLineRow, "search_text", None), "")).like(pat)
+                )
+
         total = int(
             (
                 await db.execute(
@@ -2522,12 +2531,20 @@ async def get_entries_overview(
 @router.get("/available-kpis")
 async def get_available_kpis(
     organization_id: int | None = Query(None),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=200,
+        description="Optional: return only first N rows (for fast capability checks).",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """List KPIs the current user can enter data for (assigned KPIs or all org KPIs for admin)."""
     org_id = _org_id(current_user, organization_id)
     kpis = await list_available_kpis(db, current_user.id, org_id)
+    if limit is not None:
+        kpis = kpis[: int(limit)]
     return [{"id": k.id, "name": k.name, "year": k.year, "domain_id": k.domain_id} for k in kpis]
 
 

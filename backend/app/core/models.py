@@ -689,6 +689,8 @@ class KpiMultiLineRow(Base):
         Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
     )
     row_index = Column(Integer, nullable=False)
+    # Denormalized searchable text for fast free-text search (maintained by DB trigger).
+    search_text = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 

@@ -30,11 +30,11 @@ export default function DashboardPage() {
         }
 
         setMsg("Checking your access…");
-        const kpiOverview = await api<Array<{ kpi_id: number }>>(
-          `/entries/overview?year=${new Date().getFullYear()}&organization_id=${orgId}`,
+        const available = await api<Array<{ id: number }>>(
+          `/entries/available-kpis?organization_id=${orgId}&limit=1`,
           { token }
         ).catch(() => []);
-        const hasKpiRights = Array.isArray(kpiOverview) && kpiOverview.length > 0;
+        const hasKpiRights = Array.isArray(available) && available.length > 0;
         if (hasKpiRights) {
           router.replace("/dashboard/entries");
           return;

@@ -54,11 +54,11 @@ export default function LoginPage() {
       // Default home:
       // - If user has KPI rights, land on KPIs/Entries page.
       // - Otherwise, land on the dashboard home (not a specific dashboard).
-      const kpiOverview = await api<Array<{ kpi_id: number }>>(
-        `/entries/overview?year=${new Date().getFullYear()}&organization_id=${orgId}`,
+      const available = await api<Array<{ id: number }>>(
+        `/entries/available-kpis?organization_id=${orgId}&limit=1`,
         { token: res.access_token }
       ).catch(() => []);
-      const hasKpiRights = Array.isArray(kpiOverview) && kpiOverview.length > 0;
+      const hasKpiRights = Array.isArray(available) && available.length > 0;
       if (hasKpiRights) {
         router.push("/dashboard/entries");
       } else {
