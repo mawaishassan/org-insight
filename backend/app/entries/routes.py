@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from io import BytesIO
+from io import BytesIO, StringIO
 from datetime import datetime
 import csv
 import json
@@ -2479,7 +2479,9 @@ async def export_multi_items_csv(
     sub_fields = [sf for sf in (field.sub_fields or [])]
     headers = [getattr(sf, "key", "") for sf in sub_fields]
     key_to_sf = {sf.key: sf for sf in sub_fields}
-    output = BytesIO()
+    # csv.writer expects a text stream (not BytesIO) on Python 3.
+    # Use StringIO then encode to bytes for StreamingResponse.
+    output = StringIO()
     writer = csv.writer(output)
     writer.writerow(headers)
     for r in rows:
@@ -2494,8 +2496,10 @@ async def export_multi_items_csv(
         )
 
     filename = f"multi_items_{field.key}_{field.id}.csv"
+    # UTF-8 with BOM helps Excel open it correctly.
+    content = ("\ufeff" + output.getvalue()).encode("utf-8")
     return StreamingResponse(
-        BytesIO(output.getvalue()),
+        BytesIO(content),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
     )
