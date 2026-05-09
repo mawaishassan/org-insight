@@ -209,6 +209,7 @@ export default function DomainKpiDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"scalar" | "security" | "related" | number>("scalar");
   const [securitySection, setSecuritySection] = useState<SecuritySection>("kpi_rights");
@@ -1031,6 +1032,7 @@ export default function DomainKpiDetailPage() {
     setEditAssignments(assignedUsers.map((u) => ({ user_id: u.id, permission: u.permission || "data_entry" })));
     setIsEditing(true);
     setEditRoleAssignments(assignedRoles.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })));
+    setIsDirty(false);
     setSaveError(null);
   };
 
@@ -1115,6 +1117,7 @@ export default function DomainKpiDetailPage() {
     value: string | number | boolean | Record<string, unknown>[] | string[] | undefined
   ) => {
     setFormValues((prev) => ({ ...prev, [fieldId]: { ...prev[fieldId], [key]: value } }));
+    setIsDirty(true);
   };
 
   const saveEntryWithFormValues = async (
@@ -1127,6 +1130,13 @@ export default function DomainKpiDetailPage() {
     if (!silent) setSaveError(null);
     if (!silent) setSaving(true);
     try {
+      // For large multi-line KPIs, sending an unchanged payload can be extremely slow.
+      // If user clicked Save without any edits, exit edit mode immediately.
+      if (!silent && !isDirty) {
+        if (!keepEditing) setIsEditing(false);
+        return;
+      }
+
       const values = fields
         .filter((f) => f.field_type !== "formula" && (f.can_edit !== false))
         .map((f) => {
@@ -1170,24 +1180,15 @@ export default function DomainKpiDetailPage() {
         token,
       });
       setEntry(updated);
-      const isOrgAdmin = meRole === "ORG_ADMIN";
-      if (isOrgAdmin && !silent) {
-        await api(`/kpis/${kpiId}/assignments?${saveQuery}`, {
-          method: "PUT",
-          body: JSON.stringify({ assignments: editAssignments.map((a) => ({ user_id: a.user_id, permission: a.permission || "data_entry" })) }),
-          token,
-        });
-        await api(`/kpis/${kpiId}/assignments-by-role?${saveQuery}`, {
-          method: "PUT",
-          body: JSON.stringify({ assignments: editRoleAssignments.map((a) => ({ role_id: a.role_id, permission: a.permission || "data_entry" })) }),
-          token,
-        });
-      }
-      await loadData(entryDetailLoadGenRef.current);
       if (!silent) {
+        // Return UI to view mode immediately; refresh can happen in background.
         if (!keepEditing) setIsEditing(false);
+        setIsDirty(false);
         toast.success("Entry saved successfully");
       }
+
+      // Refresh in background so a slow follow-up fetch doesn't keep "Saving..." stuck.
+      void loadData(entryDetailLoadGenRef.current);
     } catch (err) {
       const errWithList = err as Error & { errors?: Array<{ field_key?: string; sub_field_key?: string; row_index?: number; value?: string; message?: string }> };
       if (silent) {
