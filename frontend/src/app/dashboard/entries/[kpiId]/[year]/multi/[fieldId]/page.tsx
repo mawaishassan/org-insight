@@ -443,13 +443,16 @@ export default function FullPageMultiItems() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [search, setSearch] = useState("");
+  // Search UX: allow typing without hammering the API; apply only on Enter (or when cleared).
+  const [searchDraft, setSearchDraft] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
   const [showEditableOnly, setShowEditableOnly] = useState(false);
   const [sortBy, setSortBy] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [exportingCsv, setExportingCsv] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editData, setEditData] = useState<Record<string, unknown>>({});
   const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
@@ -517,6 +520,7 @@ export default function FullPageMultiItems() {
   /** Ignore stale API responses when year/org/field changes quickly (fixes missing rows / wrong permissions UI). */
   const multiPageContextLoadGenRef = useRef(0);
   const multiPageRowsLoadGenRef = useRef(0);
+  const rowsCacheRef = useRef(new Map<string, { rows: MultiItemsRow[]; total: number }>());
   const entryIdLiveRef = useRef<number | null>(null);
 
   const isAdmin = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
@@ -630,25 +634,39 @@ export default function FullPageMultiItems() {
 
   const loadRows = async () => {
     if (!token || !entryId || !fieldId || effectiveOrgId == null) return;
-    const rowLoadId = ++multiPageRowsLoadGenRef.current;
     const entryIdForThisFetch = entryId;
-    setLoading(true);
-    setError(null);
-    try {
+    const buildRowsQueryParams = (targetPage: number) => {
       const params = new URLSearchParams({
-        entry_id: String(entryId),
+        entry_id: String(entryIdForThisFetch),
         field_id: String(fieldId),
         organization_id: String(effectiveOrgId),
-        page: String(page),
+        page: String(targetPage),
         page_size: String(pageSize),
         sort_dir: sortDir,
       });
-      if (search.trim()) params.set("search", search.trim());
+      if (appliedSearch.trim()) params.set("search", appliedSearch.trim());
       if (sortBy) params.set("sort_by", sortBy);
       if (showEditableOnly) params.set("editable_only", "true");
       if (appliedFilter && appliedFilter.conditions.length > 0) {
         params.set("filters", JSON.stringify(appliedFilter));
       }
+      return params;
+    };
+
+    const cacheKey = buildRowsQueryParams(page).toString();
+    const cached = rowsCacheRef.current.get(cacheKey);
+    if (cached) {
+      setRows(cached.rows);
+      setTotal(cached.total);
+      setLoading(false);
+      return;
+    }
+
+    const rowLoadId = ++multiPageRowsLoadGenRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const params = buildRowsQueryParams(page);
       const res = await api<MultiItemsListResponse>(`/entries/multi-items/rows?${params.toString()}`, { token });
       if (
         rowLoadId !== multiPageRowsLoadGenRef.current ||
@@ -658,8 +676,27 @@ export default function FullPageMultiItems() {
       }
       setRows(res.rows);
       setTotal(res.total);
+      rowsCacheRef.current.set(params.toString(), { rows: res.rows, total: res.total });
       if (res.sub_fields && (!field || !field.sub_fields)) {
         setField((prev) => (prev ? { ...prev, sub_fields: res.sub_fields } : prev));
+      }
+
+      // Prefetch next page (optional): improves paging performance without loading full dataset.
+      const totalCount = Number(res.total ?? 0);
+      const totalPages = Math.max(1, Math.ceil(totalCount / Math.max(1, pageSize)));
+      const nextPage = page + 1;
+      if (nextPage <= totalPages) {
+        const nextParams = buildRowsQueryParams(nextPage);
+        const nextKey = nextParams.toString();
+        if (!rowsCacheRef.current.has(nextKey)) {
+          void api<MultiItemsListResponse>(`/entries/multi-items/rows?${nextKey}`, { token })
+            .then((r) => {
+              // Don't touch UI state; only cache if still relevant.
+              if (entryIdForThisFetch !== entryIdLiveRef.current) return;
+              rowsCacheRef.current.set(nextKey, { rows: r.rows, total: Number(r.total ?? totalCount) });
+            })
+            .catch(() => undefined);
+        }
       }
     } catch (e) {
       if (rowLoadId === multiPageRowsLoadGenRef.current && entryIdForThisFetch === entryIdLiveRef.current) {
@@ -680,6 +717,11 @@ export default function FullPageMultiItems() {
       multiPageRowsLoadGenRef.current += 1;
     };
   }, [token, kpiId, year, effectiveOrgId, fieldId, periodKey]);
+
+  // When the underlying query changes (KPI/field/org/year/period), drop cached pages.
+  useEffect(() => {
+    rowsCacheRef.current.clear();
+  }, [kpiId, fieldId, year, effectiveOrgId, periodKey]);
 
   const subFields = field?.sub_fields ?? [];
 
@@ -780,7 +822,7 @@ export default function FullPageMultiItems() {
   useEffect(() => {
     if (!entryId) return;
     loadRows().catch(() => undefined);
-  }, [entryId, page, pageSize, search, sortBy, sortDir, appliedFilter, showEditableOnly]);
+  }, [entryId, page, pageSize, appliedSearch, sortBy, sortDir, appliedFilter, showEditableOnly]);
 
   // Toast when returning from row edit page with success param
   useEffect(() => {
@@ -1110,13 +1152,50 @@ export default function FullPageMultiItems() {
           <input
             type="text"
             placeholder="Search rows..."
-            value={search}
+            value={searchDraft}
             onChange={(e) => {
+              const next = e.target.value;
+              setSearchDraft(next);
+              // When cleared, immediately show all records again.
+              if (next.trim() === "") {
+                setPage(1);
+                setAppliedSearch("");
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
               setPage(1);
-              setSearch(e.target.value);
+              setAppliedSearch(searchDraft.trim());
             }}
             style={{ flex: "1 1 220px", minWidth: 160, padding: "0.4rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
           />
+          {searchDraft.trim() !== "" && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setSearchDraft("");
+                setPage(1);
+                setAppliedSearch("");
+              }}
+              title="Clear search"
+            >
+              Clear
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              setPage(1);
+              setAppliedSearch(searchDraft.trim());
+            }}
+            disabled={searchDraft.trim() === appliedSearch.trim()}
+            title="Apply search (Enter)"
+          >
+            Search
+          </button>
             <label
               style={{
                 display: "flex",
@@ -2896,8 +2975,10 @@ export default function FullPageMultiItems() {
               <button
                 type="button"
                 className="btn"
+                disabled={exportingCsv}
                 onClick={async () => {
                   if (!token || !entryId || !fieldId || effectiveOrgId == null) return;
+                  setExportingCsv(true);
                   try {
                     const params = new URLSearchParams({
                       entry_id: String(entryId),
@@ -2905,7 +2986,7 @@ export default function FullPageMultiItems() {
                       organization_id: String(effectiveOrgId),
                       sort_dir: sortDir,
                     });
-                    if (search.trim()) params.set("search", search.trim());
+                    if (appliedSearch.trim()) params.set("search", appliedSearch.trim());
                     if (sortBy) params.set("sort_by", sortBy);
                     if (appliedFilter && appliedFilter.conditions.length > 0) {
                       params.set("filters", JSON.stringify(appliedFilter));
@@ -2930,10 +3011,12 @@ export default function FullPageMultiItems() {
                     URL.revokeObjectURL(a.href);
                   } catch {
                     toast.error("Export failed");
+                  } finally {
+                    setExportingCsv(false);
                   }
                 }}
               >
-                Export CSV
+                {exportingCsv ? "Exporting…" : "Export CSV"}
               </button>
               <button
                 type="button"
