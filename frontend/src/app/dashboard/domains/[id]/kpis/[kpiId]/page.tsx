@@ -209,6 +209,7 @@ export default function DomainKpiDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"scalar" | "security" | "related" | number>("scalar");
   const [securitySection, setSecuritySection] = useState<SecuritySection>("kpi_rights");
@@ -567,11 +568,10 @@ export default function DomainKpiDetailPage() {
   );
 
   const formulaBoxes = useMemo(() => {
-    const withValues = formulaFields.map((f) => ({
+    return formulaFields.map((f) => ({
       field: f,
       value: valuesByFieldId.get(f.id)?.value_number ?? null,
     }));
-    return withValues.slice(0, 4);
   }, [formulaFields, valuesByFieldId]);
 
   const lastUpdatedFormatted =
@@ -620,24 +620,13 @@ export default function DomainKpiDetailPage() {
     const kpiQuery = `?${qs({ organization_id: effectiveOrgId })}`;
     const usersQuery = `?${qs({ organization_id: effectiveOrgId })}`;
     const apiInfoQuery = `?${qs({ kpi_id: kpiId, organization_id: effectiveOrgId })}`;
-    const [
-      fieldsList,
-      entriesList,
-      overviewList,
-      kpiResp,
-      assignmentsList,
-      roleAssignmentsList,
-      usersList,
-      apiInfo,
-    ] = await Promise.all([
+
+    // Critical path: render the entry page as soon as fields + entries are ready.
+    const [fieldsList, entriesList, overviewList, kpiResp] = await Promise.all([
       api<FieldDef[]>(`/entries/fields${fieldsQuery}`, { token }).catch(() => []),
       api<EntryRow[]>(`/entries${entriesQuery}`, { token }).then((list) => list).catch(() => []),
       api<OverviewItem[]>(`/entries/overview${overviewQuery}`, { token }).catch(() => []),
       api<{ name: string }>(`/kpis/${kpiId}${kpiQuery}`, { token }).catch(() => null),
-      api<UserRef[]>(`/kpis/${kpiId}/assignments${kpiQuery}`, { token }).catch(() => []),
-      api<Array<{ id: number; name: string; description?: string | null; permission: string }>>(`/kpis/${kpiId}/assignments-by-role${kpiQuery}`, { token }).catch(() => []),
-      api<UserRef[]>(`/users${usersQuery}`, { token }).catch(() => []),
-      api<{ entry_mode?: string; api_endpoint_url?: string | null; can_edit?: boolean }>(`/entries/kpi-api-info${apiInfoQuery}`, { token }).catch(() => null),
     ]);
     if (loadId !== entryDetailLoadGenRef.current) return;
     setFields(fieldsList);
@@ -649,8 +638,9 @@ export default function DomainKpiDetailPage() {
       if (match) {
         if (loadId !== entryDetailLoadGenRef.current) return;
         setEntry(match);
-      } else if (effectiveOrgId != null) {
-        // No entry for this period: get-or-create so carry-forward from previous period is shown
+      } else if (effectiveOrgId != null && pk.trim() !== "") {
+        // Only fetch/get-or-create when user explicitly selected a period.
+        // (For large KPIs, this extra roundtrip can noticeably slow initial load.)
         try {
           const forPeriod = await api<EntryRow>(
             `/entries/for-period?${qs({ kpi_id: kpiId, year, period_key: pk, organization_id: effectiveOrgId })}`,
@@ -678,41 +668,68 @@ export default function DomainKpiDetailPage() {
     if (kpiResp?.name) setKpiName(kpiResp.name);
     else if (ov?.kpi_name) setKpiName(ov.kpi_name);
     else setKpiName(`KPI #${kpiId}`);
-    setAssignedUsers(Array.isArray(assignmentsList) ? assignmentsList.map((u: UserRef & { permission?: string }) => ({ id: u.id, username: u.username, full_name: u.full_name ?? null, permission: u.permission || "data_entry" })) : []);
-    setAssignedRoles(Array.isArray(roleAssignmentsList) ? roleAssignmentsList.map((r) => ({ ...r, permission: r.permission || "data_entry" })) : []);
-    setEditRoleAssignments(Array.isArray(roleAssignmentsList) ? roleAssignmentsList.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })) : []);
-    setOrgUsers(Array.isArray(usersList) ? usersList : []);
-    setKpiApiInfo(apiInfo ?? null);
-    api<KpiFileItem[]>(`/kpis/${kpiId}/files?${qs({ year })}`, { token })
-      .then((files) => {
-        if (loadId !== entryDetailLoadGenRef.current) return;
-        setKpiFiles(files);
-      })
-      .catch(() => {
-        if (loadId !== entryDetailLoadGenRef.current) return;
-        setKpiFiles([]);
-      });
 
-    if (isEntriesRoute && effectiveOrgId != null) {
-      api<{ time_dimension: string }>(`/organizations/${effectiveOrgId}/time-dimension`, { token })
-        .then((r) => {
+    // Non-critical path: assignments, org users, API info, files, and time-dimension can load after first paint.
+    void (async () => {
+      const isOrgAdmin = meRole === "ORG_ADMIN";
+      const [assignmentsList, roleAssignmentsList, usersList, apiInfo] = await Promise.all([
+        api<UserRef[]>(`/kpis/${kpiId}/assignments${kpiQuery}`, { token }).catch(() => []),
+        api<Array<{ id: number; name: string; description?: string | null; permission: string }>>(
+          `/kpis/${kpiId}/assignments-by-role${kpiQuery}`,
+          { token }
+        ).catch(() => []),
+        // `/users` can be very large; only load it for org admins (needed for assignment pickers / security UIs).
+        isOrgAdmin ? api<UserRef[]>(`/users${usersQuery}`, { token }).catch(() => []) : Promise.resolve([] as UserRef[]),
+        api<{ entry_mode?: string; api_endpoint_url?: string | null; can_edit?: boolean }>(`/entries/kpi-api-info${apiInfoQuery}`, { token }).catch(() => null),
+      ]);
+
+      if (loadId !== entryDetailLoadGenRef.current) return;
+      setAssignedUsers(
+        Array.isArray(assignmentsList)
+          ? assignmentsList.map((u: UserRef & { permission?: string }) => ({
+              id: u.id,
+              username: u.username,
+              full_name: u.full_name ?? null,
+              permission: u.permission || "data_entry",
+            }))
+          : []
+      );
+      setAssignedRoles(Array.isArray(roleAssignmentsList) ? roleAssignmentsList.map((r) => ({ ...r, permission: r.permission || "data_entry" })) : []);
+      setEditRoleAssignments(Array.isArray(roleAssignmentsList) ? roleAssignmentsList.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })) : []);
+      setOrgUsers(Array.isArray(usersList) ? usersList : []);
+      setKpiApiInfo(apiInfo ?? null);
+
+      api<KpiFileItem[]>(`/kpis/${kpiId}/files?${qs({ year })}`, { token })
+        .then((files) => {
           if (loadId !== entryDetailLoadGenRef.current) return;
-          setOrgTimeDimension(r.time_dimension ?? null);
+          setKpiFiles(files);
         })
         .catch(() => {
           if (loadId !== entryDetailLoadGenRef.current) return;
-          setOrgTimeDimension(null);
+          setKpiFiles([]);
         });
-      api<{ time_dimension?: string | null }>(`/kpis/${kpiId}?${kpiQuery}`, { token })
-        .then((k) => {
-          if (loadId !== entryDetailLoadGenRef.current) return;
-          setKpiTimeDimension(k.time_dimension ?? null);
-        })
-        .catch(() => {
-          if (loadId !== entryDetailLoadGenRef.current) return;
-          setKpiTimeDimension(null);
-        });
-    }
+
+      if (isEntriesRoute && effectiveOrgId != null) {
+        api<{ time_dimension: string }>(`/organizations/${effectiveOrgId}/time-dimension`, { token })
+          .then((r) => {
+            if (loadId !== entryDetailLoadGenRef.current) return;
+            setOrgTimeDimension(r.time_dimension ?? null);
+          })
+          .catch(() => {
+            if (loadId !== entryDetailLoadGenRef.current) return;
+            setOrgTimeDimension(null);
+          });
+        api<{ time_dimension?: string | null }>(`/kpis/${kpiId}?${kpiQuery}`, { token })
+          .then((k) => {
+            if (loadId !== entryDetailLoadGenRef.current) return;
+            setKpiTimeDimension(k.time_dimension ?? null);
+          })
+          .catch(() => {
+            if (loadId !== entryDetailLoadGenRef.current) return;
+            setKpiTimeDimension(null);
+          });
+      }
+    })();
   };
 
   useEffect(() => {
@@ -1016,6 +1033,7 @@ export default function DomainKpiDetailPage() {
     setEditAssignments(assignedUsers.map((u) => ({ user_id: u.id, permission: u.permission || "data_entry" })));
     setIsEditing(true);
     setEditRoleAssignments(assignedRoles.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })));
+    setIsDirty(false);
     setSaveError(null);
   };
 
@@ -1100,6 +1118,7 @@ export default function DomainKpiDetailPage() {
     value: string | number | boolean | Record<string, unknown>[] | string[] | undefined
   ) => {
     setFormValues((prev) => ({ ...prev, [fieldId]: { ...prev[fieldId], [key]: value } }));
+    setIsDirty(true);
   };
 
   const saveEntryWithFormValues = async (
@@ -1112,6 +1131,13 @@ export default function DomainKpiDetailPage() {
     if (!silent) setSaveError(null);
     if (!silent) setSaving(true);
     try {
+      // For large multi-line KPIs, sending an unchanged payload can be extremely slow.
+      // If user clicked Save without any edits, exit edit mode immediately.
+      if (!silent && !isDirty) {
+        if (!keepEditing) setIsEditing(false);
+        return;
+      }
+
       const values = fields
         .filter((f) => f.field_type !== "formula" && (f.can_edit !== false))
         .map((f) => {
@@ -1155,24 +1181,15 @@ export default function DomainKpiDetailPage() {
         token,
       });
       setEntry(updated);
-      const isOrgAdmin = meRole === "ORG_ADMIN";
-      if (isOrgAdmin && !silent) {
-        await api(`/kpis/${kpiId}/assignments?${saveQuery}`, {
-          method: "PUT",
-          body: JSON.stringify({ assignments: editAssignments.map((a) => ({ user_id: a.user_id, permission: a.permission || "data_entry" })) }),
-          token,
-        });
-        await api(`/kpis/${kpiId}/assignments-by-role?${saveQuery}`, {
-          method: "PUT",
-          body: JSON.stringify({ assignments: editRoleAssignments.map((a) => ({ role_id: a.role_id, permission: a.permission || "data_entry" })) }),
-          token,
-        });
-      }
-      await loadData(entryDetailLoadGenRef.current);
       if (!silent) {
+        // Return UI to view mode immediately; refresh can happen in background.
         if (!keepEditing) setIsEditing(false);
+        setIsDirty(false);
         toast.success("Entry saved successfully");
       }
+
+      // Refresh in background so a slow follow-up fetch doesn't keep "Saving..." stuck.
+      void loadData(entryDetailLoadGenRef.current);
     } catch (err) {
       const errWithList = err as Error & { errors?: Array<{ field_key?: string; sub_field_key?: string; row_index?: number; value?: string; message?: string }> };
       if (silent) {
@@ -1309,7 +1326,8 @@ export default function DomainKpiDetailPage() {
   ) : null;
 
   if (!kpiId) return <p>Invalid KPI.</p>;
-  if (loading) return <p>Loading...</p>;
+  // Don't block the whole page behind Loading... if we already have data.
+  if (loading && fields.length === 0) return <p>Loading...</p>;
   if (effectiveOrgId == null) return <p>Organization context required.</p>;
 
   return (
@@ -1362,7 +1380,7 @@ export default function DomainKpiDetailPage() {
         </div>
       ) : (
         <>
-      {/* Section 1: Formula fields in colored boxes (max 4) */}
+      {/* Section 1: Formula fields in colored summary cards */}
       {formulaBoxes.length > 0 && (
         <div
           style={{

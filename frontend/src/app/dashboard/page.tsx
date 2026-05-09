@@ -30,22 +30,18 @@ export default function DashboardPage() {
         }
 
         setMsg("Checking your access…");
-        const [dashboards, reports] = await Promise.all([
-          api<Array<{ id: number }>>(`/dashboards?organization_id=${orgId}`, { token }).catch(() => []),
-          api<Array<{ id: number }>>(`/reports/templates?organization_id=${orgId}`, { token }).catch(() => []),
-        ]);
-
-        if (Array.isArray(dashboards) && dashboards.length > 0) {
-          router.replace(`/dashboard/dashboards/${dashboards[0]!.id}?organization_id=${orgId}`);
-          return;
-        }
-        if (Array.isArray(reports) && reports.length > 0) {
-          router.replace(`/dashboard/reports/${reports[0]!.id}?organization_id=${orgId}`);
+        const available = await api<Array<{ id: number }>>(
+          `/entries/available-kpis?organization_id=${orgId}&limit=1`,
+          { token }
+        ).catch(() => []);
+        const hasKpiRights = Array.isArray(available) && available.length > 0;
+        if (hasKpiRights) {
+          router.replace("/dashboard/entries");
           return;
         }
 
-        // Fall back to entries; if user has no KPI rights the page will show an empty state.
-        router.replace("/dashboard/entries");
+        // No KPI rights: land on dashboard home (list), not a specific dashboard.
+        router.replace(`/dashboard/dashboards?organization_id=${orgId}`);
       } catch {
         router.replace("/dashboard/no-access");
       }

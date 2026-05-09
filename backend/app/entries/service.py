@@ -1416,6 +1416,95 @@ async def save_entry_values(
     return entry
 
 
+async def recompute_formula_fields_for_entry(
+    db: AsyncSession,
+    *,
+    entry_id: int,
+    org_id: int,
+) -> bool:
+    """
+    Recompute formula field values for a single entry.
+
+    Needed when multi_line_items rows change via the multi-items endpoints (which don't go through save_entry_values),
+    so formula cards don't become stale.
+    Returns True if any formula field was processed.
+    """
+    entry = await _get_entry(db, entry_id, org_id)
+    if not entry:
+        return False
+
+    # Load KPI + fields (include sub_fields so multi_line_items data can be used in formulas).
+    result = await db.execute(
+        select(KPI)
+        .where(KPI.id == entry.kpi_id)
+        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+    )
+    kpi = result.scalar_one_or_none()
+    if not kpi:
+        return False
+
+    fields = list(kpi.fields or [])
+    formula_fields = [f for f in fields if f.field_type == FieldType.formula and (f.formula_expression or "").strip()]
+    if not formula_fields:
+        return False
+
+    # Map field_id -> existing KPIFieldValue
+    fv_res = await db.execute(
+        select(KPIFieldValue)
+        .where(KPIFieldValue.entry_id == entry.id)
+        .options(selectinload(KPIFieldValue.field))
+    )
+    fv_list = list(fv_res.scalars().all())
+    fv_by_field_id = {fv.field_id: fv for fv in fv_list}
+
+    value_by_key: dict[str, float | int] = {}
+    multi_line_items_data: MultiLineItemsData = {}
+
+    # Seed numeric (and existing formula) values so formulas that reference earlier fields can chain.
+    # Keep a stable evaluation order by sort_order then id.
+    ordered_fields = sorted(fields, key=lambda f: (getattr(f, "sort_order", 0), getattr(f, "id", 0)))
+    for f in ordered_fields:
+        fv = fv_by_field_id.get(f.id)
+        if f.field_type == FieldType.number and fv and fv.value_number is not None:
+            try:
+                value_by_key[f.key] = float(fv.value_number)
+            except (TypeError, ValueError):
+                pass
+        elif f.field_type == FieldType.formula and fv and fv.value_number is not None:
+            try:
+                value_by_key[f.key] = float(fv.value_number)
+            except (TypeError, ValueError):
+                pass
+        elif f.field_type == FieldType.multi_line_items:
+            # Always load the current relational rows for this field.
+            multi_line_items_data[f.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=f)
+
+    other_kpi_values = await _load_other_kpi_values(db, entry.year, org_id, entry.kpi_id)
+
+    # Compute + persist
+    for f in ordered_fields:
+        if f.field_type != FieldType.formula or not (f.formula_expression or "").strip():
+            continue
+        computed = evaluate_formula(
+            f.formula_expression or "",
+            value_by_key,
+            multi_line_items_data,
+            other_kpi_values,
+        )
+        fv = fv_by_field_id.get(f.id)
+        if fv is None:
+            fv = KPIFieldValue(entry_id=entry.id, field_id=f.id)
+            db.add(fv)
+            fv_by_field_id[f.id] = fv
+        fv.value_number = computed
+        if computed is not None:
+            value_by_key[f.key] = computed
+
+    entry.updated_at = datetime.utcnow()
+    await db.flush()
+    return True
+
+
 async def recompute_formula_fields_for_kpi(
     db: AsyncSession,
     kpi_id: int,

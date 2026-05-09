@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from io import BytesIO
+from io import BytesIO, StringIO
 from datetime import datetime
 import csv
 import json
@@ -58,6 +58,7 @@ from app.entries.service import (
     user_can_edit_row,
     user_can_delete_row,
     save_entry_values,
+    recompute_formula_fields_for_entry,
     submit_entry,
     lock_entry,
     list_entries,
@@ -855,6 +856,7 @@ async def upload_multi_items_excel(
             rows_overridden = 0
     entry.user_id = current_user.id  # track last editor (optional)
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     logger.info(
         "END multi-items upload: entry_id=%s field_id=%s org_id=%s mode=%s added=%s updated=%s overridden=%s",
@@ -1398,6 +1400,15 @@ async def list_multi_items_rows(
                 sub_fields=sub_fields_payload,
             )
 
+        # Fast search: use denormalized row.search_text (GIN trigram index) when available.
+        if search:
+            q = str(search).lower().strip()
+            if q:
+                pat = f"%{q}%"
+                base_rows_stmt = base_rows_stmt.where(
+                    func.lower(func.coalesce(getattr(KpiMultiLineRow, "search_text", None), "")).like(pat)
+                )
+
         total = int(
             (
                 await db.execute(
@@ -1751,6 +1762,7 @@ async def add_multi_items_row(
             continue
         _add_cell(sub, v)
 
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     return MultiItemsRow(index=new_index, data=normalized_row)
 
@@ -1960,6 +1972,7 @@ async def update_multi_items_row_cell(
         else:
             cell.value_text = str(raw_val)
 
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
     data = rows[0][1] if rows else {}
@@ -2009,6 +2022,7 @@ async def delete_multi_items_row(
         field_id=field.id,
         deleted_indices={row_index},
     )
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
 
 
@@ -2063,6 +2077,7 @@ async def bulk_delete_multi_items_rows(
         field_id=field.id,
         deleted_indices=index_set,
     )
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
 
 
@@ -2194,6 +2209,7 @@ async def sync_multi_items_from_api(
         rows_added = len(item_dicts)
 
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     out: dict = {
         "entry_id": entry.id,
@@ -2305,6 +2321,7 @@ async def import_multi_items_from_year(
 
     entry.user_id = current_user.id
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
 
     out: dict = {
@@ -2479,7 +2496,9 @@ async def export_multi_items_csv(
     sub_fields = [sf for sf in (field.sub_fields or [])]
     headers = [getattr(sf, "key", "") for sf in sub_fields]
     key_to_sf = {sf.key: sf for sf in sub_fields}
-    output = BytesIO()
+    # csv.writer expects a text stream (not BytesIO) on Python 3.
+    # Use StringIO then encode to bytes for StreamingResponse.
+    output = StringIO()
     writer = csv.writer(output)
     writer.writerow(headers)
     for r in rows:
@@ -2494,8 +2513,10 @@ async def export_multi_items_csv(
         )
 
     filename = f"multi_items_{field.key}_{field.id}.csv"
+    # UTF-8 with BOM helps Excel open it correctly.
+    content = ("\ufeff" + output.getvalue()).encode("utf-8")
     return StreamingResponse(
-        BytesIO(output.getvalue()),
+        BytesIO(content),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
     )
@@ -2518,12 +2539,20 @@ async def get_entries_overview(
 @router.get("/available-kpis")
 async def get_available_kpis(
     organization_id: int | None = Query(None),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=200,
+        description="Optional: return only first N rows (for fast capability checks).",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """List KPIs the current user can enter data for (assigned KPIs or all org KPIs for admin)."""
     org_id = _org_id(current_user, organization_id)
     kpis = await list_available_kpis(db, current_user.id, org_id)
+    if limit is not None:
+        kpis = kpis[: int(limit)]
     return [{"id": k.id, "name": k.name, "year": k.year, "domain_id": k.domain_id} for k in kpis]
 
 

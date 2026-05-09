@@ -65,6 +65,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const orgId = user?.organization_id ?? null;
   const canEnter = user && canEnterData(user.role as UserRole);
   const canShowFilters = onEntries && canEnter && orgId != null;
+  const [entriesSearchDraft, setEntriesSearchDraft] = useState<string>(searchParams.get("q") ?? "");
 
   /** When super admin is in any organization context: org detail path, or organization_id in URL, or breadcrumb (e.g. report page loads org from API). */
   const orgDetailMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)(?:\/|$)/);
@@ -396,6 +397,34 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     applyBreadcrumbTail(null);
   }, [pathname, searchParams.get("organization_id"), user?.role]);
 
+  const updateEntriesParams = (updates: Record<string, string | number | undefined>) => {
+    const next = new URLSearchParams(searchParams.toString());
+    Object.entries(updates).forEach(([k, v]) => {
+      if (v === undefined || v === "" || v === "all") next.delete(k);
+      else next.set(k, String(v));
+    });
+    // Replace to avoid adding history entries for every filter tweak.
+    router.replace(`/dashboard/entries?${next.toString()}`);
+  };
+
+  // Keep draft in sync with URL changes (e.g. back/forward, clicking filter tags).
+  useEffect(() => {
+    if (!onEntries) return;
+    setEntriesSearchDraft(searchParams.get("q") ?? "");
+  }, [onEntries, searchParams.get("q")]);
+
+  // Debounce: do not navigate + re-fetch overview per keystroke.
+  useEffect(() => {
+    if (!canShowFilters) return;
+    const handle = window.setTimeout(() => {
+      const trimmed = entriesSearchDraft.trim();
+      const current = (searchParams.get("q") ?? "").trim();
+      if (trimmed === current) return;
+      updateEntriesParams({ q: trimmed || undefined });
+    }, 250);
+    return () => window.clearTimeout(handle);
+  }, [entriesSearchDraft, canShowFilters, searchParams]);
+
   if (loading) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -411,15 +440,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   /** Data-entry-only user (USER role): no Year/filters in header, only Home + hamburger */
   const isDataEntryOnlyUser = role === "USER";
 
-  const updateEntriesParams = (updates: Record<string, string | number | undefined>) => {
-    const next = new URLSearchParams(searchParams.toString());
-    Object.entries(updates).forEach(([k, v]) => {
-      if (v === undefined || v === "" || v === "all") next.delete(k);
-      else next.set(k, String(v));
-    });
-    router.push(`/dashboard/entries?${next.toString()}`);
-  };
-
   const dashboardsHref =
     selectedOrgId != null
       ? `/dashboard/dashboards?organization_id=${selectedOrgId}`
@@ -427,7 +447,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         ? `/dashboard/dashboards?organization_id=${user.organization_id}`
         : "/dashboard/dashboards";
 
+  const kpisHref =
+    selectedOrgId != null
+      ? `/dashboard/entries?organization_id=${selectedOrgId}`
+      : user.organization_id != null
+        ? `/dashboard/entries?organization_id=${user.organization_id}`
+        : "/dashboard/entries";
+
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
+    { href: kpisHref, label: "KPIs", show: role === "ORG_ADMIN" || role === "SUPER_ADMIN" },
     { href: dashboardsHref, label: "Dashboards", show: true },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },
@@ -560,8 +588,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <input
               type="search"
               placeholder={'Search KPIs...'}
-              value={searchParams.get("q") ?? ""}
-              onChange={(e) => updateEntriesParams({ q: e.target.value || undefined })}
+              value={entriesSearchDraft}
+              onChange={(e) => setEntriesSearchDraft(e.target.value)}
               style={{
                 padding: "0.35rem 0.6rem",
                 borderRadius: 6,

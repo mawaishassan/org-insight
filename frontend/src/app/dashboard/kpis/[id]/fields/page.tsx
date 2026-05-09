@@ -76,14 +76,6 @@ const GROUP_FUNCTIONS = [
   { value: "MAX_ITEMS", label: "MAX" },
 ] as const;
 
-const CONDITIONAL_GROUP_FUNCTIONS = [
-  { value: "SUM_ITEMS_WHERE", label: "SUM where" },
-  { value: "AVG_ITEMS_WHERE", label: "AVG where" },
-  { value: "COUNT_ITEMS_WHERE", label: "COUNT where" },
-  { value: "MIN_ITEMS_WHERE", label: "MIN where" },
-  { value: "MAX_ITEMS_WHERE", label: "MAX where" },
-] as const;
-
 const WHERE_OPERATORS = [
   { value: "op_eq", label: "equals (=)" },
   { value: "op_neq", label: "not equals (≠)" },
@@ -3491,7 +3483,7 @@ function FormulaBuilder({
   const canInsertNumber = refField?.field_type === "number";
   const isCountItemsOnly = refGroupFn === "COUNT_ITEMS";
   const isConditionalWhere = useConditional && refField?.field_type === "multi_line_items" && !!refFilterSubKey;
-  const isCountWhere = refGroupFn === "COUNT_ITEMS" || refGroupFn === "COUNT_ITEMS_WHERE";
+  const isCountWhere = refGroupFn === "COUNT_ITEMS";
   const canInsertItems = refField?.field_type === "multi_line_items" && (
     isConditionalWhere
       ? (isCountWhere ? !!refFilterSubKey : (subFields.length > 0 && !!refSubKey && !!refFilterSubKey))
@@ -3601,7 +3593,13 @@ function FormulaBuilder({
             <div>
               <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Sub-field</label>
               <select value={refSubKey} onChange={(e) => setRefSubKey(e.target.value)} style={{ minWidth: "140px" }}>
-                <option value="">{(refGroupFn === "COUNT_ITEMS" || refGroupFn === "COUNT_ITEMS_WHERE") && !useConditional ? "Row count (no sub-field)" : refGroupFn === "COUNT_ITEMS_WHERE" ? "— N/A for COUNT where —" : "— Select —"}</option>
+                <option value="">
+                  {useConditional && refGroupFn === "COUNT_ITEMS"
+                    ? "— N/A for COUNT where —"
+                    : refGroupFn === "COUNT_ITEMS" && !useConditional
+                      ? "Row count (no sub-field)"
+                      : "— Select —"}
+                </option>
                 {subFields.map((s) => (
                   <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
                 ))}
@@ -3611,9 +3609,6 @@ function FormulaBuilder({
               <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Group function</label>
               <select value={refGroupFn} onChange={(e) => setRefGroupFn(e.target.value)} style={{ minWidth: "120px" }}>
                 {GROUP_FUNCTIONS.map((g) => (
-                  <option key={g.value} value={g.value}>{g.label}</option>
-                ))}
-                {CONDITIONAL_GROUP_FUNCTIONS.map((g) => (
                   <option key={g.value} value={g.value}>{g.label}</option>
                 ))}
               </select>
