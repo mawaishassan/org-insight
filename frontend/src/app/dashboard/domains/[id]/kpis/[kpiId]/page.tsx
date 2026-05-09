@@ -567,11 +567,10 @@ export default function DomainKpiDetailPage() {
   );
 
   const formulaBoxes = useMemo(() => {
-    const withValues = formulaFields.map((f) => ({
+    return formulaFields.map((f) => ({
       field: f,
       value: valuesByFieldId.get(f.id)?.value_number ?? null,
     }));
-    return withValues.slice(0, 4);
   }, [formulaFields, valuesByFieldId]);
 
   const lastUpdatedFormatted =
@@ -1362,7 +1361,7 @@ export default function DomainKpiDetailPage() {
         </div>
       ) : (
         <>
-      {/* Section 1: Formula fields in colored boxes (max 4) */}
+      {/* Section 1: Formula fields in colored summary cards */}
       {formulaBoxes.length > 0 && (
         <div
           style={{
