@@ -447,7 +447,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         ? `/dashboard/dashboards?organization_id=${user.organization_id}`
         : "/dashboard/dashboards";
 
+  const kpisHref =
+    selectedOrgId != null
+      ? `/dashboard/entries?organization_id=${selectedOrgId}`
+      : user.organization_id != null
+        ? `/dashboard/entries?organization_id=${user.organization_id}`
+        : "/dashboard/entries";
+
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
+    { href: kpisHref, label: "KPIs", show: role === "ORG_ADMIN" || role === "SUPER_ADMIN" },
     { href: dashboardsHref, label: "Dashboards", show: true },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },

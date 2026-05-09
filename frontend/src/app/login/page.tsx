@@ -51,17 +51,18 @@ export default function LoginPage() {
         return;
       }
 
-      // Prefer a dashboard/report the user can view.
-      const [dashboards, reports] = await Promise.all([
-        api<Array<{ id: number }>>(`/dashboards?organization_id=${orgId}`, { token: res.access_token }).catch(() => []),
-        api<Array<{ id: number }>>(`/reports/templates?organization_id=${orgId}`, { token: res.access_token }).catch(() => []),
-      ]);
-      if (Array.isArray(dashboards) && dashboards.length > 0) {
-        router.push(`/dashboard/dashboards/${dashboards[0]!.id}?organization_id=${orgId}`);
-      } else if (Array.isArray(reports) && reports.length > 0) {
-        router.push(`/dashboard/reports/${reports[0]!.id}?organization_id=${orgId}`);
-      } else {
+      // Default home:
+      // - If user has KPI rights, land on KPIs/Entries page.
+      // - Otherwise, land on the dashboard home (not a specific dashboard).
+      const kpiOverview = await api<Array<{ kpi_id: number }>>(
+        `/entries/overview?year=${new Date().getFullYear()}&organization_id=${orgId}`,
+        { token: res.access_token }
+      ).catch(() => []);
+      const hasKpiRights = Array.isArray(kpiOverview) && kpiOverview.length > 0;
+      if (hasKpiRights) {
         router.push("/dashboard/entries");
+      } else {
+        router.push(`/dashboard/dashboards?organization_id=${orgId}`);
       }
       router.refresh();
     } catch (e) {
