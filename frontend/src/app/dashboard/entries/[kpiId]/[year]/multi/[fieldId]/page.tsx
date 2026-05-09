@@ -453,6 +453,7 @@ export default function FullPageMultiItems() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
+  const [downloadingTemplate, setDownloadingTemplate] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editData, setEditData] = useState<Record<string, unknown>>({});
   const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
@@ -463,9 +464,11 @@ export default function FullPageMultiItems() {
   const [uploadElapsedClock, setUploadElapsedClock] = useState<string | null>(null);
   const bulkUploadTickRef = useRef<number | null>(null);
 
-  const pageBusy = exportingCsv || loading || uploading || saving;
+  const pageBusy = exportingCsv || downloadingTemplate || loading || uploading || saving;
   const busyLabel = exportingCsv
     ? "Exporting CSV…"
+    : downloadingTemplate
+      ? "Downloading template…"
     : uploading
       ? "Uploading…"
       : saving
@@ -1997,8 +2000,10 @@ export default function FullPageMultiItems() {
                 <button
                   type="button"
                   className="btn"
+                  disabled={pageBusy}
                   onClick={async () => {
                     if (!token || !fieldId || !entryId || effectiveOrgId == null) return;
+                setDownloadingTemplate(true);
                 try {
                   const url = getApiUrl(
                     `/entries/multi-items/template?${new URLSearchParams({
@@ -2026,10 +2031,12 @@ export default function FullPageMultiItems() {
                   URL.revokeObjectURL(a.href);
                 } catch {
                   toast.error("Template download failed");
+                } finally {
+                  setDownloadingTemplate(false);
                 }
                   }}
                 >
-                  Download Excel template
+                  {downloadingTemplate ? "Downloading…" : "Download Excel template"}
                 </button>
                 <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", color: "var(--muted)", fontSize: "0.9rem" }}>
                   <input

@@ -58,6 +58,7 @@ from app.entries.service import (
     user_can_edit_row,
     user_can_delete_row,
     save_entry_values,
+    recompute_formula_fields_for_entry,
     submit_entry,
     lock_entry,
     list_entries,
@@ -855,6 +856,7 @@ async def upload_multi_items_excel(
             rows_overridden = 0
     entry.user_id = current_user.id  # track last editor (optional)
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     logger.info(
         "END multi-items upload: entry_id=%s field_id=%s org_id=%s mode=%s added=%s updated=%s overridden=%s",
@@ -1760,6 +1762,7 @@ async def add_multi_items_row(
             continue
         _add_cell(sub, v)
 
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     return MultiItemsRow(index=new_index, data=normalized_row)
 
@@ -1969,6 +1972,7 @@ async def update_multi_items_row_cell(
         else:
             cell.value_text = str(raw_val)
 
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
     data = rows[0][1] if rows else {}
@@ -2018,6 +2022,7 @@ async def delete_multi_items_row(
         field_id=field.id,
         deleted_indices={row_index},
     )
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
 
 
@@ -2072,6 +2077,7 @@ async def bulk_delete_multi_items_rows(
         field_id=field.id,
         deleted_indices=index_set,
     )
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
 
 
@@ -2203,6 +2209,7 @@ async def sync_multi_items_from_api(
         rows_added = len(item_dicts)
 
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     out: dict = {
         "entry_id": entry.id,
@@ -2314,6 +2321,7 @@ async def import_multi_items_from_year(
 
     entry.user_id = current_user.id
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
 
     out: dict = {
