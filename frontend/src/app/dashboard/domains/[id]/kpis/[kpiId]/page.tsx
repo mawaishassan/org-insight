@@ -638,8 +638,9 @@ export default function DomainKpiDetailPage() {
       if (match) {
         if (loadId !== entryDetailLoadGenRef.current) return;
         setEntry(match);
-      } else if (effectiveOrgId != null) {
-        // No entry for this period: get-or-create so carry-forward from previous period is shown
+      } else if (effectiveOrgId != null && pk.trim() !== "") {
+        // Only fetch/get-or-create when user explicitly selected a period.
+        // (For large KPIs, this extra roundtrip can noticeably slow initial load.)
         try {
           const forPeriod = await api<EntryRow>(
             `/entries/for-period?${qs({ kpi_id: kpiId, year, period_key: pk, organization_id: effectiveOrgId })}`,
@@ -1325,7 +1326,8 @@ export default function DomainKpiDetailPage() {
   ) : null;
 
   if (!kpiId) return <p>Invalid KPI.</p>;
-  if (loading) return <p>Loading...</p>;
+  // Don't block the whole page behind Loading... if we already have data.
+  if (loading && fields.length === 0) return <p>Loading...</p>;
   if (effectiveOrgId == null) return <p>Organization context required.</p>;
 
   return (

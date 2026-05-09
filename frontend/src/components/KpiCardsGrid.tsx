@@ -86,6 +86,15 @@ function qs(params: Record<string, string | number | undefined>) {
   return new URLSearchParams(entries).toString();
 }
 
+function normalizeSearchText(s: string): string {
+  return (s ?? "")
+    .toLowerCase()
+    // treat punctuation/underscores as spaces so "Student-Data" matches "student data"
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
 export interface KpiCardsGridProps {
   organizationId: number;
   year: number;
@@ -132,10 +141,22 @@ export function KpiCardsGrid({
   const [availableKpisFallback, setAvailableKpisFallback] = useState<KpiRow[]>([]);
   const [loadingFallback, setLoadingFallback] = useState(false);
 
+  // Org admin entries page: fetch available-kpis immediately so cards render fast,
+  // then enrich with /entries/overview when it arrives.
+  useEffect(() => {
+    if (!token || !organizationId) return;
+    if (cardLayout !== "org_admin") return;
+    if (domainId != null || kpisOverride !== undefined) return;
+    setLoadingFallback(true);
+    api<KpiRow[]>(`/entries/available-kpis?${qs({ organization_id: organizationId })}`, { token })
+      .then((list) => setAvailableKpisFallback(Array.isArray(list) ? list : []))
+      .catch(() => setAvailableKpisFallback([]))
+      .finally(() => setLoadingFallback(false));
+  }, [token, organizationId, cardLayout, domainId, kpisOverride]);
+
   const loadOverview = () => {
     if (!token || !organizationId) return;
     setLoadingOverview(true);
-    setAvailableKpisFallback([]);
     const query = `?${qs({ year, organization_id: organizationId })}`;
     api<OverviewItem[]>(`/entries/overview${query}`, { token })
       .then(setOverview)
@@ -156,27 +177,6 @@ export function KpiCardsGrid({
       .catch(() => setKpis([]))
       .finally(() => setLoadingKpis(false));
   }, [token, organizationId, domainId, kpisOverride]);
-
-  // Org admin entries page: when overview is empty, fetch available-kpis so we still show all KPIs
-  useEffect(() => {
-    if (
-      !token ||
-      !organizationId ||
-      cardLayout !== "org_admin" ||
-      domainId != null ||
-      kpisOverride !== undefined ||
-      loadingOverview ||
-      overview.length > 0
-    ) {
-      if (overview.length > 0) setAvailableKpisFallback([]);
-      return;
-    }
-    setLoadingFallback(true);
-    api<KpiRow[]>(`/entries/available-kpis?${qs({ organization_id: organizationId })}`, { token })
-      .then((list) => setAvailableKpisFallback(Array.isArray(list) ? list : []))
-      .catch(() => setAvailableKpisFallback([]))
-      .finally(() => setLoadingFallback(false));
-  }, [token, organizationId, cardLayout, domainId, kpisOverride, loadingOverview, overview.length]);
 
   const listToShow = useMemo(() => {
     if (kpisOverride !== undefined) return kpisOverride;
@@ -204,8 +204,17 @@ export function KpiCardsGrid({
 
   const filteredKpis = useMemo(() => {
     let list = listToShow;
-    const search = filterName.trim().toLowerCase();
-    if (search) list = list.filter((k) => k.name.toLowerCase().includes(search));
+    const search = normalizeSearchText(filterName);
+    if (search) {
+      const tokens = search.split(" ").filter(Boolean);
+      list = list.filter((k) => {
+        const item = overviewByKpiId.get(k.id);
+        const desc = (item?.kpi_description ?? "").toString();
+        const hay = normalizeSearchText(`${k.name ?? ""} ${desc}`);
+        // "contains/like" semantics for multiple words: all tokens must appear, in any order
+        return tokens.every((t) => hay.includes(t));
+      });
+    }
     if (assignedToMeOnly) {
       list = list.filter((k) => {
         const item = overviewByKpiId.get(k.id);
