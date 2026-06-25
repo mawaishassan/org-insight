@@ -500,7 +500,15 @@ export default function FullPageMultiItems() {
   const [refFilterOptions, setRefFilterOptions] = useState<Record<string, string[]>>({});
   const [sourceKpiFieldsById, setSourceKpiFieldsById] = useState<Record<number, FieldSummary[]>>({});
   const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
-  const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | "previous_year" | null>(null);
+  const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | "odoo" | "previous_year" | null>(null);
+  const [importCapabilities, setImportCapabilities] = useState<{
+    channels: string[];
+    odoo_ready: boolean;
+    odoo_org_configured?: boolean;
+    odoo_kpi_configured?: boolean;
+    odoo_blockers?: string[];
+    import_channel?: string;
+  } | null>(null);
   const [importFromYear, setImportFromYear] = useState<number>(() => {
     const y = new Date().getFullYear();
     return y - 1;
@@ -538,6 +546,7 @@ export default function FullPageMultiItems() {
   const entryIdLiveRef = useRef<number | null>(null);
 
   const isAdmin = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
+  const isSuperAdmin = userRole === "SUPER_ADMIN";
   const canManageRowAccess = isAdmin;
   const canAddRowEffective = canAddRow || isAdmin;
 
@@ -605,6 +614,25 @@ export default function FullPageMultiItems() {
       .catch(() => setMeOrgId(null));
   }, [token]);
 
+  useEffect(() => {
+    if (!token || effectiveOrgId == null || !fieldId || !kpiId) return;
+    api<{ channels: string[]; odoo_ready: boolean; odoo_org_configured?: boolean; odoo_kpi_configured?: boolean; odoo_blockers?: string[]; import_channel?: string }>(
+      `/entries/multi-items/import-capabilities?${new URLSearchParams({
+        field_id: String(fieldId),
+        kpi_id: String(kpiId),
+        organization_id: String(effectiveOrgId),
+      }).toString()}`,
+      { token }
+    )
+      .then((c) => {
+        setImportCapabilities(c);
+        const ch = (field?.config as { multi_items_import_channel?: string } | undefined)?.multi_items_import_channel;
+        if (ch === "odoo" && c.odoo_ready) setBulkChannel("odoo");
+        else if (ch === "api") setBulkChannel("api");
+      })
+      .catch(() => setImportCapabilities(null));
+  }, [token, effectiveOrgId, fieldId, kpiId, field?.config]);
+
   const loadContext = async () => {
     if (!token || !kpiId || effectiveOrgId == null || !fieldId) return;
     const loadId = ++multiPageContextLoadGenRef.current;
@@ -646,7 +674,7 @@ export default function FullPageMultiItems() {
     }
   };
 
-  const loadRows = async () => {
+  const loadRows = async (opts?: { force?: boolean }) => {
     if (!token || !entryId || !fieldId || effectiveOrgId == null) return;
     const entryIdForThisFetch = entryId;
     const buildRowsQueryParams = (targetPage: number) => {
@@ -669,7 +697,7 @@ export default function FullPageMultiItems() {
 
     const cacheKey = buildRowsQueryParams(page).toString();
     const cached = rowsCacheRef.current.get(cacheKey);
-    if (cached) {
+    if (!opts?.force && cached) {
       setRows(cached.rows);
       setTotal(cached.total);
       setLoading(false);
@@ -721,6 +749,11 @@ export default function FullPageMultiItems() {
         setLoading(false);
       }
     }
+  };
+
+  const refreshRows = async () => {
+    rowsCacheRef.current.clear();
+    await loadRows({ force: true });
   };
 
   useEffect(() => {
@@ -978,7 +1011,7 @@ export default function FullPageMultiItems() {
       );
       toast.success("Rows deleted");
       setSelectedIndices([]);
-      await loadRows();
+      await refreshRows();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Bulk delete failed");
     }
@@ -1019,6 +1052,9 @@ export default function FullPageMultiItems() {
   }, [bulkChannel, token, effectiveOrgId, entryId, fieldId, kpiId, year, periodKey]);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  const uploadModeReady =
+    uploadOption != null && (uploadOption !== "upsert" || upsertMatchSubFieldKey.trim().length > 0);
 
   const openRowAccessModal = (row: MultiItemsRow) => {
     if (!token || !entryId || !fieldId || !kpiId || effectiveOrgId == null) return;
@@ -1975,10 +2011,42 @@ export default function FullPageMultiItems() {
                         setApiUrlOverride((field.config as any).multi_items_api_endpoint_url as string);
                       }
                     }}
-                    disabled={!entryId}
+                    disabled={!entryId || !(importCapabilities?.channels || []).includes("api")}
                   />
                   API
                 </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    name="uploadChannel"
+                    checked={bulkChannel === "odoo"}
+                    onChange={() => setBulkChannel("odoo")}
+                    disabled={!entryId || !importCapabilities?.odoo_ready}
+                  />
+                  Odoo
+                </label>
+                {!importCapabilities?.odoo_ready && (
+                  <p style={{ margin: "0.35rem 0 0", fontSize: "0.8rem", color: "var(--muted)", maxWidth: 520 }}>
+                    {!entryId
+                      ? "Create or open this year’s KPI entry first."
+                      : isSuperAdmin
+                        ? (importCapabilities?.odoo_blockers || []).join(" ") ||
+                          "Odoo is not ready: organization connection and KPI request body must both be configured."
+                        : (importCapabilities?.odoo_blockers || []).join(" ") ||
+                          "Odoo is not configured for this KPI. Ask your Super Admin to configure it first."}
+                    {entryId && effectiveOrgId != null && isSuperAdmin && (
+                      <>
+                        {" "}
+                        <Link
+                          href={`/dashboard/kpis/${kpiId}/fields?organization_id=${effectiveOrgId}&tab=odoo`}
+                          style={{ color: "var(--primary)", fontWeight: 500 }}
+                        >
+                          Configure Odoo on KPI Fields page →
+                        </Link>
+                      </>
+                    )}
+                  </p>
+                )}
                 <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
                   <input
                     type="radio"
@@ -2142,7 +2210,7 @@ export default function FullPageMultiItems() {
                                 : `${modeLabel}: ${added} rows imported${timeSuffix}`
                             );
                           }
-                          await loadRows();
+                          await refreshRows();
                           setBulkPanelOpen(false);
                           setUploadOption(null);
                         } else {
@@ -2304,7 +2372,7 @@ export default function FullPageMultiItems() {
                               : "API sync completed (no records imported)."
                           );
                         }
-                        await loadRows();
+                        await refreshRows();
                       } catch (e) {
                         toast.error(e instanceof Error ? e.message : "API sync failed");
                       }
@@ -2414,6 +2482,70 @@ export default function FullPageMultiItems() {
             </div>
           )}
 
+          {bulkChannel === "odoo" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--muted)" }}>
+                {isSuperAdmin
+                  ? "Loads data from Odoo using organization connection and KPI request body configured on the KPI Fields page."
+                  : "Loads data from Odoo using settings configured by your Super Admin."}
+              </p>
+              {!uploadModeReady && (
+                <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
+                  Select an upload mode in Step 1 (Append, Override, or Update or add) to enable Odoo import.
+                </p>
+              )}
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={!entryId || !uploadModeReady || uploading}
+                style={{
+                  alignSelf: "flex-start",
+                  opacity: entryId && uploadModeReady && !uploading ? 1 : 0.55,
+                  cursor: entryId && uploadModeReady && !uploading ? "pointer" : "not-allowed",
+                }}
+                onClick={async () => {
+                  if (!token || !entryId || !fieldId || effectiveOrgId == null || !uploadModeReady || !uploadOption) return;
+                  if (uploadOption === "upsert" && !upsertMatchSubFieldKey.trim()) {
+                    toast.error("Select which sub-field to use for matching.");
+                    return;
+                  }
+                  setUploading(true);
+                  try {
+                    const params = new URLSearchParams({
+                      entry_id: String(entryId),
+                      field_id: String(fieldId),
+                      organization_id: String(effectiveOrgId),
+                      sync_mode: uploadOption,
+                    });
+                    if (uploadOption === "upsert") {
+                      params.set("match_sub_field_key", upsertMatchSubFieldKey.trim());
+                    }
+                    const res = await api<{
+                      rows_imported?: number;
+                      rows_updated?: number;
+                      rows_appended?: number;
+                    }>(`/entries/multi-items/sync-from-odoo?${params.toString()}`, { method: "POST", token });
+                    if (uploadOption === "upsert") {
+                      toast.success(
+                        `Update or add: ${res?.rows_updated ?? 0} row(s) updated, ${res?.rows_appended ?? 0} new row(s) added`
+                      );
+                    } else {
+                      const n = res?.rows_imported ?? 0;
+                      toast.success(n > 0 ? `Imported ${n} record(s) from Odoo.` : "Odoo sync completed (no records imported).");
+                    }
+                    await refreshRows();
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : "Odoo sync failed");
+                  } finally {
+                    setUploading(false);
+                  }
+                }}
+              >
+                {uploading ? "Loading from Odoo…" : "Load data from Odoo"}
+              </button>
+            </div>
+          )}
+
           {/* Import from previous year */}
           {bulkChannel === "previous_year" && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "flex-end", justifyContent: "space-between" }}>
@@ -2495,7 +2627,7 @@ export default function FullPageMultiItems() {
                       const label = uploadOption === "append" ? "Appended" : "Replaced";
                       toast.success(overridden > 0 ? `${label}: ${added} rows imported (overrode ${overridden} existing)` : `${label}: ${added} rows imported`);
                     }
-                    await loadRows();
+                    await refreshRows();
                     setBulkPanelOpen(false);
                     setUploadOption(null);
                   } catch (e) {

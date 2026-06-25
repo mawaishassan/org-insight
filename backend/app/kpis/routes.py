@@ -3,6 +3,7 @@
 import re
 import uuid
 from datetime import datetime
+from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.auth.dependencies import require_org_admin, get_current_user, get_data_export_auth, DataExportAuth
+from app.auth.dependencies import require_org_admin, require_super_admin, get_current_user, get_data_export_auth, DataExportAuth
 from app.core.models import User, KPI, KpiFile
 from app.entries.service import user_can_view_kpi, user_can_edit_kpi, parse_upsert_match_keys_json
 from app.kpis.schemas import (
@@ -39,6 +40,11 @@ from app.kpis.schemas import (
     AssignedRoleRef,
     UsedInReportRef,
     KpiFileResponse,
+    KpiOdooConfigUpdate,
+    KpiOdooConfigResponse,
+    KpiOdooConfigStatus,
+    KpiOdooPreviewRequest,
+    KpiOdooPreviewResponse,
 )
 from app.kpis.service import (
     create_kpi,
@@ -77,7 +83,7 @@ from app.kpis.service import (
     sync_kpi_entry_from_api,
 )
 from app.users.schemas import UserResponse
-from app.fields.service import list_fields as list_kpi_fields
+from app.fields.service import list_fields as list_kpi_fields, get_field as get_kpi_field
 from app.core.models import FieldType
 from app.storage.service import upload_file as storage_upload_file, delete_file as storage_delete_file, get_file_stream as storage_get_file_stream
 
@@ -868,6 +874,210 @@ async def get_kpi_api_contract(
             "year": example_year,
             "values": example_values,
         },
+    )
+
+
+@router.get("/{kpi_id}/odoo-config", response_model=KpiOdooConfigResponse)
+async def get_kpi_odoo_config_route(
+    kpi_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Get KPI Odoo request body config (Super Admin only)."""
+    from app.odoo.config_service import get_kpi_odoo_config, kpi_belongs_to_org
+
+    org_id = _org_id(current_user, organization_id)
+    if not await kpi_belongs_to_org(db, kpi_id, org_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    cfg = await get_kpi_odoo_config(db, kpi_id)
+    if not cfg:
+        return KpiOdooConfigResponse(kpi_id=kpi_id, configured=False)
+    return KpiOdooConfigResponse(
+        kpi_id=kpi_id,
+        configured=True,
+        request_body=cfg.request_body,
+        response_items_path=cfg.response_items_path,
+    )
+
+
+@router.get("/{kpi_id}/odoo-config/status", response_model=KpiOdooConfigStatus)
+async def get_kpi_odoo_config_status_route(
+    kpi_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Odoo config readiness without exposing request body (any KPI viewer)."""
+    from app.odoo.config_service import get_kpi_odoo_config, kpi_belongs_to_org
+
+    org_id = _org_id(current_user, organization_id)
+    if not await kpi_belongs_to_org(db, kpi_id, org_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    cfg = await get_kpi_odoo_config(db, kpi_id)
+    return KpiOdooConfigStatus(kpi_id=kpi_id, configured=cfg is not None)
+
+
+@router.put("/{kpi_id}/odoo-config", response_model=KpiOdooConfigResponse)
+async def update_kpi_odoo_config_route(
+    kpi_id: int,
+    body: KpiOdooConfigUpdate,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Set KPI-specific Odoo JSON request body (Super Admin only)."""
+    from app.odoo.config_service import upsert_kpi_odoo_config, kpi_belongs_to_org
+
+    org_id = _org_id(current_user, organization_id)
+    if not await kpi_belongs_to_org(db, kpi_id, org_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    cfg = await upsert_kpi_odoo_config(
+        db, kpi_id, body.request_body, (body.response_items_path or "").strip() or None
+    )
+    await db.commit()
+    return KpiOdooConfigResponse(
+        kpi_id=kpi_id,
+        configured=True,
+        request_body=cfg.request_body,
+        response_items_path=cfg.response_items_path,
+    )
+
+
+async def _fetch_kpi_odoo_preview_items(
+    db: AsyncSession,
+    *,
+    kpi_id: int,
+    field_id: int,
+    org_id: int,
+    year: int | None,
+    body: KpiOdooPreviewRequest | None,
+):
+    """Load Odoo rows for KPI preview/export (Super Admin). Returns (field, raw_items)."""
+    from types import SimpleNamespace
+
+    from app.odoo.config_service import get_org_odoo_config, get_kpi_odoo_config, kpi_belongs_to_org
+    from app.odoo.service import odoo_authenticate, odoo_fetch_items
+
+    if not await kpi_belongs_to_org(db, kpi_id, org_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+
+    field = await get_kpi_field(db, field_id, org_id)
+    if not field or field.kpi_id != kpi_id or field.field_type != FieldType.multi_line_items:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-line field not found")
+
+    org_odoo = await get_org_odoo_config(db, org_id)
+    if not org_odoo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization Odoo connection is not configured",
+        )
+
+    saved_kpi_odoo = await get_kpi_odoo_config(db, kpi_id)
+    preview_body = body.request_body if body and body.request_body is not None else None
+    preview_path = (body.response_items_path or "").strip() if body else ""
+    if preview_body is None:
+        if not saved_kpi_odoo:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Save the KPI Odoo request body first, or send request_body in the preview request",
+            )
+        request_body = saved_kpi_odoo.request_body
+        response_items_path = saved_kpi_odoo.response_items_path
+    else:
+        request_body = preview_body
+        response_items_path = preview_path or (saved_kpi_odoo.response_items_path if saved_kpi_odoo else None)
+
+    preview_year = year if year is not None else datetime.utcnow().year
+    kpi_cfg = SimpleNamespace(request_body=request_body, response_items_path=response_items_path)
+
+    try:
+        session_id = await odoo_authenticate(org_odoo)
+        context = {
+            "year": preview_year,
+            "kpi_id": kpi_id,
+            "organization_id": org_id,
+            "entry_id": 0,
+            "field_id": field.id,
+            "field_key": field.key,
+        }
+        raw_items = await odoo_fetch_items(org_odoo, kpi_cfg, session_id, context)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+
+    return field, raw_items, preview_year
+
+
+@router.post("/{kpi_id}/odoo-preview", response_model=KpiOdooPreviewResponse)
+async def preview_kpi_odoo_data_route(
+    kpi_id: int,
+    field_id: int = Query(..., description="Multi-line items field used for __FIELD_ID__ / __FIELD_KEY__ placeholders"),
+    year: int | None = Query(None, ge=2000, le=2100),
+    organization_id: int | None = Query(None),
+    body: KpiOdooPreviewRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Fetch sample Odoo rows for column discovery and mapping (Super Admin only). Does not write data."""
+    from app.odoo.service import (
+        extract_odoo_columns,
+        build_odoo_preview_rows,
+        detect_odoo_list_columns,
+    )
+
+    org_id = _org_id(current_user, organization_id)
+    _, raw_items, _ = await _fetch_kpi_odoo_preview_items(
+        db,
+        kpi_id=kpi_id,
+        field_id=field_id,
+        org_id=org_id,
+        year=year,
+        body=body,
+    )
+
+    columns = extract_odoo_columns(raw_items)
+    sample_rows, preview_column_count = build_odoo_preview_rows(raw_items, columns, max_rows=5, max_columns=7)
+    list_columns = detect_odoo_list_columns(raw_items, columns)
+    return KpiOdooPreviewResponse(
+        columns=columns,
+        sample_rows=sample_rows,
+        total_rows=len(raw_items),
+        preview_row_count=len(sample_rows),
+        preview_column_count=preview_column_count,
+        list_columns=list_columns,
+    )
+
+
+@router.post("/{kpi_id}/odoo-preview-export")
+async def export_kpi_odoo_preview_excel_route(
+    kpi_id: int,
+    field_id: int = Query(..., description="Multi-line items field used for __FIELD_ID__ / __FIELD_KEY__ placeholders"),
+    year: int | None = Query(None, ge=2000, le=2100),
+    organization_id: int | None = Query(None),
+    body: KpiOdooPreviewRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Download all Odoo sample rows and columns as Excel (Super Admin only)."""
+    from app.odoo.service import extract_odoo_columns, build_odoo_sample_xlsx_bytes
+
+    org_id = _org_id(current_user, organization_id)
+    field, raw_items, preview_year = await _fetch_kpi_odoo_preview_items(
+        db,
+        kpi_id=kpi_id,
+        field_id=field_id,
+        org_id=org_id,
+        year=year,
+        body=body,
+    )
+
+    columns = extract_odoo_columns(raw_items)
+    xlsx_bytes = build_odoo_sample_xlsx_bytes(raw_items, columns)
+    filename = f"odoo_sample_kpi{kpi_id}_{field.key}_{preview_year}.xlsx"
+    return StreamingResponse(
+        BytesIO(xlsx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

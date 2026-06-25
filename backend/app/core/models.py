@@ -126,6 +126,12 @@ class Organization(Base):
         uselist=False,
         lazy="selectin",
     )
+    odoo_config = relationship(
+        "OrganizationOdooConfig",
+        back_populates="organization",
+        uselist=False,
+        lazy="selectin",
+    )
 
 
 class OrganizationStorageConfig(Base):
@@ -147,6 +153,30 @@ class OrganizationStorageConfig(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     organization = relationship("Organization", back_populates="storage_config")
+
+
+class OrganizationOdooConfig(Base):
+    """Per-organization Odoo XML-RPC/API connection (Super Admin)."""
+
+    __tablename__ = "organization_odoo_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        unique=True,
+    )
+    login_url = Column(String(2048), nullable=False)
+    data_fetch_url = Column(String(2048), nullable=False)
+    odoo_db = Column(String(255), nullable=True)
+    username = Column(String(255), nullable=False)
+    password = Column(String(512), nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    organization = relationship("Organization", back_populates="odoo_config")
 
 
 class ExportAPIToken(Base):
@@ -436,6 +466,29 @@ class KPI(Base):
     entries = relationship("KPIEntry", back_populates="kpi", lazy="selectin")
     kpi_files = relationship("KpiFile", back_populates="kpi", lazy="selectin")
     report_template_kpis = relationship("ReportTemplateKPI", back_populates="kpi", lazy="selectin")
+    odoo_config = relationship(
+        "KpiOdooConfig",
+        back_populates="kpi",
+        uselist=False,
+        lazy="selectin",
+    )
+
+
+class KpiOdooConfig(Base):
+    """KPI-specific Odoo data fetch JSON body (Org Admin only)."""
+
+    __tablename__ = "kpi_odoo_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    kpi_id = Column(
+        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True, unique=True
+    )
+    request_body = Column(JSON, nullable=False)
+    response_items_path = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    kpi = relationship("KPI", back_populates="odoo_config")
 
 
 class KPIField(Base):

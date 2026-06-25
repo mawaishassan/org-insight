@@ -17,6 +17,8 @@ from app.organizations.schemas import (
     ExportTokenResponse,
     StorageConfigUpdate,
     StorageConfigResponse,
+    OdooConfigUpdate,
+    OdooConfigResponse,
     STORAGE_TYPES,
     mask_storage_params,
     OrganizationRoleCreate,
@@ -268,6 +270,102 @@ async def update_org_storage_config(
         organization_id=config.organization_id,
         storage_type=config.storage_type,
         params=mask_storage_params(config.params),
+        created_at=config.created_at.isoformat() + "Z" if config.created_at else None,
+        updated_at=config.updated_at.isoformat() + "Z" if config.updated_at else None,
+    )
+
+
+# --- Odoo config (Super Admin) ---
+
+
+@router.get("/{org_id}/odoo-config", response_model=OdooConfigResponse)
+async def get_org_odoo_config(
+    org_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Get organization Odoo connection settings (Super Admin only). Password is masked."""
+    from app.odoo.config_service import get_org_odoo_config as load_cfg
+
+    org = await get_organization(db, org_id)
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    config = await load_cfg(db, org_id)
+    if not config:
+        return OdooConfigResponse(organization_id=org_id, configured=False)
+    return OdooConfigResponse(
+        organization_id=config.organization_id,
+        configured=True,
+        login_url=config.login_url,
+        data_fetch_url=config.data_fetch_url,
+        odoo_db=config.odoo_db,
+        username=config.username,
+        password="***",
+        created_at=config.created_at.isoformat() + "Z" if config.created_at else None,
+        updated_at=config.updated_at.isoformat() + "Z" if config.updated_at else None,
+    )
+
+
+@router.get("/{org_id}/odoo-config/status")
+async def get_org_odoo_config_status(
+    org_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin_for_org),
+):
+    """Whether organization Odoo connection exists (no credentials exposed). Org Admin or Super Admin."""
+    from app.odoo.config_service import get_org_odoo_config as load_cfg
+
+    org = await get_organization(db, org_id)
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    config = await load_cfg(db, org_id)
+    return {"organization_id": org_id, "configured": config is not None}
+
+
+@router.patch("/{org_id}/odoo-config", response_model=OdooConfigResponse)
+async def update_org_odoo_config(
+    org_id: int,
+    body: OdooConfigUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Create or update organization Odoo settings (Super Admin only)."""
+    from app.odoo.config_service import get_org_odoo_config as load_cfg, upsert_org_odoo_config
+
+    org = await get_organization(db, org_id)
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    existing = await load_cfg(db, org_id)
+    raw_password = (body.password or "").strip()
+    if existing is None:
+        if not raw_password or raw_password == "***":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password is required when saving Odoo settings for the first time",
+            )
+        password = raw_password
+    elif raw_password and raw_password != "***":
+        password = raw_password
+    else:
+        password = existing.password
+    config = await upsert_org_odoo_config(
+        db,
+        org_id,
+        body.login_url.strip(),
+        body.data_fetch_url.strip(),
+        (body.odoo_db or "").strip() or None,
+        body.username.strip(),
+        password,
+    )
+    await db.commit()
+    return OdooConfigResponse(
+        organization_id=config.organization_id,
+        configured=True,
+        login_url=config.login_url,
+        data_fetch_url=config.data_fetch_url,
+        odoo_db=config.odoo_db,
+        username=config.username,
+        password="***",
         created_at=config.created_at.isoformat() + "Z" if config.created_at else None,
         updated_at=config.updated_at.isoformat() + "Z" if config.updated_at else None,
     )

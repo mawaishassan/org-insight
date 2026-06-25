@@ -41,8 +41,15 @@ from app.core.models import (
     utc_now,
 )
 from app.entries.schemas import EntryCreate, EntrySubmit, EntryLock, EntryResponse, FieldValueResponse
+from app.core.models import UserRole
+from app.odoo.service import sanitize_multi_items_field_config
 
 logger = logging.getLogger("uvicorn.error")
+
+
+def _field_config_for_user(config: dict | None, user: User) -> dict | None:
+    is_admin = user.role in (UserRole.SUPER_ADMIN, UserRole.ORG_ADMIN)
+    return sanitize_multi_items_field_config(config, is_admin)
 
 # Cap for list_multi_items_rows(fetch_all=True) to bound memory and payload size.
 _MULTI_ITEMS_FETCH_ALL_CAP = 50_000
@@ -2222,6 +2229,197 @@ async def sync_multi_items_from_api(
     return out
 
 
+@router.get("/multi-items/import-capabilities")
+async def multi_items_import_capabilities(
+    field_id: int = Query(...),
+    kpi_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Which bulk import channels are available for a multi-line field (no secrets)."""
+    from app.odoo.config_service import get_org_odoo_config, get_kpi_odoo_config
+
+    org_id = _org_id(current_user, organization_id)
+    field_res = await db.execute(
+        select(KPIField)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPIField.id == field_id, KPIField.kpi_id == kpi_id, KPI.organization_id == org_id)
+    )
+    field = field_res.scalar_one_or_none()
+    if not field or field.field_type != FieldType.multi_line_items:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-line field not found")
+
+    cfg = getattr(field, "config", None) or {}
+    channel = (cfg.get("multi_items_import_channel") or "excel").strip().lower()
+    if cfg.get("multi_items_api_endpoint_url"):
+        channels = ["excel", "api", "previous_year"]
+    else:
+        channels = ["excel", "previous_year"]
+
+    org_odoo = await get_org_odoo_config(db, org_id)
+    kpi_odoo = await get_kpi_odoo_config(db, kpi_id)
+    odoo_org_configured = org_odoo is not None
+    odoo_kpi_configured = kpi_odoo is not None
+    odoo_ready = odoo_org_configured and odoo_kpi_configured
+    if odoo_ready:
+        channels.append("odoo")
+
+    odoo_blockers: list[str] = []
+    if current_user.role == UserRole.SUPER_ADMIN:
+        if not odoo_org_configured:
+            odoo_blockers.append(
+                "Organization Odoo connection is not configured. Save it under Organization → Settings → Odoo integration."
+            )
+        if not odoo_kpi_configured:
+            odoo_blockers.append(
+                "KPI Odoo request body is not configured. Save it on the KPI Fields page under Odoo bulk import."
+            )
+    elif not odoo_ready:
+        odoo_blockers.append(
+            "Odoo is not configured for this KPI. Ask your Super Admin to configure it first."
+        )
+
+    can_configure = current_user.role == UserRole.SUPER_ADMIN
+    return {
+        "import_channel": channel,
+        "channels": sorted(set(channels)),
+        "odoo_ready": odoo_ready,
+        "odoo_org_configured": odoo_org_configured,
+        "odoo_kpi_configured": odoo_kpi_configured,
+        "odoo_blockers": odoo_blockers,
+        "api_configured": bool((cfg.get("multi_items_api_endpoint_url") or "").strip()),
+        "can_configure": can_configure,
+    }
+
+
+@router.post("/multi-items/sync-from-odoo")
+async def sync_multi_items_from_odoo(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    sync_mode: str = Query(
+        "override",
+        description="override = replace existing; append = append rows; upsert = update by match_sub_field_key or add",
+        pattern="^(override|append|upsert)$",
+    ),
+    match_sub_field_key: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Sync multi_line_items from Odoo using org connection + KPI request body + field mappings."""
+    from app.odoo.config_service import get_org_odoo_config, get_kpi_odoo_config
+    from app.odoo.service import (
+        odoo_authenticate,
+        odoo_fetch_items,
+        apply_odoo_field_mappings,
+        apply_odoo_sub_field_mappings,
+    )
+    from app.entries.service import user_can_add_row_multi_line_field, user_can_edit_multi_line_field
+
+    org_id = _org_id(current_user, organization_id)
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry or entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-line field not found")
+
+    can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
+    if not can_add:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to add rows to this field")
+    can_edit = await user_can_edit_multi_line_field(db, current_user.id, entry.kpi_id, field)
+    if not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this field")
+
+    cfg = getattr(field, "config", None) or {}
+    channel = (cfg.get("multi_items_import_channel") or "").strip().lower()
+    if channel != "odoo":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This field is not configured to use Odoo as import channel",
+        )
+
+    org_odoo = await get_org_odoo_config(db, org_id)
+    kpi_odoo = await get_kpi_odoo_config(db, field.kpi_id)
+    if not org_odoo or not kpi_odoo:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Odoo is not fully configured for this organization/KPI")
+
+    try:
+        session_id = await odoo_authenticate(org_odoo)
+        context = {
+            "year": entry.year,
+            "kpi_id": field.kpi_id,
+            "organization_id": org_id,
+            "entry_id": entry.id,
+            "field_id": field.id,
+            "field_key": field.key,
+        }
+        raw_items = await odoo_fetch_items(org_odoo, kpi_odoo, session_id, context)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+
+    sub_keys = {s.key for s in (field.sub_fields or [])}
+    sub_mappings = cfg.get("odoo_sub_field_mappings") or {}
+    if isinstance(sub_mappings, dict) and sub_mappings:
+        item_dicts = apply_odoo_sub_field_mappings(raw_items, sub_mappings, sub_keys)
+    else:
+        mappings = cfg.get("odoo_field_mappings") or {}
+        if not isinstance(mappings, dict):
+            mappings = {}
+        list_indices_raw = cfg.get("odoo_field_list_indices") or {}
+        list_indices: dict[str, int] = {}
+        if isinstance(list_indices_raw, dict):
+            for odoo_key, idx in list_indices_raw.items():
+                if isinstance(idx, int):
+                    list_indices[str(odoo_key)] = idx
+                elif isinstance(idx, str) and idx.isdigit():
+                    list_indices[str(odoo_key)] = int(idx)
+        item_dicts = apply_odoo_field_mappings(raw_items, mappings, sub_keys, list_indices)
+    item_dicts = [
+        dict(x)
+        for x in item_dicts
+        if isinstance(x, dict) and not _is_multi_items_row_effectively_empty(dict(x))
+    ]
+
+    existing_pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+    existing_rows: list[dict] = [r for _, r in existing_pairs] if existing_pairs else []
+
+    effective_mode = (sync_mode or "override").lower()
+    if effective_mode == "upsert":
+        mk = (match_sub_field_key or "").strip()
+        if not mk:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="match_sub_field_key is required when sync_mode=upsert")
+        sub_by_key = {s.key: s for s in (field.sub_fields or [])}
+        if mk not in sub_by_key:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="match_sub_field_key must be a defined sub-field key")
+        match_ft = getattr(sub_by_key[mk], "field_type", None)
+        new_rows, rows_updated, rows_added = _upsert_merge_multi_line_items(
+            existing_rows, item_dicts, mk, match_ft
+        )
+    elif effective_mode == "append":
+        new_rows = existing_rows + item_dicts
+        rows_updated = 0
+        rows_added = len(item_dicts)
+    else:
+        new_rows = item_dicts
+        rows_updated = 0
+        rows_added = len(item_dicts)
+
+    await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await db.commit()
+    out: dict = {"entry_id": entry.id, "field_id": field.id, "rows_imported": len(item_dicts)}
+    if effective_mode == "upsert":
+        out["rows_updated"] = rows_updated
+        out["rows_appended"] = rows_added
+    return out
+
+
 @router.post("/multi-items/import-from-year")
 async def import_multi_items_from_year(
     entry_id: int = Query(...),
@@ -2856,7 +3054,7 @@ async def get_entry_fields(
                 "formula_expression": f.formula_expression,
                 "is_required": f.is_required,
                 "sort_order": f.sort_order,
-                "config": getattr(f, "config", None),
+                "config": _field_config_for_user(getattr(f, "config", None), current_user),
                 "carry_forward_data": getattr(f, "carry_forward_data", False),
                 "full_page_multi_items": getattr(f, "full_page_multi_items", False),
                 "row_level_user_access_enabled": getattr(f, "row_level_user_access_enabled", False),
@@ -2908,7 +3106,7 @@ async def get_entry_fields(
             "formula_expression": f.formula_expression,
             "is_required": f.is_required,
             "sort_order": f.sort_order,
-            "config": getattr(f, "config", None),
+            "config": _field_config_for_user(getattr(f, "config", None), current_user),
             "carry_forward_data": getattr(f, "carry_forward_data", False),
             "full_page_multi_items": getattr(f, "full_page_multi_items", False),
             "row_level_user_access_enabled": getattr(f, "row_level_user_access_enabled", False),

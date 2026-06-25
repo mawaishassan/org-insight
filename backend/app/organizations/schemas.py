@@ -67,6 +67,37 @@ class ExportTokenResponse(BaseModel):
 
 STORAGE_TYPES = ("local", "gcs", "ftp", "s3", "onedrive")
 
+# --- Odoo config (Super Admin, per organization) ---
+
+
+class OdooConfigUpdate(BaseModel):
+    """Create or update organization Odoo connection."""
+
+    login_url: str = Field(..., min_length=1, max_length=2048)
+    data_fetch_url: str = Field(..., min_length=1, max_length=2048)
+    odoo_db: str | None = Field(None, max_length=255, description="Odoo database name for login")
+    username: str = Field(..., min_length=1, max_length=255)
+    password: str | None = Field(
+        None,
+        max_length=512,
+        description="Required on first save. Omit or send *** on update to keep existing password.",
+    )
+
+
+class OdooConfigResponse(BaseModel):
+    """Odoo config (password masked)."""
+
+    organization_id: int
+    configured: bool
+    login_url: str | None = None
+    data_fetch_url: str | None = None
+    odoo_db: str | None = None
+    username: str | None = None
+    password: str = Field(default="***", description="Masked")
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
 # Keys that must be masked in API responses (never log or return raw)
 STORAGE_SECRET_KEYS = frozenset(
     {"password", "secret", "credentials_path", "secret_access_key", "access_key_id", "token", "credentials"}

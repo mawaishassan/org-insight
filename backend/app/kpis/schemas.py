@@ -286,3 +286,62 @@ class KpiFileResponse(BaseModel):
     content_type: str | None
     created_at: str
     download_url: str | None = None  # relative path for download endpoint
+
+
+class KpiOdooConfigUpdate(BaseModel):
+    """KPI-specific Odoo fetch request body (Super Admin only)."""
+
+    request_body: dict | list = Field(..., description="JSON body sent to Odoo data fetch URL")
+    response_items_path: str | None = Field(
+        None,
+        max_length=255,
+        description="Dot path to items list in response, e.g. result.records; default auto-detect",
+    )
+
+
+class KpiOdooConfigResponse(BaseModel):
+    """Full Odoo KPI config (Org Admin)."""
+
+    kpi_id: int
+    configured: bool
+    request_body: dict | list | None = None
+    response_items_path: str | None = None
+
+
+class KpiOdooPreviewRequest(BaseModel):
+    """Optional overrides when previewing Odoo data before saving KPI config."""
+
+    request_body: dict | list | None = None
+    response_items_path: str | None = Field(
+        None,
+        max_length=255,
+        description="Dot path to items list in response; uses saved config when omitted",
+    )
+
+
+class OdooListColumnPart(BaseModel):
+    """One index option for an Odoo column that returns list/tuple values."""
+
+    index: int
+    sample: str
+
+
+class KpiOdooPreviewResponse(BaseModel):
+    """Sample Odoo rows for mapping UI (no credentials)."""
+
+    columns: list[str]
+    sample_rows: list[dict[str, str]]
+    total_rows: int
+    preview_row_count: int
+    preview_column_count: int
+    list_columns: dict[str, list[OdooListColumnPart]] = Field(
+        default_factory=dict,
+        description="Odoo columns with list/tuple values (e.g. many2one [id, name]) and sample parts per index",
+    )
+
+
+class KpiOdooConfigStatus(BaseModel):
+    """Odoo KPI config status for non-admin users (no request body)."""
+
+    kpi_id: int
+    configured: bool
