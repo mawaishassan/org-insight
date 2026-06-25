@@ -9,6 +9,7 @@ import { z } from "zod";
 import { getAccessToken, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
+import { OdooMultiLineImportAdmin } from "@/components/OdooMultiLineImportConfig";
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
   return new URLSearchParams(
@@ -308,10 +309,12 @@ export default function KpiFieldsPage() {
   const [addModalCategorySearch, setAddModalCategorySearch] = useState("");
   const [addModalSelectedIds, setAddModalSelectedIds] = useState<number[]>([]);
   const [addModalSelectedDomainIds, setAddModalSelectedDomainIds] = useState<number[]>([]);
-  type EditTabId = "details" | "fields" | "settings";
+  type EditTabId = "details" | "fields" | "settings" | "odoo";
   const tabFromUrl = searchParams.get("tab") as EditTabId | null;
   const [activeEditTab, setActiveEditTab] = useState<EditTabId>(
-    tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings" ? tabFromUrl : "details"
+    tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings" || tabFromUrl === "odoo"
+      ? tabFromUrl
+      : "details"
   );
   const [settingsPanel, setSettingsPanel] = useState<"order" | "time_dimension" | "entry_mode" | "domain" | "tags" | "danger_zone" | null>(null);
   const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
@@ -342,15 +345,24 @@ export default function KpiFieldsPage() {
   }, [userRole, multiLineFields]);
 
   useEffect(() => {
-    if (tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings") {
+    if (tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings" || tabFromUrl === "odoo") {
       setActiveEditTab(tabFromUrl);
     }
   }, [tabFromUrl]);
 
+  useEffect(() => {
+    if (typeof window === "undefined" || userRole !== "SUPER_ADMIN") return;
+    if (window.location.hash === "#odoo-bulk-import" || tabFromUrl === "odoo") {
+      setActiveEditTab("odoo");
+    }
+  }, [userRole, tabFromUrl]);
+
   const setEditTab = (tab: EditTabId) => {
     setActiveEditTab(tab);
-    if (orgIdFromUrl != null) {
+    const oid = orgIdFromUrl ?? kpi?.organization_id ?? kpiOrgId;
+    if (oid != null) {
       const params = new URLSearchParams(searchParams.toString());
+      params.set("organization_id", String(oid));
       params.set("tab", tab);
       router.replace(`/dashboard/kpis/${kpiId}/fields?${params.toString()}`, { scroll: false });
     }
@@ -898,7 +910,7 @@ export default function KpiFieldsPage() {
   if (!kpiId) return <p>Invalid KPI.</p>;
   if (loading && list.length === 0 && !kpi) return <p>Loading...</p>;
 
-  const isOrgContext = orgIdFromUrl != null && kpi != null;
+  const isOrgContext = kpi != null && (orgIdFromUrl != null || userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN");
 
   const buildMultiLineUpdateFromField = (field: any): UpdateFormData => ({
     name: String(field?.name ?? ""),
@@ -1020,6 +1032,17 @@ export default function KpiFieldsPage() {
             >
               Fields {list.length > 0 && <span style={{ marginLeft: "0.35rem", opacity: 0.8 }}>({list.length})</span>}
             </button>
+            {userRole === "SUPER_ADMIN" && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeEditTab === "odoo"}
+                style={tabButtonStyle(activeEditTab === "odoo")}
+                onClick={() => setEditTab("odoo")}
+              >
+                Odoo import
+              </button>
+            )}
             <button
               type="button"
               role="tab"
@@ -1497,6 +1520,29 @@ export default function KpiFieldsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {isOrgContext && userRole === "SUPER_ADMIN" && activeEditTab === "odoo" && orgId != null && token && (
+        <OdooMultiLineImportAdmin
+          kpiId={kpiId}
+          orgId={orgId}
+          token={token}
+          fieldId={
+            editingId ??
+            list.find((f) => f.field_type === "multi_line_items")?.id
+          }
+          subFields={
+            (list.find((f) => f.id === editingId) || list.find((f) => f.field_type === "multi_line_items"))?.sub_fields?.map((s) => ({
+              key: s.key,
+              name: s.name,
+              field_type: s.field_type,
+              config: s.config ?? null,
+            })) ?? []
+          }
+          fieldConfig={
+            (list.find((f) => f.id === editingId) || list.find((f) => f.field_type === "multi_line_items"))?.config as Record<string, unknown> | null
+          }
+        />
       )}
 
       {(!isOrgContext || activeEditTab === "fields") && (

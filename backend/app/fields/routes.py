@@ -52,6 +52,7 @@ async def get_reference_allowed_values(
     source_kpi_id: int = Query(..., description="KPI id of the source field"),
     source_field_key: str = Query(..., description="Field key of the source field"),
     source_sub_field_key: str | None = Query(None, description="Sub-field key when source is multi_line_items"),
+    year: int | None = Query(None, ge=2000, le=2100, description="Limit reference values to entries for this year"),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -60,7 +61,7 @@ async def get_reference_allowed_values(
     """Return distinct values from a source KPI field (or multi_line_items sub-field) for reference/lookup dropdown."""
     org_id = _org_id(current_user, organization_id)
     from app.entries.service import get_reference_allowed_values as get_allowed
-    values = await get_allowed(db, source_kpi_id, source_field_key, org_id, source_sub_field_key)
+    values = await get_allowed(db, source_kpi_id, source_field_key, org_id, source_sub_field_key, year=year)
     return ReferenceAllowedValuesResponse(values=values)
 
 

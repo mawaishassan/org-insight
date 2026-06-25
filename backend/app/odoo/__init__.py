@@ -1,0 +1,1 @@
+"""Odoo KPI import integration."""

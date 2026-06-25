@@ -62,6 +62,7 @@ const WHERE_OPERATORS = [
 type TabId = "overview" | "domains" | "kpis" | "reports" | "settings";
 type SettingsSubId =
   | "storage"
+  | "odoo"
   | "external_auth"
   | "time_dimension"
   | "tags"
@@ -339,6 +340,7 @@ function ApiContractBlock({ contract }: { contract: ApiContract }) {
 const TAB_IDS: TabId[] = ["overview", "domains", "kpis", "reports", "settings"];
 const SETTINGS_SUB_IDS: SettingsSubId[] = [
   "storage",
+  "odoo",
   "external_auth",
   "time_dimension",
   "tags",
@@ -600,6 +602,10 @@ export default function OrganizationDetailPage() {
           loadOrg={loadOrg}
         />
       )}
+
+      {tab === "settings" && userRole === "ORG_ADMIN" && (
+        <OrgAdminSettingsPage orgId={orgId} token={token!} settingsSub={settingsSub} setSettingsSub={(sub) => { setSettingsSub(sub); updateUrl("settings", sub); }} />
+      )}
     </div>
   );
 }
@@ -724,8 +730,10 @@ function OrganizationOverviewCards({
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
       ),
-      lines: ["Storage, time dimension, tags.", `${summary.tagCount} tag${summary.tagCount !== 1 ? "s" : ""} configured.`],
-      onClick: () => updateUrl("settings", "storage"),
+      lines: userRole === "SUPER_ADMIN"
+        ? ["Storage, Odoo, time dimension, tags.", `${summary.tagCount} tag${summary.tagCount !== 1 ? "s" : ""} configured.`]
+        : ["Odoo bulk import status for your organization.", "Configuration is managed by a Super Admin."],
+      onClick: () => updateUrl("settings", userRole === "SUPER_ADMIN" ? "storage" : "odoo"),
     },
   ];
   return (
@@ -766,6 +774,7 @@ function OrganizationOverviewCards({
 
 const SETTINGS_SUB_LABELS: Record<SettingsSubId, string> = {
   storage: "Storage settings",
+  odoo: "Odoo integration",
   external_auth: "External authentication",
   time_dimension: "Time dimension",
   tags: "Tags settings",
@@ -879,6 +888,7 @@ function SettingsPage({
       </nav>
       <div className="card" style={{ padding: "1.25rem" }}>
         {settingsSub === "storage" && <StorageConfigSection orgId={orgId} token={token} />}
+        {settingsSub === "odoo" && <OdooConfigSection orgId={orgId} token={token} />}
         {settingsSub === "external_auth" && <ExternalAuthConfigSection token={token} />}
         {settingsSub === "time_dimension" && (
           <div>
@@ -938,6 +948,76 @@ function SettingsPage({
         {settingsSub === "api_export" && (
           <ApiExportContent orgId={orgId} token={token} />
         )}
+      </div>
+    </div>
+  );
+}
+
+/** Org Admin: read-only Odoo status + where to configure KPI request bodies (no super-admin endpoints). */
+function OrgAdminSettingsPage({
+  orgId,
+  token,
+  settingsSub,
+  setSettingsSub,
+}: {
+  orgId: number;
+  token: string;
+  settingsSub: SettingsSubId;
+  setSettingsSub: (s: SettingsSubId) => void;
+}) {
+  const orgAdminSubs: SettingsSubId[] = ["odoo"];
+  const [orgOdooConfigured, setOrgOdooConfigured] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    api<{ configured: boolean }>(`/organizations/${orgId}/odoo-config/status`, { token })
+      .then((s) => setOrgOdooConfigured(s.configured))
+      .catch(() => setOrgOdooConfigured(false));
+  }, [orgId, token]);
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: "1.5rem", alignItems: "start" }}>
+      <nav className="card" style={{ padding: "0.5rem 0" }}>
+        {orgAdminSubs.map((sub) => (
+          <button
+            key={sub}
+            type="button"
+            onClick={() => setSettingsSub(sub)}
+            style={{
+              display: "block",
+              width: "100%",
+              padding: "0.6rem 1rem",
+              textAlign: "left",
+              border: "none",
+              background: settingsSub === sub ? "var(--accent-subtle, rgba(0,0,0,0.06))" : "transparent",
+              font: "inherit",
+              fontSize: "0.95rem",
+              color: settingsSub === sub ? "var(--accent)" : "var(--text)",
+              cursor: "pointer",
+              borderLeft: settingsSub === sub ? "3px solid var(--accent)" : "3px solid transparent",
+            }}
+          >
+            {SETTINGS_SUB_LABELS[sub]}
+          </button>
+        ))}
+      </nav>
+      <div className="card" style={{ padding: "1.25rem" }}>
+        <h2 style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>Odoo bulk import</h2>
+        <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
+          Odoo connection and per-KPI import settings are managed by a Super Admin. You can use Odoo bulk import on
+          multi-line entry pages when setup is complete.
+        </p>
+        <p style={{ fontSize: "0.9rem", lineHeight: 1.6, margin: 0 }}>
+          <strong>Organization Odoo connection:</strong>{" "}
+          {orgOdooConfigured === null
+            ? "checking…"
+            : orgOdooConfigured
+              ? "configured"
+              : "not configured — contact your Super Admin"}
+        </p>
+        <p style={{ fontSize: "0.9rem", lineHeight: 1.6, margin: "0.75rem 0 0", color: "var(--muted)" }}>
+          Per-KPI request bodies and field mappings are not shown here. If Odoo import is unavailable on a field, open
+          that field&apos;s bulk upload panel for the current status message.
+        </p>
       </div>
     </div>
   );
@@ -1265,6 +1345,144 @@ const STORAGE_TYPES = [
   { value: "s3", label: "Amazon S3" },
   { value: "onedrive", label: "OneDrive" },
 ] as const;
+
+interface OdooConfigResponse {
+  organization_id: number;
+  configured: boolean;
+  login_url?: string | null;
+  data_fetch_url?: string | null;
+  odoo_db?: string | null;
+  username?: string | null;
+  password?: string;
+}
+
+function OdooConfigSection({ orgId, token }: { orgId: number; token: string }) {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [configured, setConfigured] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [form, setForm] = useState({
+    login_url: "",
+    data_fetch_url: "",
+    odoo_db: "",
+    username: "",
+    password: "",
+  });
+
+  const loadConfig = () => {
+    setLoading(true);
+    api<OdooConfigResponse>(`/organizations/${orgId}/odoo-config`, { token })
+      .then((c) => {
+        setConfigured(!!c.configured);
+        if (c.configured) {
+          setForm({
+            login_url: c.login_url || "",
+            data_fetch_url: c.data_fetch_url || "",
+            odoo_db: c.odoo_db || "",
+            username: c.username || "",
+            password: "",
+          });
+        }
+      })
+      .catch((err) => {
+        setConfigured(false);
+        setMessage(err instanceof Error ? err.message : "Failed to load Odoo settings");
+      })
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadConfig();
+  }, [orgId, token]);
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!configured && !form.password.trim()) {
+      setMessage("Password is required when saving Odoo settings for the first time.");
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    const payload: Record<string, string | null> = {
+      login_url: form.login_url.trim(),
+      data_fetch_url: form.data_fetch_url.trim(),
+      odoo_db: form.odoo_db.trim() || null,
+      username: form.username.trim(),
+    };
+    if (form.password.trim()) {
+      payload.password = form.password.trim();
+    }
+    api<OdooConfigResponse>(`/organizations/${orgId}/odoo-config`, {
+      method: "PATCH",
+      token,
+      body: JSON.stringify(payload),
+    })
+      .then((c) => {
+        setConfigured(!!c.configured);
+        setMessage(`Odoo settings saved for organization #${orgId}.`);
+        toast.success("Odoo settings saved");
+        loadConfig();
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : "Failed to save";
+        setMessage(msg);
+        toast.error(msg);
+      })
+      .finally(() => setSaving(false));
+  };
+
+  if (loading) return <p style={{ color: "var(--muted)" }}>Loading Odoo config…</p>;
+
+  return (
+    <div style={{ maxWidth: "36rem" }}>
+      <h2 style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>Odoo connection</h2>
+      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.5rem" }}>
+        Organization ID: <strong>{orgId}</strong>
+        {configured ? (
+          <span style={{ marginLeft: "0.75rem", color: "var(--accent, green)" }}>● Configured</span>
+        ) : (
+          <span style={{ marginLeft: "0.75rem", color: "var(--muted)" }}>○ Not configured yet</span>
+        )}
+      </p>
+      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
+        Configure Odoo login and data fetch URLs for KPI multi-line bulk import. Credentials are used server-side only.
+      </p>
+      <form onSubmit={handleSave}>
+        <div className="form-group">
+          <label>Odoo login URL</label>
+          <input value={form.login_url} onChange={(e) => setForm((p) => ({ ...p, login_url: e.target.value }))} required style={{ width: "100%" }} />
+        </div>
+        <div className="form-group">
+          <label>Odoo data fetch URL</label>
+          <input value={form.data_fetch_url} onChange={(e) => setForm((p) => ({ ...p, data_fetch_url: e.target.value }))} required style={{ width: "100%" }} />
+        </div>
+        <div className="form-group">
+          <label>Odoo database (optional)</label>
+          <input value={form.odoo_db} onChange={(e) => setForm((p) => ({ ...p, odoo_db: e.target.value }))} style={{ width: "100%" }} />
+        </div>
+        <div className="form-group">
+          <label>Username</label>
+          <input value={form.username} onChange={(e) => setForm((p) => ({ ...p, username: e.target.value }))} required style={{ width: "100%" }} />
+        </div>
+        <div className="form-group">
+          <label>Password{!configured ? " *" : ""}</label>
+          <input
+            type="password"
+            value={form.password}
+            onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
+            placeholder={configured ? "Leave blank to keep existing password" : "Required on first save"}
+            required={!configured}
+            style={{ width: "100%" }}
+          />
+        </div>
+        {message && <p style={{ fontSize: "0.9rem", marginBottom: "0.75rem" }}>{message}</p>}
+        <button type="submit" className="btn btn-primary" disabled={saving}>
+          {saving ? "Saving…" : "Save Odoo settings"}
+        </button>
+      </form>
+    </div>
+  );
+}
 
 interface StorageConfigResponse {
   organization_id: number;
