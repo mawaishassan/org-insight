@@ -7,7 +7,7 @@ import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { makeAttachmentCellValue } from "@/lib/attachmentCellValue";
 import { AttachmentFieldControl } from "@/components/AttachmentFieldControl";
-import { toast } from "react-toastify";
+import toast from "react-hot-toast";
 import MultiReferenceInput from "@/components/MultiReferenceInput";
 import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
 
@@ -807,6 +807,18 @@ export default function MultiItemRowDetail() {
     );
   };
 
+  const getMissingRequiredFields = () => {
+    return subFields.filter((sf) => {
+      if (!sf.is_required || sf.can_edit === false) return false;
+      const val = editData[sf.key];
+      if (sf.field_type === "boolean") return false;
+      if (sf.field_type === "multi_reference" || Array.isArray(val)) {
+        return !Array.isArray(val) || val.filter((x) => x != null && String(x).trim() !== "").length === 0;
+      }
+      return val == null || String(val).trim() === "";
+    });
+  };
+
   const handleSave = async () => {
     if (!token) {
       toast.error("Session expired. Please log in again.");
@@ -815,6 +827,11 @@ export default function MultiItemRowDetail() {
     }
     if (!entryId || !fieldId) {
       toast.error("Entry is still loading. Please wait and try again.");
+      return;
+    }
+    const missing = getMissingRequiredFields();
+    if (missing.length > 0) {
+      toast.error(`Please fill required field${missing.length > 1 ? "s" : ""}: ${missing.map((f) => f.name).join(", ")}`);
       return;
     }
     setSaving(true);
@@ -904,111 +921,38 @@ export default function MultiItemRowDetail() {
                   )}
                 </span>
               </div>
-              {!isNew && (
-                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                  {isEditMode ? (
-                    <>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                {isEditMode ? (
+                  <>
+                    {!isNew && (
                       <button type="button" className="btn" onClick={exitEditMode} disabled={saving}>
                         Cancel
                       </button>
-                      <button type="button" className="btn btn-primary" disabled={saving || !entryId} onClick={handleSave}>
-                        {saving ? "Saving..." : "Save"}
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() => {
-                        const next = new URLSearchParams(searchParams.toString());
-                        next.set("mode", "edit");
-                        router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${next.toString()}`);
-                      }}
-                    >
-                      Edit
+                    )}
+                    <button type="button" className="btn btn-primary" disabled={saving || !entryId} onClick={handleSave}>
+                      {saving ? "Saving..." : "Save"}
                     </button>
-                  )}
-                  {!isEditMode ? (
-                    <button type="button" className="btn" onClick={handleDelete} style={{ color: "var(--error)" }}>
-                      Delete
-                    </button>
-                  ) : null}
-                </div>
-              )}
-            </div>
-
-
-            {/* Summary strip with a few key attributes */}
-            {subFields.length > 0 && (
-              <div
-                style={{
-                  marginBottom: "0.75rem",
-                  padding: "0.5rem 0.75rem",
-                  borderRadius: 6,
-                  background: "var(--bg-subtle, #f9fafb)",
-                  border: "1px solid var(--border)",
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                  gap: "0.5rem 1rem",
-                }}
-              >
-                {subFields.slice(0, 4).map((sf) => {
-                  const key = sf.key;
-                  const val = editData[key];
-                  let display: string;
-                  if (sf.field_type === "boolean") {
-                    display = Boolean(val) ? "Yes" : "No";
-                  } else if (sf.field_type === "date") {
-                    display = typeof val === "string" && val ? val : "—";
-                  } else if (sf.field_type === "number") {
-                    display =
-                      typeof val === "number"
-                        ? String(val)
-                        : val != null
-                        ? String(val)
-                        : "—";
-                  } else if (sf.field_type === "multi_reference") {
-                    const arr = Array.isArray(val) ? (val as unknown[]).filter((x) => x != null && String(x).trim() !== "") : [];
-                    display = arr.length > 0 ? arr.map((x) => String(x)).join("; ") : "—";
-                  } else if (sf.field_type === "mixed_list") {
-                    const arr = Array.isArray(val) ? (val as unknown[]).filter((x) => x != null && String(x).trim() !== "") : [];
-                    display = arr.length > 0 ? arr.map((x) => String(x)).join("; ") : "—";
-                  } else {
-                    display = val != null && String(val).trim() !== "" ? String(val) : "—";
-                  }
-                  return (
-                    <div key={key} style={{ minWidth: 0 }}>
-                      <div
-                        style={{
-                          fontSize: "0.75rem",
-                          textTransform: "uppercase",
-                          color: "var(--muted)",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                        title={sf.name}
-                      >
-                        {sf.name}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: "0.9rem",
-                          fontWeight: 500,
-                          color: "var(--text)",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                        title={display}
-                      >
-                        {display}
-                      </div>
-                    </div>
-                  );
-                })}
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      const next = new URLSearchParams(searchParams.toString());
+                      next.set("mode", "edit");
+                      router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${next.toString()}`);
+                    }}
+                  >
+                    Edit
+                  </button>
+                )}
+                {!isNew && (
+                  <button type="button" className="btn" onClick={handleDelete} style={{ color: "var(--error)" }} disabled={saving}>
+                    Delete
+                  </button>
+                )}
               </div>
-            )}
+            </div>
 
             {hasSectionTabs && (
               <div
