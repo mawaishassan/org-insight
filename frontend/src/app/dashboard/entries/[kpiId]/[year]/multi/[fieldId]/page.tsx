@@ -13,6 +13,7 @@ import {
   postFormDataWithUploadProgress,
 } from "@/lib/api";
 import { getAttachmentDisplayName, getAttachmentUrl } from "@/lib/attachmentCellValue";
+import { downloadBlob } from "@/lib/download";
 import toast from "react-hot-toast";
 import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
 import {
@@ -41,6 +42,57 @@ function truncateLabel(label: string, max = 48): string {
   const s = String(label ?? "");
   if (s.length <= max) return s;
   return s.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
+}
+
+/** Strip characters invalid in Windows/Excel filenames and trim whitespace (does not touch extension or internal spaces). */
+function sanitizeFileNameInput(name: string): string {
+  return String(name ?? "").replace(/[\\/:*?"<>|]+/g, "").trim();
+}
+
+/** Default export file name base (no extension) from the Multi Line Item's own name, e.g. "Research Publications" -> "Research_Publications_2026". */
+function defaultExportFileNameBase(multiLineItemName: string, year: number): string {
+  const cleaned = sanitizeFileNameInput(multiLineItemName).replace(/\s+/g, "_");
+  return `${cleaned || "Export"}_${year}`;
+}
+
+/** Resolve the final file name from user input for the given export format: sanitize, fall back
+ * to the default when empty, ensure the correct extension is present exactly once. */
+function resolveExportFileName(input: string, defaultBase: string, ext: "xlsx" | "pdf"): string {
+  let base = sanitizeFileNameInput(input);
+  if (!base) base = defaultBase;
+  const suffix = `.${ext}`;
+  if (!base.toLowerCase().endsWith(suffix)) base = `${base}${suffix}`;
+  return base;
+}
+
+const DEFAULT_PDF_HEADER_COLOR = "#2563eb";
+
+/** Max columns a PDF export can hold before it's considered unreadable (mirrored server-side in
+ * entries/routes.py's export endpoint as a defense-in-depth check with the same value). */
+const MAX_PDF_COLUMNS = 10;
+
+const PDF_TOO_MANY_COLUMNS_MESSAGE =
+  "You have selected too many columns for a readable PDF. Please deselect some columns before exporting.";
+
+const PDF_HEADER_COLOR_PRESETS: { name: string; value: string }[] = [
+  { name: "Blue", value: "#2563eb" },
+  { name: "Green", value: "#16a34a" },
+  { name: "Gray", value: "#4b5563" },
+  { name: "Black", value: "#111827" },
+  { name: "Purple", value: "#7c3aed" },
+];
+
+/** Black or white text for readable contrast against a hex background — mirrors the backend's
+ * _contrasting_text_color() heuristic exactly, so the dialog preview matches the actual PDF. */
+function contrastTextColor(hex: string): string {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(hex);
+  if (!m) return "#ffffff";
+  const int = parseInt(m[1], 16);
+  const r = ((int >> 16) & 255) / 255;
+  const g = ((int >> 8) & 255) / 255;
+  const b = (int & 255) / 255;
+  const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+  return luminance < 0.6 ? "#ffffff" : "#000000";
 }
 
 const MULTI_ITEM_WHERE_OPS = [
@@ -453,6 +505,8 @@ export default function FullPageMultiItems() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
+  const [exportingXlsx, setExportingXlsx] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
   const [downloadingTemplate, setDownloadingTemplate] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editData, setEditData] = useState<Record<string, unknown>>({});
@@ -464,9 +518,13 @@ export default function FullPageMultiItems() {
   const [uploadElapsedClock, setUploadElapsedClock] = useState<string | null>(null);
   const bulkUploadTickRef = useRef<number | null>(null);
 
-  const pageBusy = exportingCsv || downloadingTemplate || loading || uploading || saving;
+  const pageBusy = exportingCsv || exportingXlsx || exportingPdf || downloadingTemplate || loading || uploading || saving;
   const busyLabel = exportingCsv
     ? "Exporting CSV…"
+    : exportingXlsx
+      ? "Exporting Excel…"
+    : exportingPdf
+      ? "Exporting PDF…"
     : downloadingTemplate
       ? "Downloading template…"
     : uploading
@@ -523,6 +581,15 @@ export default function FullPageMultiItems() {
   const [showColumnsPopup, setShowColumnsPopup] = useState(false);
   const [columnsPopupSearch, setColumnsPopupSearch] = useState("");
   const [columnsPopupDraft, setColumnsPopupDraft] = useState<string[]>([]);
+  const [showExportDialog, setShowExportDialog] = useState(false);
+  const [exportFormat, setExportFormat] = useState<"xlsx" | "pdf">("xlsx");
+  const [exportMode, setExportMode] = useState<"all" | "selected">("all");
+  const [exportSelectedKeys, setExportSelectedKeys] = useState<string[]>([]);
+  const [exportColumnsSearch, setExportColumnsSearch] = useState("");
+  const [exportFileName, setExportFileName] = useState("");
+  const [pdfHeaderColor, setPdfHeaderColor] = useState(DEFAULT_PDF_HEADER_COLOR);
+  const [pdfTitle, setPdfTitle] = useState("");
+  const [pdfSubtitle, setPdfSubtitle] = useState("");
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const [maxAutoColumns, setMaxAutoColumns] = useState<number>(5);
   const [manualColumnsMode, setManualColumnsMode] = useState(false);
@@ -530,6 +597,7 @@ export default function FullPageMultiItems() {
   const [kpiLevelCanEdit, setKpiLevelCanEdit] = useState<boolean>(false);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [canAddRow, setCanAddRow] = useState<boolean>(false);
+  const [canExport, setCanExport] = useState<boolean>(false);
   const [rowAccessModal, setRowAccessModal] = useState<{ rowIndex: number; preview: string } | null>(null);
   const [rowAccessUsers, setRowAccessUsers] = useState<RowAccessUser[]>([]);
   const [rowAccessAssignments, setRowAccessAssignments] = useState<{ id: number; full_name: string | null; username: string }[]>([]);
@@ -549,6 +617,7 @@ export default function FullPageMultiItems() {
   const isSuperAdmin = userRole === "SUPER_ADMIN";
   const canManageRowAccess = isAdmin;
   const canAddRowEffective = canAddRow || isAdmin;
+  const canExportEffective = canExport || isAdmin;
 
   const effectiveOrgId = useMemo(
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
@@ -646,6 +715,7 @@ export default function FullPageMultiItems() {
         can_edit: boolean;
         kpi_level_can_edit: boolean;
         can_add_row: boolean;
+        can_export: boolean;
       }>(
         `/entries/multi-items/page-context?${new URLSearchParams({
           kpi_id: String(kpiId),
@@ -667,6 +737,7 @@ export default function FullPageMultiItems() {
       setCanEditKpi(ctx?.can_edit !== false);
       setKpiLevelCanEdit(ctx?.kpi_level_can_edit === true);
       setCanAddRow(ctx?.can_add_row === true);
+      setCanExport(ctx?.can_export === true);
     } catch (e) {
       if (loadId === multiPageContextLoadGenRef.current) {
         setError(e instanceof Error ? e.message : "Failed to load context");
@@ -756,6 +827,89 @@ export default function FullPageMultiItems() {
     await loadRows({ force: true });
   };
 
+  /** Same search/sort/filter params sent to /multi-items/rows (the grid), plus column
+   * selection/order, so exports contain exactly what's currently displayed. No page/page_size:
+   * export always covers every filtered row, not just the current page.
+   * `columnKeys` (when provided) overrides the default "all columns currently in the grid"
+   * set — used by the Export Options dialog's "Selected columns" mode.
+   * `fileName` (when provided) is sent as the desired download name (Export Options dialog).
+   * `headerColor`/`pdfTitle`/`pdfSubtitle` (PDF only) apply to this export only — none of them
+   * are persisted anywhere, matching "does not modify any application settings". */
+  const buildExportQueryParams = (
+    format: "csv" | "xlsx" | "pdf",
+    columnKeys?: string[],
+    fileName?: string,
+    headerColor?: string,
+    pdfTitleParam?: string,
+    pdfSubtitleParam?: string
+  ) => {
+    const params = new URLSearchParams({
+      entry_id: String(entryId),
+      field_id: String(fieldId),
+      organization_id: String(effectiveOrgId ?? ""),
+      sort_dir: sortDir,
+      format,
+    });
+    if (appliedSearch.trim()) params.set("search", appliedSearch.trim());
+    if (sortBy) params.set("sort_by", sortBy);
+    if (appliedFilter && appliedFilter.conditions.length > 0) {
+      params.set("filters", JSON.stringify(appliedFilter));
+    }
+    const cols = columnKeys ?? gridOrderedVisibleKeys;
+    if (cols.length > 0) params.set("columns", cols.join(","));
+    if (fileName && fileName.trim()) params.set("filename", fileName.trim());
+    if (format === "pdf" && headerColor) params.set("pdf_header_color", headerColor);
+    if (format === "pdf" && pdfTitleParam && pdfTitleParam.trim()) params.set("pdf_title", pdfTitleParam.trim());
+    if (format === "pdf" && pdfSubtitleParam && pdfSubtitleParam.trim()) {
+      params.set("pdf_subtitle", pdfSubtitleParam.trim());
+    }
+    return params;
+  };
+
+  const runExport = async (
+    format: "csv" | "xlsx" | "pdf",
+    columnKeys?: string[],
+    fileName?: string,
+    headerColor?: string,
+    pdfTitleParam?: string,
+    pdfSubtitleParam?: string
+  ) => {
+    if (!token || !entryId || !fieldId || effectiveOrgId == null) return;
+    const setBusy = format === "xlsx" ? setExportingXlsx : format === "pdf" ? setExportingPdf : setExportingCsv;
+    setBusy(true);
+    try {
+      const params = buildExportQueryParams(format, columnKeys, fileName, headerColor, pdfTitleParam, pdfSubtitleParam);
+      const url = getApiUrl(`/entries/multi-items/export?${params.toString()}`);
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.status === 401) {
+        clearTokens();
+        toast.error("Session expired. Please log in again.");
+        router.push("/login");
+        return;
+      }
+      if (res.status === 403) {
+        toast.error("You don't have permission to export this data.");
+        return;
+      }
+      if (!res.ok) {
+        toast.error("Export failed");
+        return;
+      }
+      const blob = await res.blob();
+      // The backend echoes the same resolved name via Content-Disposition, but that header
+      // isn't readable client-side across the cross-origin dev API (no CORS expose_headers) —
+      // use the name we already resolved and sent, so the saved file always matches it exactly.
+      const downloadName = fileName && fileName.trim() ? fileName.trim() : `multi_items_${fieldId}_${year}.${format}`;
+      downloadBlob(blob, downloadName);
+      const formatLabel = format === "xlsx" ? "Excel" : format === "pdf" ? "PDF" : "CSV";
+      toast.success(`${formatLabel} file downloaded`);
+    } catch {
+      toast.error("Export failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!token || effectiveOrgId == null) return;
     loadContext().catch(() => undefined);
@@ -771,6 +925,34 @@ export default function FullPageMultiItems() {
   }, [kpiId, fieldId, year, effectiveOrgId, periodKey]);
 
   const subFields = field?.sub_fields ?? [];
+
+  /** Columns currently shown in the grid, in the grid's actual display order (the table always
+   * renders subFields in field-defined order, filtered to visibleColumns — never the picker's
+   * possibly-different toggle order). This is the "columns currently in the Multi Line Item grid"
+   * both export modes are defined relative to. */
+  const gridOrderedVisibleKeys = useMemo(
+    () =>
+      subFields
+        .filter((sf) => visibleColumns.length === 0 || visibleColumns.includes(sf.key))
+        .map((sf) => sf.key),
+    [subFields, visibleColumns]
+  );
+
+  /** Every sub-field defined for this Multi Line Item, in field-defined order — independent of
+   * the grid's currently-visible/auto-fit column subset (visibleColumns only limits what's
+   * rendered on screen; it is not the exportable column set). Used by the Export dialog, which
+   * must offer every configured field regardless of grid display limits. */
+  const allFieldColumnKeys = useMemo(() => subFields.map((sf) => sf.key), [subFields]);
+
+  /** Default PDF title/sub-header — mirrors the backend's own fallback exactly (title = the
+   * Multi Line Item's name; sub-header = KPI name + year), shown pre-filled in the Export
+   * dialog so the user sees sensible text immediately but can freely override it per export. */
+  const defaultPdfTitle = field?.name || kpiName || "Export";
+  const defaultPdfSubtitle = kpiName && kpiName !== defaultPdfTitle ? `${kpiName} · ${year}` : String(year);
+
+  /** PDF is capped at MAX_PDF_COLUMNS — beyond that the table would be too cramped to read.
+   * Checked in real time as the user (de)selects columns, not just at submit time. */
+  const pdfTooManyColumnsSelected = exportFormat === "pdf" && exportSelectedKeys.length > MAX_PDF_COLUMNS;
 
   useEffect(() => {
     if (!token || effectiveOrgId == null || !showFilterPanel) return;
@@ -1429,6 +1611,30 @@ export default function FullPageMultiItems() {
               {visibleColumns.length > 0 && (
                 <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>({visibleColumns.length})</span>
               )}
+            </button>
+          )}
+          {canExportEffective && (
+            <button
+              type="button"
+              className="btn"
+              disabled={pageBusy}
+              title="Export the currently filtered rows"
+              onClick={() => {
+                setExportFormat("xlsx");
+                setExportMode("all");
+                // Default to the columns currently visible in the grid (not every column defined
+                // for the field) — the user is already working with these, and it keeps the PDF
+                // selection under MAX_PDF_COLUMNS in the common case so the dialog opens valid.
+                setExportSelectedKeys([...gridOrderedVisibleKeys]);
+                setExportColumnsSearch("");
+                setExportFileName(`${defaultExportFileNameBase(field?.name || kpiName || "Export", year)}.xlsx`);
+                setPdfHeaderColor(DEFAULT_PDF_HEADER_COLOR);
+                setPdfTitle(defaultPdfTitle);
+                setPdfSubtitle(defaultPdfSubtitle);
+                setShowExportDialog(true);
+              }}
+            >
+              {exportingXlsx || exportingPdf ? "Exporting…" : "Export"}
             </button>
           )}
         </div>
@@ -2846,6 +3052,342 @@ export default function FullPageMultiItems() {
             </div>
           </>
         )}
+        {showExportDialog && (
+          <>
+            <div
+              role="presentation"
+              style={{
+                position: "fixed",
+                inset: 0,
+                background: "rgba(0,0,0,0.35)",
+                zIndex: 1000,
+              }}
+              onClick={() => setShowExportDialog(false)}
+            />
+            <div
+              role="dialog"
+              aria-label="Export"
+              style={{
+                position: "fixed",
+                left: "50%",
+                top: "50%",
+                transform: "translate(-50%, -50%)",
+                zIndex: 1001,
+                background: "var(--bg, #fff)",
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+                width: "min(460px, 92vw)",
+                maxHeight: "min(620px, 88vh)",
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ padding: "0.85rem 1.1rem", borderBottom: "1px solid var(--border)", fontWeight: 600, flex: "0 0 auto" }}>
+                Export
+              </div>
+
+              <div style={{ flex: "1 1 auto", overflowY: "auto", padding: "1rem 1.1rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <div style={{ display: "flex", gap: "1rem" }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.35rem" }}>
+                      Format
+                    </label>
+                    <div style={{ display: "flex", gap: "0.5rem" }}>
+                      {(["xlsx", "pdf"] as const).map((fmt) => (
+                        <button
+                          key={fmt}
+                          type="button"
+                          className={exportFormat === fmt ? "btn btn-primary" : "btn"}
+                          style={{ flex: 1, padding: "0.4rem 0.5rem", fontSize: "0.85rem" }}
+                          onClick={() => {
+                            setExportFormat(fmt);
+                            // PDF only supports "selected columns" (an all-columns PDF is unreadable).
+                            if (fmt === "pdf" && exportMode === "all") setExportMode("selected");
+                            setExportFileName((prev) => {
+                              const base = prev.replace(/\.(xlsx|pdf)$/i, "");
+                              return `${base}.${fmt}`;
+                            });
+                          }}
+                        >
+                          {fmt === "xlsx" ? "Excel" : "PDF"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.35rem" }}>
+                    File name
+                  </label>
+                  <input
+                    type="text"
+                    value={exportFileName}
+                    onChange={(e) => setExportFileName(e.target.value)}
+                    placeholder={`${defaultExportFileNameBase(field?.name || kpiName || "Export", year)}.${exportFormat}`}
+                    style={{
+                      width: "100%",
+                      padding: "0.4rem 0.6rem",
+                      borderRadius: 6,
+                      border: "1px solid var(--border)",
+                      fontSize: "0.85rem",
+                    }}
+                  />
+                </div>
+
+                {exportFormat === "xlsx" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.85rem" }}>
+                      <input
+                        type="radio"
+                        name="export-mode"
+                        checked={exportMode === "all"}
+                        onChange={() => setExportMode("all")}
+                      />
+                      <span>
+                        All columns
+                        <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}> ({allFieldColumnKeys.length} total)</span>
+                      </span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.85rem" }}>
+                      <input
+                        type="radio"
+                        name="export-mode"
+                        checked={exportMode === "selected"}
+                        onChange={() => setExportMode("selected")}
+                      />
+                      <span>Selected columns</span>
+                    </label>
+                  </div>
+                )}
+
+                {exportFormat === "pdf" && (
+                  <div style={{ display: "flex", gap: "0.75rem" }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.35rem" }}>
+                        PDF header
+                      </label>
+                      <input
+                        type="text"
+                        value={pdfTitle}
+                        onChange={(e) => setPdfTitle(e.target.value)}
+                        placeholder={defaultPdfTitle}
+                        style={{ width: "100%", padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label
+                        style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.35rem" }}
+                        title="An explanatory line shown just above the table"
+                      >
+                        PDF sub-header
+                      </label>
+                      <input
+                        type="text"
+                        value={pdfSubtitle}
+                        onChange={(e) => setPdfSubtitle(e.target.value)}
+                        placeholder={defaultPdfSubtitle}
+                        title="An explanatory line shown just above the table"
+                        style={{ width: "100%", padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {exportFormat === "pdf" && (
+                  <div>
+                    <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.35rem" }}>
+                      Header color
+                    </label>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", flexWrap: "wrap" }}>
+                      {PDF_HEADER_COLOR_PRESETS.map((preset) => (
+                        <button
+                          key={preset.value}
+                          type="button"
+                          title={preset.name}
+                          aria-label={preset.name}
+                          onClick={() => setPdfHeaderColor(preset.value)}
+                          style={{
+                            width: 22,
+                            height: 22,
+                            borderRadius: "50%",
+                            background: preset.value,
+                            border:
+                              pdfHeaderColor.toLowerCase() === preset.value.toLowerCase()
+                                ? "2px solid var(--text)"
+                                : "1px solid var(--border)",
+                            boxShadow: pdfHeaderColor.toLowerCase() === preset.value.toLowerCase() ? "0 0 0 2px var(--bg, #fff)" : "none",
+                            cursor: "pointer",
+                            padding: 0,
+                          }}
+                        />
+                      ))}
+                      <input
+                        type="color"
+                        value={/^#[0-9a-fA-F]{6}$/.test(pdfHeaderColor) ? pdfHeaderColor : DEFAULT_PDF_HEADER_COLOR}
+                        onChange={(e) => setPdfHeaderColor(e.target.value)}
+                        title="Custom color"
+                        style={{ width: 26, height: 22, padding: 0, border: "1px solid var(--border)", borderRadius: 4, cursor: "pointer" }}
+                      />
+                      <span
+                        style={{
+                          marginLeft: "0.15rem",
+                          padding: "0.2rem 0.6rem",
+                          borderRadius: 6,
+                          background: pdfHeaderColor,
+                          color: contrastTextColor(pdfHeaderColor),
+                          fontSize: "0.75rem",
+                          fontWeight: 600,
+                        }}
+                      >
+                        Preview
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {(exportFormat === "pdf" || exportMode === "selected") && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", minHeight: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                      <input
+                        type="text"
+                        placeholder="Search columns..."
+                        value={exportColumnsSearch}
+                        onChange={(e) => setExportColumnsSearch(e.target.value)}
+                        style={{
+                          flex: "1 1 160px",
+                          padding: "0.35rem 0.55rem",
+                          borderRadius: 6,
+                          border: "1px solid var(--border)",
+                          fontSize: "0.85rem",
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
+                        onClick={() => setExportSelectedKeys([...allFieldColumnKeys])}
+                      >
+                        Select all
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
+                        onClick={() => setExportSelectedKeys([])}
+                      >
+                        Deselect all
+                      </button>
+                      <span
+                        style={{
+                          fontSize: "0.75rem",
+                          color: pdfTooManyColumnsSelected ? "var(--error, #dc2626)" : "var(--muted)",
+                          fontWeight: pdfTooManyColumnsSelected ? 600 : 400,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {exportSelectedKeys.length}/{allFieldColumnKeys.length} selected
+                        {exportFormat === "pdf" && ` (max ${MAX_PDF_COLUMNS})`}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        border: "1px solid var(--border)",
+                        borderRadius: 6,
+                        padding: "0.25rem 0.6rem",
+                      }}
+                    >
+                      {allFieldColumnKeys
+                        .map((key) => subFields.find((sf) => sf.key === key))
+                        .filter((sf): sf is SubField => {
+                          if (!sf) return false;
+                          const q = exportColumnsSearch.trim().toLowerCase();
+                          if (!q) return true;
+                          return sf.name.toLowerCase().includes(q) || (sf.key || "").toLowerCase().includes(q);
+                        })
+                        .map((sf) => {
+                          const selected = exportSelectedKeys.includes(sf.key);
+                          return (
+                            <label
+                              key={sf.key}
+                              style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.3rem 0", cursor: "pointer", fontSize: "0.85rem" }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={(e) => {
+                                  setExportSelectedKeys((prev) =>
+                                    e.target.checked ? [...prev, sf.key] : prev.filter((k) => k !== sf.key)
+                                  );
+                                }}
+                              />
+                              <span>{sf.name}</span>
+                              {sf.key && sf.key !== sf.name && (
+                                <span style={{ fontSize: "0.7rem", color: "var(--muted)" }}>({sf.key})</span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      {allFieldColumnKeys.length === 0 && (
+                        <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.4rem 0" }}>No columns available.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ flex: "0 0 auto", borderTop: "1px solid var(--border)", padding: "0.75rem 1.1rem" }}>
+                {pdfTooManyColumnsSelected && (
+                  <div
+                    style={{
+                      marginBottom: "0.6rem",
+                      padding: "0.5rem 0.65rem",
+                      borderRadius: 6,
+                      background: "var(--error-muted, #fef2f2)",
+                      border: "1px solid var(--error, #dc2626)",
+                      color: "var(--error, #dc2626)",
+                      fontSize: "0.8rem",
+                    }}
+                  >
+                    {PDF_TOO_MANY_COLUMNS_MESSAGE}
+                  </div>
+                )}
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+                  <button type="button" className="btn" onClick={() => setShowExportDialog(false)}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={
+                      ((exportFormat === "pdf" || exportMode === "selected") && exportSelectedKeys.length === 0) ||
+                      pdfTooManyColumnsSelected
+                    }
+                    onClick={() => {
+                      if (pdfTooManyColumnsSelected) {
+                        toast.error(PDF_TOO_MANY_COLUMNS_MESSAGE);
+                        return;
+                      }
+                      const usesAllColumns = exportFormat === "xlsx" && exportMode === "all";
+                      const cols = usesAllColumns
+                        ? allFieldColumnKeys
+                        : allFieldColumnKeys.filter((k) => exportSelectedKeys.includes(k));
+                      const defaultBase = defaultExportFileNameBase(field?.name || kpiName || "Export", year);
+                      const resolvedFileName = resolveExportFileName(exportFileName, defaultBase, exportFormat);
+                      setShowExportDialog(false);
+                      void runExport(exportFormat, cols, resolvedFileName, pdfHeaderColor, pdfTitle, pdfSubtitle);
+                    }}
+                  >
+                    Export
+                  </button>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
         {loading ? (
           <p style={{ color: "var(--muted)" }}>Loading rows…</p>
         ) : rows.length === 0 ? (
@@ -3216,45 +3758,7 @@ export default function FullPageMultiItems() {
                 type="button"
                 className="btn"
                 disabled={pageBusy}
-                onClick={async () => {
-                  if (!token || !entryId || !fieldId || effectiveOrgId == null) return;
-                  setExportingCsv(true);
-                  try {
-                    const params = new URLSearchParams({
-                      entry_id: String(entryId),
-                      field_id: String(fieldId),
-                      organization_id: String(effectiveOrgId),
-                      sort_dir: sortDir,
-                    });
-                    if (appliedSearch.trim()) params.set("search", appliedSearch.trim());
-                    if (sortBy) params.set("sort_by", sortBy);
-                    if (appliedFilter && appliedFilter.conditions.length > 0) {
-                      params.set("filters", JSON.stringify(appliedFilter));
-                    }
-                    const url = getApiUrl(`/entries/multi-items/export?${params.toString()}`);
-                    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-                    if (res.status === 401 || res.status === 403) {
-                      clearTokens();
-                      toast.error("Session expired. Please log in again.");
-                      router.push("/login");
-                      return;
-                    }
-                    if (!res.ok) {
-                      toast.error("Export failed");
-                      return;
-                    }
-                    const blob = await res.blob();
-                    const a = document.createElement("a");
-                    a.href = URL.createObjectURL(blob);
-                    a.download = `multi_items_${fieldId}_${year}.csv`;
-                    a.click();
-                    URL.revokeObjectURL(a.href);
-                  } catch {
-                    toast.error("Export failed");
-                  } finally {
-                    setExportingCsv(false);
-                  }
-                }}
+                onClick={() => runExport("csv")}
               >
                 {exportingCsv ? "Exporting…" : `Export CSV (${total})`}
               </button>

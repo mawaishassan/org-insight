@@ -1156,6 +1156,46 @@ async def user_can_delete_row(
     return False
 
 
+async def get_user_row_edit_map(
+    db: AsyncSession, user_id: int, entry_id: int, field_id: int
+) -> dict[int, bool]:
+    """Batch-load {row_index: can_edit} from KpiMultiLineRowAccess for one user/entry/field (single query).
+
+    Used to determine both row *visibility* (row-level access enabled ⇒ only rows with an
+    access record are visible, mirroring list_multi_items_rows) and per-row edit rights,
+    without the N+1 cost of calling user_can_edit_row() once per row.
+    """
+    res = await db.execute(
+        select(KpiMultiLineRowAccess.row_index, KpiMultiLineRowAccess.can_edit).where(
+            KpiMultiLineRowAccess.user_id == user_id,
+            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    return {int(row_index): bool(can_edit) for row_index, can_edit in res.all()}
+
+
+async def user_can_export_multi_line_field(
+    db: AsyncSession, user_id: int, kpi_id: int, entry_id: int, field: "KPIField"
+) -> bool:
+    """True if the user may export this multi_line_items field's rows.
+
+    - Org/Super admin: always allowed.
+    - Row-level access not enabled: same as whole-field/KPI edit permission.
+    - Row-level access enabled: requires edit rights on at least one row for this entry+field.
+    """
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if not user:
+        return False
+    if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return True
+    if not getattr(field, "row_level_user_access_enabled", False):
+        return await user_can_edit_multi_line_field(db, user_id, kpi_id, field)
+    row_edit_map = await get_user_row_edit_map(db, user_id, entry_id, field.id)
+    return any(row_edit_map.values())
+
+
 async def _load_other_kpi_values(
     db: AsyncSession, year: int, org_id: int, exclude_kpi_id: int
 ) -> OtherKpiValues:

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from io import BytesIO, StringIO
-from datetime import datetime
+from datetime import datetime, date
 import csv
+import html
 import json
 import logging
 import asyncio
+import re
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body
 from fastapi.responses import StreamingResponse
@@ -64,6 +66,8 @@ from app.entries.service import (
     user_can_add_row_multi_line_field,
     user_can_edit_row,
     user_can_delete_row,
+    user_can_export_multi_line_field,
+    get_user_row_edit_map,
     save_entry_values,
     recompute_formula_fields_for_entry,
     submit_entry,
@@ -388,6 +392,299 @@ def _serialize_multi_item_cell_for_csv(val: Any, field_type: FieldType | str | N
     return val
 
 
+def _safe_excel_filename_part(name: str) -> str:
+    """Sanitize a string for safe use inside a downloaded filename."""
+    cleaned = re.sub(r'[\\/*?:"<>|]+', "", str(name or "")).strip()
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    return cleaned or "Export"
+
+
+def _safe_excel_sheet_name(name: str) -> str:
+    """Excel worksheet names must be <=31 chars and cannot contain []:*?/\\."""
+    cleaned = re.sub(r'[\[\]:*?/\\]+', "", str(name or "")).strip()
+    return (cleaned or "Data")[:31]
+
+
+def _resolve_export_filename(requested: str | None, default_base: str, ext: str) -> str:
+    """
+    Resolve the final download filename: sanitize a user-supplied name (stripping a trailing
+    extension that already matches, so re-submitting a previously-downloaded name doesn't
+    double it up), falling back to default_base when blank. Always ends with exactly one `.<ext>`.
+
+    User-supplied names only have invalid filename characters stripped and are trimmed —
+    spaces are preserved exactly as typed (matches the frontend's sanitizeFileNameInput()).
+    _safe_excel_filename_part's extra "spaces -> underscore" normalization is reserved for
+    building default_base from the Multi Line Item / KPI name, not for what the user typed.
+    """
+    ext_suffix = f".{ext.lstrip('.')}"
+    raw = (requested or "").strip()
+    if raw.lower().endswith(ext_suffix.lower()):
+        raw = raw[: -len(ext_suffix)].strip()
+    if raw:
+        base = re.sub(r'[\\/*?:"<>|]+', "", raw).strip()
+        if not base:
+            base = _safe_excel_filename_part(default_base)
+    else:
+        base = _safe_excel_filename_part(default_base)
+    return f"{base}{ext_suffix}"
+
+
+def _typed_value_for_xlsx_export(val: Any, field_type: FieldType | str | None) -> Any:
+    """
+    Coerce a raw multi-line cell value to a native Python type so openpyxl stores a proper
+    Excel data type: numbers stay numeric, dates become real Excel dates, booleans become
+    Excel booleans, blanks stay blank (None), attachments export as filename only.
+    """
+    if val is None or val == "":
+        return None
+    ft = field_type.value if isinstance(field_type, FieldType) else field_type
+    if ft in (FieldType.number.value, "number"):
+        try:
+            f = float(val)
+            return int(f) if f.is_integer() else f
+        except (TypeError, ValueError):
+            return val
+    if ft in (FieldType.boolean.value, "boolean"):
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.strip().lower() in ("true", "1", "yes")
+        return bool(val)
+    if ft in (FieldType.date.value, "date"):
+        if isinstance(val, str):
+            try:
+                return datetime.fromisoformat(val.strip()).date()
+            except Exception:
+                return val
+        return val
+    if ft in (FieldType.attachment.value, "attachment"):
+        obj = val
+        if isinstance(val, str):
+            s = val.strip()
+            if s.startswith("{"):
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    obj = None
+            else:
+                obj = None
+                url = s
+                return url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+        if isinstance(obj, dict):
+            fn = obj.get("filename")
+            if fn:
+                return str(fn)
+            url = str(obj.get("url") or obj.get("download_url") or "")
+            return url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+        return val
+    if isinstance(val, list):
+        parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
+        return "; ".join(parts) if parts else None
+    if isinstance(val, dict):
+        return json.dumps(val, ensure_ascii=False)
+    return val
+
+
+def _xlsx_bytes_for_multi_items_export(
+    sheet_title: str,
+    key_to_sf: dict[str, KPIFieldSubField],
+    export_keys: list[str],
+    rows: list[dict],
+) -> bytes:
+    """Build a professional .xlsx workbook for filtered multi-line export: bold headers,
+    auto-sized columns, and native Excel types per sub-field (reuses the same field-type
+    switch as the template/CSV serializers, adapted to preserve real numeric/date/boolean types)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = _safe_excel_sheet_name(sheet_title)
+
+    headers = [getattr(key_to_sf.get(k), "name", None) or k for k in export_keys]
+    ws.append(headers)
+    bold = Font(bold=True)
+    for cell in ws[1]:
+        cell.font = bold
+
+    col_widths = [len(str(h)) for h in headers]
+    for r in rows:
+        row_cells = []
+        for idx, k in enumerate(export_keys):
+            sf = key_to_sf.get(k)
+            ft = getattr(sf, "field_type", None) if sf else None
+            v = _typed_value_for_xlsx_export(r.get(k) if isinstance(r, dict) else None, ft)
+            row_cells.append(v)
+            col_widths[idx] = max(col_widths[idx], len(str(v)) if v is not None else 0)
+        ws.append(row_cells)
+
+    for idx, width in enumerate(col_widths, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = min(max(width + 2, 10), 60)
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _display_string_for_pdf_export(val: Any, field_type: FieldType | str | None) -> str:
+    """Human-readable text for a PDF table cell. Reuses the same value coercion as the xlsx
+    export (attachment filename extraction, date/number parsing) and only adds a thin
+    text-formatting layer on top, so the two exporters can't drift on field-type handling.
+
+    Mixed List (multi-select) fields are the one exception: xlsx/CSV join selected values with
+    "; " on a single line, but a PDF table cell has limited width, so each selected value is put
+    on its own line instead (join with "\n" here; _pdf_bytes_for_multi_items_export already
+    converts "\n" to a Paragraph <br/> when building each cell, which also makes reportlab grow
+    that row's height automatically to fit the extra lines).
+    """
+    ft = field_type.value if isinstance(field_type, FieldType) else field_type
+    if ft in (FieldType.mixed_list.value, "mixed_list") and isinstance(val, list):
+        parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
+        # Blank line between values (not just a line break) for readability; the extra "\n"
+        # becomes a second <br/> in cell_text(), which also grows the row height further.
+        return "\n\n".join(parts)
+    typed = _typed_value_for_xlsx_export(val, field_type)
+    if typed is None:
+        return ""
+    if isinstance(typed, bool):
+        return "Yes" if typed else "No"
+    if isinstance(typed, date):
+        return typed.isoformat()
+    return str(typed)
+
+
+_DEFAULT_PDF_HEADER_COLOR = "#2563eb"
+
+# Max columns a PDF export can hold before it's considered unreadable (mirrored in the frontend's
+# Export dialog as MAX_PDF_COLUMNS for real-time validation; kept in sync manually).
+_MAX_PDF_EXPORT_COLUMNS = 10
+
+
+def _sanitize_hex_color(value: str | None, default: str = _DEFAULT_PDF_HEADER_COLOR) -> str:
+    """Validate a user-supplied hex color (from the Export dialog); fall back to `default` for
+    anything malformed rather than letting an invalid value reach reportlab."""
+    v = (value or "").strip()
+    if v and not v.startswith("#"):
+        v = f"#{v}"
+    return v if re.fullmatch(r"#[0-9a-fA-F]{6}", v) else default
+
+
+def _contrasting_text_color(hex_color: str):
+    """Pick black or white text for readable contrast against a given background color
+    (standard relative-luminance heuristic; reportlab Color channels are floats in [0, 1])."""
+    from reportlab.lib import colors
+
+    bg = colors.HexColor(hex_color)
+    luminance = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
+    return colors.white if luminance < 0.6 else colors.black
+
+
+def _pdf_bytes_for_multi_items_export(
+    title: str,
+    subtitle: str,
+    key_to_sf: dict[str, KPIFieldSubField],
+    export_keys: list[str],
+    rows: list[dict],
+    header_color: str = _DEFAULT_PDF_HEADER_COLOR,
+) -> bytes:
+    """Build a professional PDF table for filtered multi-line export: repeating header row on
+    every page, automatic page breaks, wrapped cell text, landscape orientation once there are
+    enough columns to need it, and column widths approximated from actual content length
+    (same lightweight heuristic as the xlsx auto-width column sizing). Always prepends a
+    "Sr. No." column generated purely from row position — never a DB field, never affected by
+    which data columns the user selected, and not something the user can deselect."""
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4, landscape, portrait
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
+    header_bg = colors.HexColor(header_color)
+    header_text_color = _contrasting_text_color(header_color)
+
+    styles = getSampleStyleSheet()
+    header_style = ParagraphStyle(
+        "MultiItemsPdfHeaderCell",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=9,
+        textColor=header_text_color,
+        leading=11,
+    )
+    sr_no_header_style = ParagraphStyle("MultiItemsPdfSrNoHeaderCell", parent=header_style, alignment=TA_CENTER)
+    cell_style = ParagraphStyle("MultiItemsPdfBodyCell", parent=styles["Normal"], fontSize=8, leading=10)
+    sr_no_cell_style = ParagraphStyle("MultiItemsPdfSrNoCell", parent=cell_style, alignment=TA_CENTER)
+
+    use_landscape = len(export_keys) > 4
+    page_size = landscape(A4) if use_landscape else portrait(A4)
+    margin = 12 * mm
+    sr_no_width = 12 * mm
+    available_width = page_size[0] - 2 * margin - sr_no_width
+
+    headers = [str(getattr(key_to_sf.get(k), "name", None) or k) for k in export_keys]
+
+    def cell_text(row: dict, key: str) -> str:
+        sf = key_to_sf.get(key)
+        ft = getattr(sf, "field_type", None) if sf else None
+        raw = _display_string_for_pdf_export(row.get(key) if isinstance(row, dict) else None, ft)
+        return html.escape(raw).replace("\n", "<br/>")
+
+    data = [[Paragraph("Sr. No.", sr_no_header_style)] + [Paragraph(html.escape(h), header_style) for h in headers]]
+    for sr_no, r in enumerate(rows, start=1):
+        data.append([Paragraph(str(sr_no), sr_no_cell_style)] + [Paragraph(cell_text(r, k), cell_style) for k in export_keys])
+
+    # Proportional column widths from content length (header + sampled row values), rescaled to
+    # fit the page exactly, with a minimum floor so no column becomes unreadably thin.
+    sample_rows = rows[:200]
+    col_chars = [len(h) for h in headers]
+    for r in sample_rows:
+        for idx, k in enumerate(export_keys):
+            col_chars[idx] = max(col_chars[idx], min(len(cell_text(r, k)), 60))
+    total_chars = sum(col_chars) or len(export_keys)
+    min_width = 18 * mm
+    raw_widths = [max(min_width, available_width * (c / total_chars)) for c in col_chars]
+    scale = available_width / sum(raw_widths) if sum(raw_widths) > available_width else 1.0
+    col_widths = [sr_no_width] + [w * scale for w in raw_widths]
+
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), header_bg),
+                ("TEXTCOLOR", (0, 0), (-1, 0), header_text_color),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=page_size,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
+        title=title,
+    )
+    elements = [
+        Paragraph(html.escape(title), styles["Title"]),
+        Paragraph(html.escape(subtitle), styles["Normal"]),
+        Spacer(1, 10),
+        table,
+    ]
+    doc.build(elements)
+    return buf.getvalue()
+
+
 def _resolve_multi_items_import_mode(import_mode: str | None, append_legacy: bool) -> str:
     if import_mode:
         return import_mode.strip().lower()
@@ -573,6 +870,7 @@ class MultiItemsPageContextResponse(BaseModel):
     can_edit: bool
     kpi_level_can_edit: bool
     can_add_row: bool
+    can_export: bool = False
 
 
 class EntryIdResponse(BaseModel):
@@ -2589,12 +2887,42 @@ async def export_multi_items_csv(
     sort_by: str | None = Query(None),
     sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     filters: str | None = Query(None),
+    columns: str | None = Query(
+        None,
+        description="Comma-separated sub-field keys to include, in order (defaults to all "
+        "columns the current user can view, in field-defined order).",
+    ),
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$", description="Export file format"),
+    filename: str | None = Query(
+        None,
+        description="Desired download file name (with or without extension); sanitized "
+        "server-side. Defaults to the Multi Line Item field's name when omitted or blank.",
+    ),
+    pdf_header_color: str | None = Query(
+        None,
+        description="PDF only: table header background color as a hex string (e.g. #2563eb). "
+        "Sanitized server-side; falls back to the default blue when omitted or invalid. "
+        "Applies only to this export — no application setting is changed.",
+    ),
+    pdf_title: str | None = Query(
+        None,
+        description="PDF only: main header/title shown at the top of the PDF for this export. "
+        "Falls back to the Multi Line Item's name when omitted or blank.",
+    ),
+    pdf_subtitle: str | None = Query(
+        None,
+        description="PDF only: sub-header — an explanatory line shown just above the table for "
+        "this export. Falls back to the KPI name and year when omitted or blank.",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Export multi_line_items rows for an entry+field as CSV, honoring search, sort, and filters.
+    Export multi_line_items rows for an entry+field as CSV, XLSX, or PDF, honoring the same
+    search, sort, filters, column selection/order and row-level permissions as the grid
+    (list_multi_items_rows).
     """
+    requested_filename = filename  # capture before the CSV/XLSX branches reuse `filename` as the resolved name
     org_id = _org_id(current_user, organization_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
@@ -2606,8 +2934,44 @@ async def export_multi_items_csv(
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
 
+    # Authorization: org admin, or KPI/field edit permission, or (when row-level access is
+    # enabled) edit permission on at least one row. Same gate the frontend uses to show/hide
+    # the export button; enforced here as the source of truth.
+    if not await user_can_export_multi_line_field(db, current_user.id, entry.kpi_id, entry.id, field):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to export this field")
+
+    is_org_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+
+    # Columns the user can view (mirrors list_multi_items_rows' viewable_keys computation).
+    viewable_keys: set[str] = set()
+    if is_org_admin:
+        viewable_keys = {getattr(sf, "key", "") for sf in (field.sub_fields or [])}
+    else:
+        access_map = await get_user_field_access_for_kpi(db, current_user.id, entry.kpi_id)
+        can_view_kpi = (
+            await user_can_view_kpi(db, current_user.id, entry.kpi_id, org_id) if access_map is None else False
+        )
+        for sf in field.sub_fields or []:
+            if access_map is None:
+                can_view = can_view_kpi
+            else:
+                perm = access_map.get((field.id, getattr(sf, "id", None))) or access_map.get((field.id, None))
+                can_view = perm in ("view", "data_entry")
+            if can_view:
+                viewable_keys.add(getattr(sf, "key", ""))
+
+    # Row-level visibility: when row-level access is enabled, non-admins only see rows they
+    # have an explicit access record for (same rule as the grid).
+    field_row_access_enabled = bool(getattr(field, "row_level_user_access_enabled", False))
+    row_edit_map: dict[int, bool] = {}
+    if field_row_access_enabled and not is_org_admin:
+        row_edit_map = await get_user_row_edit_map(db, current_user.id, entry.id, field.id)
+
     pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
-    rows: list[dict] = [r for _, r in pairs] if pairs else []
+    rows: list[tuple[int, dict]] = list(pairs) if pairs else []
+
+    if field_row_access_enabled and not is_org_admin:
+        rows = [(i, r) for (i, r) in rows if int(i) in row_edit_map]
 
     # Filter by search
     if search:
@@ -2622,7 +2986,7 @@ async def export_multi_items_csv(
                     return True
             return False
 
-        rows = [r for r in rows if isinstance(r, dict) and matches(r)]
+        rows = [(i, r) for (i, r) in rows if isinstance(r, dict) and matches(r)]
 
     # Advanced filters (same payload as list_multi_items_rows)
     if filters:
@@ -2656,11 +3020,11 @@ async def export_multi_items_csv(
                                 entry.year,
                                 field,
                                 conds,
-                                [r for r in rows if isinstance(r, dict)],
+                                [r for _, r in rows],
                             )
                     rows = [
-                        r
-                        for r in rows
+                        (i, r)
+                        for (i, r) in rows
                         if isinstance(r, dict)
                         and row_passes_filters(
                             r,
@@ -2670,7 +3034,7 @@ async def export_multi_items_csv(
                         )
                     ]
                 else:
-                    rows = [r for r in rows if isinstance(r, dict) and row_passes_filters(r, raw_filters)]
+                    rows = [(i, r) for (i, r) in rows if isinstance(r, dict) and row_passes_filters(r, raw_filters)]
         except json.JSONDecodeError:
             pass
 
@@ -2686,27 +3050,81 @@ async def export_multi_items_csv(
                 return str(v) if v is not None else ""
 
         try:
-            rows = sorted(rows, key=sort_key, reverse=reverse)
+            rows = sorted(rows, key=lambda ir: sort_key(ir[1]), reverse=reverse)
         except Exception:
             pass
 
-    # Build CSV
-    sub_fields = [sf for sf in (field.sub_fields or [])]
-    headers = [getattr(sf, "key", "") for sf in sub_fields]
-    key_to_sf = {sf.key: sf for sf in sub_fields}
-    # csv.writer expects a text stream (not BytesIO) on Python 3.
-    # Use StringIO then encode to bytes for StreamingResponse.
+    key_to_sf = {sf.key: sf for sf in (field.sub_fields or [])}
+    if columns:
+        requested = [c.strip() for c in columns.split(",") if c.strip()]
+        export_keys = [k for k in requested if k in key_to_sf and k in viewable_keys]
+    else:
+        export_keys = [sf.key for sf in (field.sub_fields or []) if sf.key in viewable_keys]
+
+    row_dicts = [r for _, r in rows]
+
+    if format in ("xlsx", "pdf") and not export_keys:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No columns selected for export")
+
+    # PDF is capped at _MAX_PDF_EXPORT_COLUMNS — beyond that the table is too cramped to read.
+    # The frontend already validates this in real time as columns are (de)selected; this is a
+    # defense-in-depth check for any other API caller.
+    if format == "pdf" and len(export_keys) > _MAX_PDF_EXPORT_COLUMNS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "You have selected too many columns for a readable PDF. Please deselect some "
+                "columns before exporting."
+            ),
+        )
+
+    if format == "xlsx":
+        kpi_res = await db.execute(select(KPI.name).where(KPI.id == entry.kpi_id))
+        kpi_name = kpi_res.scalar_one_or_none() or field.name or "Export"
+        content = _xlsx_bytes_for_multi_items_export(kpi_name, key_to_sf, export_keys, row_dicts)
+        # Default file name is the Multi Line Item (field) name, not the KPI name — the sheet
+        # tab still identifies the KPI, but the download name identifies which item it is.
+        default_base = f"{field.name or kpi_name}_{entry.year}"
+        filename = _resolve_export_filename(requested_filename, default_base, "xlsx")
+        return StreamingResponse(
+            BytesIO(content),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    if format == "pdf":
+        kpi_res = await db.execute(select(KPI.name).where(KPI.id == entry.kpi_id))
+        kpi_name = kpi_res.scalar_one_or_none() or field.name or "Export"
+        default_title = field.name or kpi_name
+        default_subtitle = f"{kpi_name} · {entry.year}" if kpi_name and kpi_name != default_title else str(entry.year)
+        # Header/sub-header are defined per-export in the Export dialog (not an org-level
+        # setting) — blank/omitted values fall back to the auto-generated title/subtitle.
+        title = (pdf_title or "").strip() or default_title
+        subtitle = (pdf_subtitle or "").strip() or default_subtitle
+        header_color = _sanitize_hex_color(pdf_header_color)
+        content = _pdf_bytes_for_multi_items_export(
+            title, subtitle, key_to_sf, export_keys, row_dicts, header_color=header_color
+        )
+        default_base = f"{field.name or kpi_name}_{entry.year}"
+        filename = _resolve_export_filename(requested_filename, default_base, "pdf")
+        return StreamingResponse(
+            BytesIO(content),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # CSV (default; unchanged header/format for backward compatibility with existing consumers).
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(headers)
-    for r in rows:
+    writer.writerow(export_keys)
+    for r in row_dicts:
         writer.writerow(
             [
                 _serialize_multi_item_cell_for_csv(
                     r.get(key, "") if isinstance(r, dict) else "",
                     getattr(key_to_sf.get(key), "field_type", None),
                 )
-                for key in headers
+                for key in export_keys
             ]
         )
 
@@ -2951,6 +3369,7 @@ async def get_multi_items_page_context(
     )
 
     can_add = await user_can_add_row_multi_line_field(db, current_user.id, kpi_id, int(f.id))
+    can_export = await user_can_export_multi_line_field(db, current_user.id, kpi_id, entry.id, f)
 
     return MultiItemsPageContextResponse(
         entry_id=int(entry.id),
@@ -2960,6 +3379,7 @@ async def get_multi_items_page_context(
         can_edit=bool(can_edit),
         kpi_level_can_edit=bool(kpi_level_can_edit),
         can_add_row=bool(can_add),
+        can_export=bool(can_export),
     )
 
 

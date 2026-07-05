@@ -115,9 +115,16 @@ async def create_org(
 async def get_org(
     org_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_org_admin_for_org),
 ):
-    """Get organization by id."""
+    """Get organization by id. Org Admin (for their own org) or Super Admin.
+
+    OrganizationResponse only exposes name/description/is_active/time_dimension — nothing an
+    org admin shouldn't see about their own organization. Several frontend pages already fetch
+    this defensively (falling back to null on failure), which is what made the previous
+    super-admin-only restriction a silent, functionally-invisible bug for org admins rather than
+    a hard failure: the org name/time-dimension info they'd expect to see just came back empty.
+    """
     org = await get_organization(db, org_id)
     if not org:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
