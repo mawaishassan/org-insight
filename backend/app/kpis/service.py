@@ -5,7 +5,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, update
 from sqlalchemy.orm import selectinload
 
 from app.core.models import (
@@ -35,8 +35,10 @@ from app.core.models import (
     Organization,
     TimeDimension,
     time_dimension_allowed_for_kpi,
+    KpiSection,
 )
-from app.kpis.schemas import KPICreate, KPIUpdate
+from app.kpis.schemas import KPICreate, KPIUpdate, KpiSectionCreate, KpiSectionUpdate
+from app.fields.service import get_or_create_general_section
 from app.entries.service import (
     get_or_create_entry,
     save_entry_values,
@@ -1616,3 +1618,124 @@ async def sync_kpi_entry_from_api(
     else:
         _log("No value_inputs to save; check field keys vs API response keys above")
     return {"entry_id": entry.id, "year": year, "fields_updated": len(value_inputs)}
+
+
+# --- KPI field sections (collapsible grouping of a KPI's fields) ---
+
+
+async def list_kpi_sections(db: AsyncSession, kpi_id: int, org_id: int) -> list[tuple[KpiSection, int]] | None:
+    """List sections for a KPI (ordered by sort_order) with each section's field count.
+    Returns None if the KPI doesn't belong to this org."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return None
+    result = await db.execute(
+        select(KpiSection, func.count(KPIField.id))
+        .outerjoin(KPIField, KPIField.section_id == KpiSection.id)
+        .where(KpiSection.kpi_id == kpi_id)
+        .group_by(KpiSection.id)
+        .order_by(KpiSection.sort_order, KpiSection.id)
+    )
+    return [(row[0], row[1]) for row in result.all()]
+
+
+async def create_kpi_section(
+    db: AsyncSession, kpi_id: int, org_id: int, data: KpiSectionCreate
+) -> KpiSection | None:
+    """Create a section within a KPI. sort_order defaults to after the last existing section."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return None
+    sort_order = data.sort_order
+    if sort_order is None:
+        r = await db.execute(
+            select(func.coalesce(func.max(KpiSection.sort_order), -1)).where(KpiSection.kpi_id == kpi_id)
+        )
+        # COALESCE already guarantees a non-null result (-1 when no sections exist yet); do NOT
+        # additionally `or -1` here — a real max of 0 (e.g. a lone "General" section) is falsy in
+        # Python and would be wrongly replaced by -1, colliding the new section's sort_order with it.
+        sort_order = r.scalar_one() + 1
+    section = KpiSection(kpi_id=kpi_id, name=data.name, sort_order=sort_order)
+    db.add(section)
+    await db.flush()
+    if data.field_ids:
+        await db.execute(
+            update(KPIField)
+            .where(KPIField.id.in_(data.field_ids), KPIField.kpi_id == kpi_id)
+            .values(section_id=section.id)
+        )
+        await db.flush()
+    return section
+
+
+async def assign_fields_to_section(
+    db: AsyncSession, section_id: int, kpi_id: int, org_id: int, field_ids: list[int]
+) -> KpiSection | None:
+    """Move the given fields (must belong to this KPI) into this section. Returns None if the
+    section doesn't exist (or doesn't belong to this KPI/org)."""
+    section = await get_kpi_section(db, section_id, kpi_id, org_id)
+    if not section:
+        return None
+    await db.execute(
+        update(KPIField)
+        .where(KPIField.id.in_(field_ids), KPIField.kpi_id == kpi_id)
+        .values(section_id=section.id)
+    )
+    await db.flush()
+    return section
+
+
+async def unassign_fields_from_section(
+    db: AsyncSession, section_id: int, kpi_id: int, org_id: int, field_ids: list[int]
+) -> KpiSection | None:
+    """Move the given fields (must currently belong to this section) back to the KPI's "General"
+    section. Reversible, non-destructive — the field itself is never touched, only its grouping."""
+    section = await get_kpi_section(db, section_id, kpi_id, org_id)
+    if not section:
+        return None
+    general = await get_or_create_general_section(db, kpi_id)
+    await db.execute(
+        update(KPIField)
+        .where(KPIField.id.in_(field_ids), KPIField.kpi_id == kpi_id, KPIField.section_id == section.id)
+        .values(section_id=general.id)
+    )
+    await db.flush()
+    return section
+
+
+async def get_kpi_section(db: AsyncSession, section_id: int, kpi_id: int, org_id: int) -> KpiSection | None:
+    """Get a section by id if it belongs to this KPI (and the KPI belongs to org)."""
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        return None
+    result = await db.execute(select(KpiSection).where(KpiSection.id == section_id, KpiSection.kpi_id == kpi_id))
+    return result.scalar_one_or_none()
+
+
+async def update_kpi_section(
+    db: AsyncSession, section_id: int, kpi_id: int, org_id: int, data: KpiSectionUpdate
+) -> KpiSection | None:
+    """Rename a section and/or change its sort_order (move up/down swaps two sections' sort_order)."""
+    section = await get_kpi_section(db, section_id, kpi_id, org_id)
+    if not section:
+        return None
+    if data.name is not None:
+        section.name = data.name
+    if data.sort_order is not None:
+        section.sort_order = data.sort_order
+    await db.flush()
+    return section
+
+
+async def delete_kpi_section(db: AsyncSession, section_id: int, kpi_id: int, org_id: int) -> str:
+    """Delete a section. Returns 'ok', 'not_found', or 'has_fields' (fields must be reassigned
+    to another section first — a section with fields is never silently orphaned/deleted)."""
+    section = await get_kpi_section(db, section_id, kpi_id, org_id)
+    if not section:
+        return "not_found"
+    count_res = await db.execute(select(func.count()).select_from(KPIField).where(KPIField.section_id == section_id))
+    if (count_res.scalar() or 0) > 0:
+        return "has_fields"
+    await db.delete(section)
+    await db.flush()
+    return "ok"

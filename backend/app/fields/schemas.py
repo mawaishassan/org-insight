@@ -65,6 +65,9 @@ class KPIFieldCreate(BaseModel):
     is_required: bool = False
     sort_order: int = 0
     config: dict[str, Any] | None = None
+    section_id: int | None = Field(
+        None, description="Section this field belongs to. If omitted/invalid, falls back to the KPI's 'General' section (auto-created if needed)."
+    )
     carry_forward_data: bool = False
     full_page_multi_items: bool = False
     options: list[KPIFieldOptionCreate] = Field(default_factory=list)
@@ -81,6 +84,7 @@ class KPIFieldUpdate(BaseModel):
     is_required: bool | None = None
     sort_order: int | None = None
     config: dict[str, Any] | None = None
+    section_id: int | None = None
     carry_forward_data: bool | None = None
     full_page_multi_items: bool | None = None
     row_level_user_access_enabled: bool | None = None
@@ -112,6 +116,7 @@ class KPIFieldResponse(BaseModel):
     is_required: bool
     sort_order: int
     config: dict[str, Any] | None = None
+    section_id: int | None = None
     carry_forward_data: bool = False
     full_page_multi_items: bool = False
     row_level_user_access_enabled: bool = False

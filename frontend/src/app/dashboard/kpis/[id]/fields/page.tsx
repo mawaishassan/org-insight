@@ -139,10 +139,19 @@ interface KpiField {
   is_required: boolean;
   sort_order: number;
   config?: ReferenceConfig | null;
+  section_id?: number | null;
   carry_forward_data?: boolean;
   full_page_multi_items?: boolean;
   options: Array<{ id: number; value: string; label: string; sort_order: number }>;
   sub_fields?: SubFieldDef[];
+}
+
+interface KpiSection {
+  id: number;
+  kpi_id: number;
+  name: string;
+  sort_order: number;
+  field_count: number;
 }
 
 interface OrgTagRef {
@@ -193,6 +202,7 @@ const createSchema = z.object({
   formula_expression: z.string().optional(),
   is_required: z.boolean(),
   sort_order: z.coerce.number().int().min(0),
+  section_id: z.coerce.number().int().optional(),
   carry_forward_data: z.boolean().optional(),
   full_page_multi_items: z.boolean().optional(),
   multi_items_api_endpoint_url: z.union([z.literal(""), z.string().url("Must be a valid URL")]).optional(),
@@ -205,6 +215,7 @@ const updateSchema = z.object({
   formula_expression: z.string().optional(),
   is_required: z.boolean(),
   sort_order: z.coerce.number().int().min(0),
+  section_id: z.coerce.number().int().optional(),
   carry_forward_data: z.boolean().optional(),
   full_page_multi_items: z.boolean().optional(),
   multi_items_api_endpoint_url: z.union([z.literal(""), z.string().url("Must be a valid URL")]).optional(),
@@ -243,6 +254,18 @@ export default function KpiFieldsPage() {
   const [orgTags, setOrgTags] = useState<OrgTagRef[]>([]);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [list, setList] = useState<KpiField[]>([]);
+  const [sections, setSections] = useState<KpiSection[]>([]);
+  const [newSectionName, setNewSectionName] = useState("");
+  const [sectionRenameId, setSectionRenameId] = useState<number | null>(null);
+  const [sectionRenameDraft, setSectionRenameDraft] = useState("");
+  const [sectionsSaving, setSectionsSaving] = useState(false);
+  const [sectionFieldModal, setSectionFieldModal] = useState<{
+    mode: "create" | "manage";
+    sectionId: number | null;
+    name: string;
+    selectedFieldIds: number[];
+  } | null>(null);
+  const [sectionFieldModalSaving, setSectionFieldModalSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -428,6 +451,15 @@ export default function KpiFieldsPage() {
       .finally(() => setLoading(false));
   };
 
+  const loadSections = (organizationId?: number) => {
+    if (!token || !kpiId) return;
+    const id = organizationId ?? orgId;
+    const query = id != null ? `?${qs({ organization_id: id })}` : "";
+    api<KpiSection[]>(`/kpis/${kpiId}/sections${query}`, { token })
+      .then(setSections)
+      .catch(() => setSections([]));
+  };
+
   const loadKpi = () => {
     if (!token || !kpiId) return;
     const query = orgIdFromUrl != null ? `?${qs({ organization_id: orgIdFromUrl })}` : "";
@@ -436,11 +468,152 @@ export default function KpiFieldsPage() {
         setKpi(data);
         setCardDisplayFieldIds(Array.isArray(data.card_display_field_ids) ? [...data.card_display_field_ids] : []);
         loadList(data.organization_id);
+        loadSections(data.organization_id);
       })
       .catch(() => {
         setKpi(null);
         setLoading(false);
       });
+  };
+
+  const sectionsOrgQuery = () => (orgId != null ? `?${qs({ organization_id: orgId })}` : "");
+
+  const handleCreateSection = () => {
+    const name = newSectionName.trim();
+    if (!name) return;
+    // Creating a section always opens the field picker first, so the Super Admin can
+    // immediately assign currently-unassigned (General) fields to it during creation.
+    setSectionFieldModal({ mode: "create", sectionId: null, name, selectedFieldIds: [] });
+  };
+
+  const openManageSectionModal = (section: KpiSection) => {
+    const currentIds = list.filter((f) => f.section_id === section.id).map((f) => f.id);
+    setSectionFieldModal({ mode: "manage", sectionId: section.id, name: section.name, selectedFieldIds: currentIds });
+  };
+
+  const toggleSectionFieldSelection = (fieldId: number) => {
+    setSectionFieldModal((prev) => {
+      if (!prev) return prev;
+      const has = prev.selectedFieldIds.includes(fieldId);
+      return {
+        ...prev,
+        selectedFieldIds: has
+          ? prev.selectedFieldIds.filter((id) => id !== fieldId)
+          : [...prev.selectedFieldIds, fieldId],
+      };
+    });
+  };
+
+  const submitSectionFieldModal = async () => {
+    if (!token || !sectionFieldModal) return;
+    setSectionFieldModalSaving(true);
+    try {
+      if (sectionFieldModal.mode === "create") {
+        await api<KpiSection>(`/kpis/${kpiId}/sections${sectionsOrgQuery()}`, {
+          method: "POST",
+          body: JSON.stringify({ name: sectionFieldModal.name, field_ids: sectionFieldModal.selectedFieldIds }),
+          token,
+        });
+        setNewSectionName("");
+        toast.success("Section created");
+      } else if (sectionFieldModal.sectionId != null) {
+        const sectionId = sectionFieldModal.sectionId;
+        const originalIds = list.filter((f) => f.section_id === sectionId).map((f) => f.id);
+        const selected = new Set(sectionFieldModal.selectedFieldIds);
+        const original = new Set(originalIds);
+        const toAdd = sectionFieldModal.selectedFieldIds.filter((id) => !original.has(id));
+        const toRemove = originalIds.filter((id) => !selected.has(id));
+        if (toAdd.length > 0) {
+          await api(`/kpis/${kpiId}/sections/${sectionId}/assign-fields${sectionsOrgQuery()}`, {
+            method: "POST",
+            body: JSON.stringify({ field_ids: toAdd }),
+            token,
+          });
+        }
+        if (toRemove.length > 0) {
+          await api(`/kpis/${kpiId}/sections/${sectionId}/unassign-fields${sectionsOrgQuery()}`, {
+            method: "POST",
+            body: JSON.stringify({ field_ids: toRemove }),
+            token,
+          });
+        }
+        toast.success("Section fields updated");
+      }
+      setSectionFieldModal(null);
+      loadSections();
+      loadList();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to save section fields");
+    } finally {
+      setSectionFieldModalSaving(false);
+    }
+  };
+
+  const handleRenameSection = async (id: number) => {
+    const name = sectionRenameDraft.trim();
+    if (!token || !name) return;
+    setSectionsSaving(true);
+    try {
+      await api<KpiSection>(`/kpis/${kpiId}/sections/${id}${sectionsOrgQuery()}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
+        token,
+      });
+      setSectionRenameId(null);
+      setSectionRenameDraft("");
+      loadSections();
+      toast.success("Section renamed");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to rename section");
+    } finally {
+      setSectionsSaving(false);
+    }
+  };
+
+  const handleDeleteSection = async (section: KpiSection) => {
+    if (!token) return;
+    if (section.field_count > 0) {
+      toast.error("Reassign this section's fields to another section before deleting it");
+      return;
+    }
+    if (!window.confirm(`Delete section "${section.name}"?`)) return;
+    setSectionsSaving(true);
+    try {
+      await api(`/kpis/${kpiId}/sections/${section.id}${sectionsOrgQuery()}`, { method: "DELETE", token });
+      loadSections();
+      toast.success("Section deleted");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to delete section");
+    } finally {
+      setSectionsSaving(false);
+    }
+  };
+
+  const handleMoveSection = async (index: number, direction: "up" | "down") => {
+    const otherIndex = direction === "up" ? index - 1 : index + 1;
+    if (!token || otherIndex < 0 || otherIndex >= sections.length) return;
+    const a = sections[index];
+    const b = sections[otherIndex];
+    setSectionsSaving(true);
+    try {
+      await Promise.all([
+        api(`/kpis/${kpiId}/sections/${a.id}${sectionsOrgQuery()}`, {
+          method: "PATCH",
+          body: JSON.stringify({ sort_order: b.sort_order }),
+          token,
+        }),
+        api(`/kpis/${kpiId}/sections/${b.id}${sectionsOrgQuery()}`, {
+          method: "PATCH",
+          body: JSON.stringify({ sort_order: a.sort_order }),
+          token,
+        }),
+      ]);
+      loadSections();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to reorder sections");
+    } finally {
+      setSectionsSaving(false);
+    }
   };
 
   useEffect(() => {
@@ -540,6 +713,7 @@ export default function KpiFieldsPage() {
         formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
         is_required: data.is_required,
         sort_order: data.sort_order,
+        section_id: data.section_id ?? null,
         carry_forward_data: data.carry_forward_data ?? false,
         full_page_multi_items: data.full_page_multi_items ?? false,
         options: [],
@@ -635,6 +809,7 @@ export default function KpiFieldsPage() {
         formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
         is_required: data.is_required,
         sort_order: data.sort_order,
+        section_id: data.section_id ?? null,
         carry_forward_data: data.carry_forward_data,
         full_page_multi_items: data.full_page_multi_items,
       };
@@ -1549,6 +1724,158 @@ export default function KpiFieldsPage() {
         <>
           {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
 
+          {userRole === "SUPER_ADMIN" && (
+            <div className="card" style={{ marginBottom: "1rem", padding: "0.9rem 1rem" }}>
+              <div style={{ fontWeight: 600, marginBottom: "0.6rem" }}>
+                Sections
+                <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.85rem" }}>
+                  {" "}— group this KPI&apos;s fields into collapsible sections
+                </span>
+              </div>
+              {sections.length === 0 ? (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 0.6rem" }}>
+                  No sections yet — fields will use a default &quot;General&quot; section until you create one.
+                </p>
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, margin: "0 0 0.75rem" }}>
+                  {sections.map((s, idx) => (
+                    <li
+                      key={s.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.4rem 0",
+                        borderBottom: idx < sections.length - 1 ? "1px solid var(--border)" : "none",
+                      }}
+                    >
+                      <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={sectionsSaving || idx === 0}
+                          onClick={() => handleMoveSection(idx, "up")}
+                          style={{ fontSize: "0.7rem", padding: "0.05rem 0.35rem", lineHeight: 1 }}
+                          aria-label={`Move ${s.name} up`}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={sectionsSaving || idx === sections.length - 1}
+                          onClick={() => handleMoveSection(idx, "down")}
+                          style={{ fontSize: "0.7rem", padding: "0.05rem 0.35rem", lineHeight: 1 }}
+                          aria-label={`Move ${s.name} down`}
+                        >
+                          ↓
+                        </button>
+                      </div>
+                      {sectionRenameId === s.id ? (
+                        <>
+                          <input
+                            value={sectionRenameDraft}
+                            onChange={(e) => setSectionRenameDraft(e.target.value)}
+                            style={{ flex: "1 1 220px", padding: "0.3rem 0.5rem" }}
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={sectionsSaving || !sectionRenameDraft.trim()}
+                            onClick={() => handleRenameSection(s.id)}
+                            style={{ fontSize: "0.85rem" }}
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => {
+                              setSectionRenameId(null);
+                              setSectionRenameDraft("");
+                            }}
+                            style={{ fontSize: "0.85rem" }}
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <span style={{ flex: "1 1 220px" }}>
+                            {s.name}
+                            <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}> ({s.field_count} field{s.field_count === 1 ? "" : "s"})</span>
+                          </span>
+                          {s.name !== "General" && (
+                            <button
+                              type="button"
+                              className="btn"
+                              onClick={() => openManageSectionModal(s)}
+                              style={{ fontSize: "0.85rem" }}
+                            >
+                              Manage fields
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={s.name === "General"}
+                            onClick={() => {
+                              setSectionRenameId(s.id);
+                              setSectionRenameDraft(s.name);
+                            }}
+                            style={{ fontSize: "0.85rem" }}
+                            title={s.name === "General" ? "\"General\" is the default pool for unassigned fields and can't be renamed" : undefined}
+                          >
+                            Rename
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={sectionsSaving || s.name === "General"}
+                            onClick={() => handleDeleteSection(s)}
+                            style={{ fontSize: "0.85rem", color: "var(--error)" }}
+                            title={
+                              s.name === "General"
+                                ? "\"General\" is the default pool for unassigned fields and can't be deleted"
+                                : s.field_count > 0
+                                ? "Reassign this section's fields before deleting it"
+                                : "Delete section"
+                            }
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <input
+                  placeholder="New section name"
+                  value={newSectionName}
+                  onChange={(e) => setNewSectionName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleCreateSection();
+                    }
+                  }}
+                  style={{ flex: "1 1 220px", padding: "0.35rem 0.5rem" }}
+                />
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={sectionsSaving || !newSectionName.trim()}
+                  onClick={handleCreateSection}
+                >
+                  Add section
+                </button>
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "1rem" }}>
             <button
               type="button"
@@ -1682,6 +2009,17 @@ export default function KpiFieldsPage() {
               <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
                 <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
                 <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }} />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Section</label>
+                <select {...createForm.register("section_id")} style={{ padding: "0.35rem 0.5rem" }}>
+                  {sections.length === 0 && <option value="">General (default)</option>}
+                  {sections.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
             {(createForm.watch("field_type") === "reference" || createForm.watch("field_type") === "multi_reference") && (
@@ -1949,6 +2287,7 @@ export default function KpiFieldsPage() {
                             organizationId={kpi?.organization_id}
                             currentKpiId={kpiId}
                             userRole={userRole}
+                            sections={sections}
                           />
                         ) : (
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -2553,6 +2892,7 @@ export default function KpiFieldsPage() {
                       currentKpiId={kpiId}
                       userRole={userRole}
                       extraUiSections={f.field_type === "multi_line_items" ? uiSectionCustomByMultiFieldId[f.id] ?? [] : undefined}
+                      sections={sections}
                     />
                   ) : (
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -3184,6 +3524,101 @@ export default function KpiFieldsPage() {
         </div>
       </div>
     )}
+
+    {sectionFieldModal && (() => {
+      const generalSection = sections.find((s) => s.name === "General");
+      const pickableFields = list.filter(
+        (f) =>
+          f.section_id === generalSection?.id ||
+          (sectionFieldModal.mode === "manage" && f.section_id === sectionFieldModal.sectionId)
+      );
+      return (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.45)",
+            padding: "1rem",
+          }}
+          onClick={() => !sectionFieldModalSaving && setSectionFieldModal(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label={sectionFieldModal.mode === "create" ? "Assign fields to new section" : "Manage section fields"}
+        >
+          <div
+            className="card"
+            style={{ width: "min(560px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
+              <h2 style={{ fontSize: "1.1rem", margin: 0 }}>
+                {sectionFieldModal.mode === "create" ? `Assign fields to "${sectionFieldModal.name}"` : `Manage "${sectionFieldModal.name}"`}
+              </h2>
+              <button type="button" className="btn" onClick={() => setSectionFieldModal(null)} disabled={sectionFieldModalSaving}>
+                Close
+              </button>
+            </div>
+
+            <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: "0.5rem" }}>
+              {sectionFieldModal.mode === "create"
+                ? "Select which currently-unassigned (General) fields should belong to this new section. You can leave none selected and assign fields later."
+                : "Check a field to add it to this section (from General); uncheck a field to remove it (it moves back to General)."}
+            </p>
+
+            {pickableFields.length === 0 ? (
+              <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+                No fields are available to assign — every field already belongs to another section.
+              </p>
+            ) : (
+              <ul style={{ listStyle: "none", padding: 0, margin: "0.5rem 0", maxHeight: "45vh", overflow: "auto" }}>
+                {pickableFields.map((f) => (
+                  <li
+                    key={f.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                      padding: "0.35rem 0",
+                      borderBottom: "1px solid var(--border)",
+                    }}
+                  >
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", flex: 1 }}>
+                      <input
+                        type="checkbox"
+                        checked={sectionFieldModal.selectedFieldIds.includes(f.id)}
+                        onChange={() => toggleSectionFieldSelection(f.id)}
+                      />
+                      <span>{f.name}</span>
+                      <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>
+                        ({f.field_type === "multi_line_items" ? "multi-line" : f.field_type})
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+              <button type="button" className="btn" onClick={() => setSectionFieldModal(null)} disabled={sectionFieldModalSaving}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={sectionFieldModalSaving}
+                onClick={submitSectionFieldModal}
+              >
+                {sectionFieldModal.mode === "create" ? "Create section" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    })()}
 
     {addModal && kpi && (
       <div
@@ -3960,6 +4395,7 @@ function FieldEditForm({
   currentKpiId,
   userRole,
   extraUiSections,
+  sections,
 }: {
   field: KpiField;
   list: KpiField[];
@@ -3970,6 +4406,8 @@ function FieldEditForm({
   userRole?: UserRole | null;
   /** In-session UI section names from "+ Add section" on the fields list (merged into section tabs / dropdowns). */
   extraUiSections?: string[];
+  /** KPI-level sections (collapsible grouping) this field can be assigned to. */
+  sections?: KpiSection[];
 }) {
   type EditSubFieldRow = SubFieldDef & { keyTouched?: boolean };
   const [editKeyTouched, setEditKeyTouched] = useState(false);
@@ -3986,6 +4424,7 @@ function FieldEditForm({
       formula_expression: field.formula_expression ?? "",
       is_required: field.is_required,
       sort_order: field.sort_order,
+      section_id: field.section_id ?? undefined,
       carry_forward_data: field.carry_forward_data ?? false,
       full_page_multi_items: field.full_page_multi_items ?? false,
       multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
@@ -4154,6 +4593,17 @@ function FieldEditForm({
                 {...register("sort_order")}
                 style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }}
               />
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+              <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Section</label>
+              <select {...register("section_id")} style={{ padding: "0.35rem 0.5rem" }}>
+                {(sections ?? []).length === 0 && <option value="">General (default)</option>}
+                {(sections ?? []).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </>
