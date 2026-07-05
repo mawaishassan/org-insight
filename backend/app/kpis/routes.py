@@ -8,11 +8,11 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.core.database import get_db
 from app.auth.dependencies import require_org_admin, require_super_admin, get_current_user, get_data_export_auth, DataExportAuth
-from app.core.models import User, KPI, KpiFile
+from app.core.models import User, KPI, KpiFile, KPIField
 from app.entries.service import user_can_view_kpi, user_can_edit_kpi, parse_upsert_match_keys_json
 from app.kpis.schemas import (
     KPICreate,
@@ -45,6 +45,10 @@ from app.kpis.schemas import (
     KpiOdooConfigStatus,
     KpiOdooPreviewRequest,
     KpiOdooPreviewResponse,
+    KpiSectionCreate,
+    KpiSectionUpdate,
+    KpiSectionResponse,
+    KpiSectionFieldIdsBody,
 )
 from app.kpis.service import (
     create_kpi,
@@ -81,6 +85,12 @@ from app.kpis.service import (
     grant_view_all_rows_to_user,
     revoke_all_row_access_for_user,
     sync_kpi_entry_from_api,
+    list_kpi_sections,
+    create_kpi_section,
+    update_kpi_section,
+    delete_kpi_section,
+    assign_fields_to_section,
+    unassign_fields_from_section,
 )
 from app.users.schemas import UserResponse
 from app.fields.service import list_fields as list_kpi_fields, get_field as get_kpi_field
@@ -1284,3 +1294,140 @@ async def delete_kpi_file(
         pass
     await db.delete(kf)
     await db.commit()
+
+
+# --- KPI field sections (collapsible grouping of a KPI's fields) ---
+
+
+def _section_to_response(section, field_count: int) -> KpiSectionResponse:
+    return KpiSectionResponse(
+        id=section.id,
+        kpi_id=section.kpi_id,
+        name=section.name,
+        sort_order=section.sort_order,
+        field_count=field_count,
+    )
+
+
+@router.get("/{kpi_id}/sections", response_model=list[KpiSectionResponse])
+async def list_kpi_sections_route(
+    kpi_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List a KPI's sections (ordered). Section names aren't sensitive — any KPI viewer may read
+    this, same as they can already read the field list itself."""
+    org_id = _org_id(current_user, organization_id)
+    if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
+        can_view = await user_can_view_kpi(db, current_user.id, kpi_id, org_id)
+        if not can_view:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
+    rows = await list_kpi_sections(db, kpi_id, org_id)
+    if rows is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    return [_section_to_response(s, count) for s, count in rows]
+
+
+@router.post("/{kpi_id}/sections", response_model=KpiSectionResponse, status_code=status.HTTP_201_CREATED)
+async def create_kpi_section_route(
+    kpi_id: int,
+    body: KpiSectionCreate,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Create a section within a KPI. Org Admin or Super Admin (same permission as field CRUD)."""
+    org_id = _org_id(current_user, organization_id)
+    section = await create_kpi_section(db, kpi_id, org_id, body)
+    if not section:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    await db.commit()
+    return _section_to_response(section, 0)
+
+
+@router.patch("/{kpi_id}/sections/{section_id}", response_model=KpiSectionResponse)
+async def update_kpi_section_route(
+    kpi_id: int,
+    section_id: int,
+    body: KpiSectionUpdate,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Rename a section and/or change its sort_order. Org Admin or Super Admin."""
+    org_id = _org_id(current_user, organization_id)
+    section = await update_kpi_section(db, section_id, kpi_id, org_id, body)
+    if not section:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Section not found")
+    count_res = await db.execute(
+        select(func.count()).select_from(KPIField).where(KPIField.section_id == section_id)
+    )
+    await db.commit()
+    return _section_to_response(section, count_res.scalar() or 0)
+
+
+@router.delete("/{kpi_id}/sections/{section_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_kpi_section_route(
+    kpi_id: int,
+    section_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Delete a section. Blocked with 400 if any field is still assigned to it (reassign fields
+    to another section first — fields must always belong to a section). Org Admin or Super Admin."""
+    org_id = _org_id(current_user, organization_id)
+    outcome = await delete_kpi_section(db, section_id, kpi_id, org_id)
+    if outcome == "not_found":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Section not found")
+    if outcome == "has_fields":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reassign this section's fields to another section before deleting it",
+        )
+    await db.commit()
+
+
+@router.post("/{kpi_id}/sections/{section_id}/assign-fields", response_model=KpiSectionResponse)
+async def assign_fields_to_section_route(
+    kpi_id: int,
+    section_id: int,
+    body: KpiSectionFieldIdsBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Move the given fields into this section (e.g. picking fields for a newly created section,
+    or adding more fields from the "Manage section" view). Org Admin or Super Admin."""
+    org_id = _org_id(current_user, organization_id)
+    section = await assign_fields_to_section(db, section_id, kpi_id, org_id, body.field_ids)
+    if not section:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Section not found")
+    count_res = await db.execute(
+        select(func.count()).select_from(KPIField).where(KPIField.section_id == section_id)
+    )
+    await db.commit()
+    return _section_to_response(section, count_res.scalar() or 0)
+
+
+@router.post("/{kpi_id}/sections/{section_id}/unassign-fields", response_model=KpiSectionResponse)
+async def unassign_fields_from_section_route(
+    kpi_id: int,
+    section_id: int,
+    body: KpiSectionFieldIdsBody,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Deassign the given fields from this section back to the KPI's "General" section
+    (reversible — the field itself is never deleted). Org Admin or Super Admin."""
+    org_id = _org_id(current_user, organization_id)
+    section = await unassign_fields_from_section(db, section_id, kpi_id, org_id, body.field_ids)
+    if not section:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Section not found")
+    count_res = await db.execute(
+        select(func.count()).select_from(KPIField).where(KPIField.section_id == section_id)
+    )
+    await db.commit()
+    return _section_to_response(section, count_res.scalar() or 0)

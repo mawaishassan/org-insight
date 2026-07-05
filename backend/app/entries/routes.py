@@ -3475,6 +3475,7 @@ async def get_entry_fields(
                 "is_required": f.is_required,
                 "sort_order": f.sort_order,
                 "config": _field_config_for_user(getattr(f, "config", None), current_user),
+                "section_id": getattr(f, "section_id", None),
                 "carry_forward_data": getattr(f, "carry_forward_data", False),
                 "full_page_multi_items": getattr(f, "full_page_multi_items", False),
                 "row_level_user_access_enabled": getattr(f, "row_level_user_access_enabled", False),
@@ -3527,6 +3528,7 @@ async def get_entry_fields(
             "is_required": f.is_required,
             "sort_order": f.sort_order,
             "config": _field_config_for_user(getattr(f, "config", None), current_user),
+            "section_id": getattr(f, "section_id", None),
             "carry_forward_data": getattr(f, "carry_forward_data", False),
             "full_page_multi_items": getattr(f, "full_page_multi_items", False),
             "row_level_user_access_enabled": getattr(f, "row_level_user_access_enabled", False),
@@ -3549,6 +3551,7 @@ def _excel_sheet_name(name: str, max_len: int = 31) -> str:
 
 
 async def _build_kpi_entry_xlsx(
+    db: AsyncSession,
     kpi_name: str,
     year: int,
     org_id: int,
@@ -3675,6 +3678,7 @@ async def export_entry_excel(
     )
     entry = entry_res.scalar_one_or_none()
     xlsx_bytes = await _build_kpi_entry_xlsx(
+        db,
         kpi_name=getattr(kpi, "name", "") or f"KPI_{kpi_id}",
         year=year,
         org_id=org_id,

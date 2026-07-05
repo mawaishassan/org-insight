@@ -459,6 +459,10 @@ class KPI(Base):
     category_tags = relationship("KPICategory", back_populates="kpi", lazy="selectin")
     organization_tags = relationship("KPIOrganizationTag", back_populates="kpi", lazy="selectin")
     fields = relationship("KPIField", back_populates="kpi", lazy="selectin", order_by="KPIField.sort_order")
+    sections = relationship(
+        "KpiSection", back_populates="kpi", lazy="selectin", order_by="KpiSection.sort_order",
+        cascade="all, delete-orphan",
+    )
     assignments = relationship("KPIAssignment", back_populates="kpi", lazy="selectin")
     role_assignments = relationship("KpiRoleAssignment", back_populates="kpi", lazy="selectin")
     field_access = relationship("KpiFieldAccess", back_populates="kpi", lazy="selectin")
@@ -491,6 +495,26 @@ class KpiOdooConfig(Base):
     kpi = relationship("KPI", back_populates="odoo_config")
 
 
+class KpiSection(Base):
+    """Named, orderable grouping of a KPI's (scalar) fields, shown as a collapsible section
+    on the Org Admin's KPI page. Every KPIField belongs to exactly one section (enforced at the
+    application layer — see fields/service.py's create_field fallback-to-"General" logic)."""
+
+    __tablename__ = "kpi_sections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    kpi_id = Column(
+        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(255), nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    kpi = relationship("KPI", back_populates="sections")
+    fields = relationship("KPIField", back_populates="section", order_by="KPIField.sort_order")
+
+
 class KPIField(Base):
     """Dynamic field definition under a KPI."""
 
@@ -507,6 +531,11 @@ class KPIField(Base):
     is_required = Column(Boolean, default=False)
     sort_order = Column(Integer, default=0)
     config = Column(JSON, nullable=True)
+    # Every field belongs to exactly one section (nullable at the DB level; the application layer
+    # enforces the "must belong to a section" rule — see fields/service.py create_field). No
+    # ondelete: a section with fields still assigned cannot be deleted (blocked in the service
+    # layer with a clear error), so those rows are never orphaned by a cascading delete.
+    section_id = Column(Integer, ForeignKey("kpi_sections.id"), nullable=True, index=True)
     carry_forward_data = Column(Boolean, default=False, nullable=False, server_default="0")  # Non-cyclic: copy from previous period when new
     # When true for multi_line_items fields, data entry uses a dedicated full-page UI instead of inline rows.
     full_page_multi_items = Column(Boolean, default=False, nullable=False, server_default="0")
@@ -516,6 +545,7 @@ class KPIField(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     kpi = relationship("KPI", back_populates="fields")
+    section = relationship("KpiSection", back_populates="fields")
     options = relationship("KPIFieldOption", back_populates="field", lazy="selectin")
     sub_fields = relationship(
         "KPIFieldSubField", back_populates="field", lazy="selectin", order_by="KPIFieldSubField.sort_order"

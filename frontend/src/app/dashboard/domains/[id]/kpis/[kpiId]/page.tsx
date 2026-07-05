@@ -52,6 +52,16 @@ interface FieldDef {
   can_edit?: boolean;
   /** Multi-line only: when true, row-level user access is enforced; when false, all rows follow role/field access. */
   row_level_user_access_enabled?: boolean;
+  /** Collapsible section this (scalar) field is grouped under. */
+  section_id?: number | null;
+}
+
+interface KpiSectionInfo {
+  id: number;
+  kpi_id: number;
+  name: string;
+  sort_order: number;
+  field_count: number;
 }
 
 interface FieldValueResp {
@@ -182,6 +192,100 @@ function formatValue(
   return "—";
 }
 
+/** Group editable scalar + formula fields by their section, ordered by section sort_order.
+ * Any field whose section_id doesn't match a known section (shouldn't happen once every field
+ * has a section, but defensive) falls into a trailing "Other" bucket instead of disappearing. */
+function groupEditFieldsBySection(
+  scalarFieldsEdit: FieldDef[],
+  formulaFields: FieldDef[],
+  sections: KpiSectionInfo[]
+): { key: string; name: string; scalarFieldsEdit: FieldDef[]; formulaFields: FieldDef[] }[] {
+  const ordered = [...sections].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+  const knownIds = new Set(ordered.map((s) => s.id));
+  const groups = ordered.map((s) => ({
+    key: `section-${s.id}`,
+    name: s.name,
+    scalarFieldsEdit: scalarFieldsEdit.filter((f) => f.section_id === s.id),
+    formulaFields: formulaFields.filter((f) => f.section_id === s.id),
+  }));
+  const strayScalar = scalarFieldsEdit.filter((f) => !knownIds.has(f.section_id ?? -1));
+  const strayFormula = formulaFields.filter((f) => !knownIds.has(f.section_id ?? -1));
+  if (strayScalar.length > 0 || strayFormula.length > 0) {
+    groups.push({ key: "section-unsectioned", name: "Other", scalarFieldsEdit: strayScalar, formulaFields: strayFormula });
+  }
+  return groups;
+}
+
+/** Same grouping for the read-only "fields you can view" bucket (no formula fields there). */
+function groupViewOnlyFieldsBySection(
+  scalarFieldsViewOnly: FieldDef[],
+  sections: KpiSectionInfo[]
+): { key: string; name: string; scalarFieldsViewOnly: FieldDef[] }[] {
+  const ordered = [...sections].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+  const knownIds = new Set(ordered.map((s) => s.id));
+  const groups = ordered.map((s) => ({
+    key: `section-${s.id}`,
+    name: s.name,
+    scalarFieldsViewOnly: scalarFieldsViewOnly.filter((f) => f.section_id === s.id),
+  }));
+  const stray = scalarFieldsViewOnly.filter((f) => !knownIds.has(f.section_id ?? -1));
+  if (stray.length > 0) groups.push({ key: "section-unsectioned", name: "Other", scalarFieldsViewOnly: stray });
+  return groups;
+}
+
+/** Collapsible section panel — collapsed by default, smooth expand/collapse via a max-height
+ * transition (native <details> has poor/no cross-browser animation support). */
+function SectionAccordionItem({
+  name,
+  expanded,
+  onToggle,
+  children,
+}: {
+  name: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: 8, marginBottom: "0.6rem", overflow: "hidden" }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        style={{
+          width: "100%",
+          textAlign: "left",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "0.5rem",
+          padding: "0.6rem 0.85rem",
+          background: "var(--bg-subtle, #f9fafb)",
+          border: "none",
+          cursor: "pointer",
+          fontWeight: 600,
+          fontSize: "0.95rem",
+        }}
+      >
+        <span>{name}</span>
+        <span
+          style={{
+            display: "inline-block",
+            transition: "transform 160ms ease",
+            transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
+            color: "var(--muted)",
+          }}
+        >
+          ›
+        </span>
+      </button>
+      <div style={{ maxHeight: expanded ? 20000 : 0, overflow: "hidden", transition: "max-height 220ms ease" }}>
+        <div style={{ padding: "1rem" }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
 export default function DomainKpiDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
@@ -200,6 +304,8 @@ export default function DomainKpiDetailPage() {
   const [meId, setMeId] = useState<number | null>(null);
   const [kpiName, setKpiName] = useState<string>("");
   const [fields, setFields] = useState<FieldDef[]>([]);
+  const [sections, setSections] = useState<KpiSectionInfo[]>([]);
+  const [expandedSectionIds, setExpandedSectionIds] = useState<Set<string>>(new Set());
   const [entry, setEntry] = useState<EntryRow | null>(null);
   const [overviewItem, setOverviewItem] = useState<OverviewItem | null>(null);
   const [assignedUsers, setAssignedUsers] = useState<UserRef[]>([]);
@@ -672,7 +778,7 @@ export default function DomainKpiDetailPage() {
     // Non-critical path: assignments, org users, API info, files, and time-dimension can load after first paint.
     void (async () => {
       const isOrgAdmin = meRole === "ORG_ADMIN";
-      const [assignmentsList, roleAssignmentsList, usersList, apiInfo] = await Promise.all([
+      const [assignmentsList, roleAssignmentsList, usersList, apiInfo, sectionsList] = await Promise.all([
         api<UserRef[]>(`/kpis/${kpiId}/assignments${kpiQuery}`, { token }).catch(() => []),
         api<Array<{ id: number; name: string; description?: string | null; permission: string }>>(
           `/kpis/${kpiId}/assignments-by-role${kpiQuery}`,
@@ -681,7 +787,10 @@ export default function DomainKpiDetailPage() {
         // `/users` can be very large; only load it for org admins (needed for assignment pickers / security UIs).
         isOrgAdmin ? api<UserRef[]>(`/users${usersQuery}`, { token }).catch(() => []) : Promise.resolve([] as UserRef[]),
         api<{ entry_mode?: string; api_endpoint_url?: string | null; can_edit?: boolean }>(`/entries/kpi-api-info${apiInfoQuery}`, { token }).catch(() => null),
+        api<KpiSectionInfo[]>(`/kpis/${kpiId}/sections${kpiQuery}`, { token }).catch(() => []),
       ]);
+      if (loadId !== entryDetailLoadGenRef.current) return;
+      setSections(sectionsList);
 
       if (loadId !== entryDetailLoadGenRef.current) return;
       setAssignedUsers(
@@ -2093,12 +2202,29 @@ export default function DomainKpiDetailPage() {
 
         {activeTab === "scalar" && (
           <div style={{ overflowX: "auto" }}>
-            {/* Fields you can edit */}
+            {/* Fields you can edit — grouped into collapsible sections (collapsed by default) */}
             {(formulaFields.length > 0 || scalarFieldsEdit.length > 0) && (
               <div style={{ marginBottom: "1.5rem" }}>
                 <h3 style={{ fontSize: "1rem", fontWeight: 600, margin: "0 0 0.75rem", color: "var(--text)", borderBottom: "1px solid var(--border)", paddingBottom: "0.35rem" }}>
                   Fields you can edit
                 </h3>
+                {groupEditFieldsBySection(scalarFieldsEdit, formulaFields, sections).map(({ key, name, scalarFieldsEdit, formulaFields }) => {
+                  if (scalarFieldsEdit.length === 0 && formulaFields.length === 0) return null;
+                  const expanded = expandedSectionIds.has(key);
+                  return (
+                    <SectionAccordionItem
+                      key={key}
+                      name={name}
+                      expanded={expanded}
+                      onToggle={() =>
+                        setExpandedSectionIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(key)) next.delete(key);
+                          else next.add(key);
+                          return next;
+                        })
+                      }
+                    >
             {isEditing ? (
               <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
                 {(() => {
@@ -2531,33 +2657,57 @@ export default function DomainKpiDetailPage() {
                 </tbody>
               </table>
             )}
+                    </SectionAccordionItem>
+                  );
+                })}
               </div>
             )}
 
-            {/* Fields you can view (read-only) */}
+            {/* Fields you can view (read-only) — grouped into the same collapsible sections */}
             {scalarFieldsViewOnly.length > 0 && (
               <div>
                 <h3 style={{ fontSize: "1rem", fontWeight: 600, margin: "0 0 0.75rem", color: "var(--text)", borderBottom: "1px solid var(--border)", paddingBottom: "0.35rem" }}>
                   Fields you can view (read-only)
                 </h3>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
-                  <thead>
-                    <tr>
-                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Field</th>
-                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Value</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {scalarFieldsViewOnly.map((f) => (
-                      <tr key={f.id}>
-                        <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{f.name}</td>
-                        <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
-                          {formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                {groupViewOnlyFieldsBySection(scalarFieldsViewOnly, sections).map(({ key, name, scalarFieldsViewOnly }) => {
+                  if (scalarFieldsViewOnly.length === 0) return null;
+                  const expanded = expandedSectionIds.has(`view-${key}`);
+                  return (
+                    <SectionAccordionItem
+                      key={key}
+                      name={name}
+                      expanded={expanded}
+                      onToggle={() =>
+                        setExpandedSectionIds((prev) => {
+                          const next = new Set(prev);
+                          const k = `view-${key}`;
+                          if (next.has(k)) next.delete(k);
+                          else next.add(k);
+                          return next;
+                        })
+                      }
+                    >
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                        <thead>
+                          <tr>
+                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Field</th>
+                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {scalarFieldsViewOnly.map((f) => (
+                            <tr key={f.id}>
+                              <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{f.name}</td>
+                              <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
+                                {formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </SectionAccordionItem>
+                  );
+                })}
               </div>
             )}
 

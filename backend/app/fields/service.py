@@ -13,6 +13,7 @@ from app.core.models import (
     ReportTemplateField,
     KpiFieldAccess,
     KpiFieldAccessByRole,
+    KpiSection,
 )
 from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldOptionCreate
 
@@ -24,10 +25,39 @@ async def _kpi_org_id(db: AsyncSession, kpi_id: int) -> int | None:
     return row[0] if row else None
 
 
+async def get_or_create_general_section(db: AsyncSession, kpi_id: int) -> KpiSection:
+    """Return this KPI's "General" section, lazily creating it if it doesn't exist yet.
+    "General" is the default unassigned pool every field falls back to."""
+    result = await db.execute(select(KpiSection).where(KpiSection.kpi_id == kpi_id, KpiSection.name == "General"))
+    general = result.scalars().first()
+    if general:
+        return general
+    general = KpiSection(kpi_id=kpi_id, name="General", sort_order=0)
+    db.add(general)
+    await db.flush()
+    return general
+
+
+async def _resolve_section_id(db: AsyncSession, kpi_id: int, section_id: int | None) -> int:
+    """Validate that section_id belongs to this KPI; otherwise fall back to (lazily creating if
+    needed) the KPI's "General" section. Guarantees every field always resolves to a valid
+    section_id — the "every field must belong to a section" rule is enforced here, at the
+    application layer, for any caller (UI or direct API), not just well-behaved frontend forms."""
+    if section_id is not None:
+        result = await db.execute(
+            select(KpiSection.id).where(KpiSection.id == section_id, KpiSection.kpi_id == kpi_id)
+        )
+        if result.scalar_one_or_none() is not None:
+            return section_id
+    general = await get_or_create_general_section(db, kpi_id)
+    return general.id
+
+
 async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> KPIField | None:
     """Create KPI field (KPI must belong to org)."""
     if await _kpi_org_id(db, data.kpi_id) != org_id:
         return None
+    section_id = await _resolve_section_id(db, data.kpi_id, getattr(data, "section_id", None))
     field = KPIField(
         kpi_id=data.kpi_id,
         name=data.name,
@@ -37,6 +67,7 @@ async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> K
         is_required=data.is_required,
         sort_order=data.sort_order,
         config=data.config,
+        section_id=section_id,
         carry_forward_data=getattr(data, "carry_forward_data", False),
         full_page_multi_items=getattr(data, "full_page_multi_items", False),
     )
@@ -143,6 +174,8 @@ async def update_field(
         field.sort_order = data.sort_order
     if data.config is not None:
         field.config = data.config
+    if getattr(data, "section_id", None) is not None:
+        field.section_id = await _resolve_section_id(db, field.kpi_id, data.section_id)
     if data.carry_forward_data is not None:
         field.carry_forward_data = data.carry_forward_data
     if data.full_page_multi_items is not None:

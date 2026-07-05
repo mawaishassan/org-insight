@@ -345,3 +345,43 @@ class KpiOdooConfigStatus(BaseModel):
 
     kpi_id: int
     configured: bool
+
+
+# --- KPI field sections (collapsible grouping of a KPI's fields) ---
+
+
+class KpiSectionCreate(BaseModel):
+    """Create a section within a KPI. sort_order defaults to after the last existing section.
+    field_ids (optional): fields to move into this section immediately upon creation — must
+    currently belong to this KPI; typically the fields the Super Admin picked from the
+    "unassigned (General)" list in the Add Section flow."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    sort_order: int | None = None
+    field_ids: list[int] = Field(default_factory=list)
+
+
+class KpiSectionUpdate(BaseModel):
+    """Rename a section and/or change its sort_order (e.g. move up/down swaps two sections' sort_order)."""
+
+    name: str | None = Field(None, min_length=1, max_length=255)
+    sort_order: int | None = None
+
+
+class KpiSectionResponse(BaseModel):
+    """Section in API response, with a field count so the admin UI can warn/block delete."""
+
+    id: int
+    kpi_id: int
+    name: str
+    sort_order: int
+    field_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class KpiSectionFieldIdsBody(BaseModel):
+    """Body for bulk assign/unassign-to-section requests: the fields to move."""
+
+    field_ids: list[int] = Field(..., min_length=1)
