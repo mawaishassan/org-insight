@@ -14,6 +14,7 @@ from app.core.models import (
     KpiFieldAccess,
     KpiFieldAccessByRole,
     KpiSection,
+    FieldType,
 )
 from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldOptionCreate
 
@@ -53,11 +54,31 @@ async def _resolve_section_id(db: AsyncSession, kpi_id: int, section_id: int | N
     return general.id
 
 
+async def _validate_conditional_config(db: AsyncSession, kpi_id: int, config: dict | None) -> None:
+    if not config:
+        return
+    trigger_id = config.get("condition_trigger_field_id")
+    if trigger_id is not None:
+        result = await db.execute(
+            select(KPIField).where(KPIField.id == int(trigger_id), KPIField.kpi_id == kpi_id)
+        )
+        trigger = result.scalar_one_or_none()
+        if not trigger:
+            raise ValueError("Trigger field not found in this KPI")
+        if trigger.field_type != FieldType.boolean:
+            raise ValueError("Trigger field must be a Boolean field")
+
+
 async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> KPIField | None:
     """Create KPI field (KPI must belong to org)."""
     if await _kpi_org_id(db, data.kpi_id) != org_id:
         return None
-    section_id = await _resolve_section_id(db, data.kpi_id, getattr(data, "section_id", None))
+    if data.config:
+        await _validate_conditional_config(db, data.kpi_id, data.config)
+    if data.field_type == FieldType.multi_line_items:
+        section_id = await _resolve_section_id(db, data.kpi_id, getattr(data, "section_id", None))
+    else:
+        section_id = None
     field = KPIField(
         kpi_id=data.kpi_id,
         name=data.name,
@@ -153,6 +174,123 @@ async def list_fields(db: AsyncSession, kpi_id: int, org_id: int) -> list[KPIFie
     return list(result.scalars().all())
 
 
+def is_value_compatible(value_obj: KPIFieldValue, new_type: FieldType) -> bool:
+    if (
+        value_obj.value_text is None
+        and value_obj.value_number is None
+        and value_obj.value_boolean is None
+        and value_obj.value_date is None
+        and value_obj.value_json is None
+    ):
+        return True
+
+    if new_type in (FieldType.single_line_text, FieldType.multi_line_text, FieldType.attachment, FieldType.reference):
+        return True
+
+    elif new_type == FieldType.number:
+        if value_obj.value_number is not None:
+            return True
+        if value_obj.value_boolean is not None:
+            return True
+        if value_obj.value_text is not None:
+            try:
+                float(value_obj.value_text.strip())
+                return True
+            except ValueError:
+                return False
+        return False
+
+    elif new_type == FieldType.boolean:
+        if value_obj.value_boolean is not None:
+            return True
+        if value_obj.value_number is not None:
+            return False
+        if value_obj.value_text is not None:
+            s = value_obj.value_text.strip().lower()
+            return s in ("1", "true", "yes", "y", "0", "false", "no", "n")
+        return False
+
+    elif new_type == FieldType.date:
+        if value_obj.value_date is not None:
+            return True
+        if value_obj.value_text is not None:
+            try:
+                from datetime import datetime
+                datetime.fromisoformat(value_obj.value_text.strip().replace("Z", "+00:00"))
+                return True
+            except ValueError:
+                return False
+        return False
+
+    elif new_type in (FieldType.multi_reference, FieldType.mixed_list):
+        if value_obj.value_json is not None:
+            return isinstance(value_obj.value_json, list)
+        return False
+
+    return False
+
+
+def migrate_value(value_obj: KPIFieldValue, new_type: FieldType) -> None:
+    txt = value_obj.value_text
+    num = value_obj.value_number
+    bool_val = value_obj.value_boolean
+    dt = value_obj.value_date
+    js = value_obj.value_json
+
+    value_obj.value_text = None
+    value_obj.value_number = None
+    value_obj.value_boolean = None
+    value_obj.value_date = None
+    value_obj.value_json = None
+
+    if new_type in (FieldType.single_line_text, FieldType.multi_line_text, FieldType.attachment, FieldType.reference):
+        if txt is not None:
+            value_obj.value_text = txt
+        elif num is not None:
+            if num.is_integer():
+                value_obj.value_text = str(int(num))
+            else:
+                value_obj.value_text = str(num)
+        elif bool_val is not None:
+            value_obj.value_text = "Yes" if bool_val else "No"
+        elif dt is not None:
+            value_obj.value_text = dt.isoformat()
+        elif js is not None:
+            import json
+            value_obj.value_text = json.dumps(js)
+
+    elif new_type == FieldType.number:
+        if num is not None:
+            value_obj.value_number = num
+        elif bool_val is not None:
+            value_obj.value_number = 1.0 if bool_val else 0.0
+        elif txt is not None:
+            try:
+                value_obj.value_number = float(txt.strip())
+            except ValueError:
+                pass
+
+    elif new_type == FieldType.boolean:
+        if bool_val is not None:
+            value_obj.value_boolean = bool_val
+        elif txt is not None:
+            s = txt.strip().lower()
+            if s in ("1", "true", "yes", "y"):
+                value_obj.value_boolean = True
+            elif s in ("0", "false", "no", "n"):
+                value_obj.value_boolean = False
+
+    elif new_type == FieldType.date:
+        if dt is not None:
+            value_obj.value_date = dt
+        elif txt is not None:
+            from datetime import datetime
+            try:
+                value_obj.value_date = datetime.fromisoformat(txt.strip().replace("Z", "+00:00"))
+            except ValueError:
+                pass
+
+
 async def update_field(
     db: AsyncSession, field_id: int, org_id: int, data: KPIFieldUpdate
 ) -> KPIField | None:
@@ -160,6 +298,21 @@ async def update_field(
     field = await get_field(db, field_id, org_id)
     if not field:
         return None
+    if data.field_type is not None and data.field_type != field.field_type:
+        if field.field_type != FieldType.multi_line_items and data.field_type != FieldType.multi_line_items:
+            result = await db.execute(
+                select(KPIFieldValue).where(KPIFieldValue.field_id == field_id)
+            )
+            values = result.scalars().all()
+            for v in values:
+                if is_value_compatible(v, data.field_type):
+                    migrate_value(v, data.field_type)
+                else:
+                    v.value_text = None
+                    v.value_number = None
+                    v.value_boolean = None
+                    v.value_date = None
+                    v.value_json = None
     if data.name is not None:
         field.name = data.name
     if data.key is not None:
@@ -173,8 +326,11 @@ async def update_field(
     if data.sort_order is not None:
         field.sort_order = data.sort_order
     if data.config is not None:
+        await _validate_conditional_config(db, field.kpi_id, data.config)
         field.config = data.config
-    if getattr(data, "section_id", None) is not None:
+    if field.field_type != FieldType.multi_line_items:
+        field.section_id = None
+    elif getattr(data, "section_id", None) is not None:
         field.section_id = await _resolve_section_id(db, field.kpi_id, data.section_id)
     if data.carry_forward_data is not None:
         field.carry_forward_data = data.carry_forward_data

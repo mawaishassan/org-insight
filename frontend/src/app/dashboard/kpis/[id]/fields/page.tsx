@@ -116,6 +116,8 @@ interface ReferenceConfig {
   reference_source_field_key?: string;
   /** When source is a multi_line_items field, the sub-field key to use for values */
   reference_source_sub_field_key?: string;
+  condition_trigger_field_id?: number;
+  condition_trigger_value?: boolean;
 }
 
 interface SubFieldDef {
@@ -315,6 +317,25 @@ export default function KpiFieldsPage() {
     ui_section: string;
     config: ReferenceConfig;
   }>({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: "", config: {} });
+  const [isCondModalOpen, setIsCondModalOpen] = useState(false);
+  const [condEditingFieldId, setCondEditingFieldId] = useState<number | null>(null);
+  const [condTriggerId, setCondTriggerId] = useState<number | "">("");
+  const [condTriggerVal, setCondTriggerVal] = useState<boolean>(true);
+  const [condDepType, setCondDepType] = useState<"existing" | "new">("existing");
+  const [condDepFieldId, setCondDepFieldId] = useState<number | "">("");
+  const [condNewName, setCondNewName] = useState("");
+  const [condNewKey, setCondNewKey] = useState("");
+  const [condNewFieldType, setCondNewFieldType] = useState("single_line_text");
+  const [condNewRequired, setCondNewRequired] = useState(false);
+  const [condNewRefConfig, setCondNewRefConfig] = useState<ReferenceConfig>({});
+  const [typeChangeWarning, setTypeChangeWarning] = useState<{
+    fieldId: number;
+    data: UpdateFormData;
+    subFields?: SubFieldDef[];
+    refConfig?: ReferenceConfig;
+    count: number;
+  } | null>(null);
+
   const [kpiSaveError, setKpiSaveError] = useState<string | null>(null);
   const [kpiSaving, setKpiSaving] = useState(false);
   const [orgTimeDimension, setOrgTimeDimension] = useState<string>("yearly");
@@ -713,7 +734,7 @@ export default function KpiFieldsPage() {
         formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
         is_required: data.is_required,
         sort_order: data.sort_order,
-        section_id: data.section_id ?? null,
+        section_id: data.field_type === "multi_line_items" ? (data.section_id ?? null) : null,
         carry_forward_data: data.carry_forward_data ?? false,
         full_page_multi_items: data.full_page_multi_items ?? false,
         options: [],
@@ -798,7 +819,7 @@ export default function KpiFieldsPage() {
     }
   };
 
-  const onUpdateSubmit = async (fieldId: number, data: UpdateFormData, subFields?: SubFieldDef[], refConfig?: ReferenceConfig) => {
+  const executeFieldUpdate = async (fieldId: number, data: UpdateFormData, subFields?: SubFieldDef[], refConfig?: ReferenceConfig) => {
     if (!token || orgId == null) return;
     setError(null);
     try {
@@ -809,7 +830,7 @@ export default function KpiFieldsPage() {
         formula_expression: data.field_type === "formula" ? (data.formula_expression || null) : null,
         is_required: data.is_required,
         sort_order: data.sort_order,
-        section_id: data.section_id ?? null,
+        section_id: data.field_type === "multi_line_items" ? (data.section_id ?? null) : null,
         carry_forward_data: data.carry_forward_data,
         full_page_multi_items: data.full_page_multi_items,
       };
@@ -885,6 +906,155 @@ export default function KpiFieldsPage() {
       const msg = e instanceof Error ? e.message : "Update failed";
       setError(msg);
       toast.error(msg);
+    }
+  };
+
+  const onUpdateSubmit = async (fieldId: number, data: UpdateFormData, subFields?: SubFieldDef[], refConfig?: ReferenceConfig) => {
+    if (!token || orgId == null) return;
+    const currentField = list.find((f) => f.id === fieldId);
+    const isTypeChanged = currentField && currentField.field_type !== data.field_type;
+
+    if (isTypeChanged) {
+      try {
+        const orgParam = orgId != null ? `&organization_id=${orgId}` : "";
+        const res = await api<{ compatible: boolean; incompatible_count: number }>(
+          `/fields/${fieldId}/check-type-compatibility?new_type=${data.field_type}${orgParam}`,
+          { token }
+        );
+        if (!res.compatible && res.incompatible_count > 0) {
+          setTypeChangeWarning({ fieldId, data, subFields, refConfig, count: res.incompatible_count });
+          return;
+        }
+      } catch (err: any) {
+        console.error("Failed to check type compatibility:", err);
+      }
+    }
+
+    await executeFieldUpdate(fieldId, data, subFields, refConfig);
+  };
+
+  const handleSaveConditionalRule = async () => {
+    if (!token || !condTriggerId || orgId == null) return;
+
+    const triggerField = list.find((f) => f.id === Number(condTriggerId));
+    if (!triggerField) {
+      toast.error("Trigger field not found");
+      return;
+    }
+
+    try {
+      if (condDepType === "existing") {
+        if (!condDepFieldId) {
+          toast.error("Please select a dependent field");
+          return;
+        }
+
+        const depField = list.find((f) => f.id === Number(condDepFieldId));
+        if (!depField) {
+          toast.error("Dependent field not found");
+          return;
+        }
+
+        // If editing, and the dependent field changed
+        if (condEditingFieldId && condEditingFieldId !== depField.id) {
+          const oldField = list.find((f) => f.id === condEditingFieldId);
+          if (oldField) {
+            const oldConfig = { ...(oldField.config ?? {}) };
+            delete oldConfig.condition_trigger_field_id;
+            delete oldConfig.condition_trigger_value;
+
+            await api(`/fields/${oldField.id}?organization_id=${orgId}`, {
+              method: "PATCH",
+              body: JSON.stringify({ config: oldConfig }),
+              token,
+            });
+          }
+        }
+
+        const newConfig = {
+          ...(depField.config ?? {}),
+          condition_trigger_field_id: Number(condTriggerId),
+          condition_trigger_value: condTriggerVal,
+        };
+
+        await api(`/fields/${depField.id}?organization_id=${orgId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ config: newConfig }),
+          token,
+        });
+
+        toast.success("Conditional visibility rule saved successfully");
+      } else {
+        if (!condNewName.trim()) {
+          toast.error("Please enter a field name");
+          return;
+        }
+        if (!condNewKey.trim()) {
+          toast.error("Please enter a field key");
+          return;
+        }
+        if (!/^[a-z_][a-z0-9_]*$/.test(condNewKey)) {
+          toast.error("Field key must start with a letter and contain only lowercase letters, numbers, and underscores.");
+          return;
+        }
+
+        // Ensure key is unique
+        if (list.some((f) => f.key.toLowerCase() === condNewKey.toLowerCase())) {
+          toast.error("Field key already exists in this KPI");
+          return;
+        }
+
+        const body: Record<string, unknown> = {
+          kpi_id: kpiId,
+          name: condNewName,
+          key: condNewKey.toLowerCase(),
+          field_type: condNewFieldType,
+          is_required: condNewRequired,
+          sort_order: 0,
+          config: {
+            ...condNewRefConfig,
+            condition_trigger_field_id: Number(condTriggerId),
+            condition_trigger_value: condTriggerVal,
+          },
+          options: [],
+        };
+
+        await api(`/fields?organization_id=${orgId}`, {
+          method: "POST",
+          body: JSON.stringify(body),
+          token,
+        });
+
+        toast.success("New conditional field created successfully");
+      }
+
+      setIsCondModalOpen(false);
+      loadList();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save conditional visibility rule");
+    }
+  };
+
+  const handleRemoveConditionalRule = async (fieldId: number) => {
+    if (!token || orgId == null) return;
+    try {
+      const field = list.find((f) => f.id === fieldId);
+      if (!field) return;
+
+      const newConfig = { ...(field.config ?? {}) };
+      delete newConfig.condition_trigger_field_id;
+      delete newConfig.condition_trigger_value;
+
+      await api(`/fields/${field.id}?organization_id=${orgId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ config: newConfig }),
+        token,
+      });
+
+      toast.success("Conditional visibility rule removed");
+      loadList();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to remove conditional visibility rule");
     }
   };
 
@@ -1724,157 +1894,7 @@ export default function KpiFieldsPage() {
         <>
           {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
 
-          {userRole === "SUPER_ADMIN" && (
-            <div className="card" style={{ marginBottom: "1rem", padding: "0.9rem 1rem" }}>
-              <div style={{ fontWeight: 600, marginBottom: "0.6rem" }}>
-                Sections
-                <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.85rem" }}>
-                  {" "}— group this KPI&apos;s fields into collapsible sections
-                </span>
-              </div>
-              {sections.length === 0 ? (
-                <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 0.6rem" }}>
-                  No sections yet — fields will use a default &quot;General&quot; section until you create one.
-                </p>
-              ) : (
-                <ul style={{ listStyle: "none", padding: 0, margin: "0 0 0.75rem" }}>
-                  {sections.map((s, idx) => (
-                    <li
-                      key={s.id}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        padding: "0.4rem 0",
-                        borderBottom: idx < sections.length - 1 ? "1px solid var(--border)" : "none",
-                      }}
-                    >
-                      <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
-                        <button
-                          type="button"
-                          className="btn"
-                          disabled={sectionsSaving || idx === 0}
-                          onClick={() => handleMoveSection(idx, "up")}
-                          style={{ fontSize: "0.7rem", padding: "0.05rem 0.35rem", lineHeight: 1 }}
-                          aria-label={`Move ${s.name} up`}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          className="btn"
-                          disabled={sectionsSaving || idx === sections.length - 1}
-                          onClick={() => handleMoveSection(idx, "down")}
-                          style={{ fontSize: "0.7rem", padding: "0.05rem 0.35rem", lineHeight: 1 }}
-                          aria-label={`Move ${s.name} down`}
-                        >
-                          ↓
-                        </button>
-                      </div>
-                      {sectionRenameId === s.id ? (
-                        <>
-                          <input
-                            value={sectionRenameDraft}
-                            onChange={(e) => setSectionRenameDraft(e.target.value)}
-                            style={{ flex: "1 1 220px", padding: "0.3rem 0.5rem" }}
-                            autoFocus
-                          />
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            disabled={sectionsSaving || !sectionRenameDraft.trim()}
-                            onClick={() => handleRenameSection(s.id)}
-                            style={{ fontSize: "0.85rem" }}
-                          >
-                            Save
-                          </button>
-                          <button
-                            type="button"
-                            className="btn"
-                            onClick={() => {
-                              setSectionRenameId(null);
-                              setSectionRenameDraft("");
-                            }}
-                            style={{ fontSize: "0.85rem" }}
-                          >
-                            Cancel
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <span style={{ flex: "1 1 220px" }}>
-                            {s.name}
-                            <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}> ({s.field_count} field{s.field_count === 1 ? "" : "s"})</span>
-                          </span>
-                          {s.name !== "General" && (
-                            <button
-                              type="button"
-                              className="btn"
-                              onClick={() => openManageSectionModal(s)}
-                              style={{ fontSize: "0.85rem" }}
-                            >
-                              Manage fields
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            className="btn"
-                            disabled={s.name === "General"}
-                            onClick={() => {
-                              setSectionRenameId(s.id);
-                              setSectionRenameDraft(s.name);
-                            }}
-                            style={{ fontSize: "0.85rem" }}
-                            title={s.name === "General" ? "\"General\" is the default pool for unassigned fields and can't be renamed" : undefined}
-                          >
-                            Rename
-                          </button>
-                          <button
-                            type="button"
-                            className="btn"
-                            disabled={sectionsSaving || s.name === "General"}
-                            onClick={() => handleDeleteSection(s)}
-                            style={{ fontSize: "0.85rem", color: "var(--error)" }}
-                            title={
-                              s.name === "General"
-                                ? "\"General\" is the default pool for unassigned fields and can't be deleted"
-                                : s.field_count > 0
-                                ? "Reassign this section's fields before deleting it"
-                                : "Delete section"
-                            }
-                          >
-                            Delete
-                          </button>
-                        </>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <div style={{ display: "flex", gap: "0.5rem" }}>
-                <input
-                  placeholder="New section name"
-                  value={newSectionName}
-                  onChange={(e) => setNewSectionName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      handleCreateSection();
-                    }
-                  }}
-                  style={{ flex: "1 1 220px", padding: "0.35rem 0.5rem" }}
-                />
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={sectionsSaving || !newSectionName.trim()}
-                  onClick={handleCreateSection}
-                >
-                  Add section
-                </button>
-              </div>
-            </div>
-          )}
+
 
           <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "1rem" }}>
             <button
@@ -2010,17 +2030,19 @@ export default function KpiFieldsPage() {
                 <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
                 <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }} />
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Section</label>
-                <select {...createForm.register("section_id")} style={{ padding: "0.35rem 0.5rem" }}>
-                  {sections.length === 0 && <option value="">General (default)</option>}
-                  {sections.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {createForm.watch("field_type") === "multi_line_items" && (
+                <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                  <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Section</label>
+                  <select {...createForm.register("section_id")} style={{ padding: "0.35rem 0.5rem" }}>
+                    {sections.length === 0 && <option value="">General (default)</option>}
+                    {sections.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
             {(createForm.watch("field_type") === "reference" || createForm.watch("field_type") === "multi_reference") && (
               <div className="form-group">
@@ -2924,6 +2946,11 @@ export default function KpiFieldsPage() {
                             Formula: {f.formula_expression}
                           </span>
                         )}
+                        {f.config?.condition_trigger_field_id != null && (
+                          <span style={{ display: "block", color: "var(--primary)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                            Only visible when trigger field <strong>{list.find(x => x.id === f.config?.condition_trigger_field_id)?.name || f.config?.condition_trigger_field_id}</strong> is <strong>{f.config?.condition_trigger_value ? 'Yes' : 'No'}</strong>
+                          </span>
+                        )}
                       </div>
                       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
                         <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
@@ -2936,10 +2963,361 @@ export default function KpiFieldsPage() {
             )}
           </ul>
         )}
+
+        {/* Conditional Visibility Rules Card */}
+        {superAdminFieldsTab === "scalar" && (
+          <div className="card" style={{ marginTop: "2rem", padding: "1.5rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1rem", flexWrap: "wrap", gap: "1rem" }}>
+              <div>
+                <h3 style={{ fontSize: "1.1rem", fontWeight: 600, margin: 0 }}>
+                  Conditional Visibility Rules
+                </h3>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
+                  Configure fields to dynamically show or hide based on the value of a Boolean scalar field.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  setCondEditingFieldId(null);
+                  setCondTriggerId("");
+                  setCondTriggerVal(true);
+                  setCondDepType("existing");
+                  setCondDepFieldId("");
+                  setCondNewName("");
+                  setCondNewKey("");
+                  setCondNewFieldType("single_line_text");
+                  setCondNewRequired(false);
+                  setCondNewRefConfig({});
+                  setIsCondModalOpen(true);
+                }}
+              >
+                Add Rule
+              </button>
+            </div>
+
+            {list.filter((f) => f.config?.condition_trigger_field_id != null).length === 0 ? (
+              <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "1rem 0 0" }}>
+                No conditional visibility rules configured yet.
+              </p>
+            ) : (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem", marginTop: "1rem" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Dependent Field</th>
+                    <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Trigger Field</th>
+                    <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Condition</th>
+                    <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "1px solid var(--border)", width: 140 }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {list
+                    .filter((f) => f.config?.condition_trigger_field_id != null)
+                    .map((f) => {
+                      const trigger = list.find((t) => t.id === f.config?.condition_trigger_field_id);
+                      return (
+                        <tr key={f.id}>
+                          <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                            <strong>{f.name}</strong> <span style={{ color: "var(--muted)" }}>({f.key})</span>
+                          </td>
+                          <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                            {trigger ? (
+                              <span>{trigger.name} <span style={{ color: "var(--muted)" }}>({trigger.key})</span></span>
+                            ) : (
+                              <span style={{ color: "var(--error)" }}>Missing Trigger (ID: {f.config?.condition_trigger_field_id})</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                            Show when trigger is <strong>{f.config?.condition_trigger_value ? "Yes" : "No"}</strong>
+                          </td>
+                          <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ marginRight: "0.35rem" }}
+                              onClick={() => {
+                                setCondEditingFieldId(f.id);
+                                setCondTriggerId(f.config?.condition_trigger_field_id ?? "");
+                                setCondTriggerVal(f.config?.condition_trigger_value ?? true);
+                                setCondDepType("existing");
+                                setCondDepFieldId(f.id);
+                                setIsCondModalOpen(true);
+                              }}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ color: "var(--error)" }}
+                              onClick={() => handleRemoveConditionalRule(f.id)}
+                            >
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
       </div>
         </>
       )}
     </div>
+
+    {/* Conditional Visibility Rule Modal */}
+    {isCondModalOpen && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1000,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setIsCondModalOpen(false)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add/Edit Conditional Visibility Rule"
+      >
+        <div
+          className="card"
+          style={{ width: "min(560px, 95vw)", padding: "1.5rem", maxHeight: "90vh", overflow: "auto" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h2 style={{ fontSize: "1.2rem", marginBottom: "1rem" }}>
+            {condEditingFieldId ? "Edit Conditional Visibility Rule" : "Add Conditional Visibility Rule"}
+          </h2>
+
+          <div className="form-group" style={{ marginBottom: "1rem" }}>
+            <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Boolean Trigger Field</label>
+            <select
+              value={condTriggerId}
+              onChange={(e) => setCondTriggerId(e.target.value ? Number(e.target.value) : "")}
+              style={{ width: "100%", padding: "0.5rem" }}
+            >
+              <option value="">— Select Boolean Field —</option>
+              {list
+                .filter((f) => f.field_type === "boolean")
+                .map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name} ({f.key})
+                  </option>
+                ))}
+            </select>
+          </div>
+
+          <div className="form-group" style={{ marginBottom: "1rem" }}>
+            <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Condition Value</label>
+            <select
+              value={condTriggerVal ? "true" : "false"}
+              onChange={(e) => setCondTriggerVal(e.target.value === "true")}
+              style={{ width: "100%", padding: "0.5rem" }}
+            >
+              <option value="true">Show dependent field when trigger is Yes/True</option>
+              <option value="false">Show dependent field when trigger is No/False</option>
+            </select>
+          </div>
+
+          {!condEditingFieldId && (
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
+              <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Choose Dependency Type</label>
+              <div style={{ display: "flex", gap: "1rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    name="condDepType"
+                    checked={condDepType === "existing"}
+                    onChange={() => setCondDepType("existing")}
+                  />
+                  Use Existing Scalar Field
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    name="condDepType"
+                    checked={condDepType === "new"}
+                    onChange={() => setCondDepType("new")}
+                  />
+                  Create New Scalar Field
+                </label>
+              </div>
+            </div>
+          )}
+
+          {condDepType === "existing" ? (
+            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+              <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Dependent Scalar Field</label>
+              <select
+                value={condDepFieldId}
+                onChange={(e) => setCondDepFieldId(e.target.value ? Number(e.target.value) : "")}
+                disabled={condEditingFieldId != null}
+                style={{ width: "100%", padding: "0.5rem" }}
+              >
+                <option value="">— Select Scalar Field —</option>
+                {list
+                  .filter(
+                    (f) =>
+                      f.field_type !== "multi_line_items" &&
+                      f.field_type !== "formula" &&
+                      f.id !== Number(condTriggerId) &&
+                      (f.id === condEditingFieldId || f.config?.condition_trigger_field_id == null)
+                  )
+                  .map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name} ({f.key} - {f.field_type})
+                    </option>
+                  ))}
+              </select>
+            </div>
+          ) : (
+            <div style={{ border: "1px solid var(--border)", padding: "1rem", borderRadius: 8, marginBottom: "1.5rem" }}>
+              <h4 style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>Create Dependent Scalar Field</h4>
+              <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Field Name</label>
+                <input
+                  type="text"
+                  value={condNewName}
+                  onChange={(e) => {
+                    setCondNewName(e.target.value);
+                    setCondNewKey(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 50));
+                  }}
+                  placeholder="e.g. Funding Amount"
+                  style={{ width: "100%", padding: "0.45rem" }}
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Field Key</label>
+                <input
+                  type="text"
+                  value={condNewKey}
+                  onChange={(e) => setCondNewKey(e.target.value)}
+                  placeholder="e.g. funding_amount"
+                  style={{ width: "100%", padding: "0.45rem" }}
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Field Type</label>
+                <select
+                  value={condNewFieldType}
+                  onChange={(e) => setCondNewFieldType(e.target.value)}
+                  style={{ width: "100%", padding: "0.45rem" }}
+                >
+                  <option value="single_line_text">Single line text</option>
+                  <option value="multi_line_text">Multi line text</option>
+                  <option value="number">Numeric</option>
+                  <option value="date">Date</option>
+                  <option value="boolean">Boolean</option>
+                  <option value="attachment">Attachment</option>
+                  <option value="mixed_list">Mixed list</option>
+                  <option value="reference">Reference</option>
+                  <option value="multi_reference">Multi Reference</option>
+                </select>
+              </div>
+              <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer", fontSize: "0.85rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={condNewRequired}
+                    onChange={(e) => setCondNewRequired(e.target.checked)}
+                  />
+                  Required Field
+                </label>
+              </div>
+
+              {(condNewFieldType === "reference" || condNewFieldType === "multi_reference") && (
+                <div className="form-group" style={{ marginTop: "0.75rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Reference config</label>
+                  <ReferenceConfigUI
+                    organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                    currentKpiId={kpiId}
+                    value={condNewRefConfig}
+                    onChange={setCondNewRefConfig}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1.5rem" }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setIsCondModalOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={handleSaveConditionalRule}
+            >
+              Save Rule
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {typeChangeWarning && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1200,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setTypeChangeWarning(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Confirm Field Data Type Change"
+      >
+        <div
+          className="card"
+          style={{ width: "min(480px, 95vw)", padding: "1.5rem" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 style={{ fontSize: "1.1rem", fontWeight: 600, margin: "0 0 0.75rem" }}>
+            Warning: Data Loss Potential
+          </h3>
+          <p style={{ fontSize: "0.9rem", color: "var(--text)", margin: "0 0 1.25rem", lineHeight: 1.5 }}>
+            Changing this field data type may delete existing saved values because the current data cannot be converted to the new type. Do you want to continue?
+          </p>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setTypeChangeWarning(null)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ background: "var(--error, #ef4444)", borderColor: "var(--error, #ef4444)" }}
+              onClick={async () => {
+                const info = typeChangeWarning;
+                setTypeChangeWarning(null);
+                await executeFieldUpdate(info.fieldId, info.data, info.subFields, info.refConfig);
+              }}
+            >
+              Continue and Delete Invalid Values
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
 
     {addSubFieldModal && (
       <div
@@ -3525,100 +3903,6 @@ export default function KpiFieldsPage() {
       </div>
     )}
 
-    {sectionFieldModal && (() => {
-      const generalSection = sections.find((s) => s.name === "General");
-      const pickableFields = list.filter(
-        (f) =>
-          f.section_id === generalSection?.id ||
-          (sectionFieldModal.mode === "manage" && f.section_id === sectionFieldModal.sectionId)
-      );
-      return (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1100,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.45)",
-            padding: "1rem",
-          }}
-          onClick={() => !sectionFieldModalSaving && setSectionFieldModal(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-label={sectionFieldModal.mode === "create" ? "Assign fields to new section" : "Manage section fields"}
-        >
-          <div
-            className="card"
-            style={{ width: "min(560px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
-              <h2 style={{ fontSize: "1.1rem", margin: 0 }}>
-                {sectionFieldModal.mode === "create" ? `Assign fields to "${sectionFieldModal.name}"` : `Manage "${sectionFieldModal.name}"`}
-              </h2>
-              <button type="button" className="btn" onClick={() => setSectionFieldModal(null)} disabled={sectionFieldModalSaving}>
-                Close
-              </button>
-            </div>
-
-            <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: "0.5rem" }}>
-              {sectionFieldModal.mode === "create"
-                ? "Select which currently-unassigned (General) fields should belong to this new section. You can leave none selected and assign fields later."
-                : "Check a field to add it to this section (from General); uncheck a field to remove it (it moves back to General)."}
-            </p>
-
-            {pickableFields.length === 0 ? (
-              <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-                No fields are available to assign — every field already belongs to another section.
-              </p>
-            ) : (
-              <ul style={{ listStyle: "none", padding: 0, margin: "0.5rem 0", maxHeight: "45vh", overflow: "auto" }}>
-                {pickableFields.map((f) => (
-                  <li
-                    key={f.id}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "0.5rem",
-                      padding: "0.35rem 0",
-                      borderBottom: "1px solid var(--border)",
-                    }}
-                  >
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", flex: 1 }}>
-                      <input
-                        type="checkbox"
-                        checked={sectionFieldModal.selectedFieldIds.includes(f.id)}
-                        onChange={() => toggleSectionFieldSelection(f.id)}
-                      />
-                      <span>{f.name}</span>
-                      <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>
-                        ({f.field_type === "multi_line_items" ? "multi-line" : f.field_type})
-                      </span>
-                    </label>
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
-              <button type="button" className="btn" onClick={() => setSectionFieldModal(null)} disabled={sectionFieldModalSaving}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={sectionFieldModalSaving}
-                onClick={submitSectionFieldModal}
-              >
-                {sectionFieldModal.mode === "create" ? "Create section" : "Save"}
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    })()}
 
     {addModal && kpi && (
       <div
@@ -4594,17 +4878,19 @@ function FieldEditForm({
                 style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }}
               />
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-              <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Section</label>
-              <select {...register("section_id")} style={{ padding: "0.35rem 0.5rem" }}>
-                {(sections ?? []).length === 0 && <option value="">General (default)</option>}
-                {(sections ?? []).map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {currentFieldType === "multi_line_items" && (
+              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Section</label>
+                <select {...register("section_id")} style={{ padding: "0.35rem 0.5rem" }}>
+                  {(sections ?? []).length === 0 && <option value="">General (default)</option>}
+                  {(sections ?? []).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
         </>
       )}

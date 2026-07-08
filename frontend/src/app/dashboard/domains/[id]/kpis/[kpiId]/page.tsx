@@ -22,6 +22,8 @@ interface ReferenceConfig {
   reference_source_kpi_id?: number;
   reference_source_field_key?: string;
   reference_source_sub_field_key?: string;
+  condition_trigger_field_id?: number;
+  condition_trigger_value?: boolean;
 }
 
 interface SubFieldDef {
@@ -192,98 +194,47 @@ function formatValue(
   return "—";
 }
 
-/** Group editable scalar + formula fields by their section, ordered by section sort_order.
- * Any field whose section_id doesn't match a known section (shouldn't happen once every field
- * has a section, but defensive) falls into a trailing "Other" bucket instead of disappearing. */
-function groupEditFieldsBySection(
-  scalarFieldsEdit: FieldDef[],
-  formulaFields: FieldDef[],
-  sections: KpiSectionInfo[]
-): { key: string; name: string; scalarFieldsEdit: FieldDef[]; formulaFields: FieldDef[] }[] {
-  const ordered = [...sections].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
-  const knownIds = new Set(ordered.map((s) => s.id));
-  const groups = ordered.map((s) => ({
-    key: `section-${s.id}`,
-    name: s.name,
-    scalarFieldsEdit: scalarFieldsEdit.filter((f) => f.section_id === s.id),
-    formulaFields: formulaFields.filter((f) => f.section_id === s.id),
-  }));
-  const strayScalar = scalarFieldsEdit.filter((f) => !knownIds.has(f.section_id ?? -1));
-  const strayFormula = formulaFields.filter((f) => !knownIds.has(f.section_id ?? -1));
-  if (strayScalar.length > 0 || strayFormula.length > 0) {
-    groups.push({ key: "section-unsectioned", name: "Other", scalarFieldsEdit: strayScalar, formulaFields: strayFormula });
+function groupDependentFields(originalFields: FieldDef[]): FieldDef[] {
+  const result: FieldDef[] = [];
+  const visited = new Set<number>();
+
+  const dependentsMap = new Map<number, FieldDef[]>();
+  for (const f of originalFields) {
+    const triggerId = f.config?.condition_trigger_field_id;
+    if (triggerId != null) {
+      if (!dependentsMap.has(triggerId)) {
+        dependentsMap.set(triggerId, []);
+      }
+      dependentsMap.get(triggerId)!.push(f);
+    }
   }
-  return groups;
-}
 
-/** Same grouping for the read-only "fields you can view" bucket (no formula fields there). */
-function groupViewOnlyFieldsBySection(
-  scalarFieldsViewOnly: FieldDef[],
-  sections: KpiSectionInfo[]
-): { key: string; name: string; scalarFieldsViewOnly: FieldDef[] }[] {
-  const ordered = [...sections].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
-  const knownIds = new Set(ordered.map((s) => s.id));
-  const groups = ordered.map((s) => ({
-    key: `section-${s.id}`,
-    name: s.name,
-    scalarFieldsViewOnly: scalarFieldsViewOnly.filter((f) => f.section_id === s.id),
-  }));
-  const stray = scalarFieldsViewOnly.filter((f) => !knownIds.has(f.section_id ?? -1));
-  if (stray.length > 0) groups.push({ key: "section-unsectioned", name: "Other", scalarFieldsViewOnly: stray });
-  return groups;
-}
+  function insertField(f: FieldDef) {
+    if (visited.has(f.id)) return;
+    visited.add(f.id);
+    result.push(f);
 
-/** Collapsible section panel — collapsed by default, smooth expand/collapse via a max-height
- * transition (native <details> has poor/no cross-browser animation support). */
-function SectionAccordionItem({
-  name,
-  expanded,
-  onToggle,
-  children,
-}: {
-  name: string;
-  expanded: boolean;
-  onToggle: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div style={{ border: "1px solid var(--border)", borderRadius: 8, marginBottom: "0.6rem", overflow: "hidden" }}>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={expanded}
-        style={{
-          width: "100%",
-          textAlign: "left",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: "0.5rem",
-          padding: "0.6rem 0.85rem",
-          background: "var(--bg-subtle, #f9fafb)",
-          border: "none",
-          cursor: "pointer",
-          fontWeight: 600,
-          fontSize: "0.95rem",
-        }}
-      >
-        <span>{name}</span>
-        <span
-          style={{
-            display: "inline-block",
-            transition: "transform 160ms ease",
-            transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
-            color: "var(--muted)",
-          }}
-        >
-          ›
-        </span>
-      </button>
-      <div style={{ maxHeight: expanded ? 20000 : 0, overflow: "hidden", transition: "max-height 220ms ease" }}>
-        <div style={{ padding: "1rem" }}>{children}</div>
-      </div>
-    </div>
-  );
+    const dependents = dependentsMap.get(f.id) || [];
+    for (const dep of dependents) {
+      insertField(dep);
+    }
+  }
+
+  for (const f of originalFields) {
+    const triggerId = f.config?.condition_trigger_field_id;
+    const triggerExists = triggerId != null && originalFields.some(x => x.id === triggerId);
+    if (!triggerExists) {
+      insertField(f);
+    }
+  }
+
+  for (const f of originalFields) {
+    if (!visited.has(f.id)) {
+      insertField(f);
+    }
+  }
+
+  return result;
 }
 
 export default function DomainKpiDetailPage() {
@@ -305,7 +256,7 @@ export default function DomainKpiDetailPage() {
   const [kpiName, setKpiName] = useState<string>("");
   const [fields, setFields] = useState<FieldDef[]>([]);
   const [sections, setSections] = useState<KpiSectionInfo[]>([]);
-  const [expandedSectionIds, setExpandedSectionIds] = useState<Set<string>>(new Set());
+
   const [entry, setEntry] = useState<EntryRow | null>(null);
   const [overviewItem, setOverviewItem] = useState<OverviewItem | null>(null);
   const [assignedUsers, setAssignedUsers] = useState<UserRef[]>([]);
@@ -453,6 +404,25 @@ export default function DomainKpiDetailPage() {
     (entry?.values ?? []).forEach((v) => map.set(v.field_id, v));
     return map;
   }, [entry?.values]);
+
+  const isFieldVisible = useCallback((f: FieldDef): boolean => {
+    const triggerId = f.config?.condition_trigger_field_id;
+    if (triggerId == null) return true;
+    const triggerValue = f.config?.condition_trigger_value;
+    if (triggerValue == null) return true;
+
+    // Chained dependency resolution
+    const triggerField = fields.find((x) => x.id === triggerId);
+    if (triggerField && !isFieldVisible(triggerField)) {
+      return false;
+    }
+
+    const currentTriggerVal = isEditing
+      ? formValues[triggerId]?.value_boolean
+      : valuesByFieldId.get(triggerId)?.value_boolean;
+
+    return currentTriggerVal === triggerValue;
+  }, [fields, isEditing, formValues, valuesByFieldId]);
 
   // Load relational multi_line_items rows (value_json on entry is cleared after save for these fields).
   useEffect(() => {
@@ -735,7 +705,7 @@ export default function DomainKpiDetailPage() {
       api<{ name: string }>(`/kpis/${kpiId}${kpiQuery}`, { token }).catch(() => null),
     ]);
     if (loadId !== entryDetailLoadGenRef.current) return;
-    setFields(fieldsList);
+    setFields(groupDependentFields(fieldsList));
     if (isEntriesRoute) {
       if (loadId !== entryDetailLoadGenRef.current) return;
       setAllEntriesForPeriodBar(entriesList);
@@ -778,7 +748,7 @@ export default function DomainKpiDetailPage() {
     // Non-critical path: assignments, org users, API info, files, and time-dimension can load after first paint.
     void (async () => {
       const isOrgAdmin = meRole === "ORG_ADMIN";
-      const [assignmentsList, roleAssignmentsList, usersList, apiInfo, sectionsList] = await Promise.all([
+      const [assignmentsList, roleAssignmentsList, usersList, apiInfo] = await Promise.all([
         api<UserRef[]>(`/kpis/${kpiId}/assignments${kpiQuery}`, { token }).catch(() => []),
         api<Array<{ id: number; name: string; description?: string | null; permission: string }>>(
           `/kpis/${kpiId}/assignments-by-role${kpiQuery}`,
@@ -787,10 +757,8 @@ export default function DomainKpiDetailPage() {
         // `/users` can be very large; only load it for org admins (needed for assignment pickers / security UIs).
         isOrgAdmin ? api<UserRef[]>(`/users${usersQuery}`, { token }).catch(() => []) : Promise.resolve([] as UserRef[]),
         api<{ entry_mode?: string; api_endpoint_url?: string | null; can_edit?: boolean }>(`/entries/kpi-api-info${apiInfoQuery}`, { token }).catch(() => null),
-        api<KpiSectionInfo[]>(`/kpis/${kpiId}/sections${kpiQuery}`, { token }).catch(() => []),
       ]);
       if (loadId !== entryDetailLoadGenRef.current) return;
-      setSections(sectionsList);
 
       if (loadId !== entryDetailLoadGenRef.current) return;
       setAssignedUsers(
@@ -1248,7 +1216,7 @@ export default function DomainKpiDetailPage() {
       }
 
       const values = fields
-        .filter((f) => f.field_type !== "formula" && (f.can_edit !== false))
+        .filter((f) => f.field_type !== "formula" && (f.can_edit !== false) && isFieldVisible(f))
         .map((f) => {
           const v = fv[f.id] ?? {};
           const payload: {
@@ -2208,28 +2176,16 @@ export default function DomainKpiDetailPage() {
                 <h3 style={{ fontSize: "1rem", fontWeight: 600, margin: "0 0 0.75rem", color: "var(--text)", borderBottom: "1px solid var(--border)", paddingBottom: "0.35rem" }}>
                   Fields you can edit
                 </h3>
-                {groupEditFieldsBySection(scalarFieldsEdit, formulaFields, sections).map(({ key, name, scalarFieldsEdit, formulaFields }) => {
-                  if (scalarFieldsEdit.length === 0 && formulaFields.length === 0) return null;
-                  const expanded = expandedSectionIds.has(key);
-                  return (
-                    <SectionAccordionItem
-                      key={key}
-                      name={name}
-                      expanded={expanded}
-                      onToggle={() =>
-                        setExpandedSectionIds((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(key)) next.delete(key);
-                          else next.add(key);
-                          return next;
-                        })
-                      }
-                    >
-            {isEditing ? (
+{isEditing ? (
               <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
                 {(() => {
-                  const mixedListFields = scalarFieldsEdit.filter((f) => f.field_type === "mixed_list");
-                  const otherFields = [...formulaFields, ...scalarFieldsEdit.filter((f) => f.field_type !== "mixed_list")];
+                  const mixedListFields = scalarFieldsEdit
+                    .filter((f) => f.field_type === "mixed_list" && f.config?.condition_trigger_field_id == null)
+                    .filter(isFieldVisible);
+                  const otherFields = [
+                    ...formulaFields,
+                    ...scalarFieldsEdit.filter((f) => f.field_type !== "mixed_list" || f.config?.condition_trigger_field_id != null)
+                  ].filter(isFieldVisible);
 
                   const inferMixedAtom = (raw: string): string | number | null => {
                     const t = (raw ?? "").trim();
@@ -2560,15 +2516,60 @@ export default function DomainKpiDetailPage() {
                       );
                     }
                     if (f.field_type === "boolean") {
+                      const isTrue = val?.value_boolean === true;
+                      const isFalse = val?.value_boolean === false;
+                      const isUnset = val?.value_boolean == null;
+
+                      let btnStyle: React.CSSProperties = {
+                        padding: "0.45rem 1.25rem",
+                        minWidth: "120px",
+                        fontSize: "0.85rem",
+                        borderRadius: "6px",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        transition: "all 0.15s ease",
+                        textAlign: "center",
+                      };
+
+                      if (isTrue) {
+                        btnStyle = {
+                          ...btnStyle,
+                          background: "var(--primary, #3b82f6)",
+                          color: "#fff",
+                          border: "1px solid var(--primary, #3b82f6)",
+                        };
+                      } else if (isFalse) {
+                        btnStyle = {
+                          ...btnStyle,
+                          background: "var(--error, #ef4444)",
+                          color: "#fff",
+                          border: "1px solid var(--error, #ef4444)",
+                        };
+                      } else {
+                        btnStyle = {
+                          ...btnStyle,
+                          background: "var(--bg-subtle, #f3f4f6)",
+                          color: "var(--muted, #6b7280)",
+                          border: "1px solid var(--border)",
+                        };
+                      }
+
+                      const handleCycle = () => {
+                        if (isUnset) {
+                          updateField(f.id, "value_boolean", true);
+                        } else if (isTrue) {
+                          updateField(f.id, "value_boolean", false);
+                        } else {
+                          updateField(f.id, "value_boolean", undefined);
+                        }
+                      };
+
                       return (
-                        <div key={f.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                          <input
-                            type="checkbox"
-                            checked={val?.value_boolean ?? false}
-                            onChange={(e) => updateField(f.id, "value_boolean", e.target.checked)}
-                            id={`scalar-${f.id}`}
-                          />
-                          <label htmlFor={`scalar-${f.id}`} style={{ fontWeight: 500 }}>{f.name}</label>
+                        <div key={f.id} style={{ display: "flex", alignItems: "center", gap: "1rem", minHeight: "38px" }}>
+                          <label style={{ fontWeight: 500, margin: 0 }}>{f.name}</label>
+                          <button type="button" style={btnStyle} onClick={handleCycle}>
+                            {isTrue ? "Yes" : isFalse ? "No" : "— Select —"}
+                          </button>
                         </div>
                       );
                     }
@@ -2606,8 +2607,20 @@ export default function DomainKpiDetailPage() {
                         </div>
                       );
                     }
+                    if (f.field_type === "mixed_list") {
+                      const items = Array.isArray(val?.value_json) ? (val!.value_json as (string | number)[]) : [];
+                      return (
+                        <MixedListEditor
+                          key={f.id}
+                          fieldId={f.id}
+                          fieldName={f.name}
+                          isRequired={!!f.is_required}
+                          items={items}
+                        />
+                      );
+                    }
                     return null;
-                        })}
+                  })}
                       </div>
 
                       {mixedListFields.length > 0 && (
@@ -2643,7 +2656,7 @@ export default function DomainKpiDetailPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {[...formulaFields, ...scalarFieldsEdit].map((f) => (
+                  {[...formulaFields, ...scalarFieldsEdit].filter(isFieldVisible).map((f) => (
                     <tr key={f.id}>
                       <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
                         {f.name}
@@ -2657,9 +2670,6 @@ export default function DomainKpiDetailPage() {
                 </tbody>
               </table>
             )}
-                    </SectionAccordionItem>
-                  );
-                })}
               </div>
             )}
 
@@ -2669,25 +2679,7 @@ export default function DomainKpiDetailPage() {
                 <h3 style={{ fontSize: "1rem", fontWeight: 600, margin: "0 0 0.75rem", color: "var(--text)", borderBottom: "1px solid var(--border)", paddingBottom: "0.35rem" }}>
                   Fields you can view (read-only)
                 </h3>
-                {groupViewOnlyFieldsBySection(scalarFieldsViewOnly, sections).map(({ key, name, scalarFieldsViewOnly }) => {
-                  if (scalarFieldsViewOnly.length === 0) return null;
-                  const expanded = expandedSectionIds.has(`view-${key}`);
-                  return (
-                    <SectionAccordionItem
-                      key={key}
-                      name={name}
-                      expanded={expanded}
-                      onToggle={() =>
-                        setExpandedSectionIds((prev) => {
-                          const next = new Set(prev);
-                          const k = `view-${key}`;
-                          if (next.has(k)) next.delete(k);
-                          else next.add(k);
-                          return next;
-                        })
-                      }
-                    >
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+<table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                         <thead>
                           <tr>
                             <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Field</th>
@@ -2695,7 +2687,7 @@ export default function DomainKpiDetailPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {scalarFieldsViewOnly.map((f) => (
+                          {scalarFieldsViewOnly.filter(isFieldVisible).map((f) => (
                             <tr key={f.id}>
                               <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{f.name}</td>
                               <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
@@ -2705,9 +2697,6 @@ export default function DomainKpiDetailPage() {
                           ))}
                         </tbody>
                       </table>
-                    </SectionAccordionItem>
-                  );
-                })}
               </div>
             )}
 

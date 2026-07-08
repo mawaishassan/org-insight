@@ -10,7 +10,7 @@ from app.auth.dependencies import require_org_admin, get_current_user, require_t
 from app.core.models import User, KPIField, KPIFieldValue, KPI, KPIEntry
 from app.core.models import FieldType
 from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldResponse, KPIFieldOptionResponse, KPIFieldSubFieldResponse, KPIFieldChildDataSummary
-from app.fields.service import create_field, get_field, list_fields, update_field, delete_field, get_field_child_data_summary
+from app.fields.service import create_field, get_field, list_fields, update_field, delete_field, get_field_child_data_summary, is_value_compatible
 from app.entries.service import recompute_formula_fields_for_kpi
 
 router = APIRouter(prefix="/fields", tags=["fields"])
@@ -36,7 +36,7 @@ def _field_to_response(f):
         is_required=f.is_required,
         sort_order=f.sort_order,
         config=f.config,
-        section_id=getattr(f, "section_id", None),
+        section_id=getattr(f, "section_id", None) if f.field_type == FieldType.multi_line_items else None,
         carry_forward_data=getattr(f, "carry_forward_data", False),
         full_page_multi_items=getattr(f, "full_page_multi_items", False),
         options=[KPIFieldOptionResponse.model_validate(o) for o in (f.options or [])],
@@ -88,7 +88,10 @@ async def create_kpi_field(
 ):
     """Create KPI field."""
     org_id = _org_id(current_user, organization_id)
-    field = await create_field(db, org_id, body)
+    try:
+        field = await create_field(db, org_id, body)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if not field:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
     if field.field_type == FieldType.formula and (field.formula_expression or "").strip():
@@ -113,6 +116,39 @@ async def get_kpi_field(
     return _field_to_response(field)
 
 
+@router.get("/{field_id}/check-type-compatibility")
+async def check_type_compatibility(
+    field_id: int,
+    new_type: FieldType = Query(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Check if existing values are compatible with the new field type."""
+    org_id = _org_id(current_user, organization_id)
+    field = await get_field(db, field_id, org_id)
+    if not field:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field not found")
+
+    if field.field_type == FieldType.multi_line_items or new_type == FieldType.multi_line_items:
+        return {"compatible": True, "incompatible_count": 0}
+
+    result = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.field_id == field_id)
+    )
+    values = result.scalars().all()
+
+    incompatible_count = 0
+    for v in values:
+        if not is_value_compatible(v, new_type):
+            incompatible_count += 1
+
+    return {
+        "compatible": incompatible_count == 0,
+        "incompatible_count": incompatible_count,
+    }
+
+
 @router.patch("/{field_id}", response_model=KPIFieldResponse)
 async def update_kpi_field(
     field_id: int,
@@ -129,7 +165,10 @@ async def update_kpi_field(
     prev_field_type = existing.field_type
     prev_formula = (existing.formula_expression or "").strip()
 
-    field = await update_field(db, field_id, org_id, body)
+    try:
+        field = await update_field(db, field_id, org_id, body)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if not field:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field not found")
     next_formula = (field.formula_expression or "").strip()
