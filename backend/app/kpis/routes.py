@@ -1431,3 +1431,226 @@ async def unassign_fields_from_section_route(
     )
     await db.commit()
     return _section_to_response(section, count_res.scalar() or 0)
+
+
+# --- KPI Report PDF Export Endpoints (Org Admin only) ---
+
+from fastapi import BackgroundTasks
+from typing import Dict, Any, Optional
+
+class KpiReportGenerateBody(BaseModel):
+    year: int
+    period_key: str = ""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    kpi_name_override: Optional[str] = None
+    custom_header: Optional[str] = None
+    custom_subheader: Optional[str] = None
+    organization_info: Optional[str] = None
+    include_generation_date: bool = True
+    multi_line_fields: Dict[str, Dict[str, Any]] = {}
+    scalar_fields: Optional[Dict[str, str]] = None
+    excluded_scalar_fields: Optional[list[str]] = None
+    excluded_multi_line_fields: Optional[list[str]] = None
+    ordered_scalar_fields: Optional[list[str]] = None
+    format: Optional[str] = "pdf"
+
+    class Config:
+        extra = "allow"
+
+
+@router.post("/{kpi_id}/reports/generate", status_code=status.HTTP_202_ACCEPTED)
+async def generate_kpi_report_route(
+    kpi_id: int,
+    body: KpiReportGenerateBody,
+    background_tasks: BackgroundTasks,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Start background KPI report generation. Org admin only."""
+    org_id = _org_id(current_user, organization_id)
+    
+    # Verify KPI exists
+    kpi = await get_kpi(db, kpi_id, org_id)
+    if not kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+        
+    # Verify entry exists for year and period_key
+    from app.core.models import KPIEntry, KpiReportJob
+    entry_stmt = select(KPIEntry).where(
+        KPIEntry.organization_id == org_id,
+        KPIEntry.kpi_id == kpi_id,
+        KPIEntry.year == body.year,
+        KPIEntry.period_key == body.period_key
+    )
+    entry_res = await db.execute(entry_stmt)
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No KPI entry found for year {body.year} and period '{body.period_key}'"
+        )
+        
+    # Create job
+    job_id = str(uuid.uuid4())
+    job = KpiReportJob(
+        id=job_id,
+        organization_id=org_id,
+        kpi_id=kpi_id,
+        user_id=current_user.id,
+        year=body.year,
+        period_key=body.period_key,
+        status="pending",
+        configuration=body.model_dump()
+    )
+    db.add(job)
+    await db.commit()
+    
+    # Trigger background generation task
+    from app.reports.service import background_generate_kpi_pdf
+    background_tasks.add_task(
+        background_generate_kpi_pdf,
+        job_id=job_id,
+        organization_id=org_id,
+        kpi_id=kpi_id,
+        year=body.year,
+        period_key=body.period_key,
+        configuration=body.model_dump()
+    )
+    
+    return {
+        "job_id": job_id,
+        "status": "pending"
+    }
+
+
+@router.get("/{kpi_id}/reports/jobs/{job_id}")
+async def get_kpi_report_job_route(
+    kpi_id: int,
+    job_id: str,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Check status of a background report generation job."""
+    org_id = _org_id(current_user, organization_id)
+    from app.core.models import KpiReportJob
+    job_stmt = select(KpiReportJob).where(
+        KpiReportJob.id == job_id,
+        KpiReportJob.kpi_id == kpi_id,
+        KpiReportJob.organization_id == org_id
+    )
+    job_res = await db.execute(job_stmt)
+    job = job_res.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report job not found")
+        
+    return {
+        "id": job.id,
+        "status": job.status,
+        "error_message": job.error_message,
+        "stored_path": job.stored_path,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None
+    }
+
+
+@router.get("/{kpi_id}/reports/jobs/{job_id}/download")
+async def download_kpi_report_pdf_route(
+    kpi_id: int,
+    job_id: str,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Download the completed KPI PDF report, packaging with attachments as a ZIP if any exist."""
+    org_id = _org_id(current_user, organization_id)
+    from app.core.models import KpiReportJob, KpiFile
+    job_stmt = select(KpiReportJob).where(
+        KpiReportJob.id == job_id,
+        KpiReportJob.kpi_id == kpi_id,
+        KpiReportJob.organization_id == org_id
+    )
+    job_res = await db.execute(job_stmt)
+    job = job_res.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report job not found")
+        
+    if job.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Report job is in status: {job.status}"
+        )
+        
+    if not job.stored_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PDF file not found")
+        
+    from app.storage.service import get_file_stream as storage_get_file_stream
+    try:
+        data = await storage_get_file_stream(db, org_id, job.stored_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found in storage")
+        
+    from fastapi import Response
+
+    is_docx = (job.stored_path or "").endswith(".docx") or (job.configuration and job.configuration.get("format") == "docx")
+    
+    if is_docx:
+        return Response(
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="kpi_report_{kpi_id}_{job.year}.docx"'}
+        )
+
+    # Fetch all attachments associated with the KPI
+    files_stmt = select(KpiFile).where(
+        KpiFile.kpi_id == kpi_id,
+        KpiFile.organization_id == org_id
+    )
+    files_res = await db.execute(files_stmt)
+    kpi_files = files_res.scalars().all()
+
+    if kpi_files:
+        import io
+        import zipfile
+        
+        # Package PDF and attachments into a ZIP archive
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            # Add the PDF report
+            pdf_filename = f"kpi_report_{kpi_id}_{job.year}.pdf"
+            zip_file.writestr(pdf_filename, data)
+            
+            # Add each attachment file
+            seen_filenames = set()
+            for kf in kpi_files:
+                try:
+                    file_data = await storage_get_file_stream(db, org_id, kf.stored_path)
+                    base_name = kf.original_filename or f"attachment_{kf.id}"
+                    name_to_use = base_name
+                    counter = 1
+                    while name_to_use in seen_filenames:
+                        if "." in base_name:
+                            parts = base_name.rsplit(".", 1)
+                            name_to_use = f"{parts[0]}_{counter}.{parts[1]}"
+                        else:
+                            name_to_use = f"{base_name}_{counter}"
+                        counter += 1
+                    seen_filenames.add(name_to_use)
+                    zip_file.writestr(name_to_use, file_data)
+                except Exception:
+                    # Keep going if one file is missing or has error
+                    pass
+        
+        return Response(
+            content=zip_buffer.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="kpi_report_{kpi_id}_{job.year}.zip"'}
+        )
+        
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="kpi_report_{kpi_id}_{job.year}.pdf"'}
+    )

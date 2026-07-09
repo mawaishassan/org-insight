@@ -1104,3 +1104,32 @@ class DashboardAccessPermission(Base):
 
     dashboard = relationship("Dashboard", back_populates="access_permissions")
     user = relationship("User", back_populates="dashboard_access_permissions")
+
+
+class KpiReportJob(Base):
+    """Background report job for generating KPI PDF reports."""
+
+    __tablename__ = "kpi_report_jobs"
+
+    id = Column(String(36), primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kpi_id = Column(
+        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    year = Column(Integer, nullable=False, index=True)
+    period_key = Column(String(8), nullable=False, default="")
+    status = Column(String(20), nullable=False, default="pending")  # pending, processing, completed, failed
+    configuration = Column(JSON, nullable=False)  # custom title, headers, column selections, filters, table settings
+    stored_path = Column(String(2048), nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    completed_at = Column(DateTime, nullable=True)
+
+    organization = relationship("Organization")
+    kpi = relationship("KPI")
+    user = relationship("User")

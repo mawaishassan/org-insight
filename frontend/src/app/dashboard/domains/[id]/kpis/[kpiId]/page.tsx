@@ -295,6 +295,27 @@ export default function DomainKpiDetailPage() {
   const [submitLoading, setSubmitLoading] = useState(false);
   const [exportExcelLoading, setExportExcelLoading] = useState(false);
   const [importExcelLoading, setImportExcelLoading] = useState(false);
+
+  // KPI PDF Report Customization states
+  const [showPdfModal, setShowPdfModal] = useState(false);
+  const [pdfTitle, setPdfTitle] = useState("");
+  const [pdfKpiNameOverride, setPdfKpiNameOverride] = useState("");
+  const [pdfCustomHeader, setPdfCustomHeader] = useState("University Research Performance Report");
+  const [pdfCustomSubheader, setPdfCustomSubheader] = useState("Department of Computer Science");
+  const [pdfOrgInfo, setPdfOrgInfo] = useState("");
+  const [pdfIncludeDate, setPdfIncludeDate] = useState(true);
+  const [pdfMultiLineConfig, setPdfMultiLineConfig] = useState<Record<string, {
+    selected_columns: string[];
+    table_name: string;
+    table_heading: string;
+    table_subheader: string;
+    filters: { conditions: any[]; _version?: number };
+  }>>({});
+  const [pdfJobId, setPdfJobId] = useState<string | null>(null);
+  const [pdfJobStatus, setPdfJobStatus] = useState<string | null>(null);
+  const [pdfJobError, setPdfJobError] = useState<string | null>(null);
+  const [pdfProgressInterval, setPdfProgressInterval] = useState<any>(null);
+  const [pdfActiveTab, setPdfActiveTab] = useState<"general" | "tables">("general");
   /** Bulk upload section is hidden until user clicks the "Bulk upload" link (per multi_line field) */
   const [bulkExpandedByFieldId, setBulkExpandedByFieldId] = useState<Record<number, boolean>>({});
   /** KPI file attachments */
@@ -423,6 +444,139 @@ export default function DomainKpiDetailPage() {
 
     return currentTriggerVal === triggerValue;
   }, [fields, isEditing, formValues, valuesByFieldId]);
+
+  // Prefill KPI and organization PDF config when they are loaded
+  useEffect(() => {
+    if (kpiName) {
+      setPdfTitle(`${kpiName} Performance Report`);
+      setPdfKpiNameOverride(kpiName);
+    }
+  }, [kpiName]);
+
+  useEffect(() => {
+    if (fields) {
+      const initialConfig: Record<string, any> = {};
+      fields.forEach((f) => {
+        if (f.field_type === "multi_line_items") {
+          initialConfig[f.key] = {
+            selected_columns: f.sub_fields?.map((sf: any) => sf.key) || [],
+            table_name: f.name || "",
+            table_heading: `Overview of ${f.name}`,
+            table_subheader: "Performance Metrics & Details",
+            filters: { conditions: [], _version: 2 }
+          };
+        }
+      });
+      setPdfMultiLineConfig(initialConfig);
+    }
+  }, [fields]);
+
+  useEffect(() => {
+    if (token && effectiveOrgId) {
+      api<{ name: string }>(`/organizations/${effectiveOrgId}`, { token })
+        .then((org) => {
+          if (org && org.name) {
+            setPdfOrgInfo(org.name);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [token, effectiveOrgId]);
+
+  // Clean up polling interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pdfProgressInterval) {
+        clearInterval(pdfProgressInterval);
+      }
+    };
+  }, [pdfProgressInterval]);
+
+  const handleGeneratePdf = async () => {
+    if (!token || !effectiveOrgId || !kpiId) return;
+    setPdfJobStatus("pending");
+    setPdfJobError(null);
+    try {
+      const url = getApiUrl(`/kpis/${kpiId}/reports/generate?organization_id=${effectiveOrgId}`);
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          year,
+          period_key: periodKeyFromUrl || "",
+          title: pdfTitle,
+          kpi_name_override: pdfKpiNameOverride,
+          custom_header: pdfCustomHeader,
+          custom_subheader: pdfCustomSubheader,
+          organization_info: pdfOrgInfo,
+          include_generation_date: pdfIncludeDate,
+          multi_line_fields: pdfMultiLineConfig
+        })
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Failed to start generation");
+      }
+      const data = await res.json();
+      setPdfJobId(data.job_id);
+      setPdfJobStatus(data.status);
+      toast("Report generation started in the background...");
+      
+      const interval = setInterval(async () => {
+        try {
+          const pollUrl = getApiUrl(`/kpis/${kpiId}/reports/jobs/${data.job_id}?organization_id=${effectiveOrgId}`);
+          const pollRes = await fetch(pollUrl, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (!pollRes.ok) throw new Error("Failed to check status");
+          const pollData = await pollRes.json();
+          setPdfJobStatus(pollData.status);
+          
+          if (pollData.status === "completed") {
+            clearInterval(interval);
+            setPdfProgressInterval(null);
+            toast.success("PDF Report generated successfully!");
+            
+            const downloadUrl = getApiUrl(`/kpis/${kpiId}/reports/jobs/${data.job_id}/download?organization_id=${effectiveOrgId}`);
+            const downloadRes = await fetch(downloadUrl, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            if (downloadRes.ok) {
+              const blob = await downloadRes.blob();
+              const contentType = downloadRes.headers.get("content-type") || "";
+              const isZip = contentType.toLowerCase().includes("zip") || blob.type.toLowerCase().includes("zip");
+              const finalFilename = kpiName || "kpi_report";
+              const a = document.createElement("a");
+              a.href = URL.createObjectURL(blob);
+              a.download = isZip 
+                ? `${finalFilename.replace(/\s+/g, "_")}.zip` 
+                : `${finalFilename.replace(/\s+/g, "_")}.pdf`;
+              a.click();
+              URL.revokeObjectURL(a.href);
+            }
+          } else if (pollData.status === "failed") {
+            clearInterval(interval);
+            setPdfProgressInterval(null);
+            setPdfJobError(pollData.error_message || "Generation failed");
+            toast.error(`Report generation failed: ${pollData.error_message || "Unknown error"}`);
+          }
+        } catch (e: any) {
+          clearInterval(interval);
+          setPdfProgressInterval(null);
+          setPdfJobStatus("failed");
+          setPdfJobError(e.message || "Polling failed");
+        }
+      }, 2000);
+      setPdfProgressInterval(interval);
+    } catch (e: any) {
+      setPdfJobStatus("failed");
+      setPdfJobError(e.message || "Failed to start generation");
+      toast.error(e.message || "Failed to start generation");
+    }
+  };
 
   // Load relational multi_line_items rows (value_json on entry is cleared after save for these fields).
   useEffect(() => {
@@ -1763,6 +1917,26 @@ export default function DomainKpiDetailPage() {
                   You are entering data for <span style={{ color: "var(--text)" }}>{timeDimensionLabel != null ? `${timeDimensionLabel} (${year})` : year}</span>.
                 </p>
                 <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+                {meRole === "ORG_ADMIN" && (
+                  <button
+                    type="button"
+                    style={{
+                      padding: "0.35rem 0.65rem",
+                      fontSize: "0.85rem",
+                      border: "1px solid var(--border)",
+                      borderRadius: 6,
+                      background: "var(--surface)",
+                      cursor: "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "0.35rem",
+                    }}
+                    onClick={() => router.push(`/dashboard/domains/${params.id}/kpis/${kpiId}/report-builder?organization_id=${effectiveOrgId}`)}
+                  >
+                    <span style={{ fontSize: "1.1rem" }}>📋</span>
+                    Generate PDF Report
+                  </button>
+                )}
                 <span style={{ fontSize: "0.8rem", color: "var(--muted)", marginRight: "0.25rem" }}>Excel:</span>
                 <button
                   type="button"
@@ -5595,7 +5769,7 @@ export default function DomainKpiDetailPage() {
                     {fieldRightsSaving ? "Saving…" : "Save"}
                   </button>
                   <button type="button" className="btn" onClick={() => setFieldRightsModalUserId(null)}>
-                    Cancel
+                       Cancel
                   </button>
                 </div>
               </>

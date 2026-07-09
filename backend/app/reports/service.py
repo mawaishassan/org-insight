@@ -2370,3 +2370,1238 @@ async def evaluate_report_snippet(
         return val if val != "" else None
 
     return None
+
+
+def group_dependent_fields(original_fields: list) -> list:
+    """Topologically sort fields so that dependents appear directly below their trigger field."""
+    result = []
+    visited = set()
+    dependents_map = {}
+    for f in original_fields:
+        trigger_id = f.config.get("condition_trigger_field_id") if f.config else None
+        if trigger_id is not None:
+            try:
+                trigger_id = int(trigger_id)
+                dependents_map.setdefault(trigger_id, []).append(f)
+            except (ValueError, TypeError):
+                continue
+
+    def insert_field(f):
+        if f.id in visited:
+            return
+        visited.add(f.id)
+        result.append(f)
+        dependents = dependents_map.get(f.id, [])
+        dependents.sort(key=lambda x: (x.sort_order, x.id))
+        for dep in dependents:
+            insert_field(dep)
+
+    sorted_orig = sorted(original_fields, key=lambda x: (x.sort_order, x.id))
+    for f in sorted_orig:
+        trigger_id = f.config.get("condition_trigger_field_id") if f.config else None
+        trigger_exists = False
+        if trigger_id is not None:
+            try:
+                trigger_id = int(trigger_id)
+                trigger_exists = any(x.id == trigger_id for x in sorted_orig)
+            except (ValueError, TypeError):
+                pass
+        if not trigger_exists:
+            insert_field(f)
+
+    for f in sorted_orig:
+        if f.id not in visited:
+            insert_field(f)
+    return result
+
+
+def is_field_visible(f, fields_by_id: dict, values_by_field_id: dict) -> bool:
+    """Recursively check conditional visibility based on trigger boolean field value."""
+    trigger_id = f.config.get("condition_trigger_field_id") if f.config else None
+    if trigger_id is None:
+        return True
+    try:
+        trigger_id = int(trigger_id)
+    except (ValueError, TypeError):
+        return True
+    trigger_value = f.config.get("condition_trigger_value", True)
+    trigger_field = fields_by_id.get(trigger_id)
+    if trigger_field and not is_field_visible(trigger_field, fields_by_id, values_by_field_id):
+        return False
+    current_trigger_val = values_by_field_id.get(trigger_id)
+    coerced_val = False
+    if isinstance(current_trigger_val, bool):
+        coerced_val = current_trigger_val
+    elif isinstance(current_trigger_val, str):
+        coerced_val = current_trigger_val.strip().lower() in ("1", "true", "yes", "y")
+    elif isinstance(current_trigger_val, (int, float)):
+        coerced_val = bool(current_trigger_val)
+    return coerced_val == trigger_value
+
+
+from reportlab.pdfgen import canvas
+
+class NumberedCanvas(canvas.Canvas):
+    """Two-pass ReportLab canvas to draw exact page numbers, headers, and footers on each page."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_page_states = []
+        self.organization_name = ""
+        self.confidentiality_text = "Confidential Document"
+        self.include_date = True
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        num_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.draw_page_elements(num_pages)
+            super().showPage()
+        super().save()
+
+    def draw_page_elements(self, page_count):
+        from reportlab.lib import colors
+        import datetime
+        self.saveState()
+        self.setFont("Helvetica-Bold", 8)
+        self.setFillColor(colors.HexColor("#4b5563"))
+        
+        # Running Header
+        pass
+
+        # Running Footer
+        self.setStrokeColor(colors.HexColor("#e5e7eb"))
+        self.setLineWidth(0.5)
+        self.line(54, 55, 612 - 54, 55)
+        self.setFont("Helvetica", 8)
+        self.setFillColor(colors.HexColor("#6b7280"))
+        
+        footer_left = f"{self.confidentiality_text}"
+        if self.organization_name:
+            footer_left += f" | {self.organization_name}"
+        self.drawString(54, 40, footer_left)
+        
+        date_str = ""
+        if self.include_date:
+            date_str = f"Generated on {datetime.date.today().strftime('%B %d, %Y')} | "
+        footer_right = f"{date_str}Page {self._pageNumber} of {page_count}"
+        self.drawRightString(612 - 54, 40, footer_right)
+        self.restoreState()
+
+
+async def generate_kpi_pdf_report(
+    db: AsyncSession,
+    organization_id: int,
+    kpi_id: int,
+    year: int,
+    period_key: str,
+    configuration: dict
+) -> bytes:
+    import html
+    from io import BytesIO
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    
+    from app.core.models import KPI, KPIField, KPIEntry, KPIFieldValue, Organization, FieldType
+    from app.entries.routes import _display_string_for_pdf_export
+    from sqlalchemy.orm import selectinload
+    
+    # 1. Fetch KPI
+    kpi_stmt = (
+        select(KPI)
+        .where(KPI.id == kpi_id, KPI.organization_id == organization_id)
+        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+    )
+    kpi_res = await db.execute(kpi_stmt)
+    kpi = kpi_res.scalar_one_or_none()
+    if not kpi:
+        raise ValueError("KPI not found")
+
+    # 2. Fetch Entry
+    entry_stmt = select(KPIEntry).where(
+        KPIEntry.organization_id == organization_id,
+        KPIEntry.kpi_id == kpi_id,
+        KPIEntry.year == year,
+        KPIEntry.period_key == period_key
+    )
+    entry_res = await db.execute(entry_stmt)
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise ValueError(f"KPI Entry for year {year} and period '{period_key}' not found")
+
+    # 3. Fetch Scalar Values
+    scalar_values_query = select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id)
+    scalar_values_res = await db.execute(scalar_values_query)
+    scalar_values = scalar_values_res.scalars().all()
+    
+    values_by_field_id = {}
+    for val in scalar_values:
+        if val.value_boolean is not None:
+            values_by_field_id[val.field_id] = val.value_boolean
+        elif val.value_number is not None:
+            values_by_field_id[val.field_id] = val.value_number
+        elif val.value_date is not None:
+            values_by_field_id[val.field_id] = val.value_date
+        elif val.value_json is not None:
+            values_by_field_id[val.field_id] = val.value_json
+        else:
+            values_by_field_id[val.field_id] = val.value_text
+
+    # 4. Extract Configuration
+    title = (configuration.get("report_header") or configuration.get("title") or "").strip() or f"{kpi.name} Report"
+    kpi_name_override = (configuration.get("kpi_name_override") or "").strip() or kpi.name
+    custom_header = (configuration.get("custom_header") or "").strip()
+    custom_subheader = (configuration.get("custom_subheader") or "").strip()
+    organization_info = (configuration.get("organization_info") or "").strip()
+    include_generation_date = configuration.get("include_generation_date", True)
+
+    # Resolve time dimensions
+    org = await db.get(Organization, organization_id)
+    org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
+    kpi_td_raw = getattr(kpi, "time_dimension", None)
+    kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
+    effective_td = effective_kpi_time_dimension(kpi_td, org_td)
+
+    # 5. Setup Styles
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "KpiReportTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#1e3a8a"),
+        alignment=TA_CENTER,
+        spaceAfter=12
+    )
+    kpi_name_style = ParagraphStyle(
+        "KpiReportName",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=16,
+        textColor=colors.HexColor("#0f766e"),
+        spaceBefore=14,
+        spaceAfter=8,
+        keepWithNext=True
+    )
+    section_heading_style = ParagraphStyle(
+        "KpiSectionHeading",
+        parent=styles["Heading3"],
+        fontName="Helvetica-Bold",
+        fontSize=11,
+        leading=14,
+        textColor=colors.HexColor("#111827"),
+        spaceBefore=12,
+        spaceAfter=6,
+        keepWithNext=True
+    )
+    body_label_style = ParagraphStyle(
+        "KpiBodyLabel",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#374151")
+    )
+    body_value_style = ParagraphStyle(
+        "KpiBodyValue",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#1f2937")
+    )
+    table_title_style = ParagraphStyle(
+        "KpiTableTitle",
+        parent=styles["Heading4"],
+        fontName="Helvetica-Bold",
+        fontSize=11,
+        leading=14,
+        textColor=colors.HexColor("#1e3a8a"),
+        spaceBefore=14,
+        spaceAfter=4,
+        keepWithNext=False
+    )
+    table_heading_style = ParagraphStyle(
+        "KpiTableHeading",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=9,
+        leading=11,
+        textColor=colors.HexColor("#4b5563"),
+        spaceAfter=2,
+        keepWithNext=False
+    )
+    table_subheader_style = ParagraphStyle(
+        "KpiTableSubheader",
+        parent=styles["Normal"],
+        fontName="Helvetica-Oblique",
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#6b7280"),
+        spaceAfter=6,
+        keepWithNext=False
+    )
+    th_style = ParagraphStyle(
+        "KpiTableHeaderCell",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        leading=10,
+        textColor=colors.white
+    )
+    th_sr_style = ParagraphStyle("KpiTableHeaderSrCell", parent=th_style, alignment=TA_CENTER)
+    td_style = ParagraphStyle(
+        "KpiTableBodyCell",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#1f2937")
+    )
+    td_sr_style = ParagraphStyle("KpiTableBodySrCell", parent=td_style, alignment=TA_CENTER)
+
+    elements = []
+
+    # Main Title (Report Header)
+    elements.append(Paragraph(html.escape(title), title_style))
+    elements.append(Spacer(1, 10))
+
+    # Optional Description
+    description = (configuration.get("description") or "").strip()
+    if description:
+        desc_heading_style = ParagraphStyle(
+            "DescHeading",
+            parent=styles["Heading3"],
+            fontName="Helvetica-Bold",
+            fontSize=11,
+            leading=14,
+            textColor=colors.HexColor("#1e3a8a"),
+            spaceBefore=8,
+            spaceAfter=4,
+            keepWithNext=True
+        )
+        elements.append(Paragraph("Description", desc_heading_style))
+        
+        desc_text_style = ParagraphStyle(
+            "DescText",
+            parent=styles["Normal"],
+            fontSize=9,
+            leading=13,
+            textColor=colors.HexColor("#374151"),
+            spaceAfter=10
+        )
+        elements.append(Paragraph(html.escape(description), desc_text_style))
+
+    # 6. Scalar Fields Table (Section Grouped & Borderless)
+    scalar_fields = [f for f in kpi.fields if f.field_type != FieldType.multi_line_items]
+    fields_by_id = {f.id: f for f in kpi.fields}
+    sorted_scalars = group_dependent_fields(scalar_fields)
+    
+    excluded_fields = configuration.get("excluded_scalar_fields") or []
+    excluded_set = {str(item) for item in excluded_fields}
+    
+    visible_scalars = [
+        f for f in sorted_scalars 
+        if is_field_visible(f, fields_by_id, values_by_field_id)
+        and f.key not in excluded_set
+        and str(f.id) not in excluded_set
+    ]
+
+    # Apply custom scalar fields order if specified
+    ordered_scalar_ids = configuration.get("ordered_scalar_fields")
+    if ordered_scalar_ids:
+        order_map = {str(val): idx for idx, val in enumerate(ordered_scalar_ids)}
+        def get_sort_key(f):
+            if str(f.id) in order_map:
+                return order_map[str(f.id)]
+            if f.key in order_map:
+                return order_map[f.key]
+            return 999999
+        visible_scalars.sort(key=get_sort_key)
+
+    # Get excluded multi-line fields and compute visible ones
+    multi_line_fields = [f for f in kpi.fields if f.field_type == FieldType.multi_line_items]
+    excluded_ml_keys = configuration.get("excluded_multi_line_fields") or []
+    excluded_ml_set = {str(item) for item in excluded_ml_keys}
+    visible_multi_line = [
+        f for f in multi_line_fields
+        if f.key not in excluded_ml_set and str(f.id) not in excluded_ml_set
+    ]
+
+    # Build parent blocks for scalar fields to keep parents and their children grouped
+    scalar_blocks = []
+    current_block = []
+    
+    for f in visible_scalars:
+        parent_id = f.config.get("condition_trigger_field_id") if f.config else None
+        if parent_id is not None:
+            try:
+                parent_id = int(parent_id)
+            except (ValueError, TypeError):
+                parent_id = None
+                
+        is_child = False
+        if parent_id is not None:
+            parent_field = fields_by_id.get(parent_id)
+            if parent_field and parent_field in visible_scalars:
+                is_child = True
+                
+        if is_child:
+            if current_block:
+                current_block.append(f)
+            else:
+                current_block = [f]
+        else:
+            if current_block:
+                scalar_blocks.append(current_block)
+            current_block = [f]
+            
+    if current_block:
+        scalar_blocks.append(current_block)
+
+    # Construct main rendering blocks (scalars + multi-line)
+    main_blocks = [("scalar_block", block) for block in scalar_blocks]
+    
+    # Separate multi-line fields into ordered and unordered
+    ordered_ml = []
+    unordered_ml = []
+    
+    for f in visible_multi_line:
+        field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
+        sort_order = field_config.get("sort_order")
+        try:
+            if sort_order is not None and str(sort_order).strip():
+                sort_order = int(sort_order)
+                ordered_ml.append((sort_order, f))
+            else:
+                unordered_ml.append(f)
+        except (ValueError, TypeError):
+            unordered_ml.append(f)
+            
+    # Sort ordered_ml by their sort_order (stable sort)
+    ordered_ml.sort(key=lambda x: x[0])
+    
+    # Interleave ordered multi-line fields into main_blocks (1-indexed position)
+    for sort_order, f in ordered_ml:
+        idx = max(0, sort_order - 1)
+        if idx >= len(main_blocks):
+            main_blocks.append(("multi_line", f))
+        else:
+            main_blocks.insert(idx, ("multi_line", f))
+            
+    # Append unordered multi-line fields to the end of main_blocks
+    for f in unordered_ml:
+        main_blocks.append(("multi_line", f))
+
+    # Calculate unified serial numbers for all visible elements in main_blocks
+    field_serial_numbers = {}
+    top_counter = 0
+    
+    for item_type, val in main_blocks:
+        if item_type == "scalar_block":
+            parent_field = val[0]
+            top_counter += 1
+            field_serial_numbers[parent_field.id] = str(top_counter)
+            
+            parent_child_counters = {}
+            for child in val[1:]:
+                parent_id = child.config.get("condition_trigger_field_id") if child.config else None
+                if parent_id is not None:
+                    try:
+                        parent_id = int(parent_id)
+                    except (ValueError, TypeError):
+                        parent_id = None
+                
+                if parent_id is not None:
+                    parent_num = field_serial_numbers.get(parent_id, "")
+                    child_idx = parent_child_counters.get(parent_id, 0) + 1
+                    parent_child_counters[parent_id] = child_idx
+                    field_serial_numbers[child.id] = f"{parent_num}.{child_idx}" if parent_num else f"{child_idx}"
+                else:
+                    field_serial_numbers[child.id] = f"{top_counter}.x"
+        elif item_type == "multi_line":
+            top_counter += 1
+            field_serial_numbers[val.id] = str(top_counter)
+
+    # 6. Render main blocks (interleaved scalars & tables)
+    custom_labels = configuration.get("scalar_fields", {})
+    
+    for item_type, val in main_blocks:
+        if item_type == "scalar_block":
+            scalar_data = []
+            for f in val:
+                val_data = values_by_field_id.get(f.id)
+                # Check for boolean or has options and render checkboxes
+                if f.field_type == FieldType.boolean:
+                    val_bool = None
+                    if val_data is not None:
+                        if isinstance(val_data, bool):
+                            val_bool = val_data
+                        elif isinstance(val_data, str):
+                            val_bool = val_data.strip().lower() in ("1", "true", "yes", "y")
+                        elif isinstance(val_data, (int, float)):
+                            val_bool = bool(val_data)
+                    if val_bool is True:
+                        val_str = "Yes"
+                    elif val_bool is False:
+                        val_str = "No"
+                    else:
+                        val_str = "—"
+                elif f.options:
+                    opts_str = []
+                    selected_val = str(val_data).strip() if val_data is not None else ""
+                    for opt in f.options:
+                        box = "☑" if opt.value == selected_val else "☐"
+                        opts_str.append(f"{box} {html.escape(opt.label or opt.value)}")
+                    val_str = " &nbsp;&nbsp;&nbsp;&nbsp; ".join(opts_str)
+                else:
+                    val_str = _display_string_for_pdf_export(val_data, f.field_type) if val_data is not None else "—"
+
+                # calculate depth
+                depth = 0
+                curr = f
+                while curr.config and curr.config.get("condition_trigger_field_id") is not None:
+                    try:
+                        parent_id = int(curr.config.get("condition_trigger_field_id"))
+                        parent = fields_by_id.get(parent_id)
+                        if not parent:
+                            break
+                        depth += 1
+                        curr = parent
+                    except (ValueError, TypeError):
+                        break
+                    if depth > 10:
+                        break
+
+                display_label = custom_labels.get(f.key) or custom_labels.get(str(f.id)) or f.name
+                serial_prefix = field_serial_numbers.get(f.id, "")
+                if serial_prefix:
+                    display_label = f"{serial_prefix}. {display_label}"
+                    
+                indented_label_style = ParagraphStyle(
+                    f"KpiBodyLabel_{f.id}",
+                    parent=body_label_style,
+                    leftIndent=depth * 15
+                )
+                
+                scalar_data.append([
+                    Paragraph(html.escape(display_label), indented_label_style),
+                    Paragraph(val_str, body_value_style)
+                ])
+
+            scalar_table = Table(scalar_data, colWidths=[384, 120])
+            scalar_table.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#f3f4f6")),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ]))
+            elements.append(scalar_table)
+            elements.append(Spacer(1, 10))
+            
+        elif item_type == "multi_line":
+            f = val
+            field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
+            selected_column_keys = field_config.get("selected_columns")
+            if not selected_column_keys:
+                selected_column_keys = [sf.key for sf in f.sub_fields]
+
+            raw_filters = field_config.get("filters", {})
+
+            from app.entries.multi_line_load import load_multi_line_row_dicts
+            row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+            rows = [r for _, r in row_pairs]
+
+            filtered_rows = []
+            if rows:
+                from app.entries.multi_item_filters import row_passes_filters
+                from app.entries.reference_filter_resolve import build_reference_resolution_map
+
+                if raw_filters and raw_filters.get("conditions"):
+                    conds = raw_filters.get("conditions")
+                    resolution_maps = await build_reference_resolution_map(
+                        db, organization_id, entry.year, f, conds, rows
+                    )
+                    reference_field_types = {sf.key: sf.field_type.value if hasattr(sf.field_type, "value") else sf.field_type for sf in f.sub_fields}
+                    for r in rows:
+                        if row_passes_filters(r, raw_filters, resolution_maps=resolution_maps, reference_field_types=reference_field_types):
+                            filtered_rows.append(r)
+                else:
+                    filtered_rows = rows
+
+            table_name = (field_config.get("table_name") or "").strip() or f.name
+            table_heading = (field_config.get("table_heading") or "").strip()
+            table_subheader = (field_config.get("table_subheader") or "").strip()
+
+            is_duplicate_heading = (table_heading == table_name)
+
+            serial_prefix = field_serial_numbers.get(f.id, "")
+            if serial_prefix:
+                table_name = f"{serial_prefix}. {table_name}"
+
+            elements.append(Spacer(1, 10))
+            elements.append(Paragraph(html.escape(table_name), table_title_style))
+            if table_heading and not is_duplicate_heading:
+                elements.append(Paragraph(html.escape(table_heading), table_heading_style))
+            if table_subheader:
+                elements.append(Paragraph(html.escape(table_subheader), table_subheader_style))
+
+            key_to_sf = {sf.key: sf for sf in f.sub_fields}
+            headers = [str(key_to_sf[col].name if col in key_to_sf else col) for col in selected_column_keys]
+
+            num_cols = len(selected_column_keys)
+            max_char_limit = None
+            if num_cols > 30:
+                table_font_size = 4.5
+                table_leading = 5.5
+                min_col_width = 20
+                max_char_limit = 12
+            elif num_cols > 15:
+                table_font_size = 5.5
+                table_leading = 6.5
+                min_col_width = 25
+                max_char_limit = 25
+            elif num_cols > 8:
+                table_font_size = 7
+                table_leading = 9
+                min_col_width = 35
+                max_char_limit = 40
+            else:
+                table_font_size = 8
+                table_leading = 10
+                min_col_width = 45
+
+            t_th_style = ParagraphStyle(
+                f"KpiTH_{f.key}",
+                parent=styles["Normal"],
+                fontName="Helvetica-Bold",
+                fontSize=table_font_size,
+                leading=table_leading,
+                textColor=colors.white
+            )
+            t_th_sr_style = ParagraphStyle(f"KpiTH_Sr_{f.key}", parent=t_th_style, alignment=TA_CENTER)
+            
+            t_td_style = ParagraphStyle(
+                f"KpiTD_{f.key}",
+                parent=styles["Normal"],
+                fontName="Helvetica",
+                fontSize=table_font_size,
+                leading=table_leading,
+                textColor=colors.HexColor("#1f2937")
+            )
+            t_td_sr_style = ParagraphStyle(f"KpiTD_Sr_{f.key}", parent=t_td_style, alignment=TA_CENTER)
+
+            available_width = 504
+            sr_no_width = 24
+
+            sample_rows = filtered_rows[:200]
+            col_chars = [len(h) for h in headers]
+            for r in sample_rows:
+                for idx, col in enumerate(selected_column_keys):
+                    sf = key_to_sf.get(col)
+                    ft = getattr(sf, "field_type", None) if sf else None
+                    raw_cell = _display_string_for_pdf_export(r.get(col), ft) if r.get(col) is not None else ""
+                    col_chars[idx] = max(col_chars[idx], min(len(raw_cell), 60))
+
+            total_chars = sum(col_chars) or len(selected_column_keys)
+            raw_widths = [max(min_col_width, (available_width - sr_no_width) * (c / total_chars)) for c in col_chars]
+            scale = (available_width - sr_no_width) / sum(raw_widths) if sum(raw_widths) > (available_width - sr_no_width) else 1.0
+            
+            col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
+
+            def get_header_text(h: str) -> str:
+                if max_char_limit and len(h) > max_char_limit:
+                    return h[:max_char_limit] + "..."
+                return h
+
+            table_data = [
+                [Paragraph("<b>Sr. No.</b>", t_th_sr_style)] + 
+                [Paragraph(f"<b>{html.escape(get_header_text(h))}</b>", t_th_style) for h in headers]
+            ]
+
+            def get_cell_text(row: dict, col: str) -> str:
+                sf = key_to_sf.get(col)
+                ft = getattr(sf, "field_type", None) if sf else None
+                raw_cell = _display_string_for_pdf_export(row.get(col) if isinstance(row, dict) else None, ft)
+                
+                limit = max_char_limit or 1000
+                if len(raw_cell) > limit:
+                    raw_cell = raw_cell[:limit] + "..."
+                    
+                lines = raw_cell.split("\n")
+                if len(lines) > 15:
+                    raw_cell = "\n".join(lines[:15]) + "\n[... truncated due to size limit]"
+                    
+                return html.escape(raw_cell).replace("\n", "<br/>")
+
+            for sr, r in enumerate(filtered_rows, start=1):
+                table_data.append([
+                    Paragraph(str(sr), t_td_sr_style)
+                ] + [
+                    Paragraph(get_cell_text(r, col), t_td_style) for col in selected_column_keys
+                ])
+
+            grid_style = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+
+            if not filtered_rows:
+                table_data.append([
+                    Paragraph("No records found matching filters.", t_td_style)
+                ] + [Paragraph("", t_td_style) for _ in selected_column_keys])
+                grid_style.append(("SPAN", (0, 1), (-1, 1)))
+            else:
+                grid_style.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f4f6")]))
+
+            ml_table = Table(table_data, colWidths=col_widths, repeatRows=1)
+            ml_table.setStyle(TableStyle(grid_style))
+            elements.append(ml_table)
+            elements.append(Spacer(1, 10))
+
+    # 8. Build Document
+    buf = BytesIO()
+    margin = 54
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
+        title=title
+    )
+
+    def canvas_maker(*args, **kwargs):
+        canvas_obj = NumberedCanvas(*args, **kwargs)
+        canvas_obj.organization_name = organization_info or (getattr(org, "name", "") if org else "")
+        canvas_obj.include_date = include_generation_date
+        return canvas_obj
+
+    doc.build(elements, canvasmaker=canvas_maker)
+    return buf.getvalue()
+
+
+async def generate_kpi_docx_report(
+    db: AsyncSession,
+    organization_id: int,
+    kpi_id: int,
+    year: int,
+    period_key: str,
+    configuration: dict
+) -> bytes:
+    import html
+    from io import BytesIO
+    from docx import Document
+    from docx.shared import Pt, Inches, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    
+    from app.core.models import KPI, KPIField, KPIEntry, KPIFieldValue, Organization, FieldType
+    from app.entries.routes import _display_string_for_pdf_export
+    from sqlalchemy.orm import selectinload
+    
+    # 1. Fetch KPI
+    kpi_stmt = (
+        select(KPI)
+        .where(KPI.id == kpi_id, KPI.organization_id == organization_id)
+        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+    )
+    kpi_res = await db.execute(kpi_stmt)
+    kpi = kpi_res.scalar_one_or_none()
+    if not kpi:
+        raise ValueError("KPI not found")
+
+    # 2. Fetch Entry
+    entry_stmt = select(KPIEntry).where(
+        KPIEntry.organization_id == organization_id,
+        KPIEntry.kpi_id == kpi_id,
+        KPIEntry.year == year,
+        KPIEntry.period_key == period_key
+    )
+    entry_res = await db.execute(entry_stmt)
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise ValueError(f"KPI Entry for year {year} and period '{period_key}' not found")
+
+    # 3. Fetch Scalar Values
+    scalar_values_query = select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id)
+    scalar_values_res = await db.execute(scalar_values_query)
+    scalar_values = scalar_values_res.scalars().all()
+    
+    values_by_field_id = {}
+    for val in scalar_values:
+        if val.value_boolean is not None:
+            values_by_field_id[val.field_id] = val.value_boolean
+        elif val.value_number is not None:
+            values_by_field_id[val.field_id] = val.value_number
+        elif val.value_date is not None:
+            values_by_field_id[val.field_id] = val.value_date
+        elif val.value_json is not None:
+            values_by_field_id[val.field_id] = val.value_json
+        else:
+            values_by_field_id[val.field_id] = val.value_text
+
+    # 4. Extract Configuration
+    title = (configuration.get("report_header") or configuration.get("title") or "").strip() or f"{kpi.name} Report"
+    description = (configuration.get("description") or "").strip()
+
+    org = await db.get(Organization, organization_id)
+
+    # 5. Initialize Document
+    doc = Document()
+    
+    # Add Report Header/Title
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_title = p_title.add_run(title)
+    run_title.bold = True
+    run_title.font.size = Pt(18)
+    run_title.font.color.rgb = RGBColor(0x1e, 0x3a, 0x8a)
+    
+    # Add Description
+    if description:
+        p_desc_head = doc.add_paragraph()
+        p_desc_head.paragraph_format.space_before = Pt(12)
+        p_desc_head.paragraph_format.space_after = Pt(4)
+        run_dh = p_desc_head.add_run("Description")
+        run_dh.bold = True
+        run_dh.font.size = Pt(12)
+        run_dh.font.color.rgb = RGBColor(0x1e, 0x3a, 0x8a)
+        
+        p_desc_text = doc.add_paragraph()
+        p_desc_text.paragraph_format.space_after = Pt(12)
+        run_dt = p_desc_text.add_run(description)
+        run_dt.font.size = Pt(10)
+        run_dt.font.color.rgb = RGBColor(0x37, 0x41, 0x51)
+
+    # 6. Extract fields logic (identical to PDF)
+    scalar_fields = [f for f in kpi.fields if f.field_type != FieldType.multi_line_items]
+    fields_by_id = {f.id: f for f in kpi.fields}
+    sorted_scalars = group_dependent_fields(scalar_fields)
+    
+    excluded_fields = configuration.get("excluded_scalar_fields") or []
+    excluded_set = {str(item) for item in excluded_fields}
+    
+    visible_scalars = [
+        f for f in sorted_scalars 
+        if is_field_visible(f, fields_by_id, values_by_field_id)
+        and f.key not in excluded_set
+        and str(f.id) not in excluded_set
+    ]
+
+    # Apply custom scalar fields order if specified
+    ordered_scalar_ids = configuration.get("ordered_scalar_fields")
+    if ordered_scalar_ids:
+        order_map = {str(val): idx for idx, val in enumerate(ordered_scalar_ids)}
+        def get_sort_key(f):
+            if str(f.id) in order_map:
+                return order_map[str(f.id)]
+            if f.key in order_map:
+                return order_map[f.key]
+            return 999999
+        visible_scalars.sort(key=get_sort_key)
+
+    # Get excluded multi-line fields and compute visible ones
+    multi_line_fields = [f for f in kpi.fields if f.field_type == FieldType.multi_line_items]
+    excluded_ml_keys = configuration.get("excluded_multi_line_fields") or []
+    excluded_ml_set = {str(item) for item in excluded_ml_keys}
+    visible_multi_line = [
+        f for f in multi_line_fields
+        if f.key not in excluded_ml_set and str(f.id) not in excluded_ml_set
+    ]
+
+    # Build parent blocks for scalar fields to keep parents and their children grouped
+    scalar_blocks = []
+    current_block = []
+    
+    for f in visible_scalars:
+        parent_id = f.config.get("condition_trigger_field_id") if f.config else None
+        if parent_id is not None:
+            try:
+                parent_id = int(parent_id)
+            except (ValueError, TypeError):
+                parent_id = None
+                
+        is_child = False
+        if parent_id is not None:
+            parent_field = fields_by_id.get(parent_id)
+            if parent_field and parent_field in visible_scalars:
+                is_child = True
+                
+        if is_child:
+            if current_block:
+                current_block.append(f)
+            else:
+                current_block = [f]
+        else:
+            if current_block:
+                scalar_blocks.append(current_block)
+            current_block = [f]
+            
+    if current_block:
+        scalar_blocks.append(current_block)
+
+    # Construct main rendering blocks (scalars + multi-line)
+    main_blocks = [("scalar_block", block) for block in scalar_blocks]
+    
+    # Separate multi-line fields into ordered and unordered
+    ordered_ml = []
+    unordered_ml = []
+    
+    for f in visible_multi_line:
+        field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
+        sort_order = field_config.get("sort_order")
+        try:
+            if sort_order is not None and str(sort_order).strip():
+                sort_order = int(sort_order)
+                ordered_ml.append((sort_order, f))
+            else:
+                unordered_ml.append(f)
+        except (ValueError, TypeError):
+            unordered_ml.append(f)
+            
+    # Sort ordered_ml by their sort_order (stable sort)
+    ordered_ml.sort(key=lambda x: x[0])
+    
+    # Interleave ordered multi-line fields into main_blocks (1-indexed position)
+    for sort_order, f in ordered_ml:
+        idx = max(0, sort_order - 1)
+        if idx >= len(main_blocks):
+            main_blocks.append(("multi_line", f))
+        else:
+            main_blocks.insert(idx, ("multi_line", f))
+            
+    # Append unordered multi-line fields to the end of main_blocks
+    for f in unordered_ml:
+        main_blocks.append(("multi_line", f))
+
+    # Calculate unified serial numbers for all visible elements in main_blocks
+    field_serial_numbers = {}
+    top_counter = 0
+    
+    for item_type, val in main_blocks:
+        if item_type == "scalar_block":
+            parent_field = val[0]
+            top_counter += 1
+            field_serial_numbers[parent_field.id] = str(top_counter)
+            
+            parent_child_counters = {}
+            for child in val[1:]:
+                parent_id = child.config.get("condition_trigger_field_id") if child.config else None
+                if parent_id is not None:
+                    try:
+                        parent_id = int(parent_id)
+                    except (ValueError, TypeError):
+                        parent_id = None
+                
+                if parent_id is not None:
+                    parent_num = field_serial_numbers.get(parent_id, "")
+                    child_idx = parent_child_counters.get(parent_id, 0) + 1
+                    parent_child_counters[parent_id] = child_idx
+                    field_serial_numbers[child.id] = f"{parent_num}.{child_idx}" if parent_num else f"{child_idx}"
+                else:
+                    field_serial_numbers[child.id] = f"{top_counter}.x"
+        elif item_type == "multi_line":
+            top_counter += 1
+            field_serial_numbers[val.id] = str(top_counter)
+
+    # 7. Render main blocks (interleaved scalars & tables)
+    custom_labels = configuration.get("scalar_fields", {})
+    
+    for item_type, val in main_blocks:
+        if item_type == "scalar_block":
+            for f in val:
+                val_data = values_by_field_id.get(f.id)
+                # Check for boolean or has options and render plain values
+                if f.field_type == FieldType.boolean:
+                    val_bool = None
+                    if val_data is not None:
+                        if isinstance(val_data, bool):
+                            val_bool = val_data
+                        elif isinstance(val_data, str):
+                            val_bool = val_data.strip().lower() in ("1", "true", "yes", "y")
+                        elif isinstance(val_data, (int, float)):
+                            val_bool = bool(val_data)
+                    box_yes = "☒" if val_bool is True else "☐"
+                    box_no = "☒" if val_bool is False else "☐"
+                    val_str = f"{box_yes} Yes    {box_no} No"
+                elif f.options:
+                    opts_str = []
+                    selected_val = str(val_data).strip() if val_data is not None else ""
+                    for opt in f.options:
+                        box = "☒" if opt.value == selected_val else "☐"
+                        opts_str.append(f"{box} {opt.label or opt.value}")
+                    val_str = "    ".join(opts_str)
+                else:
+                    val_str = _display_string_for_pdf_export(val_data, f.field_type) if val_data is not None else "—"
+
+                # calculate depth
+                depth = 0
+                curr = f
+                while curr.config and curr.config.get("condition_trigger_field_id") is not None:
+                    try:
+                        parent_id = int(curr.config.get("condition_trigger_field_id"))
+                        parent = fields_by_id.get(parent_id)
+                        if not parent:
+                            break
+                        depth += 1
+                        curr = parent
+                    except (ValueError, TypeError):
+                        break
+                    if depth > 10:
+                        break
+
+                display_label = custom_labels.get(f.key) or custom_labels.get(str(f.id)) or f.name
+                serial_prefix = field_serial_numbers.get(f.id, "")
+                if serial_prefix:
+                    display_label = f"{serial_prefix}. {display_label}"
+                
+                # Check ending punctuation for suffix
+                suffix = ": "
+                if display_label.endswith("?") or display_label.endswith(":") or display_label.endswith("."):
+                    suffix = " "
+
+                # Add as styled paragraph in parallel layout flow
+                p = doc.add_paragraph()
+                p.paragraph_format.left_indent = Inches(0.25 * depth)
+                p.paragraph_format.space_before = Pt(2)
+                p.paragraph_format.space_after = Pt(2)
+                
+                run_lbl = p.add_run(f"{display_label}{suffix}")
+                run_lbl.bold = True
+                run_lbl.font.size = Pt(10.5)
+                run_lbl.font.color.rgb = RGBColor(0x37, 0x41, 0x51)
+                
+                run_val = p.add_run(val_str)
+                run_val.font.size = Pt(10.5)
+                run_val.font.color.rgb = RGBColor(0x1f, 0x29, 0x37)
+            
+        elif item_type == "multi_line":
+            f = val
+            field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
+            selected_column_keys = field_config.get("selected_columns")
+            if not selected_column_keys:
+                selected_column_keys = [sf.key for sf in f.sub_fields]
+
+            raw_filters = field_config.get("filters", {})
+
+            from app.entries.multi_line_load import load_multi_line_row_dicts
+            row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+            rows = [r for _, r in row_pairs]
+
+            filtered_rows = []
+            if rows:
+                from app.entries.multi_item_filters import row_passes_filters
+                from app.entries.reference_filter_resolve import build_reference_resolution_map
+
+                if raw_filters and raw_filters.get("conditions"):
+                    conds = raw_filters.get("conditions")
+                    resolution_maps = await build_reference_resolution_map(
+                        db, organization_id, entry.year, f, conds, rows
+                    )
+                    reference_field_types = {sf.key: sf.field_type.value if hasattr(sf.field_type, "value") else sf.field_type for sf in f.sub_fields}
+                    for r in rows:
+                        if row_passes_filters(r, raw_filters, resolution_maps=resolution_maps, reference_field_types=reference_field_types):
+                            filtered_rows.append(r)
+                else:
+                    filtered_rows = rows
+
+            table_name = (field_config.get("table_name") or "").strip() or f.name
+            serial_prefix = field_serial_numbers.get(f.id, "")
+            if serial_prefix:
+                table_name = f"{serial_prefix}. {table_name}"
+                
+            table_heading = (field_config.get("table_heading") or "").strip()
+            table_subheader = (field_config.get("table_subheader") or "").strip()
+
+            # Render Table title/headings in Word
+            p_tname = doc.add_paragraph()
+            p_tname.paragraph_format.space_before = Pt(12)
+            p_tname.paragraph_format.space_after = Pt(2)
+            run_tn = p_tname.add_run(table_name)
+            run_tn.bold = True
+            run_tn.font.size = Pt(12)
+            run_tn.font.color.rgb = RGBColor(0x1e, 0x3a, 0x8a)
+            
+            # Deduplicate check
+            is_duplicate_heading = (table_heading == (field_config.get("table_name") or "").strip() or f.name)
+            if table_heading and not is_duplicate_heading:
+                p_thead = doc.add_paragraph()
+                p_thead.paragraph_format.space_after = Pt(2)
+                run_th = p_thead.add_run(table_heading)
+                run_th.bold = True
+                run_th.font.size = Pt(10)
+                run_th.font.color.rgb = RGBColor(0x4b, 0x55, 0x63)
+                
+            if table_subheader:
+                p_tsub = doc.add_paragraph()
+                p_tsub.paragraph_format.space_after = Pt(6)
+                run_ts = p_tsub.add_run(table_subheader)
+                run_ts.italic = True
+                run_ts.font.size = Pt(9)
+                run_ts.font.color.rgb = RGBColor(0x6b, 0x72, 0x80)
+
+            key_to_sf = {sf.key: sf for sf in f.sub_fields}
+            headers = [str(key_to_sf[col].name if col in key_to_sf else col) for col in selected_column_keys]
+
+            # Add Table Grid in Word
+            table = doc.add_table(rows=1, cols=len(selected_column_keys) + 1)
+            table.style = 'Table Grid'
+            
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].paragraphs[0].text = "Sr. No."
+            hdr_cells[0].paragraphs[0].runs[0].bold = True
+            hdr_cells[0].paragraphs[0].runs[0].font.size = Pt(9.5)
+            
+            for i, h_text in enumerate(headers):
+                hdr_cells[i+1].paragraphs[0].text = h_text
+                hdr_cells[i+1].paragraphs[0].runs[0].bold = True
+                hdr_cells[i+1].paragraphs[0].runs[0].font.size = Pt(9.5)
+
+            num_cols = len(selected_column_keys)
+            max_char_limit = None
+            if num_cols > 30:
+                max_char_limit = 12
+            elif num_cols > 15:
+                max_char_limit = 25
+            elif num_cols > 8:
+                max_char_limit = 40
+
+            def get_cell_plain_text(row_dict: dict, col: str) -> str:
+                sf = key_to_sf.get(col)
+                ft = getattr(sf, "field_type", None) if sf else None
+                raw_cell = _display_string_for_pdf_export(row_dict.get(col) if isinstance(row_dict, dict) else None, ft)
+                
+                limit = max_char_limit or 1000
+                if len(raw_cell) > limit:
+                    raw_cell = raw_cell[:limit] + "..."
+                    
+                lines = raw_cell.split("\n")
+                if len(lines) > 15:
+                    raw_cell = "\n".join(lines[:15]) + "\n[... truncated]"
+                    
+                return raw_cell
+
+            if not filtered_rows:
+                row = table.add_row()
+                row.cells[0].paragraphs[0].text = "No records found matching filters."
+                row.cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+                for cell in row.cells[1:]:
+                    row.cells[0].merge(cell)
+            else:
+                for sr, r in enumerate(filtered_rows, start=1):
+                    row = table.add_row()
+                    row.cells[0].paragraphs[0].text = str(sr)
+                    row.cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+                    for i, col in enumerate(selected_column_keys):
+                        row.cells[i+1].paragraphs[0].text = get_cell_plain_text(r, col)
+                        row.cells[i+1].paragraphs[0].runs[0].font.size = Pt(9)
+
+            # Spacing
+            doc.add_paragraph()
+
+    # Save to BytesIO
+    file_stream = BytesIO()
+    doc.save(file_stream)
+    file_stream.seek(0)
+    return file_stream.getvalue()
+
+
+async def background_generate_kpi_pdf(
+    job_id: str,
+    organization_id: int,
+    kpi_id: int,
+    year: int,
+    period_key: str,
+    configuration: dict
+) -> None:
+    from app.core.database import AsyncSessionLocal
+    from app.core.models import KpiReportJob, utc_now
+    from app.storage.service import upload_file
+    import traceback
+    import uuid
+
+    async with AsyncSessionLocal() as db:
+        try:
+            job_stmt = select(KpiReportJob).where(KpiReportJob.id == job_id)
+            job_res = await db.execute(job_stmt)
+            job = job_res.scalar_one_or_none()
+            if not job:
+                return
+
+            job.status = "processing"
+            await db.commit()
+
+            fmt = configuration.get("format", "pdf")
+            if fmt == "docx":
+                doc_bytes = await generate_kpi_docx_report(
+                    db=db,
+                    organization_id=organization_id,
+                    kpi_id=kpi_id,
+                    year=year,
+                    period_key=period_key,
+                    configuration=configuration
+                )
+                filename = f"kpi_report_{kpi_id}_{year}_{period_key or 'full'}_{uuid.uuid4().hex[:8]}.docx"
+                relative_path = f"kpi_reports/{filename}"
+                content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                file_bytes = doc_bytes
+            else:
+                pdf_bytes = await generate_kpi_pdf_report(
+                    db=db,
+                    organization_id=organization_id,
+                    kpi_id=kpi_id,
+                    year=year,
+                    period_key=period_key,
+                    configuration=configuration
+                )
+                filename = f"kpi_report_{kpi_id}_{year}_{period_key or 'full'}_{uuid.uuid4().hex[:8]}.pdf"
+                relative_path = f"kpi_reports/{filename}"
+                content_type = "application/pdf"
+                file_bytes = pdf_bytes
+
+            stored_path = await upload_file(
+                db=db,
+                organization_id=organization_id,
+                relative_path=relative_path,
+                content=file_bytes,
+                content_type=content_type
+            )
+
+            # Reload and complete
+            job_res = await db.execute(job_stmt)
+            job = job_res.scalar_one_or_none()
+            if job:
+                job.status = "completed"
+                job.stored_path = stored_path
+                job.completed_at = utc_now()
+                await db.commit()
+
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                job_res = await db.execute(select(KpiReportJob).where(KpiReportJob.id == job_id))
+                job = job_res.scalar_one_or_none()
+                if job:
+                    job.status = "failed"
+                    job.error_message = str(e)
+                    job.completed_at = utc_now()
+                    await db.commit()
+            except Exception:
+                pass
