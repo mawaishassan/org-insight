@@ -16,6 +16,7 @@ SUB_FIELD_TYPES = (
     FieldType.multi_reference,
     FieldType.attachment,
     FieldType.mixed_list,
+    FieldType.formula,
 )
 
 

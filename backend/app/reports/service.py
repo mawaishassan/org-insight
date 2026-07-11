@@ -153,12 +153,31 @@ async def _load_multi_line_items_rows_batch(
         .order_by(KpiMultiLineRow.entry_id, KpiMultiLineRow.row_index)
         .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
     )
+    
+    sub_fields = getattr(field, "sub_fields", None) or []
+    subfields_dict = {}
+    for sf in sub_fields:
+        subfields_dict[sf.key] = sf
+        if getattr(sf, "id", None) is not None:
+            subfields_dict[int(sf.id)] = sf
+
+    from app.fields.conditional import is_subfield_visible
     by_entry: dict[int, list[dict]] = defaultdict(list)
     for r in res.scalars().all():
         eid = getattr(r, "entry_id", None)
         if eid is None:
             continue
-        by_entry[int(eid)].append(_kpi_multi_line_orm_row_to_dict(r))
+        row_dict = _kpi_multi_line_orm_row_to_dict(r)
+        
+        cleaned_r = {}
+        for k, v in row_dict.items():
+            sf = subfields_dict.get(k)
+            if sf and is_subfield_visible(sf, subfields_dict, row_dict):
+                cleaned_r[k] = v
+            elif not sf:
+                cleaned_r[k] = v
+                
+        by_entry[int(eid)].append(cleaned_r)
     return dict(by_entry)
 
 
@@ -2416,27 +2435,9 @@ def group_dependent_fields(original_fields: list) -> list:
 
 
 def is_field_visible(f, fields_by_id: dict, values_by_field_id: dict) -> bool:
-    """Recursively check conditional visibility based on trigger boolean field value."""
-    trigger_id = f.config.get("condition_trigger_field_id") if f.config else None
-    if trigger_id is None:
-        return True
-    try:
-        trigger_id = int(trigger_id)
-    except (ValueError, TypeError):
-        return True
-    trigger_value = f.config.get("condition_trigger_value", True)
-    trigger_field = fields_by_id.get(trigger_id)
-    if trigger_field and not is_field_visible(trigger_field, fields_by_id, values_by_field_id):
-        return False
-    current_trigger_val = values_by_field_id.get(trigger_id)
-    coerced_val = False
-    if isinstance(current_trigger_val, bool):
-        coerced_val = current_trigger_val
-    elif isinstance(current_trigger_val, str):
-        coerced_val = current_trigger_val.strip().lower() in ("1", "true", "yes", "y")
-    elif isinstance(current_trigger_val, (int, float)):
-        coerced_val = bool(current_trigger_val)
-    return coerced_val == trigger_value
+    """Recursively check conditional visibility of a field."""
+    from app.fields.conditional import is_field_visible as _is_field_visible
+    return _is_field_visible(f, fields_by_id, values_by_field_id)
 
 
 from reportlab.pdfgen import canvas

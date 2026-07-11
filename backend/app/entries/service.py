@@ -1,5 +1,6 @@
 """KPI entry CRUD, submit, lock; formula evaluation for formula fields."""
 
+import ast
 import json
 import math
 from datetime import datetime
@@ -147,7 +148,9 @@ async def _resolve_attachment_filenames_to_urls(
 
 async def replace_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField, rows: list[dict]) -> None:
     """Replace relational multi_line_items rows/cells for (entry, field) from list-of-dicts."""
+    existing_rows = await load_multi_line_items_rows(db, entry_id=entry_id, field=field)
     resolved_rows = await _resolve_attachment_filenames_to_urls(db, field.kpi_id, rows, getattr(field, "sub_fields", None) or [])
+
     existing = await db.execute(
         select(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
     )
@@ -155,7 +158,45 @@ async def replace_multi_line_items_rows(db: AsyncSession, *, entry_id: int, fiel
         await db.delete(r)
     await db.flush()
 
-    key_to_sub = {getattr(s, "key", None): s for s in (getattr(field, "sub_fields", None) or []) if getattr(s, "key", None)}
+    sub_fields = getattr(field, "sub_fields", None) or []
+    key_to_sub = {getattr(s, "key", None): s for s in sub_fields if getattr(s, "key", None)}
+    
+    subfields_dict = {}
+    for sf in sub_fields:
+        subfields_dict[sf.key] = sf
+        if getattr(sf, "id", None) is not None:
+            subfields_dict[int(sf.id)] = sf
+
+    from app.fields.conditional import is_subfield_visible
+    merged_resolved_rows = []
+    for idx, inc_row in enumerate(resolved_rows or []):
+        inc_row = inc_row if isinstance(inc_row, dict) else {}
+        exist_row = existing_rows[idx] if idx < len(existing_rows) and isinstance(existing_rows[idx], dict) else {}
+        
+        merged_row = {**exist_row, **inc_row}
+        
+        # Clean up dependent fields recursively in merged_row if condition is false
+        changed = True
+        while changed:
+            changed = False
+            for sf in sub_fields:
+                if sf.key in merged_row and merged_row[sf.key] not in (None, "", []):
+                    if not is_subfield_visible(sf, subfields_dict, merged_row):
+                        merged_row[sf.key] = None
+                        changed = True
+
+        final_row = {}
+        for sub in sub_fields:
+            if not getattr(sub, "key", None):
+                continue
+            if is_subfield_visible(sub, subfields_dict, merged_row):
+                if sub.key in inc_row:
+                    final_row[sub.key] = inc_row[sub.key]
+                else:
+                    final_row[sub.key] = exist_row.get(sub.key)
+            else:
+                final_row[sub.key] = None
+        merged_resolved_rows.append(final_row)
 
     def _add_cell(row_id: int, sub: Any, raw_val: Any) -> None:
         c = KpiMultiLineCell(row_id=row_id, sub_field_id=int(getattr(sub, "id")))
@@ -193,7 +234,7 @@ async def replace_multi_line_items_rows(db: AsyncSession, *, entry_id: int, fiel
                 c.value_text = str(raw_val)
         db.add(c)
 
-    for idx, row in enumerate(resolved_rows or []):
+    for idx, row in enumerate(merged_resolved_rows):
         rdict = row if isinstance(row, dict) else {}
         mlr = KpiMultiLineRow(entry_id=entry_id, field_id=field.id, row_index=int(idx))
         db.add(mlr)
@@ -1401,7 +1442,7 @@ async def user_can_export_multi_line_field(
 
 
 async def _load_other_kpi_values(
-    db: AsyncSession, year: int, org_id: int, exclude_kpi_id: int
+    db: AsyncSession, year: int, org_id: int, exclude_kpi_id: int, period_key: str | None = None, is_draft: bool | None = None
 ) -> OtherKpiValues:
     """Load numeric field values from org's entries for other KPIs (same org, same year)."""
     out: OtherKpiValues = {}
@@ -1412,12 +1453,27 @@ async def _load_other_kpi_values(
             KPIEntry.year == year,
             KPIEntry.kpi_id != exclude_kpi_id,
         )
-        .options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
     )
+    if period_key is not None:
+        q = q.where(KPIEntry.period_key == period_key)
+    q = q.options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
+    
     res = await db.execute(q)
-    for other_entry in res.scalars().all():
-        kid = other_entry.kpi_id
-        for fv in other_entry.field_values or []:
+    entries = list(res.scalars().all())
+    
+    from collections import defaultdict
+    kpi_entries = defaultdict(list)
+    for entry in entries:
+        kpi_entries[entry.kpi_id].append(entry)
+        
+    for kid, entries_list in kpi_entries.items():
+        selected_entry = None
+        if is_draft is not None:
+            selected_entry = next((e for e in entries_list if e.is_draft == is_draft), None)
+        if selected_entry is None:
+            selected_entry = next((e for e in entries_list if e.is_draft), entries_list[0])
+            
+        for fv in selected_entry.field_values or []:
             if not fv.field or fv.value_number is None:
                 continue
             if fv.field.field_type not in (FieldType.number, FieldType.formula):
@@ -1431,54 +1487,8 @@ async def _load_other_kpi_values(
 
 def _is_subfield_satisfied_for_row(sf, row: dict, key_to_sf: dict) -> bool:
     """Check if a subfield's visibility condition is satisfied for a given row dict."""
-    if not sf or not getattr(sf, "config", None) or not isinstance(sf.config, dict):
-        return True
-    
-    trigger_id = sf.config.get("condition_trigger_field_id")
-    trigger_key = sf.config.get("condition_trigger_field_key")
-    if trigger_id is None and trigger_key is None:
-        return True
-        
-    trigger_value = sf.config.get("condition_trigger_value")
-    if trigger_value is None:
-        return True
-        
-    # Resolve the trigger subfield
-    parent_sf = None
-    if trigger_id is not None:
-        try:
-            tid_int = int(trigger_id)
-            for parent_cand in key_to_sf.values():
-                if getattr(parent_cand, "id", None) == tid_int:
-                    parent_sf = parent_cand
-                    break
-        except (ValueError, TypeError):
-            pass
-            
-    if parent_sf is None and trigger_key is not None:
-        parent_sf = key_to_sf.get(trigger_key)
-        
-    if not parent_sf:
-        return True  # Fallback to showing if trigger field not found/resolved
-        
-    # Evaluate parent's condition first (chained dependency)
-    if not _is_subfield_satisfied_for_row(parent_sf, row, key_to_sf):
-        return False
-        
-    # Check parent's value in this row
-    val = row.get(parent_sf.key)
-    
-    # Coerce cell value to bool
-    val_bool = None
-    if val is not None:
-        if isinstance(val, bool):
-            val_bool = val
-        elif isinstance(val, str):
-            val_bool = val.strip().lower() in ("1", "true", "yes", "y")
-        elif isinstance(val, (int, float)):
-            val_bool = bool(val)
-            
-    return val_bool == trigger_value
+    from app.fields.conditional import is_subfield_visible
+    return is_subfield_visible(sf, key_to_sf, row)
 
 async def save_entry_values(
     db: AsyncSession,
@@ -1503,6 +1513,50 @@ async def save_entry_values(
         return None
     key_to_field = {f.key: f for f in kpi.fields}
     validation_errors: list[dict] = []
+
+    # Construct merged state to check visibility
+    scalar_vals_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == entry_id)
+    )
+    existing_vals = scalar_vals_res.scalars().all()
+    existing_values_dict = {fv.field_id: fv for fv in existing_vals}
+
+    class TempVal:
+        def __init__(self, vb, vn, vt, vd, vj):
+            self.value_boolean = vb
+            self.value_number = vn
+            self.value_text = vt
+            self.value_date = vd
+            self.value_json = vj
+
+    merged_values_dict = {**existing_values_dict}
+    for v in values:
+        coerced_date = None
+        if v.value_date is not None:
+            if isinstance(v.value_date, datetime):
+                coerced_date = v.value_date
+            elif isinstance(v.value_date, str):
+                try:
+                    s = v.value_date.strip()
+                    if s:
+                        coerced_date = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    pass
+        merged_values_dict[v.field_id] = TempVal(
+            v.value_boolean, v.value_number, v.value_text, coerced_date, v.value_json
+        )
+
+    from app.fields.conditional import is_field_visible
+    fields_dict = {f.id: f for f in kpi.fields}
+    filtered_values = []
+    for v in values:
+        f = fields_dict.get(v.field_id)
+        if f:
+            if is_field_visible(f, fields_dict, merged_values_dict):
+                filtered_values.append(v)
+        else:
+            filtered_values.append(v)
+    values = filtered_values
 
     # Field-level access for merging multi_line_items by editable columns
     access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
@@ -1632,20 +1686,6 @@ async def save_entry_values(
         fv.value_text = v.value_text
         fv.value_number = v.value_number
         if f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
-            # Clean/sanitize dependent subfields if their trigger conditions are False
-            key_to_sub = {getattr(sub, "key", None): sub for sub in (getattr(f, "sub_fields", None) or []) if getattr(sub, "key", None)}
-            for row in v.value_json:
-                if not isinstance(row, dict):
-                    continue
-                changed = True
-                while changed:
-                    changed = False
-                    for sub in (getattr(f, "sub_fields", None) or []):
-                        if row.get(sub.key) is not None:
-                            if not _is_subfield_satisfied_for_row(sub, row, key_to_sub):
-                                row[sub.key] = None
-                                changed = True
-
             multi_line_items_data[f.key] = v.value_json
 
             if access_map is None:
@@ -1691,16 +1731,23 @@ async def save_entry_values(
         if num_val is not None:
             value_by_key[f.key] = num_val
 
+    # Recompute MLI formula subfields before loading them for scalar formulas
+    await recompute_mli_formula_subfields(db, entry_id=entry_id, org_id=org_id)
+
     # For multi_line_items not in request, use existing stored value
     for f in kpi.fields:
         if f.field_type != FieldType.multi_line_items or f.key in multi_line_items_data:
+            if f.key in multi_line_items_data:
+                multi_line_items_data[f.key] = await load_multi_line_items_rows(db, entry_id=entry_id, field=f)
             continue
         existing_rows = await load_multi_line_items_rows(db, entry_id=entry_id, field=f)
         if existing_rows:
             multi_line_items_data[f.key] = existing_rows
 
     # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
-    other_kpi_values = await _load_other_kpi_values(db, entry.year, org_id, kpi_id)
+    other_kpi_values = await _load_other_kpi_values(
+        db, entry.year, org_id, kpi_id, period_key=entry.period_key, is_draft=entry.is_draft
+    )
 
     # Formula fields
     for f in kpi.fields:
@@ -1774,6 +1821,9 @@ async def recompute_formula_fields_for_entry(
     fv_list = list(fv_res.scalars().all())
     fv_by_field_id = {fv.field_id: fv for fv in fv_list}
 
+    # Recompute MLI formula subfields
+    await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id)
+
     value_by_key: dict[str, float | int] = {}
     multi_line_items_data: MultiLineItemsData = {}
 
@@ -1796,7 +1846,9 @@ async def recompute_formula_fields_for_entry(
             # Always load the current relational rows for this field.
             multi_line_items_data[f.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=f)
 
-    other_kpi_values = await _load_other_kpi_values(db, entry.year, org_id, entry.kpi_id)
+    other_kpi_values = await _load_other_kpi_values(
+        db, entry.year, org_id, entry.kpi_id, period_key=entry.period_key, is_draft=entry.is_draft
+    )
 
     # Compute + persist
     for f in ordered_fields:
@@ -1878,7 +1930,9 @@ async def recompute_formula_fields_for_kpi(
                 except (TypeError, ValueError):
                     pass
 
-        other_kpi_values = await _load_other_kpi_values(db, entry.year, org_id, kpi_id)
+        other_kpi_values = await _load_other_kpi_values(
+            db, entry.year, org_id, kpi_id, period_key=entry.period_key, is_draft=entry.is_draft
+        )
         for f in formula_fields:
             computed = evaluate_formula(
                 f.formula_expression or "",
@@ -1900,33 +1954,8 @@ async def recompute_formula_fields_for_kpi(
 
 
 def _is_field_visible_for_entry(field, values_dict: dict, fields_dict: dict) -> bool:
-    if not field.config or not isinstance(field.config, dict):
-        return True
-    trigger_id = field.config.get("condition_trigger_field_id")
-    if trigger_id is None:
-        return True
-    trigger_value = field.config.get("condition_trigger_value")
-    if trigger_value is None:
-        return True
-        
-    try:
-        tid_int = int(trigger_id)
-    except (ValueError, TypeError):
-        return True
-        
-    trigger_field = fields_dict.get(tid_int)
-    if trigger_field and not _is_field_visible_for_entry(trigger_field, values_dict, fields_dict):
-        return False
-        
-    fv = values_dict.get(tid_int)
-    current_trigger_val = None
-    if fv:
-        current_trigger_val = getattr(fv, "value_boolean", None)
-        if current_trigger_val is None and getattr(fv, "value_text", None) is not None:
-            text_val = str(getattr(fv, "value_text")).strip().lower()
-            current_trigger_val = text_val in ("1", "true", "yes", "y")
-            
-    return current_trigger_val == trigger_value
+    from app.fields.conditional import is_field_visible
+    return is_field_visible(field, fields_dict, values_dict)
 
 
 async def submit_entry(
@@ -2634,3 +2663,272 @@ async def list_entries_overview(
             }
         result.append(item)
     return result
+
+
+def extract_cross_kpi_mli_references(expression: str) -> set[tuple[int, str]]:
+    """Extract (kpi_id, field_key) tuples from any cross-KPI MLI function calls in expression."""
+    refs = set()
+    if not expression or not expression.strip():
+        return refs
+    try:
+        tree = ast.parse(expression)
+    except SyntaxError:
+        return refs
+        
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            func_name = node.func.id
+            if func_name in (
+                "SUM_KPI_ITEMS", "AVG_KPI_ITEMS", "COUNT_KPI_ITEMS", "MIN_KPI_ITEMS", "MAX_KPI_ITEMS",
+                "SUM_KPI_ITEMS_WHERE", "AVG_KPI_ITEMS_WHERE", "COUNT_KPI_ITEMS_WHERE", "MIN_KPI_ITEMS_WHERE", "MAX_KPI_ITEMS_WHERE"
+            ):
+                if len(node.args) >= 2:
+                    kpi_id = None
+                    arg0 = node.args[0]
+                    if isinstance(arg0, ast.Constant):
+                        kpi_id = arg0.value
+                    elif isinstance(arg0, ast.Num):
+                        kpi_id = arg0.n
+                    
+                    field_key = None
+                    arg1 = node.args[1]
+                    if isinstance(arg1, ast.Constant):
+                        field_key = arg1.value
+                    elif isinstance(arg1, ast.Str):
+                        field_key = arg1.s
+                        
+                    if isinstance(kpi_id, int) and isinstance(field_key, str):
+                        refs.add((kpi_id, field_key))
+    return refs
+
+
+async def _load_other_kpi_multi_line_data(
+    db: AsyncSession,
+    year: int,
+    org_id: int,
+    refs: set[tuple[int, str]],
+    period_key: str | None = None,
+    is_draft: bool | None = None,
+) -> dict[tuple[int, str], list[dict[str, Any]]]:
+    """Batch-load multi-line item rows for the referenced other KPIs and fields."""
+    out = {}
+    if not refs:
+        return out
+        
+    from collections import defaultdict
+    kpi_to_keys = defaultdict(list)
+    for kpi_id, field_key in refs:
+        kpi_to_keys[kpi_id].append(field_key)
+        
+    for kpi_id, field_keys in kpi_to_keys.items():
+        q = select(KPIEntry).where(
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == year,
+            KPIEntry.organization_id == org_id,
+        )
+        if period_key is not None:
+            q = q.where(KPIEntry.period_key == period_key)
+            
+        entry_res = await db.execute(q)
+        entries = list(entry_res.scalars().all())
+        
+        entry = None
+        if is_draft is not None:
+            entry = next((e for e in entries if e.is_draft == is_draft), None)
+        if entry is None:
+            entry = next((e for e in entries if e.is_draft), entries[0] if entries else None)
+            
+        if not entry:
+            for fk in field_keys:
+                out[(kpi_id, fk)] = []
+            continue
+            
+        fields_res = await db.execute(
+            select(KPIField).where(
+                KPIField.kpi_id == kpi_id,
+                KPIField.key.in_(field_keys),
+                KPIField.field_type == FieldType.multi_line_items,
+            ).options(selectinload(KPIField.sub_fields))
+        )
+        fields = fields_res.scalars().all()
+        for f in fields:
+            rows = await load_multi_line_items_rows(db, entry_id=entry.id, field=f)
+            out[(kpi_id, f.key)] = rows
+            
+        found_keys = {f.key for f in fields}
+        for fk in field_keys:
+            if fk not in found_keys:
+                out[(kpi_id, fk)] = []
+                
+    return out
+
+
+def _topological_sort_subfields(sub_fields: list[Any]) -> list[Any]:
+    """Sort sub-fields in dependency order (dependencies first) to allow cascading formulas."""
+    key_to_sf = {sf.key: sf for sf in sub_fields}
+    visited = {}  # key -> status: 0=unvisited, 1=visiting, 2=visited
+    result = []
+
+    def dfs(u: str):
+        visited[u] = 1
+        cfg = getattr(key_to_sf[u], "config", None) or {}
+        if hasattr(cfg, "get"):
+            formula_expr = cfg.get("formula_expression")
+        elif isinstance(cfg, dict):
+            formula_expr = cfg.get("formula_expression")
+        else:
+            formula_expr = None
+        from app.formula_engine.circular_validation import extract_formula_dependencies
+        deps = extract_formula_dependencies(formula_expr)
+        for v in deps:
+            if v in key_to_sf and visited.get(v, 0) == 0:
+                dfs(v)
+        visited[u] = 2
+        result.append(key_to_sf[u])
+
+    for sf in sub_fields:
+        if visited.get(sf.key, 0) == 0:
+            dfs(sf.key)
+    return result
+
+
+async def recompute_mli_formula_subfields(
+    db: AsyncSession,
+    entry_id: int,
+    org_id: int,
+    field_id: int | None = None,
+) -> None:
+    """Recompute and persist all formula subfield values for an entry's multi_line_items fields."""
+    entry = await db.get(KPIEntry, entry_id)
+    if not entry or entry.organization_id != org_id:
+        return
+
+    # 1. Load the KPI fields and sub_fields
+    q = (
+        select(KPIField)
+        .where(KPIField.kpi_id == entry.kpi_id, KPIField.field_type == FieldType.multi_line_items)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    if field_id is not None:
+        q = q.where(KPIField.id == field_id)
+    res = await db.execute(q)
+    mli_fields = list(res.scalars().all())
+
+    # Load scalar field values of this entry for formula variables namespace
+    fv_res = await db.execute(
+        select(KPIFieldValue)
+        .where(KPIFieldValue.entry_id == entry.id)
+        .options(selectinload(KPIFieldValue.field))
+    )
+    fv_list = list(fv_res.scalars().all())
+    value_by_key: dict[str, float | int] = {}
+    for fv in fv_list:
+        if fv.field and fv.field.field_type in (FieldType.number, FieldType.formula) and fv.value_number is not None:
+            try:
+                value_by_key[fv.field.key] = float(fv.value_number)
+            except (TypeError, ValueError):
+                pass
+
+    # Load scalar values of other KPIs for cross-KPI scalar refs
+    other_kpi_values = await _load_other_kpi_values(
+        db, entry.year, org_id, entry.kpi_id, period_key=entry.period_key, is_draft=entry.is_draft
+    )
+
+    # Load all MLI field rows in the current entry so formulas can reference other MLI fields in the same entry
+    multi_line_items_data: MultiLineItemsData = {}
+    all_mli_res = await db.execute(
+        select(KPIField)
+        .where(KPIField.kpi_id == entry.kpi_id, KPIField.field_type == FieldType.multi_line_items)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    for mf in all_mli_res.scalars().all():
+        multi_line_items_data[mf.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=mf)
+
+    # 2. Iterate through each MLI field and compute formula subfields
+    for f in mli_fields:
+        sub_fields = list(f.sub_fields or [])
+        formula_subs = [sf for sf in sub_fields if sf.field_type == FieldType.formula]
+        if not formula_subs:
+            continue
+
+        # Extract cross-KPI multi-line dependencies
+        refs = set()
+        for sf in formula_subs:
+            cfg = sf.config or {}
+            if hasattr(cfg, "get"):
+                expr = cfg.get("formula_expression")
+            elif isinstance(cfg, dict):
+                expr = cfg.get("formula_expression")
+            else:
+                expr = None
+            if expr:
+                refs.update(extract_cross_kpi_mli_references(expr))
+
+        other_kpi_mli_data = await _load_other_kpi_multi_line_data(
+            db, entry.year, org_id, refs, period_key=entry.period_key, is_draft=entry.is_draft
+        )
+        sorted_subs = _topological_sort_subfields(sub_fields)
+
+        rows_res = await db.execute(
+            select(KpiMultiLineRow)
+            .where(KpiMultiLineRow.entry_id == entry.id, KpiMultiLineRow.field_id == f.id)
+            .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
+        )
+        rows_orm = list(rows_res.scalars().all())
+
+        for r in rows_orm:
+            # Construct working row data from existing cells
+            working_row: dict[str, Any] = {}
+            cells_by_sub_id: dict[int, KpiMultiLineCell] = {}
+            for cell in getattr(r, "cells", None) or []:
+                sf = getattr(cell, "sub_field", None)
+                if sf:
+                    working_row[sf.key] = _ml_cell_raw(cell)
+                    cells_by_sub_id[sf.id] = cell
+
+            # Compute formula subfields in topological order
+            for sf in sorted_subs:
+                sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
+                if sf_type_s == "formula":
+                    cfg = sf.config or {}
+                    if hasattr(cfg, "get"):
+                        expr = cfg.get("formula_expression")
+                    elif isinstance(cfg, dict):
+                        expr = cfg.get("formula_expression")
+                    else:
+                        expr = None
+                    if not expr:
+                        computed = None
+                    else:
+                        computed = evaluate_formula(
+                            expr,
+                            value_by_key,
+                            multi_line_items_data,
+                            other_kpi_values,
+                            current_row=working_row,
+                            other_kpi_multi_line_data=other_kpi_mli_data,
+                        )
+
+                    # Update working_row
+                    working_row[sf.key] = computed
+
+                    # Persist cell value
+                    cell = cells_by_sub_id.get(sf.id)
+                    if cell is None:
+                        cell = KpiMultiLineCell(row_id=r.id, sub_field_id=sf.id)
+                        db.add(cell)
+                        cells_by_sub_id[sf.id] = cell
+
+                    cell.value_text = None
+                    cell.value_number = None
+                    cell.value_json = None
+                    cell.value_boolean = None
+                    cell.value_date = None
+
+                    if computed is not None:
+                        try:
+                            cell.value_number = float(computed)
+                        except (TypeError, ValueError):
+                            cell.value_text = str(computed)
+
+    await db.flush()

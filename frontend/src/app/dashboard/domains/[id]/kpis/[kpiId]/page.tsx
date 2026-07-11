@@ -17,6 +17,7 @@ import {
 } from "@/lib/attachmentCellValue";
 import { AttachmentFieldControl } from "@/components/AttachmentFieldControl";
 import MultiReferenceInput from "@/components/MultiReferenceInput";
+import { isFieldVisible as evaluateFieldVisible } from "@/lib/conditionalRules";
 
 interface ReferenceConfig {
   reference_source_kpi_id?: number;
@@ -449,22 +450,7 @@ export default function DomainKpiDetailPage() {
   }, [entry?.values]);
 
   const isFieldVisible = useCallback((f: FieldDef): boolean => {
-    const triggerId = f.config?.condition_trigger_field_id;
-    if (triggerId == null) return true;
-    const triggerValue = f.config?.condition_trigger_value;
-    if (triggerValue == null) return true;
-
-    // Chained dependency resolution
-    const triggerField = fields.find((x) => x.id === triggerId);
-    if (triggerField && !isFieldVisible(triggerField)) {
-      return false;
-    }
-
-    const currentTriggerVal = isEditing
-      ? formValues[triggerId]?.value_boolean
-      : valuesByFieldId.get(triggerId)?.value_boolean;
-
-    return currentTriggerVal === triggerValue;
+    return evaluateFieldVisible(f as any, fields as any, formValues, valuesByFieldId, isEditing);
   }, [fields, isEditing, formValues, valuesByFieldId]);
 
   // Prefill KPI and organization PDF config when they are loaded

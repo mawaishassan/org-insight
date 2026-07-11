@@ -9,6 +9,7 @@ import { makeAttachmentCellValue } from "@/lib/attachmentCellValue";
 import { AttachmentFieldControl } from "@/components/AttachmentFieldControl";
 import toast from "react-hot-toast";
 import MultiReferenceInput from "@/components/MultiReferenceInput";
+import { isSubFieldVisible as evaluateSubFieldVisible } from "@/lib/conditionalRules";
 import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
 
 function asWidgets(layout: any): Widget[] {
@@ -411,6 +412,7 @@ export default function MultiItemRowDetail() {
   const token = getAccessToken();
 
   const [meOrgId, setMeOrgId] = useState<number | null>(null);
+  const [userRole, setUserRole] = useState<string | null>(null);
   const [kpiName, setKpiName] = useState<string>("");
   const [field, setField] = useState<FieldSummary | null>(null);
   const [dashboardName, setDashboardName] = useState<string>("");
@@ -513,9 +515,16 @@ export default function MultiItemRowDetail() {
       router.push("/login");
       return;
     }
-    api<{ organization_id: number | null }>("/auth/me", { token })
-      .then((me) => setMeOrgId(me.organization_id ?? null))
-      .catch(() => setMeOrgId(null));
+    api<{ organization_id: number | null; role?: string | { value?: string } }>("/auth/me", { token })
+      .then((me) => {
+        setMeOrgId(me.organization_id ?? null);
+        const r = me.role;
+        setUserRole(typeof r === "string" ? r : r?.value ?? null);
+      })
+      .catch(() => {
+        setMeOrgId(null);
+        setUserRole(null);
+      });
   }, [token, router]);
 
   const loadContext = async (loadId: number) => {
@@ -597,42 +606,8 @@ export default function MultiItemRowDetail() {
 
   const subFields = field?.sub_fields ?? [];
 
-  // Helper to determine if a subfield's conditional visibility rule is satisfied
   const isSubFieldVisible = useCallback((sf: any, currentData: Record<string, any>): boolean => {
-    if (!sf?.config) return true;
-    const triggerId = sf.config.condition_trigger_field_id;
-    const triggerKey = sf.config.condition_trigger_field_key;
-    if (triggerId == null && triggerKey == null) return true;
-    
-    const triggerValue = sf.config.condition_trigger_value;
-    if (triggerValue == null) return true;
-    
-    // Find trigger subfield in subFields
-    const parentSf = subFields.find(
-      (p: any) =>
-        (triggerId != null && p.id === triggerId) ||
-        (triggerKey != null && p.key === triggerKey)
-    );
-    if (!parentSf) return true;
-    
-    // Parent's parent condition must also be satisfied (recursively check)
-    if (!isSubFieldVisible(parentSf, currentData)) return false;
-    
-    // Check parent's current value in currentData
-    const val = currentData[parentSf.key];
-    let valBool: boolean | null = null;
-    if (val !== undefined && val !== null) {
-      if (typeof val === "boolean") {
-        valBool = val;
-      } else if (typeof val === "string") {
-        const cleaned = val.trim().toLowerCase();
-        valBool = cleaned === "true" || cleaned === "1" || cleaned === "yes" || cleaned === "y";
-      } else if (typeof val === "number") {
-        valBool = val !== 0;
-      }
-    }
-    
-    return valBool === triggerValue;
+    return evaluateSubFieldVisible(sf, subFields as any, currentData);
   }, [subFields]);
 
   const sectionGroups = useMemo(() => {
@@ -679,7 +654,7 @@ export default function MultiItemRowDetail() {
       }));
   }, [subFields, editData, isSubFieldVisible]);
 
-  const hasSectionTabs = sectionGroups.length > 1 || (sectionGroups.length === 1 && sectionGroups[0].label !== "");
+  const hasSectionTabs = sectionGroups.length > 1;
 
   useEffect(() => {
     if (!hasSectionTabs) {
@@ -748,6 +723,60 @@ export default function MultiItemRowDetail() {
       return next;
     });
   };
+
+  const nonFormulaSerialized = useMemo(() => {
+    const obj: Record<string, unknown> = {};
+    subFields.forEach((sf) => {
+      if (sf.field_type !== "formula") {
+        obj[sf.key] = editData[sf.key];
+      }
+    });
+    return JSON.stringify(obj);
+  }, [editData, subFields]);
+
+  useEffect(() => {
+    if (!entryId || !fieldId || !token) return;
+
+    const hasFormula = subFields.some((sf) => sf.field_type === "formula");
+    if (!hasFormula) return;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(async () => {
+      try {
+        const payload = {
+          entry_id: entryId,
+          field_id: fieldId,
+          row_data: JSON.parse(nonFormulaSerialized),
+        };
+        const computed: Record<string, unknown> = await api(
+          `/entries/multi-items/rows/preview-formulas?${new URLSearchParams({
+            organization_id: String(effectiveOrgId ?? ""),
+          }).toString()}`,
+          {
+            method: "POST",
+            body: JSON.stringify(payload),
+            token,
+            signal: controller.signal,
+          }
+        );
+        setEditData((prev) => {
+          const next = { ...prev };
+          Object.entries(computed).forEach(([k, v]) => {
+            next[k] = v;
+          });
+          return next;
+        });
+      } catch (e) {
+        // Silently ignore aborts or errors
+      }
+    }, 250);
+
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [nonFormulaSerialized, entryId, fieldId, token, effectiveOrgId, subFields]);
+
 
   const Toggle = ({
     checked,

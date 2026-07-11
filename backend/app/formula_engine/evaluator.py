@@ -73,25 +73,31 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
     - Text: eq, neq, contains, not_contains, starts_with, ends_with
     """
     cell = row.get(filter_sub_key)
+    
+    # Normalize operator (e.g. "op_eq" or "op_EQ" or "eq" -> "eq")
+    op_norm = str(op).strip().lower()
+    if op_norm.startswith("op_"):
+        op_norm = op_norm[3:]
+
     # Treat None specially: only neq passes
     if cell is None:
-        return op == "neq"
+        return op_norm == "neq"
 
     # Try numeric comparison first
     n = _to_num(cell)
     fv_num = _to_num(filter_value)
-    if n is not None and fv_num is not None and op in {"eq", "neq", "gt", "gte", "lt", "lte"}:
-        if op == "eq":
+    if n is not None and fv_num is not None and op_norm in {"eq", "neq", "gt", "gte", "lt", "lte"}:
+        if op_norm == "eq":
             return n == fv_num
-        if op == "neq":
+        if op_norm == "neq":
             return n != fv_num
-        if op == "gt":
+        if op_norm == "gt":
             return n > fv_num
-        if op == "gte":
+        if op_norm == "gte":
             return n >= fv_num
-        if op == "lt":
+        if op_norm == "lt":
             return n < fv_num
-        if op == "lte":
+        if op_norm == "lte":
             return n <= fv_num
         return False
 
@@ -112,31 +118,31 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
     fv_str = str(filter_value).strip()
 
     def _match_text(cell_str: str) -> bool:
-        if op == "eq":
+        if op_norm == "eq":
             return cell_str == fv_str
-        if op == "neq":
+        if op_norm == "neq":
             return cell_str != fv_str
-        if op == "contains":
+        if op_norm == "contains":
             return fv_str in cell_str
-        if op == "not_contains":
+        if op_norm == "not_contains":
             return fv_str not in cell_str
-        if op == "starts_with":
+        if op_norm == "starts_with":
             return cell_str.startswith(fv_str)
-        if op == "ends_with":
+        if op_norm == "ends_with":
             return cell_str.endswith(fv_str)
         return False
 
-    if op == "eq":
+    if op_norm == "eq":
         return any(_match_text(c) for c in cell_candidates)
-    if op == "neq":
+    if op_norm == "neq":
         return all(_match_text(c) for c in cell_candidates)
-    if op == "contains":
+    if op_norm == "contains":
         return any(_match_text(c) for c in cell_candidates)
-    if op == "not_contains":
+    if op_norm == "not_contains":
         return all(_match_text(c) for c in cell_candidates)
-    if op == "starts_with":
+    if op_norm == "starts_with":
         return any(_match_text(c) for c in cell_candidates)
-    if op == "ends_with":
+    if op_norm == "ends_with":
         return any(_match_text(c) for c in cell_candidates)
     return False
 
@@ -272,10 +278,25 @@ def _items_values_where_multi(
     return out
 
 
+class CurrentRowWrapper:
+    """Wrapper to allow dotted attribute access in SimpleEval for CurrentRow (e.g. CurrentRow.Gender)."""
+
+    def __init__(self, data: dict[str, Any]):
+        self._data = data
+
+    def __getattr__(self, name: str) -> Any:
+        val = self._data.get(name)
+        if val is None:
+            return 0
+        return val
+
+
 def _make_evaluator(
     field_values: dict[str, float | int],
     multi_line_items_data: MultiLineItemsData | None = None,
     other_kpi_values: OtherKpiValues | None = None,
+    current_row: dict[str, Any] | None = None,
+    other_kpi_multi_line_data: dict[tuple[int, str], list[dict[str, Any]]] | None = None,
 ) -> "SimpleEval":
     """Build SimpleEval with field values, optional multi_line_items data, and optional other-KPI refs."""
     if SimpleEval is None:
@@ -284,6 +305,9 @@ def _make_evaluator(
     s.operators = {**s.operators}
     # Missing or None field values -> 0 so formulas don't fail when a referenced field has no value
     s.names = _SafeNames(dict(field_values))
+    if current_row is not None:
+        s.names["CurrentRow"] = CurrentRowWrapper(current_row)
+        
     ref_values = other_kpi_values or {}
     items_data = multi_line_items_data or {}
     # So SUM_ITEMS(field_key, sub_key) works: inject field keys and sub_keys as string names
@@ -314,6 +338,23 @@ def _make_evaluator(
     ):
         s.names[op_name] = op_name.replace("op_", "")
 
+    def _resolve_current_row_args(args: tuple[Any, ...]) -> tuple[Any, ...]:
+        if not current_row:
+            return args
+        resolved = []
+        for arg in args:
+            if isinstance(arg, str) and arg.startswith("CurrentRow."):
+                key = arg.split(".", 1)[1]
+                resolved.append(current_row.get(key, 0))
+            else:
+                resolved.append(arg)
+        return tuple(resolved)
+
+    def _other_kpi_rows(kpi_id: int, field_key: str) -> list[dict[str, Any]]:
+        if not other_kpi_multi_line_data:
+            return []
+        return other_kpi_multi_line_data.get((kpi_id, field_key), [])
+
     def sum_items(field_key: str, sub_key: str) -> float:
         return sum(_items_values(items_data, field_key, sub_key))
 
@@ -330,6 +371,7 @@ def _make_evaluator(
         """
         if not args:
             return 0.0
+        args = _resolve_current_row_args(args)
         field_key = str(args[0])
         rows = items_data.get(field_key) if isinstance(items_data, dict) else []
         if not isinstance(rows, list):
@@ -357,22 +399,91 @@ def _make_evaluator(
         return max(vals) if vals else 0.0
 
     def sum_items_where(field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
         vals = _items_values_where_multi(items_data, field_key, value_sub_key, where_args, 0)
         return sum(vals)
 
     def avg_items_where(field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
         vals = _items_values_where_multi(items_data, field_key, value_sub_key, where_args, 0)
         return sum(vals) / len(vals) if vals else 0.0
 
     def count_items_where(field_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
         return float(len(_rows_where_multi(items_data, field_key, where_args, 0)))
 
     def min_items_where(field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
         vals = _items_values_where_multi(items_data, field_key, value_sub_key, where_args, 0)
         return min(vals) if vals else 0.0
 
     def max_items_where(field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
         vals = _items_values_where_multi(items_data, field_key, value_sub_key, where_args, 0)
+        return max(vals) if vals else 0.0
+
+    # Cross-KPI items aggregation functions:
+    def sum_kpi_items(kpi_id: int, field_key: str, sub_key: str) -> float:
+        rows = _other_kpi_rows(kpi_id, field_key)
+        vals = [_to_num(r.get(sub_key)) for r in rows if isinstance(r, dict)]
+        return sum(v for v in vals if v is not None)
+
+    def avg_kpi_items(kpi_id: int, field_key: str, sub_key: str) -> float:
+        rows = _other_kpi_rows(kpi_id, field_key)
+        vals = [_to_num(r.get(sub_key)) for r in rows if isinstance(r, dict)]
+        vals = [v for v in vals if v is not None]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def count_kpi_items(kpi_id: int, field_key: str, sub_key: str | None = None) -> float:
+        rows = _other_kpi_rows(kpi_id, field_key)
+        if not sub_key:
+            return float(len(rows))
+        return float(len([r for r in rows if isinstance(r, dict) and r.get(sub_key) is not None]))
+
+    def min_kpi_items(kpi_id: int, field_key: str, sub_key: str) -> float:
+        rows = _other_kpi_rows(kpi_id, field_key)
+        vals = [_to_num(r.get(sub_key)) for r in rows if isinstance(r, dict)]
+        vals = [v for v in vals if v is not None]
+        return min(vals) if vals else 0.0
+
+    def max_kpi_items(kpi_id: int, field_key: str, sub_key: str) -> float:
+        rows = _other_kpi_rows(kpi_id, field_key)
+        vals = [_to_num(r.get(sub_key)) for r in rows if isinstance(r, dict)]
+        vals = [v for v in vals if v is not None]
+        return max(vals) if vals else 0.0
+
+    def sum_kpi_items_where(kpi_id: int, field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
+        rows = _other_kpi_rows(kpi_id, field_key)
+        data = {field_key: rows}
+        vals = _items_values_where_multi(data, field_key, value_sub_key, where_args, 0)
+        return sum(vals)
+
+    def avg_kpi_items_where(kpi_id: int, field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
+        rows = _other_kpi_rows(kpi_id, field_key)
+        data = {field_key: rows}
+        vals = _items_values_where_multi(data, field_key, value_sub_key, where_args, 0)
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def count_kpi_items_where(kpi_id: int, field_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
+        rows = _other_kpi_rows(kpi_id, field_key)
+        data = {field_key: rows}
+        return float(len(_rows_where_multi(data, field_key, where_args, 0)))
+
+    def min_kpi_items_where(kpi_id: int, field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
+        rows = _other_kpi_rows(kpi_id, field_key)
+        data = {field_key: rows}
+        vals = _items_values_where_multi(data, field_key, value_sub_key, where_args, 0)
+        return min(vals) if vals else 0.0
+
+    def max_kpi_items_where(kpi_id: int, field_key: str, value_sub_key: str, *where_args: Any) -> float:
+        where_args = _resolve_current_row_args(where_args)
+        rows = _other_kpi_rows(kpi_id, field_key)
+        data = {field_key: rows}
+        vals = _items_values_where_multi(data, field_key, value_sub_key, where_args, 0)
         return max(vals) if vals else 0.0
 
     def kpi_field(kpi_id: int, field_key: str) -> float:
@@ -412,6 +523,16 @@ def _make_evaluator(
         "COUNT_ITEMS_WHERE": count_items_where,
         "MIN_ITEMS_WHERE": min_items_where,
         "MAX_ITEMS_WHERE": max_items_where,
+        "SUM_KPI_ITEMS": sum_kpi_items,
+        "AVG_KPI_ITEMS": avg_kpi_items,
+        "COUNT_KPI_ITEMS": count_kpi_items,
+        "MIN_KPI_ITEMS": min_kpi_items,
+        "MAX_KPI_ITEMS": max_kpi_items,
+        "SUM_KPI_ITEMS_WHERE": sum_kpi_items_where,
+        "AVG_KPI_ITEMS_WHERE": avg_kpi_items_where,
+        "COUNT_KPI_ITEMS_WHERE": count_kpi_items_where,
+        "MIN_KPI_ITEMS_WHERE": min_kpi_items_where,
+        "MAX_KPI_ITEMS_WHERE": max_kpi_items_where,
         "KPI_FIELD": kpi_field,
     }
     return s
@@ -422,6 +543,8 @@ def evaluate_formula(
     field_values: dict[str, float | int],
     multi_line_items_data: MultiLineItemsData | None = None,
     other_kpi_values: OtherKpiValues | None = None,
+    current_row: dict[str, Any] | None = None,
+    other_kpi_multi_line_data: dict[tuple[int, str], list[dict[str, Any]]] | None = None,
 ) -> float | int | None:
     """
     Safely evaluate a formula string.
@@ -438,7 +561,13 @@ def evaluate_formula(
     if not re.match(r"^[\w\s+\-*/().,\"\'&]+$", expression):
         return None
     try:
-        ev = _make_evaluator(field_values, multi_line_items_data, other_kpi_values)
+        ev = _make_evaluator(
+            field_values,
+            multi_line_items_data,
+            other_kpi_values,
+            current_row,
+            other_kpi_multi_line_data,
+        )
         result = ev.eval(expression)
         if result is None:
             return None

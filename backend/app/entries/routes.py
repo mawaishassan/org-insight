@@ -83,6 +83,8 @@ from app.entries.service import (
     _is_multi_items_row_effectively_empty,
     parse_upsert_match_keys_json,
     coerce_mixed_list_raw,
+    _load_other_kpi_values,
+    load_multi_line_items_rows,
 )
 from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
@@ -851,7 +853,9 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
                     continue
                 empty = False
                 sf = allowed[key]
-                if sf.field_type == FieldType.number:
+                if sf.field_type == FieldType.attachment:
+                    continue
+                elif sf.field_type == FieldType.number:
                     try:
                         item[key] = float(raw)
                     except Exception:
@@ -1309,6 +1313,13 @@ async def list_multi_items_rows(
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
 
+    sub_fields = getattr(field, "sub_fields", None) or []
+    subfields_dict = {}
+    for sf in sub_fields:
+        subfields_dict[sf.key] = sf
+        if getattr(sf, "id", None) is not None:
+            subfields_dict[int(sf.id)] = sf
+
     if fetch_all and search:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1608,11 +1619,13 @@ async def list_multi_items_rows(
             ft = getattr(sf, "field_type", None)
             sub_fields_payload.append(
                 {
+                    "id": sf_id,
                     "key": sf_key,
                     "name": getattr(sf, "name", sf_key),
                     # `field_type` should be an Enum(FieldType), but some datasets/migrations may load it as a plain string.
                     "field_type": ft.value if hasattr(ft, "value") else ft,
                     "is_required": getattr(sf, "is_required", False),
+                    "config": getattr(sf, "config", None),
                 }
             )
     if not use_fast_sql_paging:
@@ -1910,7 +1923,15 @@ async def list_multi_items_rows(
             else:
                 can_edit = can_edit_common
                 can_delete = can_delete_common
-            r_visible = {k: v for k, v in (r or {}).items() if k in viewable_keys}
+            r_visible = {}
+            from app.fields.conditional import is_subfield_visible
+            for k, v in (r or {}).items():
+                if k in viewable_keys:
+                    sf = subfields_dict.get(k)
+                    if sf and is_subfield_visible(sf, subfields_dict, r):
+                        r_visible[k] = v
+                    elif not sf:
+                        r_visible[k] = v
             out_rows.append(MultiItemsRow(index=orig_index, data=r_visible, can_edit=can_edit, can_delete=can_delete))
 
         return MultiItemsListResponse(
@@ -2049,7 +2070,15 @@ async def list_multi_items_rows(
             can_edit = can_edit_common
             can_delete = can_delete_common
 
-        r_visible = {k: v for k, v in r.items() if k in viewable_keys}
+        r_visible = {}
+        from app.fields.conditional import is_subfield_visible
+        for k, v in r.items():
+            if k in viewable_keys:
+                sf = subfields_dict.get(k)
+                if sf and is_subfield_visible(sf, subfields_dict, r):
+                    r_visible[k] = v
+                elif not sf:
+                    r_visible[k] = v
         out_rows.append(MultiItemsRow(index=orig_index, data=r_visible, can_edit=can_edit, can_delete=can_delete))
 
     return MultiItemsListResponse(
@@ -2094,6 +2123,22 @@ async def add_multi_items_row(
             continue
         if getattr(sub, "field_type", None) == FieldType.mixed_list:
             normalized_row[k] = coerce_mixed_list_raw(v) or None
+
+    subfields_dict = {}
+    for sf in (field.sub_fields or []):
+        subfields_dict[sf.key] = sf
+        if getattr(sf, "id", None) is not None:
+            subfields_dict[int(sf.id)] = sf
+
+    from app.fields.conditional import is_subfield_visible
+    final_row = {}
+    for k, v in normalized_row.items():
+        sf = subfields_dict.get(k)
+        if sf and not is_subfield_visible(sf, subfields_dict, normalized_row):
+            final_row[k] = None
+        else:
+            final_row[k] = v
+    normalized_row = final_row
 
     max_idx_res = await db.execute(
         select(func.max(KpiMultiLineRow.row_index)).where(
@@ -2241,22 +2286,68 @@ async def update_multi_items_row(
             cell.value_text = str(raw_val)
 
     # Merge row: only update cells for sub_fields the user can edit
+    subfields_dict = {}
+    for sf in (field.sub_fields or []):
+        subfields_dict[sf.key] = sf
+        if getattr(sf, "id", None) is not None:
+            subfields_dict[int(sf.id)] = sf
+
+    from app.fields.conditional import is_subfield_visible
+    from app.entries.service import _ml_cell_raw
+
+    # Build a temporary merged dict to check visibility rules against the final state
+    temp_merged = {}
+    # First, populate with existing values
+    for cell_sf_id, cell in existing_cells.items():
+        cell_sf = subfields_dict.get(cell_sf_id)
+        if cell_sf:
+            temp_merged[cell_sf.key] = _ml_cell_raw(cell)
+
+    # Then merge incoming values
     for col_key, col_value in (row or {}).items():
-        sub = key_to_sub.get(col_key)
-        if sub is None:
-            continue
-        if not await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, getattr(sub, "id", None)):
-            continue
-        next_val = (coerce_mixed_list_raw(col_value) or None) if getattr(sub, "field_type", None) == FieldType.mixed_list else col_value
-        sub_id = int(getattr(sub, "id"))
+        temp_merged[col_key] = col_value
+
+    # Now filter temp_merged to make sure dependent fields whose condition is false are cleared
+    changed = True
+    while changed:
+        changed = False
+        for sf in (field.sub_fields or []):
+            if sf.key in temp_merged and temp_merged[sf.key] not in (None, "", []):
+                if not is_subfield_visible(sf, subfields_dict, temp_merged):
+                    temp_merged[sf.key] = None
+                    changed = True
+
+    # Now update database cells based on filtered values
+    for sf in (field.sub_fields or []):
+        sub_id = int(getattr(sf, "id"))
+        next_val = temp_merged.get(sf.key)
+        
+        # If the user has edits for this column, verify edit permission
+        if row and sf.key in row:
+            if not await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, sub_id):
+                continue
+
         cell = existing_cells.get(sub_id)
-        if cell is None:
-            cell = KpiMultiLineCell(row_id=mlr.id, sub_field_id=sub_id)
-            db.add(cell)
-            existing_cells[sub_id] = cell
-        _set_cell_value(cell, sub, next_val)
+        if next_val is not None:
+            next_val = (coerce_mixed_list_raw(next_val) or None) if getattr(sf, "field_type", None) == FieldType.mixed_list else next_val
+
+        if next_val is None or next_val == "":
+            if cell:
+                # Clear cell values
+                cell.value_text = None
+                cell.value_number = None
+                cell.value_json = None
+                cell.value_boolean = None
+                cell.value_date = None
+        else:
+            if cell is None:
+                cell = KpiMultiLineCell(row_id=mlr.id, sub_field_id=sub_id)
+                db.add(cell)
+                existing_cells[sub_id] = cell
+            _set_cell_value(cell, sf, next_val)
 
     mark_entry_modified(entry, current_user.id)
+    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     # Return row in legacy dict shape
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
@@ -2369,6 +2460,138 @@ async def update_multi_items_row_cell(
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
     data = rows[0][1] if rows else {}
     return MultiItemsRow(index=row_index, data=data)
+
+
+class RowPreviewRequest(BaseModel):
+    entry_id: int
+    field_id: int
+    row_data: dict[str, Any]
+
+
+@router.post("/multi-items/rows/preview-formulas")
+async def preview_row_formulas(
+    req: RowPreviewRequest,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Preview formula subfields evaluation on a draft row."""
+    org_id = _org_id(current_user, organization_id)
+    entry = await db.get(KPIEntry, req.entry_id)
+    if not entry or entry.organization_id != org_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    field = await _load_multi_items_field(db, org_id, req.field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field not found")
+
+    # Load scalar values of this entry for formula variables namespace
+    fv_res = await db.execute(
+        select(KPIFieldValue)
+        .where(KPIFieldValue.entry_id == entry.id)
+        .options(selectinload(KPIFieldValue.field))
+    )
+    fv_list = list(fv_res.scalars().all())
+    value_by_key: dict[str, float | int] = {}
+    for fv in fv_list:
+        if fv.field and fv.field.field_type in (FieldType.number, FieldType.formula) and fv.value_number is not None:
+            try:
+                value_by_key[fv.field.key] = float(fv.value_number)
+            except (TypeError, ValueError):
+                pass
+
+    # Load scalar values of other KPIs
+    other_kpi_values = await _load_other_kpi_values(
+        db, entry.year, org_id, entry.kpi_id, period_key=entry.period_key, is_draft=entry.is_draft
+    )
+
+    # Load all MLI field rows in the current entry so formulas can reference other MLI fields in the same entry
+    multi_line_items_data = {}
+    all_mli_res = await db.execute(
+        select(KPIField)
+        .where(KPIField.kpi_id == entry.kpi_id, KPIField.field_type == FieldType.multi_line_items)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    for mf in all_mli_res.scalars().all():
+        multi_line_items_data[mf.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=mf)
+
+    sub_fields = list(field.sub_fields or [])
+    formula_subs = [sf for sf in sub_fields if sf.field_type == FieldType.formula or sf.field_type == "formula"]
+    if not formula_subs:
+        return {}
+
+    from app.entries.service import (
+        extract_cross_kpi_mli_references,
+        _load_other_kpi_multi_line_data,
+        _topological_sort_subfields,
+    )
+
+    refs = set()
+    for sf in formula_subs:
+        cfg = sf.config or {}
+        expr = cfg.get("formula_expression") if isinstance(cfg, dict) else None
+        if expr:
+            refs.update(extract_cross_kpi_mli_references(expr))
+
+    other_kpi_mli_data = await _load_other_kpi_multi_line_data(
+        db, entry.year, org_id, refs, period_key=entry.period_key, is_draft=entry.is_draft
+    )
+    sorted_subs = _topological_sort_subfields(sub_fields)
+
+    # Construct working row data from draft values
+    working_row: dict[str, Any] = {}
+    key_to_sub = {getattr(s, "key", None): s for s in sub_fields if getattr(s, "key", None)}
+    for k, v in req.row_data.items():
+        sub = key_to_sub.get(k)
+        if sub:
+            ft = getattr(sub, "field_type", None)
+            ft_s = ft.value if hasattr(ft, "value") else str(ft)
+            if ft_s == "number":
+                if v is not None and v != "":
+                    try:
+                        working_row[k] = float(v)
+                    except Exception:
+                        working_row[k] = v
+                else:
+                    working_row[k] = None
+            elif ft_s == "boolean":
+                if isinstance(v, bool):
+                    working_row[k] = v
+                else:
+                    s_val = str(v).strip().lower()
+                    if s_val in ("true", "yes", "1"):
+                        working_row[k] = True
+                    elif s_val in ("false", "no", "0"):
+                        working_row[k] = False
+                    else:
+                        working_row[k] = None
+            else:
+                working_row[k] = v
+        else:
+            working_row[k] = v
+
+    computed_formulas = {}
+    for sf in sorted_subs:
+        sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
+        if sf_type_s == "formula":
+            cfg = sf.config or {}
+            expr = cfg.get("formula_expression") if isinstance(cfg, dict) else None
+            if not expr:
+                computed = None
+            else:
+                from app.formula_engine.evaluator import evaluate_formula
+                computed = evaluate_formula(
+                    expr,
+                    value_by_key,
+                    multi_line_items_data,
+                    other_kpi_values,
+                    current_row=working_row,
+                    other_kpi_multi_line_data=other_kpi_mli_data,
+                )
+            working_row[sf.key] = computed
+            computed_formulas[sf.key] = computed
+
+    return computed_formulas
 
 
 @router.delete("/multi-items/rows/{row_index}", status_code=status.HTTP_204_NO_CONTENT)
@@ -3152,7 +3375,23 @@ async def export_multi_items_csv(
     else:
         export_keys = [sf.key for sf in (field.sub_fields or []) if sf.key in viewable_keys]
 
-    row_dicts = [r for _, r in rows]
+    subfields_dict = {}
+    for sf in (field.sub_fields or []):
+        subfields_dict[sf.key] = sf
+        if getattr(sf, "id", None) is not None:
+            subfields_dict[int(sf.id)] = sf
+
+    from app.fields.conditional import is_subfield_visible
+    row_dicts = []
+    for _, r in rows:
+        cleaned_r = {}
+        for k, v in r.items():
+            sf = subfields_dict.get(k)
+            if sf and is_subfield_visible(sf, subfields_dict, r):
+                cleaned_r[k] = v
+            elif not sf:
+                cleaned_r[k] = v
+        row_dicts.append(cleaned_r)
 
     if format in ("xlsx", "pdf") and not export_keys:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No columns selected for export")
@@ -3661,9 +3900,20 @@ async def _build_kpi_entry_xlsx(
 
     wb = Workbook()
     value_by_field_id = {}
+    values_raw_dict = {}
     if entry and getattr(entry, "field_values", None):
         for fv in entry.field_values:
             value_by_field_id[fv.field_id] = fv
+            if fv.value_boolean is not None:
+                values_raw_dict[fv.field_id] = fv.value_boolean
+            elif fv.value_number is not None:
+                values_raw_dict[fv.field_id] = fv.value_number
+            elif fv.value_date is not None:
+                values_raw_dict[fv.field_id] = fv.value_date
+            elif fv.value_json is not None:
+                values_raw_dict[fv.field_id] = fv.value_json
+            else:
+                values_raw_dict[fv.field_id] = fv.value_text
 
     # --- Sheet 1: Scalar (and formula) fields ---
     scalar_types = (
@@ -3678,7 +3928,14 @@ async def _build_kpi_entry_xlsx(
         FieldType.multi_reference,
         FieldType.mixed_list,
     )
-    scalar_fields = [f for f in fields if getattr(f, "field_type", None) in scalar_types]
+    from app.fields.conditional import is_field_visible
+    fields_by_id = {f.id: f for f in fields}
+    
+    scalar_fields = [
+        f for f in fields 
+        if getattr(f, "field_type", None) in scalar_types 
+        and is_field_visible(f, fields_by_id, values_raw_dict)
+    ]
     ws_scalar = wb.active
     ws_scalar.title = _excel_sheet_name("KPI Data")
     ws_scalar.append(["Field", "Value"])
@@ -3707,7 +3964,11 @@ async def _build_kpi_entry_xlsx(
         ws_scalar.append([f.name, val])
 
     # --- One sheet per multi_line_items field ---
-    multi_fields = [f for f in fields if getattr(f, "field_type", None) == FieldType.multi_line_items]
+    multi_fields = [
+        f for f in fields 
+        if getattr(f, "field_type", None) == FieldType.multi_line_items 
+        and is_field_visible(f, fields_by_id, values_raw_dict)
+    ]
     for idx, f in enumerate(multi_fields):
         sub_fields = list(getattr(f, "sub_fields", None) or [])
         keys = [s.key for s in sub_fields]
@@ -3720,18 +3981,27 @@ async def _build_kpi_entry_xlsx(
         ws.append(keys)
         pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
         rows = [r for _, r in pairs] if pairs else []
-        key_to_sf = {s.key: s for s in sub_fields}
+        
+        key_to_sf = {}
+        for sf in sub_fields:
+            key_to_sf[sf.key] = sf
+            if getattr(sf, "id", None) is not None:
+                key_to_sf[int(sf.id)] = sf
+
+        from app.fields.conditional import is_subfield_visible
         for row in rows:
             if not isinstance(row, dict):
                 ws.append([""] * len(keys))
                 continue
 
             def _cell_out(col_key: str):
-                raw = row.get(col_key, "")
                 sf = key_to_sf.get(col_key)
-                if sf and getattr(sf, "field_type", None) == FieldType.multi_reference and isinstance(raw, list):
+                if not sf or not is_subfield_visible(sf, key_to_sf, row):
+                    return ""
+                raw = row.get(col_key, "")
+                if getattr(sf, "field_type", None) == FieldType.multi_reference and isinstance(raw, list):
                     return "; ".join(str(x) for x in raw)
-                if sf and getattr(sf, "field_type", None) == FieldType.mixed_list and isinstance(raw, list):
+                if getattr(sf, "field_type", None) == FieldType.mixed_list and isinstance(raw, list):
                     return "; ".join(str(x) for x in raw)
                 return raw if raw is not None else ""
 
@@ -3845,6 +4115,8 @@ def _parse_kpi_entry_xlsx(
                 continue  # skip formula fields on upload
             if ft == FieldType.multi_line_items:
                 continue  # handled separately
+            if ft == FieldType.attachment:
+                continue  # skip attachment upload via Excel
             val: dict = {}
             if raw_value is None or raw_value == "":
                 pass

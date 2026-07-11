@@ -90,6 +90,18 @@ export async function deleteKpiStoredFileByUrl(rawUrl: string, token: string | n
   }
 }
 
+function storedFileRefToFilename(ref: unknown): string {
+  if (ref && typeof ref === "object") {
+    if ("filename" in ref && typeof (ref as { filename: unknown }).filename === "string") {
+      return String((ref as { filename: string }).filename).trim();
+    }
+    if ("original_filename" in ref && typeof (ref as { original_filename: unknown }).original_filename === "string") {
+      return String((ref as { original_filename: string }).original_filename).trim();
+    }
+  }
+  return "";
+}
+
 /**
  * Open a KPI attachment stored as download URL (relative or absolute). Uses JWT for /api/kpis/.../files/.../download.
  * For other http(s) URLs, opens in a new tab without auth.
@@ -115,7 +127,17 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
     }
     const blob = await res.blob();
     const blobUrl = URL.createObjectURL(blob);
-    window.open(blobUrl, "_blank", "noopener,noreferrer");
+    const filename = storedFileRefToFilename(ref);
+    if (filename) {
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } else {
+      window.open(blobUrl, "_blank", "noopener,noreferrer");
+    }
     setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
     return;
   }
@@ -136,7 +158,17 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
   }
   const blob = await res.blob();
   const blobUrl = URL.createObjectURL(blob);
-  window.open(blobUrl, "_blank", "noopener,noreferrer");
+  const filename = storedFileRefToFilename(ref);
+  if (filename) {
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } else {
+    window.open(blobUrl, "_blank", "noopener,noreferrer");
+  }
   setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
 }
 

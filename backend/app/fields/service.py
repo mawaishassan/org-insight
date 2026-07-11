@@ -65,8 +65,25 @@ async def _validate_conditional_config(db: AsyncSession, kpi_id: int, config: di
         trigger = result.scalar_one_or_none()
         if not trigger:
             raise ValueError("Trigger field not found in this KPI")
-        if trigger.field_type != FieldType.boolean:
-            raise ValueError("Trigger field must be a Boolean field")
+        if trigger.field_type not in (FieldType.boolean, FieldType.reference, FieldType.number):
+            raise ValueError("Trigger field must be a Boolean, Dropdown (Referential), or Numeric field")
+
+    rules = config.get("conditional_rules")
+    if rules is not None:
+        if not isinstance(rules, list):
+            raise ValueError("conditional_rules must be a list")
+        for r in rules:
+            if not isinstance(r, dict):
+                raise ValueError("Each conditional rule must be a dictionary")
+            operator = r.get("operator")
+            if not operator:
+                raise ValueError("Rule must specify an operator")
+            if operator.lower() not in ("eq", "neq", "gt", "lt", "gte", "lte", "between", "outside"):
+                raise ValueError(f"Invalid operator '{operator}' in rule")
+            dep_fields = r.get("dependent_fields") or r.get("dependent_field_ids")
+            if dep_fields is not None:
+                if not isinstance(dep_fields, list):
+                    raise ValueError("dependent_fields must be a list")
 
 
 async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> KPIField | None:
@@ -103,6 +120,10 @@ async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> K
                 sort_order=opt.sort_order if opt.sort_order else i,
             )
         )
+    if data.field_type == FieldType.multi_line_items and data.sub_fields:
+        from app.formula_engine.circular_validation import validate_mli_circular_dependencies
+        validate_mli_circular_dependencies(data.sub_fields)
+
     for i, sub in enumerate(data.sub_fields or []):
         db.add(
             KPIFieldSubField(
@@ -298,6 +319,35 @@ async def update_field(
     field = await get_field(db, field_id, org_id)
     if not field:
         return None
+    prev_type = field.field_type
+    prev_subfields = {sf.key: sf.field_type for sf in (field.sub_fields or [])}
+
+    # Detect type changes or subfield changes and clean up conditional rules
+    type_changed_field_ids = []
+    deleted_subfield_keys = []
+    type_changed_subfield_keys = []
+
+    if data.field_type is not None and data.field_type != prev_type:
+        type_changed_field_ids.append(field.id)
+
+    if data.sub_fields is not None and prev_type == FieldType.multi_line_items:
+        new_subkeys = {sub.key for sub in data.sub_fields}
+        for k in prev_subfields:
+            if k not in new_subkeys:
+                deleted_subfield_keys.append(k)
+        for sub in data.sub_fields:
+            if sub.key in prev_subfields and sub.field_type != prev_subfields[sub.key]:
+                type_changed_subfield_keys.append(sub.key)
+
+    if type_changed_field_ids or deleted_subfield_keys or type_changed_subfield_keys:
+        await cleanup_conditional_rules_for_kpi(
+            db,
+            field.kpi_id,
+            type_changed_field_ids=type_changed_field_ids,
+            deleted_subfield_keys=deleted_subfield_keys,
+            type_changed_subfield_keys=type_changed_subfield_keys,
+        )
+
     if data.field_type is not None and data.field_type != field.field_type:
         if field.field_type != FieldType.multi_line_items and data.field_type != FieldType.multi_line_items:
             result = await db.execute(
@@ -350,6 +400,10 @@ async def update_field(
                 )
             )
     if data.sub_fields is not None:
+        if field.field_type == FieldType.multi_line_items:
+            from app.formula_engine.circular_validation import validate_mli_circular_dependencies
+            validate_mli_circular_dependencies(data.sub_fields)
+
         # Defensive cleanup: some DBs/environments may not cascade sub_field FK rows
         # in access tables consistently when sub-fields are replaced.
         await db.execute(
@@ -405,11 +459,128 @@ async def get_field_child_data_summary(
     }
 
 
+async def cleanup_conditional_rules_for_kpi(
+    db: AsyncSession,
+    kpi_id: int,
+    deleted_field_ids: list[int] | None = None,
+    deleted_subfield_keys: list[str] | None = None,
+    type_changed_field_ids: list[int] | None = None,
+    type_changed_subfield_keys: list[str] | None = None,
+) -> None:
+    deleted_fields = set(str(x) for x in (deleted_field_ids or []))
+    deleted_subs = set(str(x) for x in (deleted_subfield_keys or []))
+    changed_fields = set(str(x) for x in (type_changed_field_ids or []))
+    changed_subs = set(str(x) for x in (type_changed_subfield_keys or []))
+
+    all_affected_fields = deleted_fields.union(changed_fields)
+    all_affected_subs = deleted_subs.union(changed_subs)
+
+    if not all_affected_fields and not all_affected_subs:
+        return
+
+    res = await db.execute(
+        select(KPIField)
+        .where(KPIField.kpi_id == kpi_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    all_fields = res.scalars().all()
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    for f in all_fields:
+        # 1. Check legacy/conditional rules on the scalar field level
+        f_changed = False
+        if f.config and isinstance(f.config, dict):
+            # Check legacy trigger
+            tid = f.config.get("condition_trigger_field_id")
+            tkey = f.config.get("condition_trigger_field_key")
+            if (tid is not None and str(tid) in all_affected_fields) or (tkey is not None and str(tkey) in all_affected_fields):
+                f.config.pop("condition_trigger_field_id", None)
+                f.config.pop("condition_trigger_field_key", None)
+                f.config.pop("condition_trigger_value", None)
+                f_changed = True
+
+            # Check conditional rules
+            rules = f.config.get("conditional_rules")
+            if rules and isinstance(rules, list):
+                next_rules = []
+                for r in rules:
+                    if not isinstance(r, dict):
+                        continue
+                    # If this field is the trigger, and it had a type change or deletion, remove the rule
+                    if str(f.id) in all_affected_fields or str(f.key) in all_affected_fields:
+                        continue
+                    
+                    # Otherwise, check if any dependent field is affected
+                    deps = r.get("dependent_fields") or r.get("dependent_field_ids") or []
+                    next_deps = [d for d in deps if str(d) not in all_affected_fields]
+                    if next_deps:
+                        r["dependent_fields"] = next_deps
+                        if "dependent_field_ids" in r:
+                            r["dependent_field_ids"] = next_deps
+                        next_rules.append(r)
+                if len(next_rules) != len(rules):
+                    if next_rules:
+                        f.config["conditional_rules"] = next_rules
+                    else:
+                        f.config.pop("conditional_rules", None)
+                    f_changed = True
+            
+            if f_changed:
+                flag_modified(f, "config")
+                db.add(f)
+
+        # 2. Check rules on subfields of this field
+        for sf in getattr(f, "sub_fields", None) or []:
+            sf_changed = False
+            if sf.config and isinstance(sf.config, dict):
+                # Check legacy trigger
+                tid = sf.config.get("condition_trigger_field_id")
+                tkey = sf.config.get("condition_trigger_field_key")
+                if (tid is not None and (str(tid) in all_affected_subs or str(tid) in all_affected_fields)) or \
+                   (tkey is not None and (str(tkey) in all_affected_subs or str(tkey) in all_affected_fields)):
+                    sf.config.pop("condition_trigger_field_id", None)
+                    sf.config.pop("condition_trigger_field_key", None)
+                    sf.config.pop("condition_trigger_value", None)
+                    sf_changed = True
+
+                # Check conditional rules
+                rules = sf.config.get("conditional_rules")
+                if rules and isinstance(rules, list):
+                    next_rules = []
+                    for r in rules:
+                        if not isinstance(r, dict):
+                            continue
+                        # If this subfield is the trigger, and it had a type change/deletion, remove the rule
+                        if str(sf.id) in all_affected_subs or str(sf.key) in all_affected_subs:
+                            continue
+                        
+                        # Check dependent subfields
+                        deps = r.get("dependent_fields") or r.get("dependent_field_ids") or []
+                        next_deps = [d for d in deps if str(d) not in all_affected_subs]
+                        if next_deps:
+                            r["dependent_fields"] = next_deps
+                            if "dependent_field_ids" in r:
+                                r["dependent_field_ids"] = next_deps
+                            next_rules.append(r)
+                    if len(next_rules) != len(rules):
+                        if next_rules:
+                            sf.config["conditional_rules"] = next_rules
+                        else:
+                            sf.config.pop("conditional_rules", None)
+                        sf_changed = True
+
+                if sf_changed:
+                    flag_modified(sf, "config")
+                    db.add(sf)
+
+
 async def delete_field(db: AsyncSession, field_id: int, org_id: int) -> bool:
     """Delete field and all child records (field values, report template refs, options)."""
     field = await get_field(db, field_id, org_id)
     if not field:
         return False
+    await cleanup_conditional_rules_for_kpi(db, field.kpi_id, deleted_field_ids=[field.id])
     await db.execute(delete(KPIFieldValue).where(KPIFieldValue.field_id == field_id))
     await db.execute(delete(ReportTemplateField).where(ReportTemplateField.kpi_field_id == field_id))
     await db.execute(delete(KPIFieldOption).where(KPIFieldOption.field_id == field_id))

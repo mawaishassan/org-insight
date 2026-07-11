@@ -596,10 +596,30 @@ export default function FullPageMultiItems() {
   }, [kpiId, fieldId, year, effectiveOrgId, periodKey]);
 
   const subFields = field?.sub_fields ?? [];
-  const gridSubFields = useMemo(
-    () => subFields.filter((sf) => (sf.config as any)?.condition_trigger_field_id == null && (sf.config as any)?.condition_trigger_field_key == null),
-    [subFields]
-  );
+  const gridSubFields = useMemo(() => {
+    const isSubFieldConditional = (sf: any, allSubs: any[]): boolean => {
+      if (sf.config?.condition_trigger_field_id != null || sf.config?.condition_trigger_field_key != null) {
+        return true;
+      }
+      for (const other of allSubs) {
+        const rules = other.config?.conditional_rules;
+        if (Array.isArray(rules)) {
+          for (const r of rules) {
+            const deps = r.dependent_fields || r.dependent_field_ids || [];
+            const depStrList = deps.map((d: any) => String(d));
+            if (
+              (sf.id != null && depStrList.includes(String(sf.id))) ||
+              (sf.key != null && depStrList.includes(String(sf.key)))
+            ) {
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    };
+    return subFields.filter((sf) => !isSubFieldConditional(sf, subFields));
+  }, [subFields]);
 
   /** Columns currently shown in the grid, in the grid's actual display order (the table always
    * renders subFields in field-defined order, filtered to visibleColumns — never the picker's
