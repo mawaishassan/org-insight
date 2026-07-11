@@ -5,7 +5,7 @@ import math
 from datetime import datetime
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, distinct
+from sqlalchemy import select, func, distinct, delete, and_
 from sqlalchemy.orm import selectinload
 
 from app.core.models import (
@@ -85,8 +85,69 @@ async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: 
     return out
 
 
+async def _resolve_attachment_filenames_to_urls(
+    db: AsyncSession,
+    kpi_id: int,
+    rows: list[dict],
+    sub_fields: list,
+) -> list[dict]:
+    """Map simple attachment filename strings back to their original JSON URL objects by querying KpiFile table."""
+    from app.core.models import KpiFile, FieldType
+    import json
+
+    attachment_keys = [
+        s.key for s in sub_fields if getattr(s, "field_type", None) in (FieldType.attachment, "attachment")
+    ]
+    if not attachment_keys or not rows:
+        return rows
+
+    # Query all files associated with this KPI to build a filename -> {url, filename} map
+    from sqlalchemy import select
+    files_stmt = select(KpiFile).where(KpiFile.kpi_id == kpi_id)
+    files_res = await db.execute(files_stmt)
+    kpi_files = files_res.scalars().all()
+
+    filename_to_obj = {}
+    for kf in kpi_files:
+        fn = kf.original_filename
+        if fn:
+            filename_to_obj[fn.strip().lower()] = {
+                "url": f"/api/kpis/{kpi_id}/files/{kf.id}/download",
+                "filename": fn
+            }
+
+    new_rows = []
+    for r in rows:
+        if not isinstance(r, dict):
+            new_rows.append(r)
+            continue
+        new_row = dict(r)
+        for k in attachment_keys:
+            val = new_row.get(k)
+            if isinstance(val, str):
+                s = val.strip()
+                if not s:
+                    new_row[k] = None
+                elif s.startswith("{"):
+                    try:
+                        new_row[k] = json.loads(s)
+                    except Exception:
+                        pass
+                else:
+                    s_lower = s.lower()
+                    if s_lower in filename_to_obj:
+                        new_row[k] = filename_to_obj[s_lower]
+                    elif s_lower in ("none", "null", "attached file"):
+                        new_row[k] = None
+                    else:
+                        new_row[k] = s
+        new_rows.append(new_row)
+    return new_rows
+
+
 async def replace_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField, rows: list[dict]) -> None:
     """Replace relational multi_line_items rows/cells for (entry, field) from list-of-dicts."""
+    resolved_rows = await _resolve_attachment_filenames_to_urls(db, field.kpi_id, rows, getattr(field, "sub_fields", None) or [])
     existing = await db.execute(
         select(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
     )
@@ -132,7 +193,7 @@ async def replace_multi_line_items_rows(db: AsyncSession, *, entry_id: int, fiel
                 c.value_text = str(raw_val)
         db.add(c)
 
-    for idx, row in enumerate(rows or []):
+    for idx, row in enumerate(resolved_rows or []):
         rdict = row if isinstance(row, dict) else {}
         mlr = KpiMultiLineRow(entry_id=entry_id, field_id=field.id, row_index=int(idx))
         db.add(mlr)
@@ -679,37 +740,180 @@ async def _copy_carry_forward_from_previous(
         prev = _previous_period(pyear, ppk, dimension)
 
 
+async def _copy_entry_values(db: AsyncSession, src_id: int, dest_id: int) -> None:
+    from app.core.models import KPIFieldValue, KpiMultiLineRow, KpiMultiLineCell, KpiMultiLineRowAccess, KpiFile
+    
+    # 1. Copy scalar values
+    scalar_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == src_id)
+    )
+    for fv in scalar_res.scalars().all():
+        new_fv = KPIFieldValue(
+            entry_id=dest_id,
+            field_id=fv.field_id,
+            value_text=fv.value_text,
+            value_number=fv.value_number,
+            value_json=fv.value_json,
+            value_boolean=fv.value_boolean,
+            value_date=fv.value_date
+        )
+        db.add(new_fv)
+        
+    # 2. Copy MLI rows
+    mli_rows_res = await db.execute(
+        select(KpiMultiLineRow)
+        .where(KpiMultiLineRow.entry_id == src_id)
+        .options(selectinload(KpiMultiLineRow.cells))
+    )
+    for r in mli_rows_res.scalars().all():
+        new_r = KpiMultiLineRow(
+            entry_id=dest_id,
+            field_id=r.field_id,
+            row_index=r.row_index,
+            search_text=r.search_text
+        )
+        db.add(new_r)
+        await db.flush()
+        
+        for c in r.cells:
+            new_c = KpiMultiLineCell(
+                row_id=new_r.id,
+                sub_field_id=c.sub_field_id,
+                value_text=c.value_text,
+                value_number=c.value_number,
+                value_json=c.value_json,
+                value_boolean=c.value_boolean,
+                value_date=c.value_date
+            )
+            db.add(new_c)
+
+    # 3. Copy row access records
+    access_res = await db.execute(
+        select(KpiMultiLineRowAccess).where(KpiMultiLineRowAccess.entry_id == src_id)
+    )
+    for ra in access_res.scalars().all():
+        new_ra = KpiMultiLineRowAccess(
+            user_id=ra.user_id,
+            entry_id=dest_id,
+            field_id=ra.field_id,
+            row_index=ra.row_index,
+            can_edit=ra.can_edit,
+            can_delete=ra.can_delete
+        )
+        db.add(new_ra)
+
+    # 4. Copy KPI files
+    files_res = await db.execute(
+        select(KpiFile).where(KpiFile.entry_id == src_id)
+    )
+    for f in files_res.scalars().all():
+        new_f = KpiFile(
+            kpi_id=f.kpi_id,
+            organization_id=f.organization_id,
+            year=f.year,
+            entry_id=dest_id,
+            original_filename=f.original_filename,
+            stored_path=f.stored_path,
+            content_type=f.content_type,
+            size=f.size,
+            uploaded_by_user_id=f.uploaded_by_user_id
+        )
+        db.add(new_f)
+            
+    await db.flush()
+
+
+def mark_entry_modified(entry: KPIEntry, user_id: int) -> None:
+    entry.last_modified_at = datetime.utcnow()
+    entry.last_modified_by_user_id = user_id
+    entry.user_id = user_id
+    entry.updated_at = datetime.utcnow()
+    
+    if entry.is_draft:
+        if entry.submitted_at is not None:
+            entry.is_modified_after_submission = True
+
+
 async def get_or_create_entry(
     db: AsyncSession, user_id: int, org_id: int, kpi_id: int, year: int, period_key: str = ""
 ) -> tuple[KPIEntry | None, bool]:
     """Get existing entry or create new one (one per organization per KPI per year per period_key). Returns (entry, created)."""
     pk = (period_key or "").strip()[:8]
-    result = await db.execute(
-        select(KPIEntry).where(
-            KPIEntry.organization_id == org_id,
-            KPIEntry.kpi_id == kpi_id,
-            KPIEntry.year == year,
-            KPIEntry.period_key == pk,
+    
+    # Check edit access
+    can_edit = await user_can_edit_kpi(db, user_id, kpi_id, org_id)
+    
+    if can_edit:
+        # User is editor: load or create their private draft
+        result = await db.execute(
+            select(KPIEntry).where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == kpi_id,
+                KPIEntry.year == year,
+                KPIEntry.period_key == pk,
+                KPIEntry.is_draft == True,
+                KPIEntry.user_id == user_id,
+            )
         )
-    )
-    entry = result.scalar_one_or_none()
-    if entry:
-        return entry, False
-    kpi_org = await _resolve_org_and_kpi(db, kpi_id)
-    if kpi_org != org_id:
-        return None, False
-    entry = KPIEntry(
-        organization_id=org_id,
-        kpi_id=kpi_id,
-        user_id=user_id,
-        year=year,
-        period_key=pk,
-        is_draft=True,
-    )
-    db.add(entry)
-    await db.flush()
-    await _copy_carry_forward_from_previous(db, org_id, kpi_id, entry, year, pk)
-    return entry, True
+        entry = result.scalar_one_or_none()
+        if entry:
+            return entry, False
+            
+        # Check if a published version exists
+        pub_result = await db.execute(
+            select(KPIEntry).where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == kpi_id,
+                KPIEntry.year == year,
+                KPIEntry.period_key == pk,
+                KPIEntry.is_draft == False,
+            )
+        )
+        pub_entry = pub_result.scalar_one_or_none()
+        
+        # Verify KPI belongs to org
+        kpi_org = await _resolve_org_and_kpi(db, kpi_id)
+        if kpi_org != org_id:
+            return None, False
+            
+        # Create private draft
+        entry = KPIEntry(
+            organization_id=org_id,
+            kpi_id=kpi_id,
+            user_id=user_id,
+            year=year,
+            period_key=pk,
+            is_draft=True,
+            is_modified_after_submission=False,
+        )
+        db.add(entry)
+        await db.flush()
+        
+        if pub_entry:
+            # Copy all values from published version to this new draft
+            await _copy_entry_values(db, pub_entry.id, entry.id)
+            entry.submitted_at = pub_entry.submitted_at
+            entry.submitted_by_user_id = pub_entry.submitted_by_user_id
+            entry.is_modified_after_submission = False
+            await db.flush()
+            return entry, True
+        else:
+            # Copy carry-forward from previous period
+            await _copy_carry_forward_from_previous(db, org_id, kpi_id, entry, year, pk)
+            return entry, True
+    else:
+        # User is view-only: retrieve published version
+        pub_result = await db.execute(
+            select(KPIEntry).where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == kpi_id,
+                KPIEntry.year == year,
+                KPIEntry.period_key == pk,
+                KPIEntry.is_draft == False,
+            )
+        )
+        pub_entry = pub_result.scalar_one_or_none()
+        return pub_entry, False
 
 
 def _assignment_type_value(a) -> str:
@@ -1225,6 +1429,57 @@ async def _load_other_kpi_values(
     return out
 
 
+def _is_subfield_satisfied_for_row(sf, row: dict, key_to_sf: dict) -> bool:
+    """Check if a subfield's visibility condition is satisfied for a given row dict."""
+    if not sf or not getattr(sf, "config", None) or not isinstance(sf.config, dict):
+        return True
+    
+    trigger_id = sf.config.get("condition_trigger_field_id")
+    trigger_key = sf.config.get("condition_trigger_field_key")
+    if trigger_id is None and trigger_key is None:
+        return True
+        
+    trigger_value = sf.config.get("condition_trigger_value")
+    if trigger_value is None:
+        return True
+        
+    # Resolve the trigger subfield
+    parent_sf = None
+    if trigger_id is not None:
+        try:
+            tid_int = int(trigger_id)
+            for parent_cand in key_to_sf.values():
+                if getattr(parent_cand, "id", None) == tid_int:
+                    parent_sf = parent_cand
+                    break
+        except (ValueError, TypeError):
+            pass
+            
+    if parent_sf is None and trigger_key is not None:
+        parent_sf = key_to_sf.get(trigger_key)
+        
+    if not parent_sf:
+        return True  # Fallback to showing if trigger field not found/resolved
+        
+    # Evaluate parent's condition first (chained dependency)
+    if not _is_subfield_satisfied_for_row(parent_sf, row, key_to_sf):
+        return False
+        
+    # Check parent's value in this row
+    val = row.get(parent_sf.key)
+    
+    # Coerce cell value to bool
+    val_bool = None
+    if val is not None:
+        if isinstance(val, bool):
+            val_bool = val
+        elif isinstance(val, str):
+            val_bool = val.strip().lower() in ("1", "true", "yes", "y")
+        elif isinstance(val, (int, float)):
+            val_bool = bool(val)
+            
+    return val_bool == trigger_value
+
 async def save_entry_values(
     db: AsyncSession,
     entry_id: int,
@@ -1354,14 +1609,18 @@ async def save_entry_values(
             continue
         if f.field_type == FieldType.formula:
             continue  # computed below
-        fv = (
+        res_fvs = (
             await db.execute(
                 select(KPIFieldValue).where(
                     KPIFieldValue.entry_id == entry_id,
                     KPIFieldValue.field_id == v.field_id,
                 )
             )
-        ).scalar_one_or_none()
+        ).scalars().all()
+        if len(res_fvs) > 1:
+            for dup in res_fvs[1:]:
+                await db.delete(dup)
+        fv = res_fvs[0] if res_fvs else None
         num_val = None
         if v.value_number is not None:
             num_val = float(v.value_number) if not isinstance(v.value_number, (int, float)) else v.value_number
@@ -1373,7 +1632,22 @@ async def save_entry_values(
         fv.value_text = v.value_text
         fv.value_number = v.value_number
         if f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
+            # Clean/sanitize dependent subfields if their trigger conditions are False
+            key_to_sub = {getattr(sub, "key", None): sub for sub in (getattr(f, "sub_fields", None) or []) if getattr(sub, "key", None)}
+            for row in v.value_json:
+                if not isinstance(row, dict):
+                    continue
+                changed = True
+                while changed:
+                    changed = False
+                    for sub in (getattr(f, "sub_fields", None) or []):
+                        if row.get(sub.key) is not None:
+                            if not _is_subfield_satisfied_for_row(sub, row, key_to_sub):
+                                row[sub.key] = None
+                                changed = True
+
             multi_line_items_data[f.key] = v.value_json
+
             if access_map is None:
                 # No field-level ACL (e.g. org/super admin): accept full value.
                 await replace_multi_line_items_rows(db, entry_id=entry_id, field=f, rows=v.value_json)
@@ -1435,14 +1709,18 @@ async def save_entry_values(
         computed = evaluate_formula(
             f.formula_expression, value_by_key, multi_line_items_data, other_kpi_values
         )
-        fv = (
+        res_fvs = (
             await db.execute(
                 select(KPIFieldValue).where(
                     KPIFieldValue.entry_id == entry_id,
                     KPIFieldValue.field_id == f.id,
                 )
             )
-        ).scalar_one_or_none()
+        ).scalars().all()
+        if len(res_fvs) > 1:
+            for dup in res_fvs[1:]:
+                await db.delete(dup)
+        fv = res_fvs[0] if res_fvs else None
         if fv is None:
             fv = KPIFieldValue(entry_id=entry_id, field_id=f.id)
             db.add(fv)
@@ -1450,8 +1728,7 @@ async def save_entry_values(
         if computed is not None:
             value_by_key[f.key] = computed
 
-    entry.user_id = user_id
-    entry.updated_at = datetime.utcnow()
+    mark_entry_modified(entry, user_id)
     await db.flush()
     return entry
 
@@ -1622,19 +1899,205 @@ async def recompute_formula_fields_for_kpi(
     return len(entries)
 
 
+def _is_field_visible_for_entry(field, values_dict: dict, fields_dict: dict) -> bool:
+    if not field.config or not isinstance(field.config, dict):
+        return True
+    trigger_id = field.config.get("condition_trigger_field_id")
+    if trigger_id is None:
+        return True
+    trigger_value = field.config.get("condition_trigger_value")
+    if trigger_value is None:
+        return True
+        
+    try:
+        tid_int = int(trigger_id)
+    except (ValueError, TypeError):
+        return True
+        
+    trigger_field = fields_dict.get(tid_int)
+    if trigger_field and not _is_field_visible_for_entry(trigger_field, values_dict, fields_dict):
+        return False
+        
+    fv = values_dict.get(tid_int)
+    current_trigger_val = None
+    if fv:
+        current_trigger_val = getattr(fv, "value_boolean", None)
+        if current_trigger_val is None and getattr(fv, "value_text", None) is not None:
+            text_val = str(getattr(fv, "value_text")).strip().lower()
+            current_trigger_val = text_val in ("1", "true", "yes", "y")
+            
+    return current_trigger_val == trigger_value
+
+
 async def submit_entry(
     db: AsyncSession, entry_id: int, user_id: int, org_id: int
 ) -> KPIEntry | None:
-    """Mark entry as submitted (no longer draft)."""
-    entry = await _get_entry(db, entry_id, org_id)
-    if not entry or entry.is_locked:
+    """Validate and submit the KPI entry (publishing it)."""
+    draft_entry = await _get_entry(db, entry_id, org_id)
+    if not draft_entry or not draft_entry.is_draft or draft_entry.is_locked:
         return None
-    entry.is_draft = False
-    entry.submitted_at = datetime.utcnow()
-    entry.user_id = user_id
-    entry.updated_at = datetime.utcnow()
+        
+    # 1. Perform Validation
+    from fastapi import HTTPException
+    from app.core.models import KPI, KPIField, KPIFieldValue, KpiMultiLineRow, KpiMultiLineCell, KpiMultiLineRowAccess, KpiFile, FieldType
+    from sqlalchemy.orm import selectinload
+    
+    # Load KPI fields and sub_fields
+    kpi_res = await db.execute(
+        select(KPI)
+        .where(KPI.id == draft_entry.kpi_id)
+        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+    )
+    kpi = kpi_res.scalar_one_or_none()
+    if not kpi:
+        return None
+        
+    # Load scalar values
+    scalar_vals_res = await db.execute(
+        select(KPIFieldValue).where(KPIFieldValue.entry_id == draft_entry.id)
+    )
+    scalar_vals = scalar_vals_res.scalars().all()
+    values_dict = {fv.field_id: fv for fv in scalar_vals}
+    fields_dict = {f.id: f for f in kpi.fields}
+    
+    missing_fields = []
+    
+    # Helper to check if a value is empty
+    def is_val_empty(val_obj) -> bool:
+        if not val_obj:
+            return True
+        is_num_empty = val_obj.value_number is None
+        is_bool_empty = val_obj.value_boolean is None
+        is_date_empty = val_obj.value_date is None
+        is_json_empty = val_obj.value_json is None or val_obj.value_json == [] or val_obj.value_json == {}
+        is_text_empty = val_obj.value_text is None or str(val_obj.value_text).strip() == ""
+        return is_num_empty and is_bool_empty and is_date_empty and is_json_empty and is_text_empty
+
+    # 1) Validate Scalar Fields
+    for f in kpi.fields:
+        if f.field_type == FieldType.multi_line_items or f.field_type == "multi_line_items":
+            continue
+        if f.field_type == FieldType.formula or f.field_type == "formula":
+            continue
+        if not f.is_required:
+            continue
+            
+        # Check conditional visibility
+        if not _is_field_visible_for_entry(f, values_dict, fields_dict):
+            continue
+            
+        fv = values_dict.get(f.id)
+        if is_val_empty(fv):
+            missing_fields.append(f.name)
+            
+    # 2) Validate MLI Fields
+    for f in kpi.fields:
+        if f.field_type != FieldType.multi_line_items and f.field_type != "multi_line_items":
+            continue
+            
+        # Fetch rows for this MLI field
+        mli_rows_res = await db.execute(
+            select(KpiMultiLineRow)
+            .where(KpiMultiLineRow.entry_id == draft_entry.id, KpiMultiLineRow.field_id == f.id)
+            .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
+        )
+        mli_rows = mli_rows_res.scalars().all()
+        
+        sub_fields = getattr(f, "sub_fields", None) or []
+        key_to_sf = {sf.key: sf for sf in sub_fields}
+        
+        for row in mli_rows:
+            # Reconstruct row dictionary for visibility checks
+            row_dict = {}
+            cell_by_sf_id = {}
+            for cell in row.cells:
+                val = None
+                if cell.value_number is not None:
+                    val = cell.value_number
+                elif cell.value_boolean is not None:
+                    val = cell.value_boolean
+                elif cell.value_date is not None:
+                    val = cell.value_date
+                elif cell.value_json is not None:
+                    val = cell.value_json
+                elif cell.value_text is not None:
+                    val = cell.value_text
+                
+                if cell.sub_field:
+                    row_dict[cell.sub_field.key] = val
+                    cell_by_sf_id[cell.sub_field.id] = cell
+                    
+            for sf in sub_fields:
+                if not sf.is_required:
+                    continue
+                # Check visibility
+                if not _is_subfield_satisfied_for_row(sf, row_dict, key_to_sf):
+                    continue
+                    
+                cell = cell_by_sf_id.get(sf.id)
+                if is_val_empty(cell):
+                    missing_fields.append(f"{f.name} → {sf.name} (Row {row.row_index + 1})")
+                    
+    if missing_fields:
+        errors_str = "\n".join(f"• {m}" for m in missing_fields)
+        detail = f"The KPI cannot be submitted because the following required fields are missing:\n\n{errors_str}"
+        raise HTTPException(status_code=400, detail=detail)
+
+    # 2. Load or create the published entry
+    pub_res = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == draft_entry.kpi_id,
+            KPIEntry.year == draft_entry.year,
+            KPIEntry.period_key == draft_entry.period_key,
+            KPIEntry.is_draft == False,
+        )
+    )
+    pub_entry = pub_res.scalar_one_or_none()
+    
+    if not pub_entry:
+        pub_entry = KPIEntry(
+            organization_id=org_id,
+            kpi_id=draft_entry.kpi_id,
+            year=draft_entry.year,
+            period_key=draft_entry.period_key,
+            is_draft=False,
+        )
+        db.add(pub_entry)
+        await db.flush()
+        
+    # 3. Clear existing values on the published entry
+    await db.execute(delete(KPIFieldValue).where(KPIFieldValue.entry_id == pub_entry.id))
+    await db.execute(delete(KpiMultiLineRowAccess).where(KpiMultiLineRowAccess.entry_id == pub_entry.id))
+    await db.execute(delete(KpiFile).where(KpiFile.entry_id == pub_entry.id))
+    
+    existing_rows = await db.execute(
+        select(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == pub_entry.id)
+    )
+    for r in list(existing_rows.scalars().all()):
+        await db.delete(r)
+        
     await db.flush()
-    return entry
+    
+    # 4. Copy all values from draft to published entry
+    await _copy_entry_values(db, draft_entry.id, pub_entry.id)
+    
+    # 5. Update submission metadata
+    now = datetime.utcnow()
+    pub_entry.submitted_at = now
+    pub_entry.submitted_by_user_id = user_id
+    pub_entry.last_modified_at = now
+    pub_entry.last_modified_by_user_id = user_id
+    pub_entry.user_id = user_id
+    pub_entry.updated_at = now
+    
+    draft_entry.submitted_at = now
+    draft_entry.submitted_by_user_id = user_id
+    draft_entry.is_modified_after_submission = False
+    draft_entry.updated_at = now
+    
+    await db.flush()
+    return draft_entry
 
 
 async def lock_entry(
@@ -1719,7 +2182,7 @@ async def list_entries(
     period_key: str | None = None,
     as_admin: bool = False,
 ) -> list[KPIEntry]:
-    """List entries for org (per KPI per year per period_key). Non-admin: only KPIs the user is assigned to."""
+    """List entries for org (per KPI per year per period_key). Prioritize the user's private draft if it exists."""
     q = select(KPIEntry).where(KPIEntry.organization_id == org_id)
     if kpi_id is not None:
         q = q.where(KPIEntry.kpi_id == kpi_id)
@@ -1727,15 +2190,41 @@ async def list_entries(
         q = q.where(KPIEntry.year == year)
     if period_key is not None:
         q = q.where(KPIEntry.period_key == (period_key.strip()[:8] if period_key else ""))
-    if not as_admin:
-        q = q.join(
-            KPIAssignment,
-            (KPIAssignment.kpi_id == KPIEntry.kpi_id) & (KPIAssignment.user_id == user_id),
-        )
-    q = q.order_by(KPIEntry.year.desc(), KPIEntry.period_key, KPIEntry.kpi_id)
+
     q = q.options(selectinload(KPIEntry.field_values), selectinload(KPIEntry.user))
     result = await db.execute(q)
-    return list(result.unique().scalars().all())
+    all_entries = list(result.unique().scalars().all())
+
+    # Group entries by (kpi_id, year, period_key)
+    grouped: dict[tuple[int, int, str], list[KPIEntry]] = {}
+    for entry in all_entries:
+        key = (entry.kpi_id, entry.year, entry.period_key)
+        grouped.setdefault(key, []).append(entry)
+
+    filtered_entries: list[KPIEntry] = []
+    for key, group in grouped.items():
+        # Find current user's draft entry
+        my_draft = next((e for e in group if e.is_draft and e.user_id == user_id), None)
+        if my_draft:
+            filtered_entries.append(my_draft)
+        else:
+            # Fallback to the published entry
+            published = next((e for e in group if not e.is_draft), None)
+            if published:
+                filtered_entries.append(published)
+
+    # Sort descending
+    filtered_entries.sort(key=lambda e: (e.year, e.period_key, e.kpi_id), reverse=True)
+
+    # Non-admin: filter by KPI assignment
+    if not as_admin:
+        assign_res = await db.execute(
+            select(KPIAssignment.kpi_id).where(KPIAssignment.user_id == user_id)
+        )
+        assigned_kpis = set(assign_res.scalars().all())
+        filtered_entries = [e for e in filtered_entries if e.kpi_id in assigned_kpis]
+
+    return filtered_entries
 
 
 async def get_latest_year_with_entries(

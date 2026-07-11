@@ -35,7 +35,7 @@ from app.reports.schemas import ReportTemplateCreate, ReportTemplateUpdate, Repo
 from app.fields.schemas import KPIFieldResponse
 from app.formula_engine.evaluator import evaluate_formula
 from app.core.models import FieldType
-from app.entries.service import _load_other_kpi_values
+from app.entries.service import _load_other_kpi_values, _is_subfield_satisfied_for_row
 from app.entries.reference_filter_resolve import (
     build_reference_resolution_map,
     _extract_ref_label,
@@ -2498,7 +2498,8 @@ async def generate_kpi_pdf_report(
     kpi_id: int,
     year: int,
     period_key: str,
-    configuration: dict
+    configuration: dict,
+    requesting_user_id: int | None = None
 ) -> bytes:
     import html
     from io import BytesIO
@@ -2522,16 +2523,32 @@ async def generate_kpi_pdf_report(
     kpi = kpi_res.scalar_one_or_none()
     if not kpi:
         raise ValueError("KPI not found")
-
+ 
     # 2. Fetch Entry
-    entry_stmt = select(KPIEntry).where(
-        KPIEntry.organization_id == organization_id,
-        KPIEntry.kpi_id == kpi_id,
-        KPIEntry.year == year,
-        KPIEntry.period_key == period_key
-    )
-    entry_res = await db.execute(entry_stmt)
-    entry = entry_res.scalar_one_or_none()
+    entry = None
+    if requesting_user_id is not None:
+        entry_stmt = select(KPIEntry).where(
+            KPIEntry.organization_id == organization_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == year,
+            KPIEntry.period_key == period_key,
+            KPIEntry.is_draft == True,
+            KPIEntry.user_id == requesting_user_id
+        )
+        entry_res = await db.execute(entry_stmt)
+        entry = entry_res.scalar_one_or_none()
+        
+    if not entry:
+        entry_stmt = select(KPIEntry).where(
+            KPIEntry.organization_id == organization_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == year,
+            KPIEntry.period_key == period_key,
+            KPIEntry.is_draft == False
+        )
+        entry_res = await db.execute(entry_stmt)
+        entry = entry_res.scalar_one_or_none()
+        
     if not entry:
         raise ValueError(f"KPI Entry for year {year} and period '{period_key}' not found")
 
@@ -2733,7 +2750,8 @@ async def generate_kpi_pdf_report(
     excluded_ml_set = {str(item) for item in excluded_ml_keys}
     visible_multi_line = [
         f for f in multi_line_fields
-        if f.key not in excluded_ml_set and str(f.id) not in excluded_ml_set
+        if is_field_visible(f, fields_by_id, values_by_field_id)
+        and f.key not in excluded_ml_set and str(f.id) not in excluded_ml_set
     ]
 
     # Build parent blocks for scalar fields to keep parents and their children grouped
@@ -3009,8 +3027,11 @@ async def generate_kpi_pdf_report(
             for r in sample_rows:
                 for idx, col in enumerate(selected_column_keys):
                     sf = key_to_sf.get(col)
-                    ft = getattr(sf, "field_type", None) if sf else None
-                    raw_cell = _display_string_for_pdf_export(r.get(col), ft) if r.get(col) is not None else ""
+                    if sf and not _is_subfield_satisfied_for_row(sf, r, key_to_sf):
+                        raw_cell = ""
+                    else:
+                        ft = getattr(sf, "field_type", None) if sf else None
+                        raw_cell = _display_string_for_pdf_export(r.get(col), ft) if r.get(col) is not None else ""
                     col_chars[idx] = max(col_chars[idx], min(len(raw_cell), 60))
 
             total_chars = sum(col_chars) or len(selected_column_keys)
@@ -3031,6 +3052,8 @@ async def generate_kpi_pdf_report(
 
             def get_cell_text(row: dict, col: str) -> str:
                 sf = key_to_sf.get(col)
+                if sf and not _is_subfield_satisfied_for_row(sf, row, key_to_sf):
+                    return ""
                 ft = getattr(sf, "field_type", None) if sf else None
                 raw_cell = _display_string_for_pdf_export(row.get(col) if isinstance(row, dict) else None, ft)
                 
@@ -3104,7 +3127,8 @@ async def generate_kpi_docx_report(
     kpi_id: int,
     year: int,
     period_key: str,
-    configuration: dict
+    configuration: dict,
+    requesting_user_id: int | None = None
 ) -> bytes:
     import html
     from io import BytesIO
@@ -3128,14 +3152,30 @@ async def generate_kpi_docx_report(
         raise ValueError("KPI not found")
 
     # 2. Fetch Entry
-    entry_stmt = select(KPIEntry).where(
-        KPIEntry.organization_id == organization_id,
-        KPIEntry.kpi_id == kpi_id,
-        KPIEntry.year == year,
-        KPIEntry.period_key == period_key
-    )
-    entry_res = await db.execute(entry_stmt)
-    entry = entry_res.scalar_one_or_none()
+    entry = None
+    if requesting_user_id is not None:
+        entry_stmt = select(KPIEntry).where(
+            KPIEntry.organization_id == organization_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == year,
+            KPIEntry.period_key == period_key,
+            KPIEntry.is_draft == True,
+            KPIEntry.user_id == requesting_user_id
+        )
+        entry_res = await db.execute(entry_stmt)
+        entry = entry_res.scalar_one_or_none()
+        
+    if not entry:
+        entry_stmt = select(KPIEntry).where(
+            KPIEntry.organization_id == organization_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == year,
+            KPIEntry.period_key == period_key,
+            KPIEntry.is_draft == False
+        )
+        entry_res = await db.execute(entry_stmt)
+        entry = entry_res.scalar_one_or_none()
+        
     if not entry:
         raise ValueError(f"KPI Entry for year {year} and period '{period_key}' not found")
 
@@ -3223,7 +3263,8 @@ async def generate_kpi_docx_report(
     excluded_ml_set = {str(item) for item in excluded_ml_keys}
     visible_multi_line = [
         f for f in multi_line_fields
-        if f.key not in excluded_ml_set and str(f.id) not in excluded_ml_set
+        if is_field_visible(f, fields_by_id, values_by_field_id)
+        and f.key not in excluded_ml_set and str(f.id) not in excluded_ml_set
     ]
 
     # Build parent blocks for scalar fields to keep parents and their children grouped
@@ -3485,6 +3526,8 @@ async def generate_kpi_docx_report(
 
             def get_cell_plain_text(row_dict: dict, col: str) -> str:
                 sf = key_to_sf.get(col)
+                if sf and not _is_subfield_satisfied_for_row(sf, row_dict, key_to_sf):
+                    return ""
                 ft = getattr(sf, "field_type", None) if sf else None
                 raw_cell = _display_string_for_pdf_export(row_dict.get(col) if isinstance(row_dict, dict) else None, ft)
                 
@@ -3556,7 +3599,8 @@ async def background_generate_kpi_pdf(
                     kpi_id=kpi_id,
                     year=year,
                     period_key=period_key,
-                    configuration=configuration
+                    configuration=configuration,
+                    requesting_user_id=job.user_id
                 )
                 filename = f"kpi_report_{kpi_id}_{year}_{period_key or 'full'}_{uuid.uuid4().hex[:8]}.docx"
                 relative_path = f"kpi_reports/{filename}"
@@ -3569,7 +3613,8 @@ async def background_generate_kpi_pdf(
                     kpi_id=kpi_id,
                     year=year,
                     period_key=period_key,
-                    configuration=configuration
+                    configuration=configuration,
+                    requesting_user_id=job.user_id
                 )
                 filename = f"kpi_report_{kpi_id}_{year}_{period_key or 'full'}_{uuid.uuid4().hex[:8]}.pdf"
                 relative_path = f"kpi_reports/{filename}"

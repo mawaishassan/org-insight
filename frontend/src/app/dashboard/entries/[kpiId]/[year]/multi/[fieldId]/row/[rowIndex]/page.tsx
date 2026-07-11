@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { getAccessToken } from "@/lib/auth";
@@ -597,8 +597,49 @@ export default function MultiItemRowDetail() {
 
   const subFields = field?.sub_fields ?? [];
 
+  // Helper to determine if a subfield's conditional visibility rule is satisfied
+  const isSubFieldVisible = useCallback((sf: any, currentData: Record<string, any>): boolean => {
+    if (!sf?.config) return true;
+    const triggerId = sf.config.condition_trigger_field_id;
+    const triggerKey = sf.config.condition_trigger_field_key;
+    if (triggerId == null && triggerKey == null) return true;
+    
+    const triggerValue = sf.config.condition_trigger_value;
+    if (triggerValue == null) return true;
+    
+    // Find trigger subfield in subFields
+    const parentSf = subFields.find(
+      (p: any) =>
+        (triggerId != null && p.id === triggerId) ||
+        (triggerKey != null && p.key === triggerKey)
+    );
+    if (!parentSf) return true;
+    
+    // Parent's parent condition must also be satisfied (recursively check)
+    if (!isSubFieldVisible(parentSf, currentData)) return false;
+    
+    // Check parent's current value in currentData
+    const val = currentData[parentSf.key];
+    let valBool: boolean | null = null;
+    if (val !== undefined && val !== null) {
+      if (typeof val === "boolean") {
+        valBool = val;
+      } else if (typeof val === "string") {
+        const cleaned = val.trim().toLowerCase();
+        valBool = cleaned === "true" || cleaned === "1" || cleaned === "yes" || cleaned === "y";
+      } else if (typeof val === "number") {
+        valBool = val !== 0;
+      }
+    }
+    
+    return valBool === triggerValue;
+  }, [subFields]);
+
   const sectionGroups = useMemo(() => {
-    const hasAnyExplicit = subFields.some((sf) => {
+    // Filter subFields to only those that are satisfied (visible)
+    const visibleSubs = subFields.filter((sf) => isSubFieldVisible(sf, editData));
+
+    const hasAnyExplicit = visibleSubs.some((sf) => {
       const section = (sf as any)?.config?.ui_section;
       return typeof section === "string" && section.trim().length > 0;
     });
@@ -608,7 +649,7 @@ export default function MultiItemRowDetail() {
       { label: string; fields: SubField[]; order: number; isOther: boolean }
     >();
 
-    subFields.forEach((sf, idx) => {
+    visibleSubs.forEach((sf, idx) => {
       const rawSection = (sf as any)?.config?.ui_section;
       const section = typeof rawSection === "string" ? rawSection.trim() : "";
       const label = section.length > 0 ? section : hasAnyExplicit ? "Other" : "";
@@ -626,7 +667,7 @@ export default function MultiItemRowDetail() {
 
     const groups = Array.from(groupMap.values()).sort((a, b) => a.order - b.order);
     if (!hasAnyExplicit) {
-      return [{ label: "", fields: subFields, showHeading: false }] as const;
+      return [{ label: "", fields: visibleSubs, showHeading: false }] as const;
     }
 
     return groups
@@ -636,7 +677,7 @@ export default function MultiItemRowDetail() {
         fields: g.fields,
         showHeading: !g.isOther,
       }));
-  }, [subFields]);
+  }, [subFields, editData, isSubFieldVisible]);
 
   const hasSectionTabs = sectionGroups.length > 1 || (sectionGroups.length === 1 && sectionGroups[0].label !== "");
 
@@ -690,7 +731,22 @@ export default function MultiItemRowDetail() {
   }, [token, effectiveOrgId, field]);
 
   const handleChangeCell = (key: string, value: unknown) => {
-    setEditData((prev) => ({ ...prev, [key]: value }));
+    setEditData((prev) => {
+      const next = { ...prev, [key]: value };
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const sf of subFields) {
+          if (next[sf.key] !== undefined && next[sf.key] !== null && next[sf.key] !== "") {
+            if (!isSubFieldVisible(sf, next)) {
+              next[sf.key] = sf.field_type === "multi_reference" ? [] : null;
+              changed = true;
+            }
+          }
+        }
+      }
+      return next;
+    });
   };
 
   const Toggle = ({
@@ -810,6 +866,7 @@ export default function MultiItemRowDetail() {
   const getMissingRequiredFields = () => {
     return subFields.filter((sf) => {
       if (!sf.is_required || sf.can_edit === false) return false;
+      if (!isSubFieldVisible(sf, editData)) return false;
       const val = editData[sf.key];
       if (sf.field_type === "boolean") return false;
       if (sf.field_type === "multi_reference" || Array.isArray(val)) {
@@ -1235,23 +1292,19 @@ export default function MultiItemRowDetail() {
                       <AttachmentFieldControl
                         value={val}
                         uploadSuccessAlert={false}
-                        onUploaded={(downloadUrl, filename) => {
+                        onUploaded={async (downloadUrl, filename) => {
                           const cell = makeAttachmentCellValue(downloadUrl, filename);
-                          setEditData((prev) => {
-                            const merged = { ...prev, [key]: cell };
-                            if (entryId && fieldId) {
-                              if (isNew) {
-                                void persistNewRow(merged).catch((e) =>
-                                  toast.error(e instanceof Error ? e.message : "Could not save row"),
-                                );
-                              } else {
-                                void persistExistingRow(merged)
-                                  .then(() => toast.success("File attached and saved."))
-                                  .catch((e) => toast.error(e instanceof Error ? e.message : "Could not save"));
-                              }
+                          if (entryId && fieldId) {
+                            if (isNew) {
+                              await persistNewRow({ ...editData, [key]: cell });
+                            } else {
+                              await persistExistingRow({ ...editData, [key]: cell });
+                              setEditData((prev) => ({ ...prev, [key]: cell }));
+                              toast.success("File attached and saved.");
                             }
-                            return merged;
-                          });
+                          } else {
+                            setEditData((prev) => ({ ...prev, [key]: cell }));
+                          }
                         }}
                         onClear={() => handleChangeCell(key, "")}
                         token={token}

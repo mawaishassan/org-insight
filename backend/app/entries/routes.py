@@ -71,6 +71,7 @@ from app.entries.service import (
     save_entry_values,
     recompute_formula_fields_for_entry,
     submit_entry,
+    mark_entry_modified,
     lock_entry,
     list_entries,
     list_available_kpis,
@@ -245,7 +246,9 @@ async def _replace_multi_line_rows_from_dicts(
     )
     await db.flush()
 
-    rows_list = [r if isinstance(r, dict) else {} for r in (rows or [])]
+    from app.entries.service import _resolve_attachment_filenames_to_urls
+    resolved_rows = await _resolve_attachment_filenames_to_urls(db, field.kpi_id, rows, field.sub_fields or [])
+    rows_list = [r if isinstance(r, dict) else {} for r in (resolved_rows or [])]
     key_to_sub = {getattr(s, "key", None): s for s in (field.sub_fields or []) if getattr(s, "key", None)}
 
     if not rows_list:
@@ -312,6 +315,17 @@ def _entry_to_response(entry):
     if getattr(entry, "user", None):
         u = entry.user
         entered_by_name = (getattr(u, "full_name", None) or getattr(u, "username", None) or "").strip() or getattr(u, "username", None)
+        
+    submitted_by_name = None
+    if getattr(entry, "submitted_by", None):
+        sub_u = entry.submitted_by
+        submitted_by_name = (getattr(sub_u, "full_name", None) or getattr(sub_u, "username", None) or "").strip() or getattr(sub_u, "username", None)
+        
+    last_modified_by_name = None
+    if getattr(entry, "last_modified_by", None):
+        mod_u = entry.last_modified_by
+        last_modified_by_name = (getattr(mod_u, "full_name", None) or getattr(mod_u, "username", None) or "").strip() or getattr(mod_u, "username", None)
+
     return EntryResponse(
         id=entry.id,
         kpi_id=entry.kpi_id,
@@ -322,6 +336,10 @@ def _entry_to_response(entry):
         is_draft=entry.is_draft,
         is_locked=entry.is_locked,
         submitted_at=entry.submitted_at,
+        is_modified_after_submission=getattr(entry, "is_modified_after_submission", False),
+        submitted_by_user_name=submitted_by_name,
+        last_modified_at=getattr(entry, "last_modified_at", None),
+        last_modified_by_user_name=last_modified_by_name,
         values=[
             FieldValueResponse(
                 field_id=fv.field_id,
@@ -367,6 +385,26 @@ def _serialize_multi_item_cell_for_xlsx(val: Any, field_type: FieldType | str | 
             parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
             return "; ".join(parts)
         return str(val).strip() if val is not None and str(val).strip() else ""
+    if ft == FieldType.attachment.value or ft == "attachment":
+        obj = val
+        if isinstance(val, str):
+            s = val.strip()
+            if s.startswith("{"):
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    obj = None
+            else:
+                obj = None
+                url = s
+                return url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+        if isinstance(obj, dict):
+            fn = obj.get("filename")
+            if fn:
+                return str(fn)
+            url = str(obj.get("url") or obj.get("download_url") or "")
+            return url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+        return str(val) if val else ""
     if isinstance(val, list):
         parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
         return "; ".join(parts)
@@ -387,6 +425,26 @@ def _serialize_multi_item_cell_for_csv(val: Any, field_type: FieldType | str | N
         if isinstance(val, list):
             return "; ".join(str(x).strip() for x in val if x is not None and str(x).strip() != "")
         return val
+    if ft == FieldType.attachment.value or ft == "attachment":
+        obj = val
+        if isinstance(val, str):
+            s = val.strip()
+            if s.startswith("{"):
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    obj = None
+            else:
+                obj = None
+                url = s
+                return url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+        if isinstance(obj, dict):
+            fn = obj.get("filename")
+            if fn:
+                return str(fn)
+            url = str(obj.get("url") or obj.get("download_url") or "")
+            return url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+        return str(val) if val else ""
     if isinstance(val, list):
         return "; ".join(str(x).strip() for x in val if x is not None and str(x).strip() != "")
     return val
@@ -514,10 +572,15 @@ def _xlsx_bytes_for_multi_items_export(
         for idx, k in enumerate(export_keys):
             sf = key_to_sf.get(k)
             ft = getattr(sf, "field_type", None) if sf else None
-            v = _typed_value_for_xlsx_export(r.get(k) if isinstance(r, dict) else None, ft)
+            from app.entries.service import _is_subfield_satisfied_for_row
+            if sf and not _is_subfield_satisfied_for_row(sf, r, key_to_sf):
+                v = None
+            else:
+                v = _typed_value_for_xlsx_export(r.get(k) if isinstance(r, dict) else None, ft)
             row_cells.append(v)
             col_widths[idx] = max(col_widths[idx], len(str(v)) if v is not None else 0)
         ws.append(row_cells)
+
 
     for idx, width in enumerate(col_widths, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = min(max(width + 2, 10), 60)
@@ -627,9 +690,14 @@ def _pdf_bytes_for_multi_items_export(
 
     def cell_text(row: dict, key: str) -> str:
         sf = key_to_sf.get(key)
-        ft = getattr(sf, "field_type", None) if sf else None
-        raw = _display_string_for_pdf_export(row.get(key) if isinstance(row, dict) else None, ft)
+        from app.entries.service import _is_subfield_satisfied_for_row
+        if sf and not _is_subfield_satisfied_for_row(sf, row, key_to_sf):
+            raw = ""
+        else:
+            ft = getattr(sf, "field_type", None) if sf else None
+            raw = _display_string_for_pdf_export(row.get(key) if isinstance(row, dict) else None, ft)
         return html.escape(raw).replace("\n", "<br/>")
+
 
     data = [[Paragraph("Sr. No.", sr_no_header_style)] + [Paragraph(html.escape(h), header_style) for h in headers]]
     for sr_no, r in enumerate(rows, start=1):
@@ -989,9 +1057,25 @@ async def upload_multi_items_excel(
         _is_reference_empty_or_sentinel,
         coerce_multi_reference_raw,
         filter_multi_reference_to_allowed,
+        _is_subfield_satisfied_for_row,
     )
 
+    # Clean/sanitize dependent subfields in parsed items if their trigger conditions are False
+    key_to_sf = {sf.key: sf for sf in (field.sub_fields or [])}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        changed = True
+        while changed:
+            changed = False
+            for sf in (field.sub_fields or []):
+                if item.get(sf.key) is not None:
+                    if not _is_subfield_satisfied_for_row(sf, item, key_to_sf):
+                        item[sf.key] = None
+                        changed = True
+
     validation_errors: list[dict] = []
+
     ref_sub_fields = [s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.reference]
     multif_sub_fields = [
         s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.multi_reference
@@ -1159,7 +1243,7 @@ async def upload_multi_items_excel(
             )
             new_rows = merged
             rows_overridden = 0
-    entry.user_id = current_user.id  # track last editor (optional)
+    mark_entry_modified(entry, current_user.id)
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
@@ -2067,6 +2151,7 @@ async def add_multi_items_row(
             continue
         _add_cell(sub, v)
 
+    mark_entry_modified(entry, current_user.id)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     return MultiItemsRow(index=new_index, data=normalized_row)
@@ -2171,6 +2256,7 @@ async def update_multi_items_row(
             existing_cells[sub_id] = cell
         _set_cell_value(cell, sub, next_val)
 
+    mark_entry_modified(entry, current_user.id)
     await db.commit()
     # Return row in legacy dict shape
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
@@ -2277,6 +2363,7 @@ async def update_multi_items_row_cell(
         else:
             cell.value_text = str(raw_val)
 
+    mark_entry_modified(entry, current_user.id)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
@@ -2327,6 +2414,7 @@ async def delete_multi_items_row(
         field_id=field.id,
         deleted_indices={row_index},
     )
+    mark_entry_modified(entry, current_user.id)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
 
@@ -2382,6 +2470,7 @@ async def bulk_delete_multi_items_rows(
         field_id=field.id,
         deleted_indices=index_set,
     )
+    mark_entry_modified(entry, current_user.id)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
 
@@ -2514,6 +2603,7 @@ async def sync_multi_items_from_api(
         rows_added = len(item_dicts)
 
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
+    mark_entry_modified(entry, current_user.id)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     out: dict = {
@@ -2709,6 +2799,7 @@ async def sync_multi_items_from_odoo(
         rows_added = len(item_dicts)
 
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
+    mark_entry_modified(entry, current_user.id)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     out: dict = {"entry_id": entry.id, "field_id": field.id, "rows_imported": len(item_dicts)}
@@ -2815,7 +2906,7 @@ async def import_multi_items_from_year(
         rows_added = len(incoming_items)
         rows_overridden = prev_count
 
-    entry.user_id = current_user.id
+    mark_entry_modified(entry, current_user.id)
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
@@ -3118,15 +3209,22 @@ async def export_multi_items_csv(
     writer = csv.writer(output)
     writer.writerow(export_keys)
     for r in row_dicts:
-        writer.writerow(
-            [
+        row_cells = []
+        for key in export_keys:
+            sf = key_to_sf.get(key)
+            from app.entries.service import _is_subfield_satisfied_for_row
+            if sf and not _is_subfield_satisfied_for_row(sf, r, key_to_sf):
+                val = ""
+            else:
+                val = r.get(key, "") if isinstance(r, dict) else ""
+            row_cells.append(
                 _serialize_multi_item_cell_for_csv(
-                    r.get(key, "") if isinstance(r, dict) else "",
-                    getattr(key_to_sf.get(key), "field_type", None),
+                    val,
+                    getattr(sf, "field_type", None),
                 )
-                for key in export_keys
-            ]
-        )
+            )
+        writer.writerow(row_cells)
+
 
     filename = f"multi_items_{field.key}_{field.id}.csv"
     # UTF-8 with BOM helps Excel open it correctly.
@@ -3666,17 +3764,27 @@ async def export_entry_excel(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
     fields = await list_kpi_fields_service(db, kpi_id, org_id)
     pk = (period_key or "").strip()[:8]
-    entry_res = await db.execute(
-        select(KPIEntry)
-        .where(
+    entry_stmt = select(KPIEntry).where(
+        KPIEntry.kpi_id == kpi_id,
+        KPIEntry.organization_id == org_id,
+        KPIEntry.year == year,
+        KPIEntry.period_key == pk,
+        KPIEntry.is_draft == True,
+        KPIEntry.user_id == current_user.id,
+    ).options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
+    entry_res = await db.execute(entry_stmt)
+    entry = entry_res.scalar_one_or_none()
+    
+    if not entry:
+        entry_stmt = select(KPIEntry).where(
             KPIEntry.kpi_id == kpi_id,
             KPIEntry.organization_id == org_id,
             KPIEntry.year == year,
             KPIEntry.period_key == pk,
-        )
-        .options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
-    )
-    entry = entry_res.scalar_one_or_none()
+            KPIEntry.is_draft == False,
+        ).options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
+        entry_res = await db.execute(entry_stmt)
+        entry = entry_res.scalar_one_or_none()
     xlsx_bytes = await _build_kpi_entry_xlsx(
         db,
         kpi_name=getattr(kpi, "name", "") or f"KPI_{kpi_id}",

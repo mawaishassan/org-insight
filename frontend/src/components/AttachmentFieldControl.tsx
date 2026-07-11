@@ -1,7 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import type { ReactNode } from "react";
-import { deleteKpiStoredFileByUrl, getApiUrl, openKpiStoredFileInNewTab } from "@/lib/api";
+import { deleteKpiStoredFileByUrl, getApiUrl, openKpiStoredFileInNewTab, postFormDataWithUploadProgress } from "@/lib/api";
 import { getAttachmentDisplayName, getAttachmentUrl } from "@/lib/attachmentCellValue";
 
 function BinIcon({ size = 18 }: { size?: number }) {
@@ -27,7 +28,7 @@ function BinIcon({ size = 18 }: { size?: number }) {
 
 export type AttachmentFieldControlProps = {
   value: unknown;
-  onUploaded: (downloadUrl: string, filename: string) => void;
+  onUploaded: (downloadUrl: string, filename: string) => Promise<void> | void;
   onClear: () => void;
   token: string | null | undefined;
   kpiId: number;
@@ -61,7 +62,11 @@ export function AttachmentFieldControl({
 }: AttachmentFieldControlProps) {
   const urlNow = getAttachmentUrl(value);
   const displayName = getAttachmentDisplayName(value);
-  const canAttach = Boolean(token && entryId && !attachDisabled);
+
+  const [uploadState, setUploadState] = useState<"idle" | "uploading" | "saving">("idle");
+  const [uploadProgress, setUploadProgress] = useState(0);
+
+  const canAttach = Boolean(token && entryId && !attachDisabled && uploadState === "idle");
 
   const runUpload = async (file: File) => {
     if (!token) {
@@ -72,43 +77,129 @@ export function AttachmentFieldControl({
       onError?.("Entry is still loading. Please wait and try again.");
       return;
     }
+    
+    setUploadState("uploading");
+    setUploadProgress(0);
+
     try {
       const form = new FormData();
       form.append("files", file);
       form.append("entry_id", String(entryId));
       form.append("year", String(year));
-      const res = await fetch(getApiUrl(`/kpis/${kpiId}/files`), {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: form,
-      });
+
+      const res = await postFormDataWithUploadProgress(
+        `/kpis/${kpiId}/files`,
+        form,
+        {
+          token,
+          onUploadProgress: (ev) => {
+            if (ev.lengthComputable) {
+              const percent = Math.round((ev.loaded / ev.total) * 100);
+              setUploadProgress(percent);
+            }
+          },
+          onRequestSent: () => {
+            setUploadState("saving");
+          },
+        }
+      );
+
       if (!res.ok) {
-        onError?.("File upload failed");
-        return;
+        throw new Error("File upload failed");
       }
-      const uploaded = (await res.json()) as Array<{ download_url?: string; original_filename?: string }>;
+
+      const rawJson = await res.json();
+      const uploaded = rawJson as Array<{ download_url?: string; original_filename?: string }>;
       const latest = uploaded[0];
       if (!latest?.download_url) {
-        onError?.("File upload failed");
-        return;
+        throw new Error("File upload failed");
       }
+
       const name = latest.original_filename || file.name || "Uploaded file";
-      onUploaded(latest.download_url, name);
+      
+      setUploadState("saving");
+      await onUploaded(latest.download_url, name);
+
       if (uploadSuccessAlert) {
         window.alert(`Upload successful.\n\nFile: ${name}\n\nSave to keep this change.`);
       }
-    } catch {
-      onError?.("File upload failed");
+    } catch (err) {
+      console.error("Upload error details:", err);
+      onError?.(err instanceof Error ? err.message : "File upload failed");
+    } finally {
+      setUploadState("idle");
+      setUploadProgress(0);
     }
   };
+
+  if (uploadState !== "idle") {
+    return (
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.25rem",
+          width: "fit-content",
+          minWidth: compact ? 120 : 160,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            padding: compact ? "0.4rem 0.85rem" : "0.55rem 1.15rem",
+            fontSize: compact ? "0.875rem" : "0.9375rem",
+            fontWeight: 600,
+            background: "var(--bg-subtle, #f1f5f9)",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            color: "var(--text-secondary)",
+            lineHeight: 1.25,
+            minHeight: compact ? "2.375rem" : "2.625rem",
+            boxSizing: "border-box",
+          }}
+        >
+          <svg
+            className="animate-spin-custom"
+            width={compact ? 14 : 16}
+            height={compact ? 14 : 16}
+            viewBox="0 0 24 24"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            style={{ color: "var(--accent)" }}
+          >
+            <circle
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="3"
+              strokeDasharray="32"
+              strokeDashoffset="10"
+              strokeLinecap="round"
+            />
+          </svg>
+          <span>
+            {uploadState === "uploading" ? `Uploading ${uploadProgress}%` : "Saving..."}
+          </span>
+        </div>
+        {uploadState === "uploading" && (
+          <div className="progress-bar-container">
+            <div className="progress-bar-fill" style={{ width: `${uploadProgress}%` }} />
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (!urlNow) {
     return (
       <div
         style={{
           display: "flex",
-          flexDirection: compact ? "column" : "column",
-          gap: compact ? "0.35rem" : "0.45rem",
+          flexDirection: "column",
+          gap: "0.45rem",
           alignItems: "stretch",
           minWidth: compact ? 120 : undefined,
         }}
@@ -152,6 +243,7 @@ export function AttachmentFieldControl({
     );
   }
 
+
   const fontSize = compact ? "0.82rem" : "0.95rem";
   const iconSize = compact ? 15 : 18;
 
@@ -168,6 +260,7 @@ export function AttachmentFieldControl({
         type="button"
         aria-label="Remove attachment"
         title="Remove attachment"
+        disabled={uploadState !== "idle"}
         onClick={async (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -193,7 +286,8 @@ export function AttachmentFieldControl({
           border: "none",
           background: "transparent",
           color: "var(--muted, #666)",
-          cursor: "pointer",
+          cursor: uploadState === "idle" ? "pointer" : "not-allowed",
+          opacity: uploadState === "idle" ? 1 : 0.5,
           borderRadius: 4,
           flexShrink: 0,
         }}
@@ -202,6 +296,7 @@ export function AttachmentFieldControl({
       </button>
       <button
         type="button"
+        disabled={uploadState !== "idle"}
         onClick={async (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -225,7 +320,8 @@ export function AttachmentFieldControl({
           fontSize,
           fontWeight: 600,
           color: "var(--accent)",
-          cursor: "pointer",
+          cursor: uploadState === "idle" ? "pointer" : "not-allowed",
+          opacity: uploadState === "idle" ? 1 : 0.7,
           textAlign: "left",
           textDecoration: "underline",
           overflow: "hidden",

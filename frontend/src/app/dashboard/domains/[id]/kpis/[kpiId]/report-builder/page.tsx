@@ -431,10 +431,6 @@ export default function KpiReportBuilder() {
                 fontSize: "0.85rem",
                 fontWeight: 600,
                 borderRadius: "6px",
-                border: "1px solid var(--border)",
-                background: "var(--surface)",
-                color: "var(--text)",
-                cursor: "pointer"
               }}
             >
               Back

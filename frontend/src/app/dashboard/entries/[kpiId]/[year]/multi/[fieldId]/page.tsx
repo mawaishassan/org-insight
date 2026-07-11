@@ -596,6 +596,10 @@ export default function FullPageMultiItems() {
   }, [kpiId, fieldId, year, effectiveOrgId, periodKey]);
 
   const subFields = field?.sub_fields ?? [];
+  const gridSubFields = useMemo(
+    () => subFields.filter((sf) => (sf.config as any)?.condition_trigger_field_id == null && (sf.config as any)?.condition_trigger_field_key == null),
+    [subFields]
+  );
 
   /** Columns currently shown in the grid, in the grid's actual display order (the table always
    * renders subFields in field-defined order, filtered to visibleColumns — never the picker's
@@ -603,10 +607,10 @@ export default function FullPageMultiItems() {
    * both export modes are defined relative to. */
   const gridOrderedVisibleKeys = useMemo(
     () =>
-      subFields
+      gridSubFields
         .filter((sf) => visibleColumns.length === 0 || visibleColumns.includes(sf.key))
         .map((sf) => sf.key),
-    [subFields, visibleColumns]
+    [gridSubFields, visibleColumns]
   );
 
   /** Every sub-field defined for this Multi Line Item, in field-defined order — independent of
@@ -744,7 +748,7 @@ export default function FullPageMultiItems() {
 
   // Initialize visible columns (persisted per KPI/field; dashboard-origin can override via ?cols=)
   useEffect(() => {
-    if (subFields.length === 0) return;
+    if (gridSubFields.length === 0) return;
     const storageKey = `multi_visible_cols:${kpiId}:${fieldId}`;
     const manualKey = `multi_manual_cols:${kpiId}:${fieldId}`;
     let initial: string[] | null = null;
@@ -755,7 +759,7 @@ export default function FullPageMultiItems() {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-      const filtered = parsed.filter((k) => subFields.some((sf) => sf.key === k));
+      const filtered = parsed.filter((k) => gridSubFields.some((sf) => sf.key === k));
       if (filtered.length > 0) {
         setVisibleColumns(filtered);
         return;
@@ -768,7 +772,7 @@ export default function FullPageMultiItems() {
         if (stored) {
           const parsed = JSON.parse(stored);
           if (Array.isArray(parsed)) {
-            initial = parsed.filter((k) => subFields.some((sf) => sf.key === k));
+            initial = parsed.filter((k) => gridSubFields.some((sf) => sf.key === k));
           }
         }
         const m = window.localStorage.getItem(manualKey);
@@ -780,10 +784,10 @@ export default function FullPageMultiItems() {
     if (manualStored != null) setManualColumnsMode(manualStored);
     if (!initial || initial.length === 0) {
       // Default to as many columns as fit in the available width.
-      initial = subFields.slice(0, Math.max(1, maxAutoColumns)).map((sf) => sf.key);
+      initial = gridSubFields.slice(0, Math.max(1, maxAutoColumns)).map((sf) => sf.key);
     }
     setVisibleColumns(manualStored ? initial : initial.slice(0, Math.max(1, maxAutoColumns)));
-  }, [subFields, kpiId, fieldId, cameFromDashboard, colsFromUrl, maxAutoColumns]);
+  }, [gridSubFields, kpiId, fieldId, cameFromDashboard, colsFromUrl, maxAutoColumns]);
 
   // Compute how many columns fit in the available table width and trim selection if needed.
   useEffect(() => {
@@ -2271,7 +2275,7 @@ export default function FullPageMultiItems() {
                   maxHeight: 280,
                 }}
               >
-                {subFields
+                {gridSubFields
                   .filter((sf) => {
                     const q = columnsPopupSearch.trim().toLowerCase();
                     if (!q) return true;
@@ -2303,7 +2307,7 @@ export default function FullPageMultiItems() {
                               setColumnsPopupDraft((prev) => {
                                 const next = prev.includes(sf.key) ? prev : [...prev, sf.key];
                                 // If user goes beyond available area, auto-trim.
-                                return manualColumnsMode ? next : next.slice(0, Math.max(1, maxAutoColumns));
+                                  return manualColumnsMode ? next : next.slice(0, Math.max(1, maxAutoColumns));
                               });
                             } else {
                               setColumnsPopupDraft((prev) => prev.filter((k) => k !== sf.key));
@@ -2317,7 +2321,7 @@ export default function FullPageMultiItems() {
                       </label>
                     );
                   })}
-                {subFields.filter((sf) => {
+                {gridSubFields.filter((sf) => {
                   const q = columnsPopupSearch.trim().toLowerCase();
                   if (!q) return true;
                   return sf.name.toLowerCase().includes(q) || (sf.key || "").toLowerCase().includes(q);
@@ -2343,7 +2347,7 @@ export default function FullPageMultiItems() {
                   type="button"
                   className="btn btn-primary"
                   onClick={() => {
-                    const draft = columnsPopupDraft.length > 0 ? columnsPopupDraft : subFields.map((sf) => sf.key);
+                    const draft = columnsPopupDraft.length > 0 ? columnsPopupDraft : gridSubFields.map((sf) => sf.key);
                     const next = manualColumnsMode ? draft : draft.slice(0, Math.max(1, maxAutoColumns));
                     setVisibleColumns(next);
                     setShowColumnsPopup(false);
@@ -2718,7 +2722,7 @@ export default function FullPageMultiItems() {
                   </th>
                 )}
                 <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>#</th>
-                {subFields
+                {gridSubFields
                   .filter((sf) => visibleColumns.length === 0 || visibleColumns.includes(sf.key))
                   .map((sf) => {
                   const isActive = sortBy === sf.key;
@@ -2783,7 +2787,7 @@ export default function FullPageMultiItems() {
                     </td>
                   )}
                   <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>{row.index + 1}</td>
-                {subFields
+                {gridSubFields
                   .filter((sf) => visibleColumns.length === 0 || visibleColumns.includes(sf.key))
                   .map((sf) => (
                     <td

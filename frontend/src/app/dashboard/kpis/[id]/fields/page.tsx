@@ -318,11 +318,11 @@ export default function KpiFieldsPage() {
     config: ReferenceConfig;
   }>({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: "", config: {} });
   const [isCondModalOpen, setIsCondModalOpen] = useState(false);
-  const [condEditingFieldId, setCondEditingFieldId] = useState<number | null>(null);
-  const [condTriggerId, setCondTriggerId] = useState<number | "">("");
+  const [condEditingFieldId, setCondEditingFieldId] = useState<number | string | null>(null);
+  const [condTriggerId, setCondTriggerId] = useState<number | string | "">("");
   const [condTriggerVal, setCondTriggerVal] = useState<boolean>(true);
   const [condDepType, setCondDepType] = useState<"existing" | "new">("existing");
-  const [condDepFieldId, setCondDepFieldId] = useState<number | "">("");
+  const [condDepFieldId, setCondDepFieldId] = useState<number | string | "">("");
   const [condNewName, setCondNewName] = useState("");
   const [condNewKey, setCondNewKey] = useState("");
   const [condNewFieldType, setCondNewFieldType] = useState("single_line_text");
@@ -387,6 +387,18 @@ export default function KpiFieldsPage() {
       return multiLineFields.some((f) => f.id === id) ? prev : "scalar";
     });
   }, [userRole, multiLineFields]);
+
+  const isMultiTab = superAdminFieldsTab.startsWith("multi:");
+  const activeParentFieldId = useMemo(() => {
+    const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
+    return match ? Number(match[1]) : null;
+  }, [superAdminFieldsTab]);
+  const activeParentField = useMemo(() => {
+    return activeParentFieldId ? list.find((f) => f.id === activeParentFieldId) : null;
+  }, [list, activeParentFieldId]);
+  const subs = useMemo(() => {
+    return activeParentField?.sub_fields ?? [];
+  }, [activeParentField]);
 
   useEffect(() => {
     if (tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings" || tabFromUrl === "odoo") {
@@ -877,20 +889,21 @@ export default function KpiFieldsPage() {
             s.config?.reference_source_kpi_id &&
             s.config?.reference_source_field_key;
 
-          if (hasUiSection || hasRefConfig) {
-            sub.config = {
-              ...(hasUiSection ? { ui_section: uiSection } : {}),
-              ...(hasRefConfig
-                ? {
-                    reference_source_kpi_id: (s.config as any).reference_source_kpi_id,
-                    reference_source_field_key: (s.config as any).reference_source_field_key,
-                    ...((s.config as any).reference_source_sub_field_key
-                      ? { reference_source_sub_field_key: (s.config as any).reference_source_sub_field_key }
-                      : {}),
-                  }
-                : {}),
-            };
+          const sCfg = s.config && typeof s.config === "object" ? { ...s.config } : {};
+          if (uiSection) {
+            sCfg.ui_section = uiSection;
+          } else {
+            delete sCfg.ui_section;
           }
+          if (hasRefConfig) {
+            sCfg.reference_source_kpi_id = (s.config as any).reference_source_kpi_id;
+            sCfg.reference_source_field_key = (s.config as any).reference_source_field_key;
+            if ((s.config as any).reference_source_sub_field_key) {
+              sCfg.reference_source_sub_field_key = (s.config as any).reference_source_sub_field_key;
+            }
+          }
+          
+          sub.config = Object.keys(sCfg).length > 0 ? sCfg : undefined;
           return sub;
         });
       }
@@ -936,96 +949,163 @@ export default function KpiFieldsPage() {
   const handleSaveConditionalRule = async () => {
     if (!token || !condTriggerId || orgId == null) return;
 
-    const triggerField = list.find((f) => f.id === Number(condTriggerId));
-    if (!triggerField) {
-      toast.error("Trigger field not found");
-      return;
-    }
-
+    const isMultiTab = superAdminFieldsTab.startsWith("multi:");
+    
     try {
-      if (condDepType === "existing") {
-        if (!condDepFieldId) {
-          toast.error("Please select a dependent field");
+      if (isMultiTab) {
+        const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
+        const activeParentFieldId = match ? Number(match[1]) : null;
+        const field = list.find((f) => f.id === activeParentFieldId) as any;
+        if (!field) {
+          toast.error("Multi-line field not found");
+          return;
+        }
+        
+        const subs = (field.sub_fields ?? []) as any[];
+        const triggerSub = subs.find((s) => String(s.id) === String(condTriggerId) || s.key === String(condTriggerId));
+        if (!triggerSub) {
+          toast.error("Trigger subfield not found");
           return;
         }
 
-        const depField = list.find((f) => f.id === Number(condDepFieldId));
-        if (!depField) {
-          toast.error("Dependent field not found");
-          return;
-        }
+        if (condDepType === "existing") {
+          if (!condDepFieldId) {
+            toast.error("Please select a dependent subfield");
+            return;
+          }
+          const depSub = subs.find((s) => String(s.id) === String(condDepFieldId) || s.key === String(condDepFieldId));
+          if (!depSub) {
+            toast.error("Dependent subfield not found");
+            return;
+          }
 
-        // If editing, and the dependent field changed
-        if (condEditingFieldId && condEditingFieldId !== depField.id) {
-          const oldField = list.find((f) => f.id === condEditingFieldId);
-          if (oldField) {
-            const oldConfig = { ...(oldField.config ?? {}) };
-            delete oldConfig.condition_trigger_field_id;
-            delete oldConfig.condition_trigger_value;
-
-            await api(`/fields/${oldField.id}?organization_id=${orgId}`, {
-              method: "PATCH",
-              body: JSON.stringify({ config: oldConfig }),
-              token,
+          let nextSubs = subs;
+          if (condEditingFieldId && String(condEditingFieldId) !== String(depSub.id || depSub.key)) {
+            nextSubs = nextSubs.map((s) => {
+              if (String(s.id || s.key) === String(condEditingFieldId)) {
+                const oldCfg = { ...(s.config ?? {}) };
+                delete oldCfg.condition_trigger_field_id;
+                delete oldCfg.condition_trigger_field_key;
+                delete oldCfg.condition_trigger_value;
+                return { ...s, config: oldCfg };
+              }
+              return s;
             });
           }
+
+          nextSubs = nextSubs.map((s) => {
+            if (String(s.id || s.key) === String(depSub.id || depSub.key)) {
+              return {
+                ...s,
+                config: {
+                  ...(s.config ?? {}),
+                  condition_trigger_field_id: triggerSub.id ? Number(triggerSub.id) : undefined,
+                  condition_trigger_field_key: triggerSub.key,
+                  condition_trigger_value: condTriggerVal,
+                },
+              };
+            }
+            return s;
+          });
+
+          const body: UpdateFormData = {
+            name: String(field.name ?? ""),
+            key: String(field.key ?? ""),
+            field_type: "multi_line_items" as any,
+            formula_expression: String(field.formula_expression ?? ""),
+            is_required: !!field.is_required,
+            sort_order: Number(field.sort_order ?? 0),
+            carry_forward_data: !!field.carry_forward_data,
+            full_page_multi_items: !!field.full_page_multi_items,
+            multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
+          };
+
+          await executeFieldUpdate(field.id, body, nextSubs, undefined);
+          toast.success("Conditional visibility rule saved successfully");
         }
-
-        const newConfig = {
-          ...(depField.config ?? {}),
-          condition_trigger_field_id: Number(condTriggerId),
-          condition_trigger_value: condTriggerVal,
-        };
-
-        await api(`/fields/${depField.id}?organization_id=${orgId}`, {
-          method: "PATCH",
-          body: JSON.stringify({ config: newConfig }),
-          token,
-        });
-
-        toast.success("Conditional visibility rule saved successfully");
       } else {
-        if (!condNewName.trim()) {
-          toast.error("Please enter a field name");
-          return;
-        }
-        if (!condNewKey.trim()) {
-          toast.error("Please enter a field key");
-          return;
-        }
-        if (!/^[a-z_][a-z0-9_]*$/.test(condNewKey)) {
-          toast.error("Field key must start with a letter and contain only lowercase letters, numbers, and underscores.");
-          return;
-        }
+        if (condDepType === "existing") {
+          if (!condDepFieldId) {
+            toast.error("Please select a dependent field");
+            return;
+          }
 
-        // Ensure key is unique
-        if (list.some((f) => f.key.toLowerCase() === condNewKey.toLowerCase())) {
-          toast.error("Field key already exists in this KPI");
-          return;
-        }
+          const depField = list.find((f) => f.id === Number(condDepFieldId));
+          if (!depField) {
+            toast.error("Dependent field not found");
+            return;
+          }
 
-        const body: Record<string, unknown> = {
-          kpi_id: kpiId,
-          name: condNewName,
-          key: condNewKey.toLowerCase(),
-          field_type: condNewFieldType,
-          is_required: condNewRequired,
-          sort_order: 0,
-          config: {
-            ...condNewRefConfig,
+          if (condEditingFieldId && Number(condEditingFieldId) !== depField.id) {
+            const oldField = list.find((f) => f.id === Number(condEditingFieldId));
+            if (oldField) {
+              const oldConfig = { ...(oldField.config ?? {}) };
+              delete oldConfig.condition_trigger_field_id;
+              delete oldConfig.condition_trigger_value;
+
+              await api(`/fields/${oldField.id}?organization_id=${orgId}`, {
+                method: "PATCH",
+                body: JSON.stringify({ config: oldConfig }),
+                token,
+              });
+            }
+          }
+
+          const newConfig = {
+            ...(depField.config ?? {}),
             condition_trigger_field_id: Number(condTriggerId),
             condition_trigger_value: condTriggerVal,
-          },
-          options: [],
-        };
+          };
 
-        await api(`/fields?organization_id=${orgId}`, {
-          method: "POST",
-          body: JSON.stringify(body),
-          token,
-        });
+          await api(`/fields/${depField.id}?organization_id=${orgId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ config: newConfig }),
+            token,
+          });
 
-        toast.success("New conditional field created successfully");
+          toast.success("Conditional visibility rule saved successfully");
+        } else {
+          if (!condNewName.trim()) {
+            toast.error("Please enter a field name");
+            return;
+          }
+          if (!condNewKey.trim()) {
+            toast.error("Please enter a field key");
+            return;
+          }
+          if (!/^[a-z_][a-z0-9_]*$/.test(condNewKey)) {
+            toast.error("Field key must start with a letter and contain only lowercase letters, numbers, and underscores.");
+            return;
+          }
+
+          if (list.some((f) => f.key.toLowerCase() === condNewKey.toLowerCase())) {
+            toast.error("Field key already exists in this KPI");
+            return;
+          }
+
+          const body: Record<string, unknown> = {
+            kpi_id: kpiId,
+            name: condNewName,
+            key: condNewKey.toLowerCase(),
+            field_type: condNewFieldType,
+            is_required: condNewRequired,
+            sort_order: 0,
+            config: {
+              ...condNewRefConfig,
+              condition_trigger_field_id: Number(condTriggerId),
+              condition_trigger_value: condTriggerVal,
+            },
+            options: [],
+          };
+
+          await api(`/fields?organization_id=${orgId}`, {
+            method: "POST",
+            body: JSON.stringify(body),
+            token,
+          });
+
+          toast.success("New conditional field created successfully");
+        }
       }
 
       setIsCondModalOpen(false);
@@ -1035,24 +1115,55 @@ export default function KpiFieldsPage() {
     }
   };
 
-  const handleRemoveConditionalRule = async (fieldId: number) => {
+  const handleRemoveConditionalRule = async (fieldId: number, subFieldId?: number | string) => {
     if (!token || orgId == null) return;
     try {
-      const field = list.find((f) => f.id === fieldId);
-      if (!field) return;
+      if (subFieldId != null) {
+        const field = list.find((f) => f.id === fieldId) as any;
+        if (!field) return;
+        const nextSubs = (field.sub_fields ?? []).map((s: any) => {
+          if (String(s.id || s.key) === String(subFieldId)) {
+            const newConfig = { ...(s.config ?? {}) };
+            delete newConfig.condition_trigger_field_id;
+            delete newConfig.condition_trigger_field_key;
+            delete newConfig.condition_trigger_value;
+            return { ...s, config: newConfig };
+          }
+          return s;
+        });
 
-      const newConfig = { ...(field.config ?? {}) };
-      delete newConfig.condition_trigger_field_id;
-      delete newConfig.condition_trigger_value;
+        const body: UpdateFormData = {
+          name: String(field.name ?? ""),
+          key: String(field.key ?? ""),
+          field_type: "multi_line_items" as any,
+          formula_expression: String(field.formula_expression ?? ""),
+          is_required: !!field.is_required,
+          sort_order: Number(field.sort_order ?? 0),
+          carry_forward_data: !!field.carry_forward_data,
+          full_page_multi_items: !!field.full_page_multi_items,
+          multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
+        };
 
-      await api(`/fields/${field.id}?organization_id=${orgId}`, {
-        method: "PATCH",
-        body: JSON.stringify({ config: newConfig }),
-        token,
-      });
+        await executeFieldUpdate(field.id, body, nextSubs, undefined);
+        toast.success("Conditional visibility rule removed");
+        loadList();
+      } else {
+        const field = list.find((f) => f.id === fieldId);
+        if (!field) return;
 
-      toast.success("Conditional visibility rule removed");
-      loadList();
+        const newConfig = { ...(field.config ?? {}) };
+        delete newConfig.condition_trigger_field_id;
+        delete newConfig.condition_trigger_value;
+
+        await api(`/fields/${field.id}?organization_id=${orgId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ config: newConfig }),
+          token,
+        });
+
+        toast.success("Conditional visibility rule removed");
+        loadList();
+      }
     } catch (err: any) {
       toast.error(err.message || "Failed to remove conditional visibility rule");
     }
@@ -2864,6 +2975,7 @@ export default function KpiFieldsPage() {
                                                 is_required: !!(s as any).is_required,
                                                 ui_section: uiSec,
                                                 config: {
+                                                  ...cfgObj,
                                                   reference_source_kpi_id: cfgObj.reference_source_kpi_id,
                                                   reference_source_field_key: cfgObj.reference_source_field_key,
                                                   reference_source_sub_field_key: cfgObj.reference_source_sub_field_key,
@@ -2965,67 +3077,103 @@ export default function KpiFieldsPage() {
         )}
 
         {/* Conditional Visibility Rules Card */}
-        {superAdminFieldsTab === "scalar" && (
-          <div className="card" style={{ marginTop: "2rem", padding: "1.5rem" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1rem", flexWrap: "wrap", gap: "1rem" }}>
-              <div>
-                <h3 style={{ fontSize: "1.1rem", fontWeight: 600, margin: 0 }}>
-                  Conditional Visibility Rules
-                </h3>
-                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
-                  Configure fields to dynamically show or hide based on the value of a Boolean scalar field.
-                </p>
+        {(superAdminFieldsTab === "scalar" || superAdminFieldsTab.startsWith("multi:")) && (() => {
+          const isMultiTab = superAdminFieldsTab.startsWith("multi:");
+          const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
+          const activeParentFieldId = match ? Number(match[1]) : null;
+          const activeParentField = activeParentFieldId ? list.find(f => f.id === activeParentFieldId) : null;
+          
+          if (isMultiTab && !activeParentField) return null;
+          
+          const subs = activeParentField?.sub_fields ?? [];
+          const rulesList = isMultiTab 
+            ? subs.filter((s: any) => s.config?.condition_trigger_field_id != null || s.config?.condition_trigger_field_key != null)
+            : list.filter((f) => f.config?.condition_trigger_field_id != null);
+            
+          return (
+            <div className="card" style={{ marginTop: "2rem", padding: "1.5rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1rem", flexWrap: "wrap", gap: "1rem" }}>
+                <div>
+                  <h3 style={{ fontSize: "1.1rem", fontWeight: 600, margin: 0 }}>
+                    Conditional Visibility Rules
+                  </h3>
+                  <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
+                    {isMultiTab 
+                      ? "Configure sub-fields to dynamically show or hide based on the value of a Boolean sub-field."
+                      : "Configure fields to dynamically show or hide based on the value of a Boolean scalar field."
+                    }
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setCondEditingFieldId(null);
+                    setCondTriggerId("");
+                    setCondTriggerVal(true);
+                    setCondDepType("existing");
+                    setCondDepFieldId("");
+                    setCondNewName("");
+                    setCondNewKey("");
+                    setCondNewFieldType("single_line_text");
+                    setCondNewRequired(false);
+                    setCondNewRefConfig({});
+                    setIsCondModalOpen(true);
+                  }}
+                >
+                  Add Rule
+                </button>
               </div>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => {
-                  setCondEditingFieldId(null);
-                  setCondTriggerId("");
-                  setCondTriggerVal(true);
-                  setCondDepType("existing");
-                  setCondDepFieldId("");
-                  setCondNewName("");
-                  setCondNewKey("");
-                  setCondNewFieldType("single_line_text");
-                  setCondNewRequired(false);
-                  setCondNewRefConfig({});
-                  setIsCondModalOpen(true);
-                }}
-              >
-                Add Rule
-              </button>
-            </div>
 
-            {list.filter((f) => f.config?.condition_trigger_field_id != null).length === 0 ? (
-              <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "1rem 0 0" }}>
-                No conditional visibility rules configured yet.
-              </p>
-            ) : (
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem", marginTop: "1rem" }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Dependent Field</th>
-                    <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Trigger Field</th>
-                    <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Condition</th>
-                    <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "1px solid var(--border)", width: 140 }}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {list
-                    .filter((f) => f.config?.condition_trigger_field_id != null)
-                    .map((f) => {
-                      const trigger = list.find((t) => t.id === f.config?.condition_trigger_field_id);
+              {rulesList.length === 0 ? (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "1rem 0 0" }}>
+                  No conditional visibility rules configured yet.
+                </p>
+              ) : (
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem", marginTop: "1rem" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Dependent Field</th>
+                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Trigger Field</th>
+                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Condition</th>
+                      <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "1px solid var(--border)", width: 140 }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rulesList.map((f: any) => {
+                      let triggerName = "";
+                      let triggerKey = "";
+                      let conditionTriggerId = f.config?.condition_trigger_field_id;
+                      let conditionTriggerKey = f.config?.condition_trigger_field_key;
+                      
+                      if (isMultiTab) {
+                        const trigger = subs.find(
+                          (t: any) =>
+                            t.id === conditionTriggerId ||
+                            t.key === conditionTriggerKey
+                        );
+                        if (trigger) {
+                          triggerName = trigger.name;
+                          triggerKey = trigger.key;
+                        }
+                      } else {
+                        const trigger = list.find((t) => t.id === conditionTriggerId);
+                        if (trigger) {
+                          triggerName = trigger.name;
+                          triggerKey = trigger.key;
+                        }
+                      }
+                      
                       return (
-                        <tr key={f.id}>
+                        <tr key={f.id || f.key}>
                           <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
                             <strong>{f.name}</strong> <span style={{ color: "var(--muted)" }}>({f.key})</span>
                           </td>
                           <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                            {trigger ? (
-                              <span>{trigger.name} <span style={{ color: "var(--muted)" }}>({trigger.key})</span></span>
+                            {triggerName ? (
+                              <span>{triggerName} <span style={{ color: "var(--muted)" }}>({triggerKey})</span></span>
                             ) : (
-                              <span style={{ color: "var(--error)" }}>Missing Trigger (ID: {f.config?.condition_trigger_field_id})</span>
+                              <span style={{ color: "var(--error)" }}>Missing Trigger</span>
                             )}
                           </td>
                           <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
@@ -3037,11 +3185,11 @@ export default function KpiFieldsPage() {
                               className="btn"
                               style={{ marginRight: "0.35rem" }}
                               onClick={() => {
-                                setCondEditingFieldId(f.id);
-                                setCondTriggerId(f.config?.condition_trigger_field_id ?? "");
+                                setCondEditingFieldId(f.id || f.key);
+                                setCondTriggerId(conditionTriggerId || conditionTriggerKey || "");
                                 setCondTriggerVal(f.config?.condition_trigger_value ?? true);
                                 setCondDepType("existing");
-                                setCondDepFieldId(f.id);
+                                setCondDepFieldId(f.id || f.key);
                                 setIsCondModalOpen(true);
                               }}
                             >
@@ -3051,7 +3199,13 @@ export default function KpiFieldsPage() {
                               type="button"
                               className="btn"
                               style={{ color: "var(--error)" }}
-                              onClick={() => handleRemoveConditionalRule(f.id)}
+                              onClick={() => {
+                                if (isMultiTab) {
+                                  handleRemoveConditionalRule(activeParentFieldId!, f.id || f.key);
+                                } else {
+                                  handleRemoveConditionalRule(f.id);
+                                }
+                              }}
                             >
                               Remove
                             </button>
@@ -3059,11 +3213,12 @@ export default function KpiFieldsPage() {
                         </tr>
                       );
                     })}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          );
+        })()}
       </div>
         </>
       )}
@@ -3100,17 +3255,27 @@ export default function KpiFieldsPage() {
             <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Boolean Trigger Field</label>
             <select
               value={condTriggerId}
-              onChange={(e) => setCondTriggerId(e.target.value ? Number(e.target.value) : "")}
+              onChange={(e) => setCondTriggerId(e.target.value ? (isNaN(Number(e.target.value)) ? e.target.value : Number(e.target.value)) : "")}
               style={{ width: "100%", padding: "0.5rem" }}
             >
               <option value="">— Select Boolean Field —</option>
-              {list
-                .filter((f) => f.field_type === "boolean")
-                .map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.name} ({f.key})
-                  </option>
-                ))}
+              {isMultiTab ? (
+                subs
+                  .filter((s: any) => s.field_type === "boolean")
+                  .map((s: any) => (
+                    <option key={s.id || s.key} value={s.id || s.key}>
+                      {s.name} ({s.key})
+                    </option>
+                  ))
+              ) : (
+                list
+                  .filter((f) => f.field_type === "boolean")
+                  .map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name} ({f.key})
+                    </option>
+                  ))
+              )}
             </select>
           </div>
 
@@ -3126,7 +3291,7 @@ export default function KpiFieldsPage() {
             </select>
           </div>
 
-          {!condEditingFieldId && (
+          {!condEditingFieldId && !isMultiTab && (
             <div className="form-group" style={{ marginBottom: "1rem" }}>
               <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Choose Dependency Type</label>
               <div style={{ display: "flex", gap: "1rem" }}>
@@ -3154,27 +3319,45 @@ export default function KpiFieldsPage() {
 
           {condDepType === "existing" ? (
             <div className="form-group" style={{ marginBottom: "1.5rem" }}>
-              <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Dependent Scalar Field</label>
+              <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>
+                {isMultiTab ? "Dependent Subfield" : "Dependent Scalar Field"}
+              </label>
               <select
                 value={condDepFieldId}
-                onChange={(e) => setCondDepFieldId(e.target.value ? Number(e.target.value) : "")}
+                onChange={(e) => setCondDepFieldId(e.target.value ? (isNaN(Number(e.target.value)) ? e.target.value : Number(e.target.value)) : "")}
                 disabled={condEditingFieldId != null}
                 style={{ width: "100%", padding: "0.5rem" }}
               >
-                <option value="">— Select Scalar Field —</option>
-                {list
-                  .filter(
-                    (f) =>
-                      f.field_type !== "multi_line_items" &&
-                      f.field_type !== "formula" &&
-                      f.id !== Number(condTriggerId) &&
-                      (f.id === condEditingFieldId || f.config?.condition_trigger_field_id == null)
-                  )
-                  .map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.name} ({f.key} - {f.field_type})
-                    </option>
-                  ))}
+                <option value="">{isMultiTab ? "— Select Subfield —" : "— Select Scalar Field —"}</option>
+                {isMultiTab ? (
+                  subs
+                    .filter(
+                      (s: any) =>
+                        s.field_type !== "multi_line_items" &&
+                        s.field_type !== "formula" &&
+                        String(s.id || s.key) !== String(condTriggerId) &&
+                        (String(s.id || s.key) === String(condEditingFieldId) || (s.config?.condition_trigger_field_id == null && s.config?.condition_trigger_field_key == null))
+                    )
+                    .map((s: any) => (
+                      <option key={s.id || s.key} value={s.id || s.key}>
+                        {s.name} ({s.key} - {s.field_type})
+                      </option>
+                    ))
+                ) : (
+                  list
+                    .filter(
+                      (f) =>
+                        f.field_type !== "multi_line_items" &&
+                        f.field_type !== "formula" &&
+                        f.id !== Number(condTriggerId) &&
+                        (f.id === condEditingFieldId || f.config?.condition_trigger_field_id == null)
+                    )
+                    .map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.name} ({f.key} - {f.field_type})
+                      </option>
+                    ))
+                )}
               </select>
             </div>
           ) : (
@@ -3642,12 +3825,24 @@ export default function KpiFieldsPage() {
                   return;
                 }
                 const uiSection = editSubFieldDraft.ui_section.trim();
-                const cfg: Record<string, unknown> = {};
-                if (uiSection) cfg.ui_section = uiSection;
+                const cfg: Record<string, unknown> = {
+                  ...(editSubFieldDraft.config ?? {}),
+                };
+                if (uiSection) {
+                  cfg.ui_section = uiSection;
+                } else {
+                  delete cfg.ui_section;
+                }
                 if (editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") {
                   cfg.reference_source_kpi_id = editSubFieldDraft.config.reference_source_kpi_id;
                   cfg.reference_source_field_key = editSubFieldDraft.config.reference_source_field_key;
-                  if (editSubFieldDraft.config.reference_source_sub_field_key) cfg.reference_source_sub_field_key = editSubFieldDraft.config.reference_source_sub_field_key;
+                  if (editSubFieldDraft.config.reference_source_sub_field_key) {
+                    cfg.reference_source_sub_field_key = editSubFieldDraft.config.reference_source_sub_field_key;
+                  }
+                } else {
+                  delete cfg.reference_source_kpi_id;
+                  delete cfg.reference_source_field_key;
+                  delete cfg.reference_source_sub_field_key;
                 }
                 const nextSub = {
                   ...existingSubs[modal.subIndex],

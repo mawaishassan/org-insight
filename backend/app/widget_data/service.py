@@ -565,6 +565,7 @@ async def get_entry_readonly(
             KPIEntry.kpi_id == kpi_id,
             KPIEntry.year == int(year),
             KPIEntry.period_key == pk,
+            KPIEntry.is_draft == False,
         )
         .options(selectinload(KPIEntry.field_values))
     )
@@ -591,6 +592,7 @@ async def get_entry_id_updated(
             KPIEntry.kpi_id == kpi_id,
             KPIEntry.year == int(year),
             KPIEntry.period_key == pk,
+            KPIEntry.is_draft == False,
         )
     )
     row = r.one_or_none()
@@ -643,6 +645,7 @@ async def fetch_entry_revision_and_field_values(
             KPIEntry.kpi_id == kpi_id,
             KPIEntry.year == int(year),
             KPIEntry.period_key == pk,
+            KPIEntry.is_draft == False,
         )
         .outerjoin(
             KPIFieldValue,
@@ -703,6 +706,7 @@ async def fetch_scalar_bar_chart_bundle(
                 KPIEntry.organization_id == org_id,
                 KPIEntry.year == int(year),
                 KPIEntry.period_key == pk,
+                KPIEntry.is_draft == False,
             ),
         )
         .outerjoin(
@@ -2228,6 +2232,7 @@ async def _fast_line_points(
             KPI.organization_id == int(org_id),
             KPIEntry.year.in_(years),
             KPIEntry.period_key == _period_key_norm(period_key),
+            KPIEntry.is_draft == False,
         )
         .order_by(KPIEntry.year.asc())
     )
@@ -2456,6 +2461,7 @@ async def resolve_dashboard_trend_widget_data(
                 KPI.organization_id == int(org_id),
                 KPIEntry.year.in_(years if years else [0]),
                 KPIEntry.period_key == _period_key_norm(period_key),
+                KPIEntry.is_draft == False,
             )
             .order_by(KPIEntry.year.desc())
         )

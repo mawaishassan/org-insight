@@ -14,6 +14,7 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
     Column,
+    Index,
 )
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -310,7 +311,7 @@ class User(Base):
     kpi_multi_line_row_access = relationship(
         "KpiMultiLineRowAccess", back_populates="user", lazy="selectin"
     )
-    kpi_entries = relationship("KPIEntry", back_populates="user", lazy="selectin")
+    kpi_entries = relationship("KPIEntry", back_populates="user", lazy="selectin", foreign_keys="[KPIEntry.user_id]")
     kpi_files = relationship("KpiFile", back_populates="uploaded_by", lazy="selectin")
     report_access_permissions = relationship(
         "ReportAccessPermission", back_populates="user", lazy="selectin"
@@ -848,18 +849,44 @@ class KPIEntry(Base):
     is_draft = Column(Boolean, default=True, nullable=False)
     is_locked = Column(Boolean, default=False, nullable=False)
     submitted_at = Column(DateTime, nullable=True)
+    submitted_by_user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    last_modified_by_user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    last_modified_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=True)
+    is_modified_after_submission = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     __table_args__ = (
-        UniqueConstraint(
-            "organization_id", "kpi_id", "year", "period_key", name="uq_kpi_entry_org_kpi_year_period"
+        Index(
+            "uq_kpi_entry_published",
+            "organization_id",
+            "kpi_id",
+            "year",
+            "period_key",
+            unique=True,
+            postgresql_where=(is_draft == False),
+        ),
+        Index(
+            "uq_kpi_entry_draft",
+            "organization_id",
+            "kpi_id",
+            "year",
+            "period_key",
+            "user_id",
+            unique=True,
+            postgresql_where=(is_draft == True),
         ),
     )
 
     organization = relationship("Organization", back_populates="kpi_entries")
     kpi = relationship("KPI", back_populates="entries")
-    user = relationship("User", back_populates="kpi_entries")
+    user = relationship("User", back_populates="kpi_entries", foreign_keys=[user_id])
+    submitted_by = relationship("User", foreign_keys=[submitted_by_user_id])
+    last_modified_by = relationship("User", foreign_keys=[last_modified_by_user_id])
     field_values = relationship("KPIFieldValue", back_populates="entry", lazy="selectin")
     row_access = relationship(
         "KpiMultiLineRowAccess", back_populates="entry", lazy="selectin"

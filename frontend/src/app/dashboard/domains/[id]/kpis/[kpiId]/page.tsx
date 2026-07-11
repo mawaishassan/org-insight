@@ -88,6 +88,10 @@ interface EntryRow {
   values: FieldValueResp[];
   entered_by_user_name?: string | null;
   updated_at?: string | null;
+  is_modified_after_submission?: boolean;
+  submitted_by_user_name?: string | null;
+  last_modified_at?: string | null;
+  last_modified_by_user_name?: string | null;
 }
 
 interface OverviewItem {
@@ -295,6 +299,24 @@ export default function DomainKpiDetailPage() {
   const [submitLoading, setSubmitLoading] = useState(false);
   const [exportExcelLoading, setExportExcelLoading] = useState(false);
   const [importExcelLoading, setImportExcelLoading] = useState(false);
+
+  const prevIsDraftRef = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    if (entry) {
+      const prevIsDraft = prevIsDraftRef.current;
+      if (
+        prevIsDraft === false &&
+        entry.is_draft === true &&
+        entry.is_modified_after_submission === true
+      ) {
+        toast(
+          "This KPI has been modified since its last submission. Please submit it again to publish the latest changes for organizational users, reports, and dashboards.",
+          { duration: 8000, icon: "⚠️" }
+        );
+      }
+      prevIsDraftRef.current = entry.is_draft;
+    }
+  }, [entry]);
 
   // KPI PDF Report Customization states
   const [showPdfModal, setShowPdfModal] = useState(false);
@@ -856,9 +878,15 @@ export default function DomainKpiDetailPage() {
       api<FieldDef[]>(`/entries/fields${fieldsQuery}`, { token }).catch(() => []),
       api<EntryRow[]>(`/entries${entriesQuery}`, { token }).then((list) => list).catch(() => []),
       api<OverviewItem[]>(`/entries/overview${overviewQuery}`, { token }).catch(() => []),
-      api<{ name: string }>(`/kpis/${kpiId}${kpiQuery}`, { token }).catch(() => null),
+      api<{ name: string; domain_id: number | null }>(`/kpis/${kpiId}${kpiQuery}`, { token }).catch(() => null),
     ]);
     if (loadId !== entryDetailLoadGenRef.current) return;
+
+    if (params.id === "undefined" && kpiResp?.domain_id != null) {
+      router.replace(`/dashboard/domains/${kpiResp.domain_id}/kpis/${kpiId}?${searchParams.toString()}`);
+      return;
+    }
+
     setFields(groupDependentFields(fieldsList));
     if (isEntriesRoute) {
       if (loadId !== entryDetailLoadGenRef.current) return;
@@ -1370,7 +1398,7 @@ export default function DomainKpiDetailPage() {
       }
 
       const values = fields
-        .filter((f) => f.field_type !== "formula" && (f.can_edit !== false) && isFieldVisible(f))
+        .filter((f) => f.field_type !== "formula" && f.field_type !== "multi_line_items" && (f.can_edit !== false) && isFieldVisible(f))
         .map((f) => {
           const v = fv[f.id] ?? {};
           const payload: {
@@ -1448,14 +1476,11 @@ export default function DomainKpiDetailPage() {
   };
 
   /** Persist scalar attachment `value_text` immediately (upload, KPI file pick, etc.). */
-  const persistScalarAttachmentThenSave = (fieldId: number, nextText: string, successMsg = "Saved.") => {
-    setFormValues((prev) => {
-      const merged = { ...prev, [fieldId]: { ...(prev[fieldId] ?? {}), value_text: nextText } };
-      void saveEntryWithFormValues(merged, { silent: true, keepEditing: true })
-        .then(() => toast.success(successMsg))
-        .catch(() => undefined);
-      return merged;
-    });
+  const persistScalarAttachmentThenSave = async (fieldId: number, nextText: string, successMsg = "Saved.") => {
+    const merged = { ...formValues, [fieldId]: { ...(formValues[fieldId] ?? {}), value_text: nextText } };
+    await saveEntryWithFormValues(merged, { silent: true, keepEditing: true });
+    setFormValues(merged);
+    toast.success(successMsg);
   };
 
   const handleSubmitEntry = async () => {
@@ -1601,7 +1626,7 @@ export default function DomainKpiDetailPage() {
         </div>
       )}
       {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
-      {saveError && <p className="form-error" style={{ marginBottom: "1rem" }}>{saveError}</p>}
+      {saveError && <p className="form-error" style={{ marginBottom: "1rem", whiteSpace: "pre-wrap" }}>{saveError}</p>}
 
       {periodBar}
 
@@ -1711,8 +1736,10 @@ export default function DomainKpiDetailPage() {
                 <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Status</div>
                 <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>
                   {entry ? (
-                    entry.is_draft ? (
+                    entry.submitted_at == null ? (
                       <span style={{ color: "var(--warning)" }}>● Draft</span>
+                    ) : entry.is_modified_after_submission ? (
+                      <span style={{ color: "var(--warning)" }}>● Modified after submission</span>
                     ) : (
                       <span style={{ color: "var(--success)" }}>● Submitted</span>
                     )
@@ -1738,10 +1765,18 @@ export default function DomainKpiDetailPage() {
                 </div>
               )}
               {entry?.submitted_at && (
-                <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-subtle, #f8f9fa)", borderRadius: 8 }}>
-                  <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Submitted at</div>
-                  <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>{formatDate(entry.submitted_at)}</div>
-                </div>
+                <>
+                  <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-subtle, #f8f9fa)", borderRadius: 8 }}>
+                    <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Submitted at</div>
+                    <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>{formatDate(entry.submitted_at)}</div>
+                  </div>
+                  {entry.submitted_by_user_name && (
+                    <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-subtle, #f8f9fa)", borderRadius: 8 }}>
+                      <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "0.15rem" }}>Submitted by</div>
+                      <div style={{ fontWeight: 500, fontSize: "0.9rem" }}>{entry.submitted_by_user_name}</div>
+                    </div>
+                  )}
+                </>
               )}
             </div>
             {!isEntriesRoute && (meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN") && (assignedRoles.length > 0 || isEditing) && (
@@ -1842,15 +1877,17 @@ export default function DomainKpiDetailPage() {
             <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
               {isEditing ? (
                 <>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    style={{ padding: "0.4rem 0.75rem", fontSize: "0.9rem" }}
-                    onClick={handleSave}
-                    disabled={saving}
-                  >
-                    {saving ? "Saving…" : "Save"}
-                  </button>
+                  {isDirty && (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ padding: "0.4rem 0.75rem", fontSize: "0.9rem" }}
+                      onClick={handleSave}
+                      disabled={saving}
+                    >
+                      {saving ? "Saving changes…" : "Save changes"}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="btn"
@@ -1872,18 +1909,29 @@ export default function DomainKpiDetailPage() {
                       Edit
                     </button>
                   )}
-                  {entry?.id && entry.is_draft && !isLocked && canEditKpi && (
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ padding: "0.4rem 0.75rem", fontSize: "0.9rem", background: "var(--success)", color: "var(--on-muted)" }}
-                      onClick={handleSubmitEntry}
-                      disabled={submitLoading}
-                    >
-                      {submitLoading ? "Submitting…" : "Submit entry"}
-                    </button>
+                  {entry?.id && !isLocked && canEditKpi && (
+                    entry.is_draft ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ padding: "0.4rem 0.75rem", fontSize: "0.9rem", background: "var(--success)", color: "white" }}
+                        onClick={handleSubmitEntry}
+                        disabled={submitLoading}
+                      >
+                        {submitLoading ? "Submitting…" : "Submit"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ padding: "0.4rem 0.75rem", fontSize: "0.9rem", background: "#d1fae5", color: "#065f46", cursor: "not-allowed" }}
+                        disabled
+                      >
+                        Submitted
+                      </button>
+                    )
                   )}
-                  {entry?.id && !entry.is_draft && (
+                  {entry?.id && !entry.is_draft && !canEditKpi && (
                     <span
                       style={{
                         padding: "0.4rem 0.75rem",
@@ -2591,14 +2639,31 @@ export default function DomainKpiDetailPage() {
                           <AttachmentFieldControl
                             value={valueForControl}
                             uploadSuccessAlert={false}
-                            onUploaded={(downloadUrl, filename) =>
+                            onUploaded={(downloadUrl, filename) => {
                               persistScalarAttachmentThenSave(
                                 f.id,
                                 stringifyScalarAttachment(downloadUrl, filename),
                                 "File attached and saved.",
-                              )
-                            }
-                            onClear={() => updateField(f.id, "value_text", "")}
+                              );
+                              setKpiFiles((prev) => [
+                                {
+                                  id: Number(downloadUrl.split("/").slice(-2)[0]) || Date.now(),
+                                  original_filename: filename,
+                                  size: 0,
+                                  content_type: "",
+                                  created_at: new Date().toISOString(),
+                                  download_url: downloadUrl,
+                                },
+                                ...prev,
+                              ]);
+                            }}
+                            onClear={() => {
+                              updateField(f.id, "value_text", "");
+                              const url = valueForControl ? (valueForControl as any).url : "";
+                              if (url) {
+                                setKpiFiles((prev) => prev.filter((x) => x.download_url !== url));
+                              }
+                            }}
                             token={token}
                             kpiId={kpiId}
                             entryId={entry?.id ?? null}
@@ -2621,43 +2686,11 @@ export default function DomainKpiDetailPage() {
                                     borderRadius: 6,
                                   }}
                                 />
-                                {kpiFiles.length > 0 ? (
-                                  <select
-                                    value=""
-                                    onChange={(e) => {
-                                      const fileId = Number(e.target.value || "0");
-                                      const file = kpiFiles.find((x) => x.id === fileId);
-                                      if (!file?.download_url) return;
-                                      e.target.value = "";
-                                      persistScalarAttachmentThenSave(
-                                        f.id,
-                                        stringifyScalarAttachment(
-                                          file.download_url,
-                                          file.original_filename || `File ${file.id}`
-                                        ),
-                                        "Saved.",
-                                      );
-                                    }}
-                                    style={{
-                                      padding: "0.45rem 0.6rem",
-                                      borderRadius: 6,
-                                      border: "1px solid var(--border)",
-                                      fontSize: "0.85rem",
-                                    }}
-                                  >
-                                    <option value="">Select from KPI files…</option>
-                                    {kpiFiles.map((file) => (
-                                      <option key={file.id} value={file.id}>
-                                        {file.original_filename}
-                                      </option>
-                                    ))}
-                                  </select>
-                                ) : null}
                               </div>
                             }
                           />
                           <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0 }}>
-                            Uploading or choosing a KPI file saves the attachment immediately. Paste an external URL and click Save to store it with the rest of the entry.
+                            Uploading a file saves the attachment immediately. Paste an external URL and click Save to store it with the rest of the entry.
                           </p>
                         </div>
                       );
@@ -4250,7 +4283,7 @@ export default function DomainKpiDetailPage() {
             : isEditing
               ? formRows
               : viewRows;
-          const subFields = f.sub_fields ?? [];
+          const subFields = (f.sub_fields ?? []).filter((s) => (s.config as any)?.condition_trigger_field_id == null && (s.config as any)?.condition_trigger_field_key == null);
           const setRows = (next: Record<string, unknown>[]) => updateField(f.id, "value_json", next);
           const fieldQuery = `?field_id=${f.id}&organization_id=${effectiveOrgId}`;
           const templateQuery = entry
@@ -4282,11 +4315,13 @@ export default function DomainKpiDetailPage() {
                   {isEditing && (f as FieldDef).can_edit !== false && (
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                        <button type="button" className="btn btn-primary" disabled={saving || isLocked} onClick={handleSave}>
-                          {saving ? "Saving…" : "Save"}
-                        </button>
+                        {isDirty && (
+                          <button type="button" className="btn btn-primary" disabled={saving || isLocked} onClick={handleSave}>
+                            {saving ? "Saving changes…" : "Save changes"}
+                          </button>
+                        )}
                         <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
-                          Rows are in <strong>draft</strong> until you click Save.
+                          Rows are in <strong>draft</strong> until you click Save changes.
                         </span>
                       </div>
                       {(meRole === "ORG_ADMIN" || meRole === "SUPER_ADMIN" || (addRowUsersByField[f.id] || []).some((u) => u.id === (meId ?? -1))) && (
@@ -5201,22 +5236,26 @@ export default function DomainKpiDetailPage() {
                                             compact
                                             value={cellVal}
                                             uploadSuccessAlert={false}
-                                            onUploaded={(downloadUrl, filename) => {
-                                              setFormValues((prev) => {
-                                                const curRows = Array.isArray(prev[f.id]?.value_json)
-                                                  ? ([...(prev[f.id]!.value_json as Record<string, unknown>[])])
-                                                  : [...rows];
-                                                const nextRows = [...curRows];
-                                                nextRows[rowIdx] = {
-                                                  ...(nextRows[rowIdx] as Record<string, unknown>),
-                                                  [s.key]: makeAttachmentCellValue(downloadUrl, filename),
-                                                };
-                                                const merged = { ...prev, [f.id]: { ...prev[f.id], value_json: nextRows } };
-                                                void saveEntryWithFormValues(merged, { silent: true, keepEditing: true })
-                                                  .then(() => toast.success("File attached and saved."))
-                                                  .catch(() => undefined);
-                                                return merged;
-                                              });
+                                            onUploaded={async (downloadUrl, filename) => {
+                                              const cell = makeAttachmentCellValue(downloadUrl, filename);
+                                              const curRows = Array.isArray(formValues[f.id]?.value_json)
+                                                ? [...(formValues[f.id]!.value_json as Record<string, unknown>[])]
+                                                : [...rows];
+                                              const nextRows = [...curRows];
+                                              nextRows[rowIdx] = {
+                                                ...(nextRows[rowIdx] as Record<string, unknown>),
+                                                [s.key]: cell,
+                                              };
+                                              const merged = {
+                                                ...formValues,
+                                                [f.id]: {
+                                                  ...(formValues[f.id] ?? {}),
+                                                  value_json: nextRows,
+                                                },
+                                              };
+                                              await saveEntryWithFormValues(merged, { silent: true, keepEditing: true });
+                                              setFormValues(merged);
+                                              toast.success("File attached and saved.");
                                             }}
                                             onClear={() => setCell("")}
                                             token={token}

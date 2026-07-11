@@ -62,6 +62,10 @@ class EntryResponse(BaseModel):
     is_draft: bool
     is_locked: bool
     submitted_at: datetime | None
+    is_modified_after_submission: bool = False
+    submitted_by_user_name: str | None = None
+    last_modified_at: datetime | None = None
+    last_modified_by_user_name: str | None = None
     values: list[FieldValueResponse] = []
     entered_by_user_name: str | None = None
     updated_at: datetime | None = None

@@ -1482,10 +1482,23 @@ async def generate_kpi_report_route(
         KPIEntry.organization_id == org_id,
         KPIEntry.kpi_id == kpi_id,
         KPIEntry.year == body.year,
-        KPIEntry.period_key == body.period_key
+        KPIEntry.period_key == body.period_key,
+        KPIEntry.is_draft == True,
+        KPIEntry.user_id == current_user.id
     )
     entry_res = await db.execute(entry_stmt)
     entry = entry_res.scalar_one_or_none()
+    
+    if not entry:
+        entry_stmt = select(KPIEntry).where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == body.year,
+            KPIEntry.period_key == body.period_key,
+            KPIEntry.is_draft == False
+        )
+        entry_res = await db.execute(entry_stmt)
+        entry = entry_res.scalar_one_or_none()
     if not entry:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1603,13 +1616,141 @@ async def download_kpi_report_pdf_route(
             headers={"Content-Disposition": f'attachment; filename="kpi_report_{kpi_id}_{job.year}.docx"'}
         )
 
-    # Fetch all attachments associated with the KPI
+    # Fetch all attachments associated with the KPI for this year
     files_stmt = select(KpiFile).where(
         KpiFile.kpi_id == kpi_id,
-        KpiFile.organization_id == org_id
+        KpiFile.organization_id == org_id,
+        KpiFile.year == job.year
     )
     files_res = await db.execute(files_stmt)
     kpi_files = files_res.scalars().all()
+
+    # Filter out files that are no longer referenced in the entry data (deleted/overridden)
+    from app.core.models import KPIEntry, KPIFieldValue, KpiMultiLineRow, KpiMultiLineCell
+    import re
+    import json
+
+    entry_stmt = select(KPIEntry).where(
+        KPIEntry.kpi_id == kpi_id,
+        KPIEntry.organization_id == org_id,
+        KPIEntry.year == job.year,
+        KPIEntry.period_key == job.period_key,
+        KPIEntry.is_draft == True,
+        KPIEntry.user_id == job.user_id
+    )
+    entry_res = await db.execute(entry_stmt)
+    entry = entry_res.scalar_one_or_none()
+    
+    if not entry:
+        entry_stmt = select(KPIEntry).where(
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.organization_id == org_id,
+            KPIEntry.year == job.year,
+            KPIEntry.period_key == job.period_key,
+            KPIEntry.is_draft == False
+        )
+        entry_res = await db.execute(entry_stmt)
+        entry = entry_res.scalar_one_or_none()
+
+    referenced_file_ids = set()
+    if entry:
+        from app.reports.service import is_field_visible
+        from app.entries.service import _is_subfield_satisfied_for_row
+        from app.core.models import KpiMultiLineRow, KPI, KPIField
+        from sqlalchemy.orm import selectinload
+
+        kpi_stmt = (
+            select(KPI)
+            .where(KPI.id == kpi_id)
+            .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+        )
+        kpi_res = await db.execute(kpi_stmt)
+        kpi = kpi_res.scalar_one_or_none()
+        if not kpi:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+
+        fields_by_id = {f.id: f for f in kpi.fields}
+
+        # Get scalar field values
+        scalar_vals_stmt = select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id)
+        scalar_vals_res = await db.execute(scalar_vals_stmt)
+        scalar_vals = scalar_vals_res.scalars().all()
+
+        values_by_field_id = {}
+        for val in scalar_vals:
+            if val.value_boolean is not None:
+                values_by_field_id[val.field_id] = val.value_boolean
+            elif val.value_number is not None:
+                values_by_field_id[val.field_id] = val.value_number
+            elif val.value_date is not None:
+                values_by_field_id[val.field_id] = val.value_date
+            elif val.value_json is not None:
+                values_by_field_id[val.field_id] = val.value_json
+            else:
+                values_by_field_id[val.field_id] = val.value_text
+
+        file_id_pattern = re.compile(r'/files/(\d+)(?:/download)?')
+
+        for val in scalar_vals:
+            f = fields_by_id.get(val.field_id)
+            if f and is_field_visible(f, fields_by_id, values_by_field_id):
+                if val.value_text:
+                    matches = file_id_pattern.findall(val.value_text)
+                    referenced_file_ids.update(int(m) for m in matches)
+                if val.value_json:
+                    matches = file_id_pattern.findall(json.dumps(val.value_json))
+                    referenced_file_ids.update(int(m) for m in matches)
+
+        # Get MLI rows with cells and subfields
+        mli_rows_stmt = (
+            select(KpiMultiLineRow)
+            .where(KpiMultiLineRow.entry_id == entry.id)
+            .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
+        )
+        mli_rows_res = await db.execute(mli_rows_stmt)
+        mli_rows = mli_rows_res.scalars().all()
+
+        for row in mli_rows:
+            f = fields_by_id.get(row.field_id)
+            if not f or not is_field_visible(f, fields_by_id, values_by_field_id):
+                continue
+
+            # Reconstruct row dictionary for cell visibility check
+            sub_fields = getattr(f, "sub_fields", None) or []
+            key_to_sf = {sf.key: sf for sf in sub_fields}
+            row_dict = {}
+            for cell in row.cells:
+                cell_val = None
+                if cell.value_number is not None:
+                    cell_val = cell.value_number
+                elif cell.value_boolean is not None:
+                    cell_val = cell.value_boolean
+                elif cell.value_date is not None:
+                    cell_val = cell.value_date
+                elif cell.value_json is not None:
+                    cell_val = cell.value_json
+                elif cell.value_text is not None:
+                    cell_val = cell.value_text
+
+                if cell.sub_field:
+                    row_dict[cell.sub_field.key] = cell_val
+
+            for cell in row.cells:
+                if not cell.sub_field:
+                    continue
+                if not _is_subfield_satisfied_for_row(cell.sub_field, row_dict, key_to_sf):
+                    continue
+
+                if cell.value_text:
+                    matches = file_id_pattern.findall(cell.value_text)
+                    referenced_file_ids.update(int(m) for m in matches)
+                if cell.value_json:
+                    matches = file_id_pattern.findall(json.dumps(cell.value_json))
+                    referenced_file_ids.update(int(m) for m in matches)
+
+        kpi_files = [kf for kf in kpi_files if kf.id in referenced_file_ids]
+    else:
+        kpi_files = []
 
     if kpi_files:
         import io
