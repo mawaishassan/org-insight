@@ -23,6 +23,7 @@ SUB_FIELD_TYPES = (
 class KPIFieldSubFieldCreate(BaseModel):
     """Sub-field for multi_line_items (column definition)."""
 
+    id: int | None = None
     name: str = Field(..., min_length=1, max_length=255)
     key: str = Field(..., min_length=1, max_length=100)
     field_type: FieldType = Field(...)  # single_line_text, number, date, boolean, reference, multi_reference, attachment, mixed_list

@@ -6,12 +6,13 @@ from datetime import datetime
 from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.core.database import get_db
-from app.auth.dependencies import require_org_admin, require_super_admin, get_current_user, get_data_export_auth, DataExportAuth
+from app.auth.dependencies import require_org_admin, require_super_admin, get_current_user, get_data_export_auth, DataExportAuth, security
 from app.core.models import User, KPI, KpiFile, KPIField
 from app.entries.service import user_can_view_kpi, user_can_edit_kpi, parse_upsert_match_keys_json
 from app.kpis.schemas import (
@@ -1247,10 +1248,59 @@ async def upload_kpi_files(
 async def download_kpi_file(
     kpi_id: int,
     file_id: int,
+    token: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ):
     """Stream file content. Auth: Org Admin or user with view/data_entry for this KPI."""
+    token_str = None
+    if credentials:
+        token_str = credentials.credentials
+    elif token:
+        token_str = token
+
+    if not token_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    from app.core.security import decode_token
+    from sqlalchemy.orm import noload, load_only
+    payload = decode_token(token_str)
+    if not payload or payload.get("type") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    result = await db.execute(
+        select(User)
+        .where(User.id == int(user_id))
+        .options(
+            noload("*"),
+            load_only(
+                User.id,
+                User.username,
+                User.email,
+                User.full_name,
+                User.role,
+                User.organization_id,
+                User.is_active,
+            ),
+        )
+    )
+    current_user = result.scalar_one_or_none()
+    if not current_user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if not current_user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User inactive")
+
     can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
     if not can_view:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
@@ -1258,16 +1308,61 @@ async def download_kpi_file(
         select(KpiFile).where(KpiFile.id == file_id, KpiFile.kpi_id == kpi_id)
     )
     kf = res.scalar_one_or_none()
+    
+    # Healing logic: if file_id is not found directly, search references
+    if not kf:
+        import json
+        from app.core.models import KPIFieldValue, KpiMultiLineCell, KPIEntry, KpiMultiLineRow
+        
+        # Search scalar values referencing this file_id
+        ref_pattern = f"/files/{file_id}/"
+        scalar_stmt = (
+            select(KPIFieldValue.value_text)
+            .join(KPIEntry, KPIFieldValue.entry_id == KPIEntry.id)
+            .where(KPIEntry.kpi_id == kpi_id, KPIFieldValue.value_text.like(f"%{ref_pattern}%"))
+        )
+        scalar_res = await db.execute(scalar_stmt)
+        matched_text = scalar_res.scalars().first()
+        
+        # Search MLI cells if not found in scalar
+        if not matched_text:
+            cell_stmt = (
+                select(KpiMultiLineCell.value_text)
+                .join(KpiMultiLineRow, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+                .join(KPIEntry, KpiMultiLineRow.entry_id == KPIEntry.id)
+                .where(KPIEntry.kpi_id == kpi_id, KpiMultiLineCell.value_text.like(f"%{ref_pattern}%"))
+            )
+            cell_res = await db.execute(cell_stmt)
+            matched_text = cell_res.scalars().first()
+            
+        if matched_text:
+            try:
+                data = json.loads(matched_text)
+                filename = data.get("filename")
+                if filename:
+                    # Look up by filename and pick latest
+                    file_stmt = (
+                        select(KpiFile)
+                        .where(KpiFile.kpi_id == kpi_id, KpiFile.original_filename == filename.strip())
+                        .order_by(KpiFile.id.desc())
+                    )
+                    file_res = await db.execute(file_stmt)
+                    kf = file_res.scalars().first()
+            except Exception:
+                pass
+
     if not kf:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+        
     try:
         data = await storage_get_file_stream(db, kf.organization_id, kf.stored_path)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found in storage")
+        
     return StreamingResponse(
         iter([data]),
         media_type=kf.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{kf.original_filename}"'},
+        headers={"Content-Disposition": f'inline; filename="{kf.original_filename}"'},
     )
 
 
@@ -1574,11 +1669,17 @@ async def download_kpi_report_pdf_route(
     kpi_id: int,
     job_id: str,
     organization_id: int | None = Query(None),
+    custom_name: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_org_admin),
+    current_user: User = Depends(get_current_user),
 ):
     """Download the completed KPI PDF report, packaging with attachments as a ZIP if any exist."""
     org_id = _org_id(current_user, organization_id)
+    if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
+        can_view = await user_can_view_kpi(db, current_user.id, kpi_id, org_id)
+        if not can_view:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+
     from app.core.models import KpiReportJob, KpiFile
     job_stmt = select(KpiReportJob).where(
         KpiReportJob.id == job_id,
@@ -1607,13 +1708,29 @@ async def download_kpi_report_pdf_route(
         
     from fastapi import Response
 
+    # Determine display filename based on custom name, job config, or KPI name
+    raw_custom_name = custom_name
+    from fastapi.params import Query as FastAPIQuery
+    if isinstance(raw_custom_name, FastAPIQuery):
+        raw_custom_name = None
+
+    if not raw_custom_name and job.configuration:
+        raw_custom_name = job.configuration.get("kpi_name_override") or job.configuration.get("title") or job.configuration.get("custom_name")
+
+    res = await db.execute(select(KPI).where(KPI.id == kpi_id))
+    kpi = res.scalar_one_or_none()
+    kpi_name = kpi.name if kpi else f"kpi_report_{kpi_id}"
+
+    display_name = raw_custom_name.strip() if (raw_custom_name and str(raw_custom_name).strip()) else kpi_name
+    safe_display_name = _safe_filename(display_name)
+
     is_docx = (job.stored_path or "").endswith(".docx") or (job.configuration and job.configuration.get("format") == "docx")
     
     if is_docx:
         return Response(
             content=data,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="kpi_report_{kpi_id}_{job.year}.docx"'}
+            headers={"Content-Disposition": f'attachment; filename="{safe_display_name}.docx"'}
         )
 
     # Fetch all attachments associated with the KPI for this year
@@ -1626,21 +1743,36 @@ async def download_kpi_report_pdf_route(
     kpi_files = files_res.scalars().all()
 
     # Filter out files that are no longer referenced in the entry data (deleted/overridden)
-    from app.core.models import KPIEntry, KPIFieldValue, KpiMultiLineRow, KpiMultiLineCell
+    from app.core.models import KPIEntry, KPIFieldValue, KpiMultiLineCell
     import re
     import json
 
+    # Look for draft entry of the downloading user first
     entry_stmt = select(KPIEntry).where(
         KPIEntry.kpi_id == kpi_id,
         KPIEntry.organization_id == org_id,
         KPIEntry.year == job.year,
         KPIEntry.period_key == job.period_key,
         KPIEntry.is_draft == True,
-        KPIEntry.user_id == job.user_id
+        KPIEntry.user_id == current_user.id
     )
     entry_res = await db.execute(entry_stmt)
     entry = entry_res.scalar_one_or_none()
     
+    # Fallback to job creator's draft entry
+    if not entry and job.user_id != current_user.id:
+        entry_stmt = select(KPIEntry).where(
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.organization_id == org_id,
+            KPIEntry.year == job.year,
+            KPIEntry.period_key == job.period_key,
+            KPIEntry.is_draft == True,
+            KPIEntry.user_id == job.user_id
+        )
+        entry_res = await db.execute(entry_stmt)
+        entry = entry_res.scalar_one_or_none()
+    
+    # Fallback to non-draft entry
     if not entry:
         entry_stmt = select(KPIEntry).where(
             KPIEntry.kpi_id == kpi_id,
@@ -1652,11 +1784,11 @@ async def download_kpi_report_pdf_route(
         entry_res = await db.execute(entry_stmt)
         entry = entry_res.scalar_one_or_none()
 
-    referenced_file_ids = set()
+    referenced_files = []
     if entry:
         from app.reports.service import is_field_visible
         from app.entries.service import _is_subfield_satisfied_for_row
-        from app.core.models import KpiMultiLineRow, KPI, KPIField
+        from app.core.models import KpiMultiLineRow
         from sqlalchemy.orm import selectinload
 
         kpi_stmt = (
@@ -1691,15 +1823,57 @@ async def download_kpi_report_pdf_route(
 
         file_id_pattern = re.compile(r'/files/(\d+)(?:/download)?')
 
+        def _extract_file_references(val_content):
+            if not val_content:
+                return
+            val_str = val_content if isinstance(val_content, str) else json.dumps(val_content)
+            parsed_any = False
+            try:
+                data = json.loads(val_str)
+                if isinstance(data, dict):
+                    fn = data.get("filename")
+                    url = data.get("url")
+                    fid = None
+                    if url:
+                        matches = file_id_pattern.findall(str(url))
+                        if matches:
+                            fid = int(matches[0])
+                    referenced_files.append({
+                        "id": fid,
+                        "filename": str(fn).strip() if fn else None
+                    })
+                    parsed_any = True
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            fn = item.get("filename")
+                            url = item.get("url")
+                            fid = None
+                            if url:
+                                matches = file_id_pattern.findall(str(url))
+                                if matches:
+                                    fid = int(matches[0])
+                            referenced_files.append({
+                                "id": fid,
+                                "filename": str(fn).strip() if fn else None
+                            })
+                            parsed_any = True
+            except Exception:
+                pass
+            
+            if not parsed_any:
+                matches = file_id_pattern.findall(val_str)
+                for m in matches:
+                    referenced_files.append({
+                        "id": int(m),
+                        "filename": None
+                    })
+
         for val in scalar_vals:
             f = fields_by_id.get(val.field_id)
             if f and is_field_visible(f, fields_by_id, values_by_field_id):
-                if val.value_text:
-                    matches = file_id_pattern.findall(val.value_text)
-                    referenced_file_ids.update(int(m) for m in matches)
-                if val.value_json:
-                    matches = file_id_pattern.findall(json.dumps(val.value_json))
-                    referenced_file_ids.update(int(m) for m in matches)
+                _extract_file_references(val.value_text)
+                _extract_file_references(val.value_json)
 
         # Get MLI rows with cells and subfields
         mli_rows_stmt = (
@@ -1741,14 +1915,36 @@ async def download_kpi_report_pdf_route(
                 if not _is_subfield_satisfied_for_row(cell.sub_field, row_dict, key_to_sf):
                     continue
 
-                if cell.value_text:
-                    matches = file_id_pattern.findall(cell.value_text)
-                    referenced_file_ids.update(int(m) for m in matches)
-                if cell.value_json:
-                    matches = file_id_pattern.findall(json.dumps(cell.value_json))
-                    referenced_file_ids.update(int(m) for m in matches)
+                _extract_file_references(cell.value_text)
+                _extract_file_references(cell.value_json)
 
-        kpi_files = [kf for kf in kpi_files if kf.id in referenced_file_ids]
+        # Resolve target files to build final kpi_files list
+        resolved_files = {}
+        kpi_files_by_id = {kf.id: kf for kf in kpi_files}
+        
+        # Group by filename to pick the latest file ID in case of duplicates
+        filename_to_latest_file = {}
+        for kf in kpi_files:
+            if kf.original_filename:
+                fn_key = kf.original_filename.strip().lower()
+                if fn_key not in filename_to_latest_file or kf.id > filename_to_latest_file[fn_key].id:
+                    filename_to_latest_file[fn_key] = kf
+
+        for ref in referenced_files:
+            fid = ref.get("id")
+            filename = ref.get("filename")
+            
+            # 1. Match by ID first if it exists in the database files
+            if fid and fid in kpi_files_by_id:
+                resolved_files[fid] = kpi_files_by_id[fid]
+            # 2. Fallback to latest filename matching if ID is not found (migrated data)
+            elif filename:
+                fn_key = filename.strip().lower()
+                latest_kf = filename_to_latest_file.get(fn_key)
+                if latest_kf:
+                    resolved_files[latest_kf.id] = latest_kf
+
+        kpi_files = list(resolved_files.values())
     else:
         kpi_files = []
 
@@ -1760,7 +1956,7 @@ async def download_kpi_report_pdf_route(
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             # Add the PDF report
-            pdf_filename = f"kpi_report_{kpi_id}_{job.year}.pdf"
+            pdf_filename = f"{safe_display_name}.pdf"
             zip_file.writestr(pdf_filename, data)
             
             # Add each attachment file
@@ -1787,11 +1983,11 @@ async def download_kpi_report_pdf_route(
         return Response(
             content=zip_buffer.getvalue(),
             media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="kpi_report_{kpi_id}_{job.year}.zip"'}
+            headers={"Content-Disposition": f'attachment; filename="{safe_display_name}.zip"'}
         )
         
     return Response(
         content=data,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="kpi_report_{kpi_id}_{job.year}.pdf"'}
+        headers={"Content-Disposition": f'attachment; filename="{safe_display_name}.pdf"'}
     )

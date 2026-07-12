@@ -300,6 +300,7 @@ export default function DomainKpiDetailPage() {
   const [submitLoading, setSubmitLoading] = useState(false);
   const [exportExcelLoading, setExportExcelLoading] = useState(false);
   const [importExcelLoading, setImportExcelLoading] = useState(false);
+  const [reportBtnState, setReportBtnState] = useState<"idle" | "hover" | "active">("idle");
 
   const prevIsDraftRef = useRef<boolean | undefined>(undefined);
   useEffect(() => {
@@ -1954,138 +1955,67 @@ export default function DomainKpiDetailPage() {
                 {meRole === "ORG_ADMIN" && (
                   <button
                     type="button"
+                    onMouseEnter={() => setReportBtnState("hover")}
+                    onMouseLeave={() => setReportBtnState("idle")}
+                    onMouseDown={() => setReportBtnState("active")}
+                    onMouseUp={() => setReportBtnState("hover")}
                     style={{
-                      padding: "0.35rem 0.65rem",
-                      fontSize: "0.85rem",
-                      border: "1px solid var(--border)",
-                      borderRadius: 6,
-                      background: "var(--surface)",
+                      padding: "0.5rem 1rem",
+                      fontSize: "0.9rem",
+                      fontWeight: 600,
+                      border: "none",
+                      borderRadius: 8,
+                      background: reportBtnState === "active"
+                        ? "linear-gradient(135deg, #1d4ed8, #1e40af)"
+                        : reportBtnState === "hover"
+                        ? "linear-gradient(135deg, #3b82f6, #2563eb)"
+                        : "linear-gradient(135deg, #2563eb, #1d4ed8)",
+                      color: "#ffffff",
                       cursor: "pointer",
                       display: "inline-flex",
                       alignItems: "center",
-                      gap: "0.35rem",
+                      gap: "0.5rem",
+                      transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+                      boxShadow: reportBtnState === "hover"
+                        ? "0 4px 12px rgba(37, 99, 235, 0.35)"
+                        : "0 2px 4px rgba(37, 99, 235, 0.2)",
+                      transform: reportBtnState === "active" 
+                        ? "translateY(1px) scale(0.98)" 
+                        : reportBtnState === "hover" 
+                        ? "translateY(-1px)" 
+                        : "translateY(0)",
                     }}
-                    onClick={() => router.push(`/dashboard/domains/${params.id}/kpis/${kpiId}/report-builder?organization_id=${effectiveOrgId}`)}
+                    onClick={() => {
+                      const backParams = new URLSearchParams();
+                      if (effectiveOrgId) backParams.set("organization_id", String(effectiveOrgId));
+                      if (year) backParams.set("year", String(year));
+                      if (periodKeyFromUrl) backParams.set("period_key", periodKeyFromUrl);
+                      if (isEntriesRoute) backParams.set("from_entries", "true");
+                      router.push(`/dashboard/domains/${params.id || "org"}/kpis/${kpiId}/report-builder?${backParams.toString()}`);
+                    }}
                   >
-                    <span style={{ fontSize: "1.1rem" }}>📋</span>
-                    Generate PDF Report
+                    <svg 
+                      xmlns="http://www.w3.org/2000/svg" 
+                      width="16" 
+                      height="16" 
+                      viewBox="0 0 24 24" 
+                      fill="none" 
+                      stroke="currentColor" 
+                      strokeWidth="2.5" 
+                      strokeLinecap="round" 
+                      strokeLinejoin="round"
+                      style={{ transition: "transform 0.2s" }}
+                    >
+                      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>
+                      <path d="M14 2v4a2 2 0 0 0 2 2h4"/>
+                      <path d="M10 9H8"/>
+                      <path d="M16 13H8"/>
+                      <path d="M16 17H8"/>
+                    </svg>
+                    Report Generator
                   </button>
                 )}
-                <span style={{ fontSize: "0.8rem", color: "var(--muted)", marginRight: "0.25rem" }}>Excel:</span>
-                <button
-                  type="button"
-                  style={{
-                    padding: "0.35rem 0.65rem",
-                    fontSize: "0.85rem",
-                    border: "1px solid var(--border)",
-                    borderRadius: 6,
-                    background: "var(--surface)",
-                    cursor: exportExcelLoading ? "not-allowed" : "pointer",
-                    opacity: exportExcelLoading ? 0.7 : 1,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "0.35rem",
-                  }}
-                  disabled={exportExcelLoading}
-                  onClick={async () => {
-                    if (!token) return;
-                    setExportExcelLoading(true);
-                    try {
-                      const url = getApiUrl(`/entries/export-excel?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId, ...(periodKeyFromUrl ? { period_key: periodKeyFromUrl } : {}) })}`);
-                      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-                      if (!res.ok) throw new Error("Export failed");
-                      const blob = await res.blob();
-                      const disp = res.headers.get("Content-Disposition");
-                      const match = disp?.match(/filename="?([^";]+)"?/);
-                      const name = match ? match[1] : `KPI_${kpiId}_${year}.xlsx`;
-                      const a = document.createElement("a");
-                      a.href = URL.createObjectURL(blob);
-                      a.download = name;
-                      a.click();
-                      URL.revokeObjectURL(a.href);
-                      toast.success("Export successful");
-                    } catch {
-                      setError("Download failed");
-                      toast.error("Download failed");
-                    } finally {
-                      setExportExcelLoading(false);
-                    }
-                  }}
-                >
-                  <span style={{ fontSize: "1rem" }}>↓</span>
-                  {exportExcelLoading ? "Preparing…" : "Download"}
-                </button>
-                {canEditKpi && !isLocked && (
-                  <label
-                    style={{
-                      padding: "0.35rem 0.65rem",
-                      fontSize: "0.85rem",
-                      border: "1px solid var(--border)",
-                      borderRadius: 6,
-                      background: "var(--surface)",
-                      cursor: importExcelLoading ? "not-allowed" : "pointer",
-                      opacity: importExcelLoading ? 0.7 : 1,
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "0.35rem",
-                    }}
-                  >
-                    <span style={{ fontSize: "1rem" }}>↑</span>
-                    {importExcelLoading ? "Uploading…" : "Upload"}
-                    <input
-                      type="file"
-                      accept=".xlsx"
-                      style={{ display: "none" }}
-                      disabled={importExcelLoading}
-                      onChange={async (e) => {
-                        const file = e.target.files?.[0];
-                        e.target.value = "";
-                        if (!file || !token) return;
-                        const periodPhrase = timeDimensionLabel != null
-                          ? ` You are about to add data for the period: ${timeDimensionLabel} (${year}).`
-                          : "";
-                        const confirmed = window.confirm(
-                          `This will replace all existing data for this KPI entry with the data from the uploaded file.${periodPhrase}\n\nAre you sure you want to continue?`
-                        );
-                        if (!confirmed) return;
-                        setImportExcelLoading(true);
-                        setError(null);
-                        try {
-                          const form = new FormData();
-                          form.append("file", file);
-                          const url = getApiUrl(`/entries/import-excel?${qs({ kpi_id: kpiId, year, organization_id: effectiveOrgId, ...(periodKeyFromUrl ? { period_key: periodKeyFromUrl } : {}) })}`);
-                          const res = await fetch(url, {
-                            method: "POST",
-                            headers: { Authorization: `Bearer ${token}` },
-                            body: form,
-                          });
-                          if (!res.ok) {
-                            const err = await res.json().catch(() => ({}));
-                            const validationErrors = Array.isArray(err.errors) ? err.errors as Array<{ field_key?: string; sub_field_key?: string; row_index?: number; value?: string; message?: string }> : [];
-                            if (validationErrors.length > 0) {
-                              const lines = validationErrors.map((e) => {
-                                const loc = e.sub_field_key != null ? `Field "${e.field_key}", row ${(e.row_index ?? 0) + 1}, "${e.sub_field_key}"` : `Field "${e.field_key}"`;
-                                return `${loc}: value "${e.value ?? ""}" ${e.message ?? "not allowed"}`;
-                              });
-                              const msg = `Validation failed:\n${lines.join("\n")}`;
-                              setError(msg);
-                              toast.error("Validation failed – see message below");
-                              return;
-                            }
-                            throw new Error(err.detail ?? res.statusText);
-                          }
-                          await loadData(entryDetailLoadGenRef.current);
-                          toast.success("Excel imported successfully");
-                        } catch (err) {
-                          setError(err instanceof Error ? err.message : "Upload failed");
-                          toast.error(err instanceof Error ? err.message : "Upload failed");
-                        } finally {
-                          setImportExcelLoading(false);
-                        }
-                      }}
-                    />
-                  </label>
-                )}
+
                 </div>
               </div>
             )}
@@ -5117,7 +5047,7 @@ export default function DomainKpiDetailPage() {
                           <tr key={rowIdx}>
                             {subFields.map((s) => (
                               <td key={s.id} style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                {isEditing && multiFieldCanEdit && (s as SubFieldDef).can_edit !== false ? (
+                                {isEditing && multiFieldCanEdit && (s as SubFieldDef).can_edit !== false && s.field_type !== "formula" ? (
                                   s.field_type === "number" ? (
                                     (() => {
                                       const cellVal = row[s.key];

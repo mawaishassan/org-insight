@@ -853,7 +853,8 @@ def _parse_multi_items_xlsx(content: bytes, field: KPIField) -> list[dict]:
                     continue
                 empty = False
                 sf = allowed[key]
-                if sf.field_type == FieldType.attachment:
+                sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
+                if sf_type_s in ("attachment", "formula"):
                     continue
                 elif sf.field_type == FieldType.number:
                     try:
@@ -2193,6 +2194,9 @@ async def add_multi_items_row(
     for k, v in normalized_row.items():
         sub = key_to_sub.get(k)
         if not sub:
+            continue
+        sub_type_s = sub.field_type.value if hasattr(sub.field_type, "value") else str(sub.field_type)
+        if sub_type_s == "formula":
             continue
         _add_cell(sub, v)
 

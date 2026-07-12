@@ -15,6 +15,8 @@ from app.core.models import (
     KpiFieldAccessByRole,
     KpiSection,
     FieldType,
+    KpiMultiLineCell,
+    KpiMultiLineRow,
 )
 from app.fields.schemas import KPIFieldCreate, KPIFieldUpdate, KPIFieldOptionCreate
 
@@ -212,7 +214,7 @@ def is_value_compatible(value_obj: KPIFieldValue, new_type: FieldType) -> bool:
         if value_obj.value_number is not None:
             return True
         if value_obj.value_boolean is not None:
-            return True
+            return False
         if value_obj.value_text is not None:
             try:
                 float(value_obj.value_text.strip())
@@ -404,33 +406,171 @@ async def update_field(
             from app.formula_engine.circular_validation import validate_mli_circular_dependencies
             validate_mli_circular_dependencies(data.sub_fields)
 
-        # Defensive cleanup: some DBs/environments may not cascade sub_field FK rows
-        # in access tables consistently when sub-fields are replaced.
-        await db.execute(
-            delete(KpiFieldAccess).where(
-                KpiFieldAccess.field_id == field_id,
-                KpiFieldAccess.sub_field_id.is_not(None),
+        # 1. Map incoming subfields to existing ones
+        existing_sfs = {sf.id: sf for sf in (field.sub_fields or [])}
+        existing_sfs_by_key = {sf.key: sf for sf in (field.sub_fields or [])}
+        
+        incoming_matched_ids = set()
+        incoming_matched_keys = set()
+        
+        actions = [] # list of (sub_field_data, existing_sf_or_None)
+        
+        # First pass: match by ID
+        for sub in data.sub_fields:
+            sub_id = getattr(sub, "id", None)
+            matched_sf = None
+            if sub_id is not None and sub_id in existing_sfs:
+                matched_sf = existing_sfs[sub_id]
+                incoming_matched_ids.add(sub_id)
+                incoming_matched_keys.add(matched_sf.key)
+            actions.append((sub, matched_sf))
+            
+        # Second pass: match unmatched by key
+        for idx, (sub, matched_sf) in enumerate(actions):
+            if matched_sf is None:
+                sub_key = getattr(sub, "key", None)
+                if sub_key and sub_key in existing_sfs_by_key:
+                    candidate = existing_sfs_by_key[sub_key]
+                    if candidate.id not in incoming_matched_ids:
+                        actions[idx] = (sub, candidate)
+                        incoming_matched_ids.add(candidate.id)
+                        incoming_matched_keys.add(sub_key)
+
+        # 2. Delete subfields that are not in incoming subfields list
+        deleted_sfs = [sf for sf in (field.sub_fields or []) if sf.id not in incoming_matched_ids]
+        if deleted_sfs:
+            deleted_sf_ids = [sf.id for sf in deleted_sfs]
+            # Clean up access rows first
+            await db.execute(
+                delete(KpiFieldAccess).where(
+                    KpiFieldAccess.field_id == field_id,
+                    KpiFieldAccess.sub_field_id.in_(deleted_sf_ids)
+                )
             )
-        )
-        await db.execute(
-            delete(KpiFieldAccessByRole).where(
-                KpiFieldAccessByRole.field_id == field_id,
-                KpiFieldAccessByRole.sub_field_id.is_not(None),
+            await db.execute(
+                delete(KpiFieldAccessByRole).where(
+                    KpiFieldAccessByRole.field_id == field_id,
+                    KpiFieldAccessByRole.sub_field_id.in_(deleted_sf_ids)
+                )
             )
-        )
-        await db.execute(delete(KPIFieldSubField).where(KPIFieldSubField.field_id == field_id))
-        for i, sub in enumerate(data.sub_fields):
-            db.add(
-                KPIFieldSubField(
+            for sf in deleted_sfs:
+                if sf in field.sub_fields:
+                    field.sub_fields.remove(sf)
+                await db.delete(sf)
+
+        # 3. Create or update subfields
+        new_subfields_to_init = []
+        for i, (sub, sf) in enumerate(actions):
+            sub_sort_order = sub.sort_order if getattr(sub, "sort_order", None) is not None else i
+            sub_config = getattr(sub, "config", None)
+            
+            if sf is not None:
+                # Update existing subfield
+                prev_sub_type = sf.field_type
+                sf.name = sub.name
+                sf.key = sub.key
+                sf.field_type = sub.field_type
+                sf.is_required = sub.is_required
+                sf.sort_order = sub_sort_order
+                sf.config = sub_config
+                
+                # Check for field type change and migrate values
+                if sub.field_type != prev_sub_type:
+                    # Load all cells for this subfield
+                    cell_res = await db.execute(
+                        select(KpiMultiLineCell).where(KpiMultiLineCell.sub_field_id == sf.id)
+                    )
+                    cells = list(cell_res.scalars().all())
+                    for cell in cells:
+                        if is_value_compatible(cell, sub.field_type):
+                            migrate_value(cell, sub.field_type)
+                        else:
+                            cell.value_text = None
+                            cell.value_number = None
+                            cell.value_boolean = None
+                            cell.value_date = None
+                            cell.value_json = None
+                db.add(sf)
+            else:
+                # Create new subfield
+                new_sf = KPIFieldSubField(
                     field_id=field_id,
                     name=sub.name,
                     key=sub.key,
                     field_type=sub.field_type,
                     is_required=sub.is_required,
-                    sort_order=sub.sort_order if sub.sort_order else i,
-                    config=getattr(sub, "config", None),
+                    sort_order=sub_sort_order,
+                    config=sub_config,
                 )
+                db.add(new_sf)
+                if field.sub_fields is None:
+                    field.sub_fields = []
+                field.sub_fields.append(new_sf)
+                new_subfields_to_init.append(new_sf)
+                
+        await db.flush()
+
+        # 4. Initialize cell records for new subfields for all existing rows
+        if new_subfields_to_init:
+            # Find all existing rows for this field
+            rows_res = await db.execute(
+                select(KpiMultiLineRow.id).where(KpiMultiLineRow.field_id == field.id)
             )
+            row_ids = [r[0] for r in rows_res.all()]
+            for new_sf in new_subfields_to_init:
+                for r_id in row_ids:
+                    cell = KpiMultiLineCell(row_id=r_id, sub_field=new_sf)
+                    # If default value exists, populate it
+                    default_val = None
+                    if new_sf.config and isinstance(new_sf.config, dict):
+                        default_val = new_sf.config.get("default_value") or new_sf.config.get("default")
+                    if default_val is not None:
+                        ft_s = new_sf.field_type.value if hasattr(new_sf.field_type, "value") else str(new_sf.field_type)
+                        if ft_s == "number":
+                            try:
+                                cell.value_number = float(default_val)
+                            except:
+                                cell.value_text = str(default_val)
+                        elif ft_s == "boolean":
+                            if isinstance(default_val, bool):
+                                cell.value_boolean = default_val
+                            else:
+                                s = str(default_val).strip().lower()
+                                cell.value_boolean = s in ("true", "yes", "1")
+                        elif ft_s == "date":
+                            from datetime import datetime
+                            try:
+                                cell.value_date = datetime.fromisoformat(str(default_val).replace("Z", "+00:00"))
+                            except:
+                                cell.value_text = str(default_val)
+                        elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
+                            if isinstance(default_val, (dict, list)):
+                                cell.value_json = default_val
+                            else:
+                                cell.value_text = str(default_val)
+                        else:
+                            cell.value_text = str(default_val)
+                    db.add(cell)
+            await db.flush()
+
+        # Expire only the specific KpiMultiLineRow instances to force SQLAlchemy to reload their cells collection
+        rows_to_expire_res = await db.execute(
+            select(KpiMultiLineRow).where(KpiMultiLineRow.field_id == field_id)
+        )
+        for r in rows_to_expire_res.scalars().all():
+            db.expire(r)
+
+        # 5. Recompute formula subfields for all entries containing this MLI field
+        entry_ids_res = await db.execute(
+            select(KpiMultiLineRow.entry_id)
+            .where(KpiMultiLineRow.field_id == field_id)
+            .distinct()
+        )
+        entry_ids = [r[0] for r in entry_ids_res.all()]
+        if entry_ids:
+            from app.entries.service import recompute_mli_formula_subfields
+            for e_id in entry_ids:
+                await recompute_mli_formula_subfields(db, entry_id=e_id, org_id=org_id, field_id=field.id)
     await db.flush()
     return field
 

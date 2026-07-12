@@ -1236,6 +1236,14 @@ async def user_can_edit_field(
     user = user_res.scalar_one_or_none()
     if not user:
         return False
+    if sub_field_id is not None:
+        from app.core.models import KPIFieldSubField
+        sf_res = await db.execute(select(KPIFieldSubField).where(KPIFieldSubField.id == sub_field_id))
+        sf = sf_res.scalar_one_or_none()
+        if sf:
+            sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
+            if sf_type_s == "formula":
+                return False
     if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
         return True
     access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
@@ -1688,29 +1696,29 @@ async def save_entry_values(
         if f.field_type == FieldType.multi_line_items and isinstance(v.value_json, list):
             multi_line_items_data[f.key] = v.value_json
 
-            if access_map is None:
-                # No field-level ACL (e.g. org/super admin): accept full value.
-                await replace_multi_line_items_rows(db, entry_id=entry_id, field=f, rows=v.value_json)
-            else:
-                # Merge by column: only update sub_fields the user can edit; keep the rest from existing relational rows.
-                existing_list = await load_multi_line_items_rows(db, entry_id=entry_id, field=f)
-                merged_rows: list[dict] = []
-                sub_fields = getattr(f, "sub_fields", None) or []
-                for i, inc_row in enumerate(v.value_json):
-                    inc_row = inc_row if isinstance(inc_row, dict) else {}
-                    exist_row = existing_list[i] if i < len(existing_list) and isinstance(existing_list[i], dict) else {}
-                    new_row: dict = {}
-                    for sub in sub_fields:
-                        sub_id = getattr(sub, "id", None)
-                        sub_key = getattr(sub, "key", None)
-                        if sub_key is None:
-                            continue
-                        if _user_can_edit_sub_field(access_map, f.id, sub_id):
-                            new_row[sub_key] = inc_row.get(sub_key)
-                        else:
-                            new_row[sub_key] = exist_row.get(sub_key)
-                    merged_rows.append(new_row)
-                await replace_multi_line_items_rows(db, entry_id=entry_id, field=f, rows=merged_rows)
+            existing_list = await load_multi_line_items_rows(db, entry_id=entry_id, field=f)
+            merged_rows: list[dict] = []
+            sub_fields = getattr(f, "sub_fields", None) or []
+            for i, inc_row in enumerate(v.value_json):
+                inc_row = inc_row if isinstance(inc_row, dict) else {}
+                exist_row = existing_list[i] if i < len(existing_list) and isinstance(existing_list[i], dict) else {}
+                new_row: dict = {}
+                for sub in sub_fields:
+                    sub_id = getattr(sub, "id", None)
+                    sub_key = getattr(sub, "key", None)
+                    if sub_key is None:
+                        continue
+                    sub_type_s = sub.field_type.value if hasattr(sub.field_type, "value") else str(sub.field_type)
+                    if sub_type_s == "formula":
+                        new_row[sub_key] = exist_row.get(sub_key)
+                    elif access_map is None:
+                        new_row[sub_key] = inc_row.get(sub_key)
+                    elif _user_can_edit_sub_field(access_map, f.id, sub_id):
+                        new_row[sub_key] = inc_row.get(sub_key)
+                    else:
+                        new_row[sub_key] = exist_row.get(sub_key)
+                merged_rows.append(new_row)
+            await replace_multi_line_items_rows(db, entry_id=entry_id, field=f, rows=merged_rows)
             # Do not store the potentially large multi-line JSON array in kpi_field_values.
             fv.value_json = None
         else:
@@ -2885,7 +2893,6 @@ async def recompute_mli_formula_subfields(
                 if sf:
                     working_row[sf.key] = _ml_cell_raw(cell)
                     cells_by_sub_id[sf.id] = cell
-
             # Compute formula subfields in topological order
             for sf in sorted_subs:
                 sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)

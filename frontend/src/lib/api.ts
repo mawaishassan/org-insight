@@ -119,26 +119,8 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
   const url = inner ? getApiUrl(inner) : null;
 
   if (url) {
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const d = (err as { detail?: unknown }).detail;
-      throw new Error(typeof d === "string" ? d : `Download failed (${res.status})`);
-    }
-    const blob = await res.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    const filename = storedFileRefToFilename(ref);
-    if (filename) {
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    } else {
-      window.open(blobUrl, "_blank", "noopener,noreferrer");
-    }
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    const previewUrl = `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+    window.open(previewUrl, "_blank", "noopener,noreferrer");
     return;
   }
 
@@ -148,28 +130,9 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
   }
 
   const rel = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  const res = await fetch(`${typeof window !== "undefined" ? window.location.origin : ""}${rel}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const d = (err as { detail?: unknown }).detail;
-    throw new Error(typeof d === "string" ? d : `Download failed (${res.status})`);
-  }
-  const blob = await res.blob();
-  const blobUrl = URL.createObjectURL(blob);
-  const filename = storedFileRefToFilename(ref);
-  if (filename) {
-    const a = document.createElement("a");
-    a.href = blobUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  } else {
-    window.open(blobUrl, "_blank", "noopener,noreferrer");
-  }
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const previewUrl = `${origin}${rel}${rel.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+  window.open(previewUrl, "_blank", "noopener,noreferrer");
 }
 
 export async function api<T>(

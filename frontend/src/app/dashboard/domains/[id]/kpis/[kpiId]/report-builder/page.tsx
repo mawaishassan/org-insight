@@ -68,10 +68,21 @@ export default function KpiReportBuilder() {
   const domainId = params.id;
   const kpiId = Number(params.kpiId);
   const organizationIdFromUrl = searchParams.get("organization_id");
+  const yearParam = searchParams.get("year");
+  const year = yearParam ? Number(yearParam) : new Date().getFullYear();
+  const periodKeyFromUrl = searchParams.get("period_key") ?? "";
+  const fromEntries = searchParams.get("from_entries") === "true";
 
-  const backUrl = organizationIdFromUrl
-    ? `/dashboard/domains/${domainId}/kpis/${kpiId}?organization_id=${organizationIdFromUrl}`
-    : `/dashboard/domains/${domainId}/kpis/${kpiId}`;
+  const backUrl = (() => {
+    const backParams = new URLSearchParams();
+    if (organizationIdFromUrl) backParams.set("organization_id", organizationIdFromUrl);
+    if (yearParam && !fromEntries) backParams.set("year", yearParam);
+    if (periodKeyFromUrl) backParams.set("period_key", periodKeyFromUrl);
+    const queryStr = backParams.toString() ? `?${backParams.toString()}` : "";
+    return fromEntries
+      ? `/dashboard/entries/${kpiId}/${year}${queryStr}`
+      : `/dashboard/domains/${domainId}/kpis/${kpiId}${queryStr}`;
+  })();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -260,8 +271,8 @@ export default function KpiReportBuilder() {
           Authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
-          year: new Date().getFullYear(), // Default current year
-          period_key: "",
+          year: year,
+          period_key: periodKeyFromUrl || "",
           title: pdfTitle,
           description: pdfDescription,
           scalar_fields: scalarFieldOverrides,

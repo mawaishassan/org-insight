@@ -75,7 +75,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const selectedOrgId = orgIdFromPath ?? (orgIdFromQuery ? Number(orgIdFromQuery) : null) ?? orgIdFromBreadcrumb;
 
   const kpiFieldsMatch = pathname.match(/^\/dashboard\/kpis\/(\d+)\/fields\/?$/);
-  const reportBuilderMatch = pathname.match(/^\/dashboard\/domains\/(\d+)\/kpis\/(\d+)\/report-builder\/?$/);
+  const reportBuilderMatch = pathname.match(/^\/dashboard\/domains\/([^/]+)\/kpis\/(\d+)\/report-builder\/?$/);
   const domainDetailMatch = pathname.match(/^\/dashboard\/domains\/(\d+)\/?$/);
   const reportDetailMatch = pathname.match(/^\/dashboard\/reports\/(\d+)(?:\/|$)/);
   const dashboardDetailMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)(?:\/|$)/);
@@ -180,21 +180,33 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const oid = orgIdFromQuery ? Number(orgIdFromQuery) : null;
 
     if (reportBuilderMatch && oid) {
-      const domainId = Number(reportBuilderMatch[1]);
+      const domainIdStr = reportBuilderMatch[1];
       const kpiId = Number(reportBuilderMatch[2]);
+      const fromEntries = searchParams.get("from_entries") === "true";
+      const targetYear = searchParams.get("year") ?? String(currentYear);
+      const periodKey = searchParams.get("period_key") ?? "";
+
       Promise.all([
         api<{ id: number; name: string }>(`/organizations/${oid}`, { token }),
         api<{ id: number; name: string }>(`/kpis/${kpiId}?${qs({ organization_id: oid })}`, { token }),
       ])
         .then(([org, kpi]) => {
+          const segments = fromEntries
+            ? [
+                { label: targetYear, href: `/dashboard/entries?${qs({ year: targetYear, organization_id: oid })}` },
+                { label: kpi.name, href: `/dashboard/entries/${kpiId}/${targetYear}${oid ? `?organization_id=${oid}` : ""}` },
+                { label: "PDF Report Builder", href: pathname + `?${searchParams.toString()}` },
+              ]
+            : [
+                { label: "KPIs", href: `/dashboard/organizations/${oid}?tab=kpis` },
+                { label: kpi.name, href: `/dashboard/domains/${domainIdStr}/kpis/${kpiId}?${qs({ organization_id: oid, year: targetYear, period_key: periodKey })}` },
+                { label: "PDF Report Builder", href: pathname + `?${searchParams.toString()}` },
+              ];
+
           applyBreadcrumbTail({
             orgId: oid,
-            orgName: org.name,
-            segments: [
-              { label: "KPIs", href: `/dashboard/organizations/${oid}?tab=kpis` },
-              { label: kpi.name, href: `/dashboard/domains/${domainId}/kpis/${kpiId}?organization_id=${oid}` },
-              { label: "PDF Report Builder", href: pathname + `?organization_id=${oid}` },
-            ],
+            orgName: fromEntries ? null : org.name,
+            segments,
           });
         })
         .catch(() => applyBreadcrumbTail(null));
@@ -499,12 +511,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   /** Organization "home" = overview (cards) at /dashboard/organizations/[id] with no tab. */
   const orgHomeHref = (id: number) => `/dashboard/organizations/${id}`;
 
-  const isReportBuilder = pathname.includes("/report-builder");
   const breadcrumbs: { label: string; href: string }[] = [];
   if (breadcrumbTail) {
-    if (!isReportBuilder) {
-      breadcrumbs.push({ label: "Home", href: isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries" });
-    }
+    breadcrumbs.push({ label: "Home", href: isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries" });
     if (breadcrumbTail.orgId > 0 && breadcrumbTail.orgName) {
       breadcrumbs.push({
         label: breadcrumbTail.orgName,
@@ -513,9 +522,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
     breadcrumbTail.segments.forEach((s) => breadcrumbs.push(s));
   } else if (isSuperAdmin) {
-    if (!isReportBuilder) {
-      breadcrumbs.push({ label: "Home", href: "/dashboard/organizations" });
-    }
+    breadcrumbs.push({ label: "Home", href: "/dashboard/organizations" });
     if (selectedOrgId) {
       breadcrumbs.push({
         label: selectedOrgName ?? `Organization #${selectedOrgId}`,
@@ -532,9 +539,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       }
     }
   } else {
-    if (!isReportBuilder) {
-      breadcrumbs.push({ label: "Home", href: "/dashboard/entries" });
-    }
+    breadcrumbs.push({ label: "Home", href: "/dashboard/entries" });
     if (pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users") {
       breadcrumbs.push({ label: "Users", href: "/dashboard/users" });
     }
