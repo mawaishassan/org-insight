@@ -204,37 +204,78 @@ function groupDependentFields(originalFields: FieldDef[]): FieldDef[] {
   const visited = new Set<number>();
 
   const dependentsMap = new Map<number, FieldDef[]>();
+
+  // Helper to safely record parent -> child relation
+  const addRelation = (parentNumId: number, childField: FieldDef) => {
+    if (!dependentsMap.has(parentNumId)) {
+      dependentsMap.set(parentNumId, []);
+    }
+    const currentDeps = dependentsMap.get(parentNumId)!;
+    if (!currentDeps.some((x) => Number(x.id) === Number(childField.id))) {
+      currentDeps.push(childField);
+    }
+  };
+
   for (const f of originalFields) {
+    const fid = Number(f.id);
+
+    // 1. Check legacy rule (child points to parent trigger field)
     const triggerId = f.config?.condition_trigger_field_id;
     if (triggerId != null) {
-      if (!dependentsMap.has(triggerId)) {
-        dependentsMap.set(triggerId, []);
+      const numTriggerId = Number(triggerId);
+      if (!Number.isNaN(numTriggerId)) {
+        addRelation(numTriggerId, f);
       }
-      dependentsMap.get(triggerId)!.push(f);
+    }
+
+    // 2. Check new rules (parent trigger field config targets child fields)
+    const fConfig = f.config as any;
+    if (fConfig && Array.isArray(fConfig.conditional_rules)) {
+      for (const r of fConfig.conditional_rules) {
+        const depFields = r.dependent_fields || r.dependent_field_ids || [];
+        for (const dep of depFields) {
+          const target = originalFields.find(
+            (x) => String(x.id) === String(dep) || String(x.key) === String(dep)
+          );
+          if (target) {
+            addRelation(fid, target);
+          }
+        }
+      }
+    }
+  }
+
+  // A field is a root (not a dependent child) if it does not appear in dependentsMap values
+  const childIds = new Set<number>();
+  for (const [, children] of dependentsMap.entries()) {
+    for (const child of children) {
+      childIds.add(Number(child.id));
     }
   }
 
   function insertField(f: FieldDef) {
-    if (visited.has(f.id)) return;
-    visited.add(f.id);
+    const numId = Number(f.id);
+    if (visited.has(numId)) return;
+    visited.add(numId);
     result.push(f);
 
-    const dependents = dependentsMap.get(f.id) || [];
+    const dependents = dependentsMap.get(numId) || [];
     for (const dep of dependents) {
       insertField(dep);
     }
   }
 
+  // Insert root fields (fields without parents) first
   for (const f of originalFields) {
-    const triggerId = f.config?.condition_trigger_field_id;
-    const triggerExists = triggerId != null && originalFields.some(x => x.id === triggerId);
-    if (!triggerExists) {
+    const numId = Number(f.id);
+    if (!childIds.has(numId)) {
       insertField(f);
     }
   }
 
+  // Fallback for any leftover fields (e.g. self-referential rules or cycles)
   for (const f of originalFields) {
-    if (!visited.has(f.id)) {
+    if (!visited.has(Number(f.id))) {
       insertField(f);
     }
   }
@@ -2231,6 +2272,7 @@ export default function DomainKpiDetailPage() {
           </button>
           {multiLineFields
             .filter((f) => (f.sub_fields?.length ?? 0) > 0)
+            .filter(isFieldVisible)
             .map((f) => (
             <button
               key={f.id}
@@ -2317,13 +2359,9 @@ export default function DomainKpiDetailPage() {
 {isEditing ? (
               <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
                 {(() => {
-                  const mixedListFields = scalarFieldsEdit
-                    .filter((f) => f.field_type === "mixed_list" && f.config?.condition_trigger_field_id == null)
+                  const otherFields = fields
+                    .filter((f) => f.field_type !== "multi_line_items")
                     .filter(isFieldVisible);
-                  const otherFields = [
-                    ...formulaFields,
-                    ...scalarFieldsEdit.filter((f) => f.field_type !== "mixed_list" || f.config?.condition_trigger_field_id != null)
-                  ].filter(isFieldVisible);
 
                   const inferMixedAtom = (raw: string): string | number | null => {
                     const t = (raw ?? "").trim();
@@ -2513,10 +2551,13 @@ export default function DomainKpiDetailPage() {
                     <>
                       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
                         {otherFields.map((f) => {
-                    if (f.field_type === "formula") {
+                    if (f.field_type === "formula" || f.can_edit === false) {
                       return (
                         <div key={f.id} style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                          <label style={{ minWidth: 160, fontWeight: 500 }}>{f.name} (formula)</label>
+                          <label style={{ minWidth: 160, fontWeight: 500 }}>
+                            {f.name}
+                            {f.field_type === "formula" ? " (formula)" : " (read-only)"}
+                          </label>
                           <span style={{ color: "var(--muted)" }}>{formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}</span>
                         </div>
                       );
@@ -2746,26 +2787,6 @@ export default function DomainKpiDetailPage() {
                   })}
                       </div>
 
-                      {mixedListFields.length > 0 && (
-                        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                          <h4 style={{ fontSize: "0.95rem", fontWeight: 650, margin: "0.25rem 0 0", color: "var(--text)" }}>
-                            Mixed list fields
-                          </h4>
-                          {mixedListFields.map((f) => {
-                            const val = formValues[f.id];
-                            const items = Array.isArray(val?.value_json) ? (val!.value_json as (string | number)[]) : [];
-                            return (
-                              <MixedListEditor
-                                key={f.id}
-                                fieldId={f.id}
-                                fieldName={f.name}
-                                isRequired={!!f.is_required}
-                                items={items}
-                              />
-                            );
-                          })}
-                        </div>
-                      )}
                     </>
                   );
                 })()}
@@ -2779,11 +2800,12 @@ export default function DomainKpiDetailPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {[...formulaFields, ...scalarFieldsEdit].filter(isFieldVisible).map((f) => (
+                  {fields.filter((f) => f.field_type !== "multi_line_items").filter(isFieldVisible).map((f) => (
                     <tr key={f.id}>
                       <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
                         {f.name}
                         {f.field_type === "formula" && " (formula)"}
+                        {f.can_edit === false && f.field_type !== "formula" && " (read-only)"}
                       </td>
                       <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
                         {formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}
@@ -2796,32 +2818,7 @@ export default function DomainKpiDetailPage() {
               </div>
             )}
 
-            {/* Fields you can view (read-only) — grouped into the same collapsible sections */}
-            {scalarFieldsViewOnly.length > 0 && (
-              <div>
-                <h3 style={{ fontSize: "1rem", fontWeight: 600, margin: "0 0 0.75rem", color: "var(--text)", borderBottom: "1px solid var(--border)", paddingBottom: "0.35rem" }}>
-                  Fields you can view (read-only)
-                </h3>
-<table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
-                        <thead>
-                          <tr>
-                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Field</th>
-                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Value</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {scalarFieldsViewOnly.filter(isFieldVisible).map((f) => (
-                            <tr key={f.id}>
-                              <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>{f.name}</td>
-                              <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", color: "var(--muted)" }}>
-                                {formatValue(f, valuesByFieldId.get(f.id), multiLineRowsByFieldId)}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-              </div>
-            )}
+
 
           </div>
         )}
@@ -5256,7 +5253,7 @@ export default function DomainKpiDetailPage() {
         })}
 
           {/* Full-page multi-line tab content: column access + link to full page data entries */}
-          {fullPageMultiLineFields.map((f) => {
+          {fullPageMultiLineFields.filter(isFieldVisible).map((f) => {
             if (activeTab !== f.id) return null;
             const subFields = f.sub_fields ?? [];
             const fullPageUrl = effectiveOrgId != null

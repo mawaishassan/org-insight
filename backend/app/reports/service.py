@@ -2493,6 +2493,65 @@ class NumberedCanvas(canvas.Canvas):
         self.restoreState()
 
 
+class FieldNode:
+    def __init__(self, field):
+        self.field = field
+        self.children = []
+
+def get_parent_field(field, all_fields_map: dict):
+    # 1. Check legacy rule configured on this field itself
+    if field.config and isinstance(field.config, dict):
+        legacy_trigger_id = field.config.get("condition_trigger_field_id")
+        if legacy_trigger_id is not None:
+            try:
+                legacy_trigger_id = int(legacy_trigger_id)
+                if legacy_trigger_id in all_fields_map:
+                    return all_fields_map[legacy_trigger_id]
+            except (ValueError, TypeError):
+                pass
+                
+    # 2. Check new rules configured on other fields that target this field
+    for other in all_fields_map.values():
+        if other.config and isinstance(other.config, dict) and "conditional_rules" in other.config:
+            rules = other.config.get("conditional_rules")
+            if isinstance(rules, list):
+                for r in rules:
+                    if isinstance(r, dict):
+                        dep_fields = r.get("dependent_fields") or r.get("dependent_field_ids") or []
+                        dep_str_set = {str(x) for x in dep_fields}
+                        if (field.id is not None and str(field.id) in dep_str_set) or (field.key is not None and str(field.key) in dep_str_set):
+                            return other
+    return None
+
+def build_field_tree(all_fields: list) -> list[FieldNode]:
+    all_fields_map = {f.id: f for f in all_fields}
+    nodes_map = {f.id: FieldNode(f) for f in all_fields}
+    roots = []
+    
+    for f in all_fields:
+        node = nodes_map[f.id]
+        parent = get_parent_field(f, all_fields_map)
+        if parent and parent.id != f.id:
+            parent_node = nodes_map.get(parent.id)
+            if parent_node:
+                parent_node.children.append(node)
+            else:
+                roots.append(node)
+        else:
+            roots.append(node)
+            
+    # Sort children of each node by database sort_order, then id
+    def sort_children(n):
+        n.children.sort(key=lambda x: (x.field.sort_order or 0, x.field.id))
+        for c in n.children:
+            sort_children(c)
+            
+    for r in roots:
+        sort_children(r)
+        
+    return roots
+
+
 async def generate_kpi_pdf_report(
     db: AsyncSession,
     organization_id: int,
@@ -2718,147 +2777,68 @@ async def generate_kpi_pdf_report(
         )
         elements.append(Paragraph(html.escape(description), desc_text_style))
 
-    # 6. Scalar Fields Table (Section Grouped & Borderless)
-    scalar_fields = [f for f in kpi.fields if f.field_type != FieldType.multi_line_items]
+    # 6. Build the field tree and recursive rendering flow
+    roots = build_field_tree(kpi.fields)
     fields_by_id = {f.id: f for f in kpi.fields}
-    sorted_scalars = group_dependent_fields(scalar_fields)
     
+    # Excluded fields sets
     excluded_fields = configuration.get("excluded_scalar_fields") or []
-    excluded_set = {str(item) for item in excluded_fields}
-    
-    visible_scalars = [
-        f for f in sorted_scalars 
-        if is_field_visible(f, fields_by_id, values_by_field_id)
-        and f.key not in excluded_set
-        and str(f.id) not in excluded_set
-    ]
-
-    # Apply custom scalar fields order if specified
-    ordered_scalar_ids = configuration.get("ordered_scalar_fields")
-    if ordered_scalar_ids:
-        order_map = {str(val): idx for idx, val in enumerate(ordered_scalar_ids)}
-        def get_sort_key(f):
-            if str(f.id) in order_map:
-                return order_map[str(f.id)]
-            if f.key in order_map:
-                return order_map[f.key]
-            return 999999
-        visible_scalars.sort(key=get_sort_key)
-
-    # Get excluded multi-line fields and compute visible ones
-    multi_line_fields = [f for f in kpi.fields if f.field_type == FieldType.multi_line_items]
     excluded_ml_keys = configuration.get("excluded_multi_line_fields") or []
+    excluded_set = {str(item) for item in excluded_fields}
     excluded_ml_set = {str(item) for item in excluded_ml_keys}
-    visible_multi_line = [
-        f for f in multi_line_fields
-        if is_field_visible(f, fields_by_id, values_by_field_id)
-        and f.key not in excluded_ml_set and str(f.id) not in excluded_ml_set
-    ]
-
-    # Build parent blocks for scalar fields to keep parents and their children grouped
-    scalar_blocks = []
-    current_block = []
-    
-    for f in visible_scalars:
-        parent_id = f.config.get("condition_trigger_field_id") if f.config else None
-        if parent_id is not None:
-            try:
-                parent_id = int(parent_id)
-            except (ValueError, TypeError):
-                parent_id = None
-                
-        is_child = False
-        if parent_id is not None:
-            parent_field = fields_by_id.get(parent_id)
-            if parent_field and parent_field in visible_scalars:
-                is_child = True
-                
-        if is_child:
-            if current_block:
-                current_block.append(f)
-            else:
-                current_block = [f]
-        else:
-            if current_block:
-                scalar_blocks.append(current_block)
-            current_block = [f]
-            
-    if current_block:
-        scalar_blocks.append(current_block)
-
-    # Construct main rendering blocks (scalars + multi-line)
-    main_blocks = [("scalar_block", block) for block in scalar_blocks]
-    
-    # Separate multi-line fields into ordered and unordered
-    ordered_ml = []
-    unordered_ml = []
-    
-    for f in visible_multi_line:
-        field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
-        sort_order = field_config.get("sort_order")
-        try:
-            if sort_order is not None and str(sort_order).strip():
-                sort_order = int(sort_order)
-                ordered_ml.append((sort_order, f))
-            else:
-                unordered_ml.append(f)
-        except (ValueError, TypeError):
-            unordered_ml.append(f)
-            
-    # Sort ordered_ml by their sort_order (stable sort)
-    ordered_ml.sort(key=lambda x: x[0])
-    
-    # Interleave ordered multi-line fields into main_blocks (1-indexed position)
-    for sort_order, f in ordered_ml:
-        idx = max(0, sort_order - 1)
-        if idx >= len(main_blocks):
-            main_blocks.append(("multi_line", f))
-        else:
-            main_blocks.insert(idx, ("multi_line", f))
-            
-    # Append unordered multi-line fields to the end of main_blocks
-    for f in unordered_ml:
-        main_blocks.append(("multi_line", f))
-
-    # Calculate unified serial numbers for all visible elements in main_blocks
-    field_serial_numbers = {}
-    top_counter = 0
-    
-    for item_type, val in main_blocks:
-        if item_type == "scalar_block":
-            parent_field = val[0]
-            top_counter += 1
-            field_serial_numbers[parent_field.id] = str(top_counter)
-            
-            parent_child_counters = {}
-            for child in val[1:]:
-                parent_id = child.config.get("condition_trigger_field_id") if child.config else None
-                if parent_id is not None:
-                    try:
-                        parent_id = int(parent_id)
-                    except (ValueError, TypeError):
-                        parent_id = None
-                
-                if parent_id is not None:
-                    parent_num = field_serial_numbers.get(parent_id, "")
-                    child_idx = parent_child_counters.get(parent_id, 0) + 1
-                    parent_child_counters[parent_id] = child_idx
-                    field_serial_numbers[child.id] = f"{parent_num}.{child_idx}" if parent_num else f"{child_idx}"
-                else:
-                    field_serial_numbers[child.id] = f"{top_counter}.x"
-        elif item_type == "multi_line":
-            top_counter += 1
-            field_serial_numbers[val.id] = str(top_counter)
-
-    # 6. Render main blocks (interleaved scalars & tables)
     custom_labels = configuration.get("scalar_fields", {})
     
-    for item_type, val in main_blocks:
-        if item_type == "scalar_block":
-            scalar_data = []
-            for f in val:
+    # Sort roots
+    ordered_scalar_ids = configuration.get("ordered_scalar_fields") or []
+    order_map = {str(val): idx for idx, val in enumerate(ordered_scalar_ids)}
+    
+    def get_root_sort_key(node):
+        f = node.field
+        if str(f.id) in order_map:
+            return (0, order_map[str(f.id)])
+        if f.key in order_map:
+            return (0, order_map[f.key])
+        if f.field_type == FieldType.multi_line_items:
+            field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
+            sort_order = field_config.get("sort_order")
+            if sort_order is not None and str(sort_order).strip():
+                try:
+                    return (1, int(sort_order))
+                except (ValueError, TypeError):
+                    pass
+        return (2, f.sort_order or 999999, f.id)
+        
+    roots.sort(key=get_root_sort_key)
+
+    async def render_tree_recursive(nodes, parent_number="", depth=0):
+        visible_index = 1
+        for node in nodes:
+            f = node.field
+            
+            # Evaluate visibility
+            if not is_field_visible(f, fields_by_id, values_by_field_id):
+                continue
+                
+            # Check manual exclusion
+            is_excluded = False
+            if f.field_type == FieldType.multi_line_items:
+                is_excluded = (f.key in excluded_ml_set) or (str(f.id) in excluded_ml_set)
+            else:
+                is_excluded = (f.key in excluded_set) or (str(f.id) in excluded_set)
+                
+            if is_excluded:
+                continue
+                
+            # Calculate serial number
+            if parent_number:
+                serial_number = f"{parent_number}.{visible_index}"
+            else:
+                serial_number = str(visible_index)
+            visible_index += 1
+            
+            # Render node
+            if f.field_type != FieldType.multi_line_items:
                 val_data = values_by_field_id.get(f.id)
-                # Check for boolean or has options and render checkboxes
                 if f.field_type == FieldType.boolean:
                     val_bool = None
                     if val_data is not None:
@@ -2884,26 +2864,9 @@ async def generate_kpi_pdf_report(
                 else:
                     val_str = _display_string_for_pdf_export(val_data, f.field_type) if val_data is not None else "—"
 
-                # calculate depth
-                depth = 0
-                curr = f
-                while curr.config and curr.config.get("condition_trigger_field_id") is not None:
-                    try:
-                        parent_id = int(curr.config.get("condition_trigger_field_id"))
-                        parent = fields_by_id.get(parent_id)
-                        if not parent:
-                            break
-                        depth += 1
-                        curr = parent
-                    except (ValueError, TypeError):
-                        break
-                    if depth > 10:
-                        break
-
                 display_label = custom_labels.get(f.key) or custom_labels.get(str(f.id)) or f.name
-                serial_prefix = field_serial_numbers.get(f.id, "")
-                if serial_prefix:
-                    display_label = f"{serial_prefix}. {display_label}"
+                if serial_number:
+                    display_label = f"{serial_number}. {display_label}"
                     
                 indented_label_style = ParagraphStyle(
                     f"KpiBodyLabel_{f.id}",
@@ -2911,193 +2874,224 @@ async def generate_kpi_pdf_report(
                     leftIndent=depth * 15
                 )
                 
-                scalar_data.append([
+                scalar_data = [[
                     Paragraph(html.escape(display_label), indented_label_style),
                     Paragraph(val_str, body_value_style)
-                ])
-
-            scalar_table = Table(scalar_data, colWidths=[384, 120])
-            scalar_table.setStyle(TableStyle([
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#f3f4f6")),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ]))
-            elements.append(scalar_table)
-            elements.append(Spacer(1, 10))
-            
-        elif item_type == "multi_line":
-            f = val
-            field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
-            selected_column_keys = field_config.get("selected_columns")
-            if not selected_column_keys:
-                selected_column_keys = [sf.key for sf in f.sub_fields]
-
-            raw_filters = field_config.get("filters", {})
-
-            from app.entries.multi_line_load import load_multi_line_row_dicts
-            row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
-            rows = [r for _, r in row_pairs]
-
-            filtered_rows = []
-            if rows:
-                from app.entries.multi_item_filters import row_passes_filters
-                from app.entries.reference_filter_resolve import build_reference_resolution_map
-
-                if raw_filters and raw_filters.get("conditions"):
-                    conds = raw_filters.get("conditions")
-                    resolution_maps = await build_reference_resolution_map(
-                        db, organization_id, entry.year, f, conds, rows
-                    )
-                    reference_field_types = {sf.key: sf.field_type.value if hasattr(sf.field_type, "value") else sf.field_type for sf in f.sub_fields}
-                    for r in rows:
-                        if row_passes_filters(r, raw_filters, resolution_maps=resolution_maps, reference_field_types=reference_field_types):
-                            filtered_rows.append(r)
-                else:
-                    filtered_rows = rows
-
-            table_name = (field_config.get("table_name") or "").strip() or f.name
-            table_heading = (field_config.get("table_heading") or "").strip()
-            table_subheader = (field_config.get("table_subheader") or "").strip()
-
-            is_duplicate_heading = (table_heading == table_name)
-
-            serial_prefix = field_serial_numbers.get(f.id, "")
-            if serial_prefix:
-                table_name = f"{serial_prefix}. {table_name}"
-
-            elements.append(Spacer(1, 10))
-            elements.append(Paragraph(html.escape(table_name), table_title_style))
-            if table_heading and not is_duplicate_heading:
-                elements.append(Paragraph(html.escape(table_heading), table_heading_style))
-            if table_subheader:
-                elements.append(Paragraph(html.escape(table_subheader), table_subheader_style))
-
-            key_to_sf = {sf.key: sf for sf in f.sub_fields}
-            headers = [str(key_to_sf[col].name if col in key_to_sf else col) for col in selected_column_keys]
-
-            num_cols = len(selected_column_keys)
-            max_char_limit = None
-            if num_cols > 30:
-                table_font_size = 4.5
-                table_leading = 5.5
-                min_col_width = 20
-                max_char_limit = 12
-            elif num_cols > 15:
-                table_font_size = 5.5
-                table_leading = 6.5
-                min_col_width = 25
-                max_char_limit = 25
-            elif num_cols > 8:
-                table_font_size = 7
-                table_leading = 9
-                min_col_width = 35
-                max_char_limit = 40
-            else:
-                table_font_size = 8
-                table_leading = 10
-                min_col_width = 45
-
-            t_th_style = ParagraphStyle(
-                f"KpiTH_{f.key}",
-                parent=styles["Normal"],
-                fontName="Helvetica-Bold",
-                fontSize=table_font_size,
-                leading=table_leading,
-                textColor=colors.white
-            )
-            t_th_sr_style = ParagraphStyle(f"KpiTH_Sr_{f.key}", parent=t_th_style, alignment=TA_CENTER)
-            
-            t_td_style = ParagraphStyle(
-                f"KpiTD_{f.key}",
-                parent=styles["Normal"],
-                fontName="Helvetica",
-                fontSize=table_font_size,
-                leading=table_leading,
-                textColor=colors.HexColor("#1f2937")
-            )
-            t_td_sr_style = ParagraphStyle(f"KpiTD_Sr_{f.key}", parent=t_td_style, alignment=TA_CENTER)
-
-            available_width = 504
-            sr_no_width = 24
-
-            sample_rows = filtered_rows[:200]
-            col_chars = [len(h) for h in headers]
-            for r in sample_rows:
-                for idx, col in enumerate(selected_column_keys):
-                    sf = key_to_sf.get(col)
-                    if sf and not _is_subfield_satisfied_for_row(sf, r, key_to_sf):
-                        raw_cell = ""
-                    else:
-                        ft = getattr(sf, "field_type", None) if sf else None
-                        raw_cell = _display_string_for_pdf_export(r.get(col), ft) if r.get(col) is not None else ""
-                    col_chars[idx] = max(col_chars[idx], min(len(raw_cell), 60))
-
-            total_chars = sum(col_chars) or len(selected_column_keys)
-            raw_widths = [max(min_col_width, (available_width - sr_no_width) * (c / total_chars)) for c in col_chars]
-            scale = (available_width - sr_no_width) / sum(raw_widths) if sum(raw_widths) > (available_width - sr_no_width) else 1.0
-            
-            col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
-
-            def get_header_text(h: str) -> str:
-                if max_char_limit and len(h) > max_char_limit:
-                    return h[:max_char_limit] + "..."
-                return h
-
-            table_data = [
-                [Paragraph("<b>Sr. No.</b>", t_th_sr_style)] + 
-                [Paragraph(f"<b>{html.escape(get_header_text(h))}</b>", t_th_style) for h in headers]
-            ]
-
-            def get_cell_text(row: dict, col: str) -> str:
-                sf = key_to_sf.get(col)
-                if sf and not _is_subfield_satisfied_for_row(sf, row, key_to_sf):
-                    return ""
-                ft = getattr(sf, "field_type", None) if sf else None
-                raw_cell = _display_string_for_pdf_export(row.get(col) if isinstance(row, dict) else None, ft)
+                ]]
                 
-                limit = max_char_limit or 1000
-                if len(raw_cell) > limit:
-                    raw_cell = raw_cell[:limit] + "..."
-                    
-                lines = raw_cell.split("\n")
-                if len(lines) > 15:
-                    raw_cell = "\n".join(lines[:15]) + "\n[... truncated due to size limit]"
-                    
-                return html.escape(raw_cell).replace("\n", "<br/>")
-
-            for sr, r in enumerate(filtered_rows, start=1):
-                table_data.append([
-                    Paragraph(str(sr), t_td_sr_style)
-                ] + [
-                    Paragraph(get_cell_text(r, col), t_td_style) for col in selected_column_keys
-                ])
-
-            grid_style = [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-
-            if not filtered_rows:
-                table_data.append([
-                    Paragraph("No records found matching filters.", t_td_style)
-                ] + [Paragraph("", t_td_style) for _ in selected_column_keys])
-                grid_style.append(("SPAN", (0, 1), (-1, 1)))
+                scalar_table = Table(scalar_data, colWidths=[384, 120])
+                scalar_table.setStyle(TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#f3f4f6")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ]))
+                elements.append(scalar_table)
+                elements.append(Spacer(1, 4))
             else:
-                grid_style.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f4f6")]))
+                field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
+                selected_column_keys = field_config.get("selected_columns")
+                if not selected_column_keys:
+                    selected_column_keys = [sf.key for sf in f.sub_fields]
 
-            ml_table = Table(table_data, colWidths=col_widths, repeatRows=1)
-            ml_table.setStyle(TableStyle(grid_style))
-            elements.append(ml_table)
-            elements.append(Spacer(1, 10))
+                raw_filters = field_config.get("filters", {})
+
+                from app.entries.multi_line_load import load_multi_line_row_dicts
+                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+                rows = [r for _, r in row_pairs]
+
+                filtered_rows = []
+                if rows:
+                    from app.entries.multi_item_filters import row_passes_filters
+                    from app.entries.reference_filter_resolve import build_reference_resolution_map
+
+                    if raw_filters and raw_filters.get("conditions"):
+                        conds = raw_filters.get("conditions")
+                        resolution_maps = await build_reference_resolution_map(
+                            db, organization_id, entry.year, f, conds, rows
+                        )
+                        reference_field_types = {sf.key: sf.field_type.value if hasattr(sf.field_type, "value") else sf.field_type for sf in f.sub_fields}
+                        for r in rows:
+                            if row_passes_filters(r, raw_filters, resolution_maps=resolution_maps, reference_field_types=reference_field_types):
+                                filtered_rows.append(r)
+                    else:
+                        filtered_rows = rows
+
+                table_name = (field_config.get("table_name") or "").strip() or f.name
+                table_heading = (field_config.get("table_heading") or "").strip()
+                table_subheader = (field_config.get("table_subheader") or "").strip()
+
+                is_duplicate_heading = (table_heading == table_name)
+
+                if serial_number:
+                    table_name = f"{serial_number}. {table_name}"
+
+                table_indent = depth * 15
+                table_title_style_indented = ParagraphStyle(
+                    f"KpiTableTitle_{f.id}",
+                    parent=table_title_style,
+                    leftIndent=table_indent
+                )
+                table_heading_style_indented = ParagraphStyle(
+                    f"KpiTableHeading_{f.id}",
+                    parent=table_heading_style,
+                    leftIndent=table_indent
+                )
+                table_subheader_style_indented = ParagraphStyle(
+                    f"KpiTableSubheader_{f.id}",
+                    parent=table_subheader_style,
+                    leftIndent=table_indent
+                )
+
+                elements.append(Spacer(1, 10))
+                elements.append(Paragraph(html.escape(table_name), table_title_style_indented))
+                if table_heading and not is_duplicate_heading:
+                    elements.append(Paragraph(html.escape(table_heading), table_heading_style_indented))
+                if table_subheader:
+                    elements.append(Paragraph(html.escape(table_subheader), table_subheader_style_indented))
+
+                key_to_sf = {sf.key: sf for sf in f.sub_fields}
+                headers = [str(key_to_sf[col].name if col in key_to_sf else col) for col in selected_column_keys]
+
+                num_cols = len(selected_column_keys)
+                max_char_limit = None
+                if num_cols > 30:
+                    table_font_size = 4.5
+                    table_leading = 5.5
+                    min_col_width = 20
+                    max_char_limit = 12
+                elif num_cols > 15:
+                    table_font_size = 5.5
+                    table_leading = 6.5
+                    min_col_width = 25
+                    max_char_limit = 25
+                elif num_cols > 8:
+                    table_font_size = 7
+                    table_leading = 9
+                    min_col_width = 35
+                    max_char_limit = 40
+                else:
+                    table_font_size = 8
+                    table_leading = 10
+                    min_col_width = 45
+
+                t_th_style = ParagraphStyle(
+                    f"KpiTH_{f.key}",
+                    parent=styles["Normal"],
+                    fontName="Helvetica-Bold",
+                    fontSize=table_font_size,
+                    leading=table_leading,
+                    textColor=colors.white
+                )
+                t_th_sr_style = ParagraphStyle(f"KpiTH_Sr_{f.key}", parent=t_th_style, alignment=TA_CENTER)
+                
+                t_td_style = ParagraphStyle(
+                    f"KpiTD_{f.key}",
+                    parent=styles["Normal"],
+                    fontName="Helvetica",
+                    fontSize=table_font_size,
+                    leading=table_leading,
+                    textColor=colors.HexColor("#1f2937")
+                )
+                t_td_sr_style = ParagraphStyle(f"KpiTD_Sr_{f.key}", parent=t_td_style, alignment=TA_CENTER)
+
+                available_width = max(100, 504 - table_indent)
+                sr_no_width = 24
+
+                sample_rows = filtered_rows[:200]
+                col_chars = [len(h) for h in headers]
+                for r in sample_rows:
+                    for idx, col in enumerate(selected_column_keys):
+                        sf = key_to_sf.get(col)
+                        if sf and not _is_subfield_satisfied_for_row(sf, r, key_to_sf):
+                            raw_cell = ""
+                        else:
+                            ft = getattr(sf, "field_type", None) if sf else None
+                            raw_cell = _display_string_for_pdf_export(r.get(col), ft) if r.get(col) is not None else ""
+                        col_chars[idx] = max(col_chars[idx], min(len(raw_cell), 60))
+
+                total_chars = sum(col_chars) or len(selected_column_keys)
+                raw_widths = [max(min_col_width, (available_width - sr_no_width) * (c / total_chars)) for c in col_chars]
+                scale = (available_width - sr_no_width) / sum(raw_widths) if sum(raw_widths) > (available_width - sr_no_width) else 1.0
+                
+                col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
+
+                def get_header_text(h: str) -> str:
+                    if max_char_limit and len(h) > max_char_limit:
+                        return h[:max_char_limit] + "..."
+                    return h
+
+                table_data = [
+                    [Paragraph("<b>Sr. No.</b>", t_th_sr_style)] + 
+                    [Paragraph(f"<b>{html.escape(get_header_text(h))}</b>", t_th_style) for h in headers]
+                ]
+
+                def get_cell_text(row: dict, col: str) -> str:
+                    sf = key_to_sf.get(col)
+                    if sf and not _is_subfield_satisfied_for_row(sf, row, key_to_sf):
+                        return ""
+                    ft = getattr(sf, "field_type", None) if sf else None
+                    raw_cell = _display_string_for_pdf_export(row.get(col) if isinstance(row, dict) else None, ft)
+                    
+                    limit = max_char_limit or 1000
+                    if len(raw_cell) > limit:
+                        raw_cell = raw_cell[:limit] + "..."
+                        
+                    lines = raw_cell.split("\n")
+                    if len(lines) > 15:
+                        raw_cell = "\n".join(lines[:15]) + "\n[... truncated due to size limit]"
+                        
+                    return html.escape(raw_cell).replace("\n", "<br/>")
+
+                for sr, r in enumerate(filtered_rows, start=1):
+                    table_data.append([
+                        Paragraph(str(sr), t_td_sr_style)
+                    ] + [
+                        Paragraph(get_cell_text(r, col), t_td_style) for col in selected_column_keys
+                    ])
+
+                grid_style = [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+
+                if not filtered_rows:
+                    table_data.append([
+                        Paragraph("No records found matching filters.", t_td_style)
+                    ] + [Paragraph("", t_td_style) for _ in selected_column_keys])
+                    grid_style.append(("SPAN", (0, 1), (-1, 1)))
+                else:
+                    grid_style.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f4f6")]))
+
+                ml_table = Table(table_data, colWidths=col_widths, repeatRows=1)
+                ml_table.setStyle(TableStyle(grid_style))
+                
+                if table_indent > 0:
+                    indented_table = Table([[Spacer(1, 1), ml_table]], colWidths=[table_indent, sum(col_widths)])
+                    indented_table.setStyle(TableStyle([
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                        ("TOPPADDING", (0, 0), (-1, -1), 0),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                    ]))
+                    elements.append(indented_table)
+                else:
+                    elements.append(ml_table)
+                elements.append(Spacer(1, 10))
+            
+            # Render visible children recursively
+            await render_tree_recursive(node.children, parent_number=serial_number, depth=depth + 1)
+            
+    await render_tree_recursive(roots, parent_number="", depth=0)
 
     # 8. Build Document
     buf = BytesIO()
@@ -3231,146 +3225,71 @@ async def generate_kpi_docx_report(
         run_dt.font.size = Pt(10)
         run_dt.font.color.rgb = RGBColor(0x37, 0x41, 0x51)
 
-    # 6. Extract fields logic (identical to PDF)
-    scalar_fields = [f for f in kpi.fields if f.field_type != FieldType.multi_line_items]
+    # 6. Build the field tree and recursive rendering flow for Docx
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    
+    roots = build_field_tree(kpi.fields)
     fields_by_id = {f.id: f for f in kpi.fields}
-    sorted_scalars = group_dependent_fields(scalar_fields)
     
+    # Excluded fields sets
     excluded_fields = configuration.get("excluded_scalar_fields") or []
-    excluded_set = {str(item) for item in excluded_fields}
-    
-    visible_scalars = [
-        f for f in sorted_scalars 
-        if is_field_visible(f, fields_by_id, values_by_field_id)
-        and f.key not in excluded_set
-        and str(f.id) not in excluded_set
-    ]
-
-    # Apply custom scalar fields order if specified
-    ordered_scalar_ids = configuration.get("ordered_scalar_fields")
-    if ordered_scalar_ids:
-        order_map = {str(val): idx for idx, val in enumerate(ordered_scalar_ids)}
-        def get_sort_key(f):
-            if str(f.id) in order_map:
-                return order_map[str(f.id)]
-            if f.key in order_map:
-                return order_map[f.key]
-            return 999999
-        visible_scalars.sort(key=get_sort_key)
-
-    # Get excluded multi-line fields and compute visible ones
-    multi_line_fields = [f for f in kpi.fields if f.field_type == FieldType.multi_line_items]
     excluded_ml_keys = configuration.get("excluded_multi_line_fields") or []
+    excluded_set = {str(item) for item in excluded_fields}
     excluded_ml_set = {str(item) for item in excluded_ml_keys}
-    visible_multi_line = [
-        f for f in multi_line_fields
-        if is_field_visible(f, fields_by_id, values_by_field_id)
-        and f.key not in excluded_ml_set and str(f.id) not in excluded_ml_set
-    ]
-
-    # Build parent blocks for scalar fields to keep parents and their children grouped
-    scalar_blocks = []
-    current_block = []
-    
-    for f in visible_scalars:
-        parent_id = f.config.get("condition_trigger_field_id") if f.config else None
-        if parent_id is not None:
-            try:
-                parent_id = int(parent_id)
-            except (ValueError, TypeError):
-                parent_id = None
-                
-        is_child = False
-        if parent_id is not None:
-            parent_field = fields_by_id.get(parent_id)
-            if parent_field and parent_field in visible_scalars:
-                is_child = True
-                
-        if is_child:
-            if current_block:
-                current_block.append(f)
-            else:
-                current_block = [f]
-        else:
-            if current_block:
-                scalar_blocks.append(current_block)
-            current_block = [f]
-            
-    if current_block:
-        scalar_blocks.append(current_block)
-
-    # Construct main rendering blocks (scalars + multi-line)
-    main_blocks = [("scalar_block", block) for block in scalar_blocks]
-    
-    # Separate multi-line fields into ordered and unordered
-    ordered_ml = []
-    unordered_ml = []
-    
-    for f in visible_multi_line:
-        field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
-        sort_order = field_config.get("sort_order")
-        try:
-            if sort_order is not None and str(sort_order).strip():
-                sort_order = int(sort_order)
-                ordered_ml.append((sort_order, f))
-            else:
-                unordered_ml.append(f)
-        except (ValueError, TypeError):
-            unordered_ml.append(f)
-            
-    # Sort ordered_ml by their sort_order (stable sort)
-    ordered_ml.sort(key=lambda x: x[0])
-    
-    # Interleave ordered multi-line fields into main_blocks (1-indexed position)
-    for sort_order, f in ordered_ml:
-        idx = max(0, sort_order - 1)
-        if idx >= len(main_blocks):
-            main_blocks.append(("multi_line", f))
-        else:
-            main_blocks.insert(idx, ("multi_line", f))
-            
-    # Append unordered multi-line fields to the end of main_blocks
-    for f in unordered_ml:
-        main_blocks.append(("multi_line", f))
-
-    # Calculate unified serial numbers for all visible elements in main_blocks
-    field_serial_numbers = {}
-    top_counter = 0
-    
-    for item_type, val in main_blocks:
-        if item_type == "scalar_block":
-            parent_field = val[0]
-            top_counter += 1
-            field_serial_numbers[parent_field.id] = str(top_counter)
-            
-            parent_child_counters = {}
-            for child in val[1:]:
-                parent_id = child.config.get("condition_trigger_field_id") if child.config else None
-                if parent_id is not None:
-                    try:
-                        parent_id = int(parent_id)
-                    except (ValueError, TypeError):
-                        parent_id = None
-                
-                if parent_id is not None:
-                    parent_num = field_serial_numbers.get(parent_id, "")
-                    child_idx = parent_child_counters.get(parent_id, 0) + 1
-                    parent_child_counters[parent_id] = child_idx
-                    field_serial_numbers[child.id] = f"{parent_num}.{child_idx}" if parent_num else f"{child_idx}"
-                else:
-                    field_serial_numbers[child.id] = f"{top_counter}.x"
-        elif item_type == "multi_line":
-            top_counter += 1
-            field_serial_numbers[val.id] = str(top_counter)
-
-    # 7. Render main blocks (interleaved scalars & tables)
     custom_labels = configuration.get("scalar_fields", {})
     
-    for item_type, val in main_blocks:
-        if item_type == "scalar_block":
-            for f in val:
+    # Sort roots
+    ordered_scalar_ids = configuration.get("ordered_scalar_fields") or []
+    order_map = {str(val): idx for idx, val in enumerate(ordered_scalar_ids)}
+    
+    def get_root_sort_key(node):
+        f = node.field
+        if str(f.id) in order_map:
+            return (0, order_map[str(f.id)])
+        if f.key in order_map:
+            return (0, order_map[f.key])
+        if f.field_type == FieldType.multi_line_items:
+            field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
+            sort_order = field_config.get("sort_order")
+            if sort_order is not None and str(sort_order).strip():
+                try:
+                    return (1, int(sort_order))
+                except (ValueError, TypeError):
+                    pass
+        return (2, f.sort_order or 999999, f.id)
+        
+    roots.sort(key=get_root_sort_key)
+
+    async def render_docx_tree_recursive(nodes, parent_number="", depth=0):
+        visible_index = 1
+        for node in nodes:
+            f = node.field
+            
+            # Evaluate visibility
+            if not is_field_visible(f, fields_by_id, values_by_field_id):
+                continue
+                
+            # Check manual exclusion
+            is_excluded = False
+            if f.field_type == FieldType.multi_line_items:
+                is_excluded = (f.key in excluded_ml_set) or (str(f.id) in excluded_ml_set)
+            else:
+                is_excluded = (f.key in excluded_set) or (str(f.id) in excluded_set)
+                
+            if is_excluded:
+                continue
+                
+            # Calculate serial number
+            if parent_number:
+                serial_number = f"{parent_number}.{visible_index}"
+            else:
+                serial_number = str(visible_index)
+            visible_index += 1
+            
+            # Render node
+            if f.field_type != FieldType.multi_line_items:
                 val_data = values_by_field_id.get(f.id)
-                # Check for boolean or has options and render plain values
                 if f.field_type == FieldType.boolean:
                     val_bool = None
                     if val_data is not None:
@@ -3393,33 +3312,14 @@ async def generate_kpi_docx_report(
                 else:
                     val_str = _display_string_for_pdf_export(val_data, f.field_type) if val_data is not None else "—"
 
-                # calculate depth
-                depth = 0
-                curr = f
-                while curr.config and curr.config.get("condition_trigger_field_id") is not None:
-                    try:
-                        parent_id = int(curr.config.get("condition_trigger_field_id"))
-                        parent = fields_by_id.get(parent_id)
-                        if not parent:
-                            break
-                        depth += 1
-                        curr = parent
-                    except (ValueError, TypeError):
-                        break
-                    if depth > 10:
-                        break
-
                 display_label = custom_labels.get(f.key) or custom_labels.get(str(f.id)) or f.name
-                serial_prefix = field_serial_numbers.get(f.id, "")
-                if serial_prefix:
-                    display_label = f"{serial_prefix}. {display_label}"
+                if serial_number:
+                    display_label = f"{serial_number}. {display_label}"
                 
-                # Check ending punctuation for suffix
                 suffix = ": "
                 if display_label.endswith("?") or display_label.endswith(":") or display_label.endswith("."):
                     suffix = " "
 
-                # Add as styled paragraph in parallel layout flow
                 p = doc.add_paragraph()
                 p.paragraph_format.left_indent = Inches(0.25 * depth)
                 p.paragraph_format.space_before = Pt(2)
@@ -3433,132 +3333,141 @@ async def generate_kpi_docx_report(
                 run_val = p.add_run(val_str)
                 run_val.font.size = Pt(10.5)
                 run_val.font.color.rgb = RGBColor(0x1f, 0x29, 0x37)
-            
-        elif item_type == "multi_line":
-            f = val
-            field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
-            selected_column_keys = field_config.get("selected_columns")
-            if not selected_column_keys:
-                selected_column_keys = [sf.key for sf in f.sub_fields]
-
-            raw_filters = field_config.get("filters", {})
-
-            from app.entries.multi_line_load import load_multi_line_row_dicts
-            row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
-            rows = [r for _, r in row_pairs]
-
-            filtered_rows = []
-            if rows:
-                from app.entries.multi_item_filters import row_passes_filters
-                from app.entries.reference_filter_resolve import build_reference_resolution_map
-
-                if raw_filters and raw_filters.get("conditions"):
-                    conds = raw_filters.get("conditions")
-                    resolution_maps = await build_reference_resolution_map(
-                        db, organization_id, entry.year, f, conds, rows
-                    )
-                    reference_field_types = {sf.key: sf.field_type.value if hasattr(sf.field_type, "value") else sf.field_type for sf in f.sub_fields}
-                    for r in rows:
-                        if row_passes_filters(r, raw_filters, resolution_maps=resolution_maps, reference_field_types=reference_field_types):
-                            filtered_rows.append(r)
-                else:
-                    filtered_rows = rows
-
-            table_name = (field_config.get("table_name") or "").strip() or f.name
-            serial_prefix = field_serial_numbers.get(f.id, "")
-            if serial_prefix:
-                table_name = f"{serial_prefix}. {table_name}"
-                
-            table_heading = (field_config.get("table_heading") or "").strip()
-            table_subheader = (field_config.get("table_subheader") or "").strip()
-
-            # Render Table title/headings in Word
-            p_tname = doc.add_paragraph()
-            p_tname.paragraph_format.space_before = Pt(12)
-            p_tname.paragraph_format.space_after = Pt(2)
-            run_tn = p_tname.add_run(table_name)
-            run_tn.bold = True
-            run_tn.font.size = Pt(12)
-            run_tn.font.color.rgb = RGBColor(0x1e, 0x3a, 0x8a)
-            
-            # Deduplicate check
-            is_duplicate_heading = (table_heading == (field_config.get("table_name") or "").strip() or f.name)
-            if table_heading and not is_duplicate_heading:
-                p_thead = doc.add_paragraph()
-                p_thead.paragraph_format.space_after = Pt(2)
-                run_th = p_thead.add_run(table_heading)
-                run_th.bold = True
-                run_th.font.size = Pt(10)
-                run_th.font.color.rgb = RGBColor(0x4b, 0x55, 0x63)
-                
-            if table_subheader:
-                p_tsub = doc.add_paragraph()
-                p_tsub.paragraph_format.space_after = Pt(6)
-                run_ts = p_tsub.add_run(table_subheader)
-                run_ts.italic = True
-                run_ts.font.size = Pt(9)
-                run_ts.font.color.rgb = RGBColor(0x6b, 0x72, 0x80)
-
-            key_to_sf = {sf.key: sf for sf in f.sub_fields}
-            headers = [str(key_to_sf[col].name if col in key_to_sf else col) for col in selected_column_keys]
-
-            # Add Table Grid in Word
-            table = doc.add_table(rows=1, cols=len(selected_column_keys) + 1)
-            table.style = 'Table Grid'
-            
-            hdr_cells = table.rows[0].cells
-            hdr_cells[0].paragraphs[0].text = "Sr. No."
-            hdr_cells[0].paragraphs[0].runs[0].bold = True
-            hdr_cells[0].paragraphs[0].runs[0].font.size = Pt(9.5)
-            
-            for i, h_text in enumerate(headers):
-                hdr_cells[i+1].paragraphs[0].text = h_text
-                hdr_cells[i+1].paragraphs[0].runs[0].bold = True
-                hdr_cells[i+1].paragraphs[0].runs[0].font.size = Pt(9.5)
-
-            num_cols = len(selected_column_keys)
-            max_char_limit = None
-            if num_cols > 30:
-                max_char_limit = 12
-            elif num_cols > 15:
-                max_char_limit = 25
-            elif num_cols > 8:
-                max_char_limit = 40
-
-            def get_cell_plain_text(row_dict: dict, col: str) -> str:
-                sf = key_to_sf.get(col)
-                if sf and not _is_subfield_satisfied_for_row(sf, row_dict, key_to_sf):
-                    return ""
-                ft = getattr(sf, "field_type", None) if sf else None
-                raw_cell = _display_string_for_pdf_export(row_dict.get(col) if isinstance(row_dict, dict) else None, ft)
-                
-                limit = max_char_limit or 1000
-                if len(raw_cell) > limit:
-                    raw_cell = raw_cell[:limit] + "..."
-                    
-                lines = raw_cell.split("\n")
-                if len(lines) > 15:
-                    raw_cell = "\n".join(lines[:15]) + "\n[... truncated]"
-                    
-                return raw_cell
-
-            if not filtered_rows:
-                row = table.add_row()
-                row.cells[0].paragraphs[0].text = "No records found matching filters."
-                row.cells[0].paragraphs[0].runs[0].font.size = Pt(9)
-                for cell in row.cells[1:]:
-                    row.cells[0].merge(cell)
             else:
-                for sr, r in enumerate(filtered_rows, start=1):
-                    row = table.add_row()
-                    row.cells[0].paragraphs[0].text = str(sr)
-                    row.cells[0].paragraphs[0].runs[0].font.size = Pt(9)
-                    for i, col in enumerate(selected_column_keys):
-                        row.cells[i+1].paragraphs[0].text = get_cell_plain_text(r, col)
-                        row.cells[i+1].paragraphs[0].runs[0].font.size = Pt(9)
+                field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
+                selected_column_keys = field_config.get("selected_columns")
+                if not selected_column_keys:
+                    selected_column_keys = [sf.key for sf in f.sub_fields]
 
-            # Spacing
-            doc.add_paragraph()
+                raw_filters = field_config.get("filters", {})
+
+                from app.entries.multi_line_load import load_multi_line_row_dicts
+                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+                rows = [r for _, r in row_pairs]
+
+                filtered_rows = []
+                if rows:
+                    from app.entries.multi_item_filters import row_passes_filters
+                    from app.entries.reference_filter_resolve import build_reference_resolution_map
+
+                    if raw_filters and raw_filters.get("conditions"):
+                        conds = raw_filters.get("conditions")
+                        resolution_maps = await build_reference_resolution_map(
+                            db, organization_id, entry.year, f, conds, rows
+                        )
+                        reference_field_types = {sf.key: sf.field_type.value if hasattr(sf.field_type, "value") else sf.field_type for sf in f.sub_fields}
+                        for r in rows:
+                            if row_passes_filters(r, raw_filters, resolution_maps=resolution_maps, reference_field_types=reference_field_types):
+                                filtered_rows.append(r)
+                    else:
+                        filtered_rows = rows
+
+                table_name = (field_config.get("table_name") or "").strip() or f.name
+                if serial_number:
+                    table_name = f"{serial_number}. {table_name}"
+                    
+                table_heading = (field_config.get("table_heading") or "").strip()
+                table_subheader = (field_config.get("table_subheader") or "").strip()
+
+                p_tname = doc.add_paragraph()
+                p_tname.paragraph_format.left_indent = Inches(0.25 * depth)
+                p_tname.paragraph_format.space_before = Pt(12)
+                p_tname.paragraph_format.space_after = Pt(2)
+                run_tn = p_tname.add_run(table_name)
+                run_tn.bold = True
+                run_tn.font.size = Pt(12)
+                run_tn.font.color.rgb = RGBColor(0x1e, 0x3a, 0x8a)
+                
+                is_duplicate_heading = (table_heading == (field_config.get("table_name") or "").strip() or f.name)
+                if table_heading and not is_duplicate_heading:
+                    p_thead = doc.add_paragraph()
+                    p_thead.paragraph_format.left_indent = Inches(0.25 * depth)
+                    p_thead.paragraph_format.space_after = Pt(2)
+                    run_th = p_thead.add_run(table_heading)
+                    run_th.bold = True
+                    run_th.font.size = Pt(10)
+                    run_th.font.color.rgb = RGBColor(0x4b, 0x55, 0x63)
+                    
+                if table_subheader:
+                    p_tsub = doc.add_paragraph()
+                    p_tsub.paragraph_format.left_indent = Inches(0.25 * depth)
+                    p_tsub.paragraph_format.space_after = Pt(6)
+                    run_ts = p_tsub.add_run(table_subheader)
+                    run_ts.italic = True
+                    run_ts.font.size = Pt(9)
+                    run_ts.font.color.rgb = RGBColor(0x6b, 0x72, 0x80)
+
+                key_to_sf = {sf.key: sf for sf in f.sub_fields}
+                headers = [str(key_to_sf[col].name if col in key_to_sf else col) for col in selected_column_keys]
+
+                table = doc.add_table(rows=1, cols=len(selected_column_keys) + 1)
+                table.style = 'Table Grid'
+                
+                if depth > 0:
+                    tblPr = table._tbl.tblPr
+                    tblInd = OxmlElement('w:tblInd')
+                    tblInd.set(qn('w:w'), str(int(depth * 360)))
+                    tblInd.set(qn('w:type'), 'dxa')
+                    tblPr.append(tblInd)
+
+                hdr_cells = table.rows[0].cells
+                hdr_cells[0].paragraphs[0].text = "Sr. No."
+                hdr_cells[0].paragraphs[0].runs[0].bold = True
+                hdr_cells[0].paragraphs[0].runs[0].font.size = Pt(9.5)
+                
+                for i, h_text in enumerate(headers):
+                    hdr_cells[i+1].paragraphs[0].text = h_text
+                    hdr_cells[i+1].paragraphs[0].runs[0].bold = True
+                    hdr_cells[i+1].paragraphs[0].runs[0].font.size = Pt(9.5)
+
+                num_cols = len(selected_column_keys)
+                max_char_limit = None
+                if num_cols > 30:
+                    max_char_limit = 12
+                elif num_cols > 15:
+                    max_char_limit = 25
+                elif num_cols > 8:
+                    max_char_limit = 40
+
+                def get_cell_plain_text(row_dict: dict, col: str) -> str:
+                    sf = key_to_sf.get(col)
+                    if sf and not _is_subfield_satisfied_for_row(sf, row_dict, key_to_sf):
+                        return ""
+                    ft = getattr(sf, "field_type", None) if sf else None
+                    raw_cell = _display_string_for_pdf_export(row_dict.get(col) if isinstance(row_dict, dict) else None, ft)
+                    
+                    limit = max_char_limit or 1000
+                    if len(raw_cell) > limit:
+                        raw_cell = raw_cell[:limit] + "..."
+                        
+                    lines = raw_cell.split("\n")
+                    if len(lines) > 15:
+                        raw_cell = "\n".join(lines[:15]) + "\n[... truncated]"
+                        
+                    return raw_cell
+
+                if not filtered_rows:
+                    row = table.add_row()
+                    row.cells[0].paragraphs[0].text = "No records found matching filters."
+                    row.cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+                    for cell in row.cells[1:]:
+                        row.cells[0].merge(cell)
+                else:
+                    for sr, r in enumerate(filtered_rows, start=1):
+                        row = table.add_row()
+                        row.cells[0].paragraphs[0].text = str(sr)
+                        row.cells[0].paragraphs[0].runs[0].font.size = Pt(9)
+                        for i, col in enumerate(selected_column_keys):
+                            row.cells[i+1].paragraphs[0].text = get_cell_plain_text(r, col)
+                            row.cells[i+1].paragraphs[0].runs[0].font.size = Pt(9)
+                            
+                p_spacer = doc.add_paragraph()
+                p_spacer.paragraph_format.space_after = Pt(10)
+                
+            # Render visible children recursively
+            await render_docx_tree_recursive(node.children, parent_number=serial_number, depth=depth + 1)
+            
+    await render_docx_tree_recursive(roots, parent_number="", depth=0)
 
     # Save to BytesIO
     file_stream = BytesIO()

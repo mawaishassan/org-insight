@@ -8,6 +8,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, canEditDomainsAndCategories, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { KpiSearchInput } from "@/components/KpiSearchInput";
 import { KpiCardsGrid } from "@/components/KpiCardsGrid";
 import toast from "react-hot-toast";
 
@@ -282,13 +283,12 @@ export default function DomainDetailPage() {
               </div>
               <div className="form-group" style={{ marginBottom: 0 }}>
                 <label style={{ fontSize: "0.9rem" }}>Name</label>
-                <input
-                  type="text"
-                  placeholder="Search by name..."
-                  value={kpiFilterName}
-                  onChange={(e) => setKpiFilterName(e.target.value)}
-                  style={{ minWidth: "160px" }}
-                />
+          <KpiSearchInput
+            placeholder="Search by name..."
+            value={kpiFilterName}
+            onChange={setKpiFilterName}
+            style={{ minWidth: "160px" }}
+          />
               </div>
               {orgTags.length > 0 && (
                 <div className="form-group" style={{ marginBottom: 0 }}>

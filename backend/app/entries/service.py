@@ -1816,9 +1816,13 @@ async def recompute_formula_fields_for_entry(
         return False
 
     fields = list(kpi.fields or [])
+
+    # Recompute MLI formula subfields first (must happen even if there are no KPI-level formula fields)
+    await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id)
+
     formula_fields = [f for f in fields if f.field_type == FieldType.formula and (f.formula_expression or "").strip()]
     if not formula_fields:
-        return False
+        return True
 
     # Map field_id -> existing KPIFieldValue
     fv_res = await db.execute(
@@ -1828,9 +1832,6 @@ async def recompute_formula_fields_for_entry(
     )
     fv_list = list(fv_res.scalars().all())
     fv_by_field_id = {fv.field_id: fv for fv in fv_list}
-
-    # Recompute MLI formula subfields
-    await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id)
 
     value_by_key: dict[str, float | int] = {}
     multi_line_items_data: MultiLineItemsData = {}
