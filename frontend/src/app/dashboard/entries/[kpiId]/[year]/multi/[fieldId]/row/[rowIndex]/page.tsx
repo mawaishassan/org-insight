@@ -372,7 +372,98 @@ type SubField = {
   can_edit?: boolean;
   sort_order?: number;
   config?: { ui_section?: string; [key: string]: unknown } | null;
+  id?: number;
 };
+
+function groupDependentFields(originalFields: SubField[]): SubField[] {
+  const result: SubField[] = [];
+  const visited = new Set<number>();
+
+  const dependentsMap = new Map<number, SubField[]>();
+
+  const addRelation = (parentNumId: number, childField: SubField) => {
+    if (!dependentsMap.has(parentNumId)) {
+      dependentsMap.set(parentNumId, []);
+    }
+    const currentDeps = dependentsMap.get(parentNumId)!;
+    if (childField.id != null && !currentDeps.some((x) => Number(x.id) === Number(childField.id))) {
+      currentDeps.push(childField);
+    }
+  };
+
+  for (const f of originalFields) {
+    if (f.id == null) continue;
+    const fid = Number(f.id);
+
+    // 1. Check legacy rule configured on this field itself
+    const triggerId = (f.config as any)?.condition_trigger_field_id;
+    if (triggerId != null) {
+      const numTriggerId = Number(triggerId);
+      if (!Number.isNaN(numTriggerId)) {
+        addRelation(numTriggerId, f);
+      }
+    }
+
+    // 2. Check new rules configured on other fields that target this field
+    const fConfig = f.config as any;
+    if (fConfig && Array.isArray(fConfig.conditional_rules)) {
+      for (const r of fConfig.conditional_rules) {
+        const depFields = r.dependent_fields || r.dependent_field_ids || [];
+        for (const dep of depFields) {
+          const target = originalFields.find(
+            (x) => String(x.id) === String(dep) || String(x.key) === String(dep)
+          );
+          if (target) {
+            addRelation(fid, target);
+          }
+        }
+      }
+    }
+  }
+
+  const childIds = new Set<number>();
+  for (const [, children] of dependentsMap.entries()) {
+    for (const child of children) {
+      if (child.id != null) {
+        childIds.add(Number(child.id));
+      }
+    }
+  }
+
+  function insertField(f: SubField) {
+    const numId = f.id != null ? Number(f.id) : null;
+    if (numId != null) {
+      if (visited.has(numId)) return;
+      visited.add(numId);
+    }
+    result.push(f);
+
+    if (numId != null) {
+      const dependents = dependentsMap.get(numId) || [];
+      for (const dep of dependents) {
+        insertField(dep);
+      }
+    }
+  }
+
+  // Insert root fields first
+  for (const f of originalFields) {
+    const numId = f.id != null ? Number(f.id) : null;
+    if (numId == null || !childIds.has(numId)) {
+      insertField(f);
+    }
+  }
+
+  // Fallback for any leftover fields (loops, self-references)
+  for (const f of originalFields) {
+    const numId = f.id != null ? Number(f.id) : null;
+    if (numId == null || !visited.has(numId)) {
+      insertField(f);
+    }
+  }
+
+  return result;
+}
 
 interface FieldSummary {
   id: number;
@@ -613,8 +704,9 @@ export default function MultiItemRowDetail() {
   const sectionGroups = useMemo(() => {
     // Filter subFields to only those that are satisfied (visible)
     const visibleSubs = subFields.filter((sf) => isSubFieldVisible(sf, editData));
+    const sortedVisibleSubs = groupDependentFields(visibleSubs);
 
-    const hasAnyExplicit = visibleSubs.some((sf) => {
+    const hasAnyExplicit = sortedVisibleSubs.some((sf) => {
       const section = (sf as any)?.config?.ui_section;
       return typeof section === "string" && section.trim().length > 0;
     });
@@ -624,7 +716,7 @@ export default function MultiItemRowDetail() {
       { label: string; fields: SubField[]; order: number; isOther: boolean }
     >();
 
-    visibleSubs.forEach((sf, idx) => {
+    sortedVisibleSubs.forEach((sf, idx) => {
       const rawSection = (sf as any)?.config?.ui_section;
       const section = typeof rawSection === "string" ? rawSection.trim() : "";
       const label = section.length > 0 ? section : hasAnyExplicit ? "Other" : "";
@@ -642,7 +734,7 @@ export default function MultiItemRowDetail() {
 
     const groups = Array.from(groupMap.values()).sort((a, b) => a.order - b.order);
     if (!hasAnyExplicit) {
-      return [{ label: "", fields: visibleSubs, showHeading: false }] as const;
+      return [{ label: "", fields: sortedVisibleSubs, showHeading: false }] as const;
     }
 
     return groups

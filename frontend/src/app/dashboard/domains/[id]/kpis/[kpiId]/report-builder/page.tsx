@@ -16,6 +16,7 @@ import {
   removeConditionFromPayload,
 } from "@/lib/multiItemsFiltersHelper";
 import MultiItemsAdvancedFiltersPanel from "@/components/MultiItemsAdvancedFiltersPanel";
+import { isFieldVisible } from "@/lib/conditionalRules";
 
 interface KpiSectionInfo {
   id: number;
@@ -34,30 +35,65 @@ interface FieldDef {
   sub_fields?: SubField[];
 }
 
-interface FieldBlock {
-  parent: FieldDef;
-  children: FieldDef[];
+interface FieldNode {
+  field: FieldDef;
+  children: FieldNode[];
 }
 
-const getDescendants = (fieldId: number, allFields: FieldDef[]): FieldDef[] => {
-  const descendants: FieldDef[] = [];
-  const queue = [fieldId];
-  while (queue.length > 0) {
-    const currentId = queue.shift()!;
-    const children = allFields.filter(f => {
-      if (!f.config || f.config.condition_trigger_field_id === undefined) return false;
-      try {
-        return Number(f.config.condition_trigger_field_id) === currentId;
-      } catch {
-        return false;
-      }
-    });
-    children.forEach(child => {
-      descendants.push(child);
-      queue.push(child.id);
-    });
+const getParentField = (field: FieldDef, allFields: FieldDef[]): FieldDef | undefined => {
+  if (field.config && field.config.condition_trigger_field_id !== undefined && field.config.condition_trigger_field_id !== null) {
+    const triggerId = Number(field.config.condition_trigger_field_id);
+    const parent = allFields.find(x => x.id === triggerId);
+    if (parent) return parent;
   }
-  return descendants;
+  for (const other of allFields) {
+    if (other.config && Array.isArray(other.config.conditional_rules)) {
+      for (const rule of other.config.conditional_rules) {
+        const depFields = rule.dependent_fields || rule.dependent_field_ids || [];
+        if (depFields.some((dep: any) => String(dep) === String(field.id) || String(dep) === String(field.key))) {
+          return other;
+        }
+      }
+    }
+  }
+  return undefined;
+};
+
+const buildTree = (allFields: FieldDef[]): FieldNode[] => {
+  const nodesMap = new Map<number, FieldNode>();
+  for (const f of allFields) {
+    nodesMap.set(f.id, { field: f, children: [] });
+  }
+
+  const roots: FieldNode[] = [];
+  for (const f of allFields) {
+    const node = nodesMap.get(f.id)!;
+    const parent = getParentField(f, allFields);
+
+    if (parent && parent.id !== f.id) {
+      const parentNode = nodesMap.get(parent.id);
+      if (parentNode) {
+        parentNode.children.push(node);
+      } else {
+        roots.push(node);
+      }
+    } else {
+      roots.push(node);
+    }
+  }
+
+  const sortChildren = (node: FieldNode) => {
+    node.children.sort((a, b) => {
+      const sa = a.field.config?.sort_order ?? 0;
+      const sb = b.field.config?.sort_order ?? 0;
+      if (sa !== sb) return sa - sb;
+      return a.field.id - b.field.id;
+    });
+    node.children.forEach(sortChildren);
+  };
+
+  roots.forEach(sortChildren);
+  return roots;
 };
 
 export default function KpiReportBuilder() {
@@ -107,7 +143,7 @@ export default function KpiReportBuilder() {
   const [editingScalarFieldId, setEditingScalarFieldId] = useState<number | null>(null);
   const [editingScalarValue, setEditingScalarValue] = useState("");
   const [customReportName, setCustomReportName] = useState("");
-  const [orderedScalarBlocks, setOrderedScalarBlocks] = useState<FieldBlock[]>([]);
+  const [fieldTree, setFieldTree] = useState<FieldNode[]>([]);
   
   // Multi line fields config
   // Key = field key (e.g. "research_pubs")
@@ -174,36 +210,44 @@ export default function KpiReportBuilder() {
       api<FieldDef[]>(`/entries/fields?kpi_id=${kpiId}&organization_id=${effectiveOrgId}`, { token }),
       api<KpiSectionInfo[]>(`/kpis/${kpiId}/sections?organization_id=${effectiveOrgId}`, { token }).catch(() => []),
       api<{ name: string }>(`/organizations/${effectiveOrgId}`, { token }).catch(() => ({ name: "" })),
+      api<any>(`/entries/for-period?kpi_id=${kpiId}&year=${year}&period_key=${periodKeyFromUrl || ""}&organization_id=${effectiveOrgId}`, { token }).catch(() => null),
     ])
-      .then(([kpiData, fieldsData, sectionsData, orgData]) => {
+      .then(([kpiData, fieldsData, sectionsData, orgData, entryData]) => {
         setKpiName(kpiData.name);
         setKpiDesc(kpiData.description ?? "");
-        setFields(fieldsData);
         setSections(sectionsData);
         setOrgName(orgData.name);
+
+        const valuesList = entryData?.values || [];
+        const valuesMap: Record<number, any> = {};
+        valuesList.forEach((v: any) => {
+          valuesMap[v.field_id] = v;
+        });
+
+        // Filter out conditionally hidden fields using isFieldVisible
+        const visibleFieldsData = fieldsData.filter(f => 
+          isFieldVisible(f as any, fieldsData as any, {}, valuesMap, false)
+        );
+        setFields(visibleFieldsData);
 
         // Prepopulate defaults
         setPdfTitle(`${kpiData.name} Report`);
         setCustomReportName(kpiData.name);
 
-        const scalars = fieldsData.filter((f) => f.field_type !== "multi_line_items");
-        const topLevelScalars = scalars.filter(f => {
-          const triggerId = f.config?.condition_trigger_field_id;
-          if (triggerId === undefined || triggerId === null || triggerId === "") return true;
-          const triggerNum = Number(triggerId);
-          return !scalars.some(parent => parent.id === triggerNum);
+        const tree = buildTree(visibleFieldsData);
+        tree.sort((a, b) => {
+          const sa = a.field.config?.sort_order ?? 0;
+          const sb = b.field.config?.sort_order ?? 0;
+          if (sa !== sb) return sa - sb;
+          return a.field.id - b.field.id;
         });
-        const blocks = topLevelScalars.map(parent => {
-          const descendants = getDescendants(parent.id, scalars);
-          return { parent, children: descendants };
-        });
-        setOrderedScalarBlocks(blocks);
+        setFieldTree(tree);
 
         const initialConfig: typeof multiLineConfig = {};
         const drafts: typeof filterDrafts = {};
         const initialExpanded: Record<string, boolean> = {};
         
-        fieldsData.forEach((f) => {
+        visibleFieldsData.forEach((f) => {
           if (f.field_type === "multi_line_items") {
             const cols = f.sub_fields?.map((sf) => sf.key) || [];
             initialConfig[f.key] = {
@@ -222,7 +266,6 @@ export default function KpiReportBuilder() {
         setMultiLineConfig(initialConfig);
         setFilterDrafts(drafts);
         setExpandedTableKeys(initialExpanded);
-        setFilterDrafts(drafts);
         setLoading(false);
       })
       .catch((err) => {
@@ -278,7 +321,7 @@ export default function KpiReportBuilder() {
           scalar_fields: scalarFieldOverrides,
           excluded_scalar_fields: excludedScalarFields,
           excluded_multi_line_fields: excludedMultiLineFields,
-          ordered_scalar_fields: orderedScalarBlocks.flatMap(block => [block.parent, ...block.children]).map(f => String(f.id)),
+          ordered_scalar_fields: fieldTree.map(node => String(node.field.id)),
           multi_line_fields: multiLineConfig,
           format: format
         })
@@ -386,8 +429,8 @@ export default function KpiReportBuilder() {
     });
   };
 
-  const moveScalarBlock = (index: number, direction: "up" | "down") => {
-    setOrderedScalarBlocks((prev) => {
+  const moveRootNode = (index: number, direction: "up" | "down") => {
+    setFieldTree((prev) => {
       const list = [...prev];
       const targetIndex = direction === "up" ? index - 1 : index + 1;
       if (targetIndex < 0 || targetIndex >= list.length) return prev;
@@ -398,6 +441,437 @@ export default function KpiReportBuilder() {
       list[targetIndex] = temp;
       return list;
     });
+  };
+
+  const renderTableConfig = (f: FieldDef) => {
+    const cfg = multiLineConfig[f.key];
+    if (!cfg) return null;
+    const isExpanded = expandedTableKeys[f.key] !== false;
+    const warning = columnWarnings[f.key];
+
+    return (
+      <div
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: "8px",
+          overflow: "hidden",
+          background: "var(--bg-card)",
+          marginTop: "0.25rem",
+          marginBottom: "0.5rem"
+        }}
+      >
+        <div
+          onClick={() => setExpandedTableKeys((prev) => ({ ...prev, [f.key]: !isExpanded }))}
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "0.5rem 0.75rem",
+            background: "var(--bg-subtle)",
+            cursor: "pointer",
+            fontWeight: 600,
+            fontSize: "0.85rem"
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span>Table Settings</span>
+            <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontWeight: 400 }}>
+              ({cfg.selected_columns.length} cols)
+            </span>
+            {warning && (
+              <span style={{ color: "var(--error)", fontSize: "0.75rem" }}>⚠️ Limit Exceeded</span>
+            )}
+          </div>
+          <span>{isExpanded ? "▲" : "▼"}</span>
+        </div>
+
+        {isExpanded && (
+          <div style={{ padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+            {warning && (
+              <div style={{ color: "var(--error)", fontSize: "0.8rem", padding: "0.4rem", background: "rgba(220, 38, 38, 0.08)", borderRadius: "6px", border: "1px solid rgba(220, 38, 38, 0.2)" }}>
+                {warning}
+              </div>
+            )}
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label style={{ fontSize: "0.75rem" }}>Table Title</label>
+                <input
+                  type="text"
+                  value={cfg.table_heading}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setMultiLineConfig((prev) => ({
+                      ...prev,
+                      [f.key]: { ...prev[f.key], table_heading: val }
+                    }));
+                  }}
+                  style={{ padding: "0.3rem 0.5rem", fontSize: "0.8rem", width: "100%" }}
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label style={{ fontSize: "0.75rem" }}>Table Subtitle</label>
+                <input
+                  type="text"
+                  value={cfg.table_subheader}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setMultiLineConfig((prev) => ({
+                      ...prev,
+                      [f.key]: { ...prev[f.key], table_subheader: val }
+                    }));
+                  }}
+                  style={{ padding: "0.3rem 0.5rem", fontSize: "0.8rem", width: "100%" }}
+                />
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.25rem", color: "var(--text-secondary)" }}>
+                Select & Order Columns (Max 8)
+              </label>
+              
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                <div style={{ border: "1px solid var(--border)", borderRadius: "6px", padding: "0.4rem", maxHeight: "150px", overflowY: "auto", background: "var(--surface)" }}>
+                  {f.sub_fields?.map((sf) => {
+                    const isChecked = cfg.selected_columns.includes(sf.key);
+                    return (
+                      <label
+                        key={sf.key}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.3rem",
+                          fontSize: "0.8rem",
+                          padding: "0.15rem 0",
+                          cursor: "pointer",
+                          color: isChecked ? "var(--text)" : "var(--text-secondary)"
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => handleToggleColumn(f.key, sf.key)}
+                        />
+                        <span>{sf.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+
+                <div style={{ border: "1px solid var(--border)", borderRadius: "6px", padding: "0.4rem", maxHeight: "150px", overflowY: "auto", background: "var(--bg-subtle)" }}>
+                  {cfg.selected_columns.length === 0 ? (
+                    <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontStyle: "italic" }}>
+                      No columns selected
+                    </span>
+                  ) : (
+                    cfg.selected_columns.map((col, idx) => {
+                      const sf = f.sub_fields?.find((s) => s.key === col);
+                      return (
+                        <div
+                          key={col}
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            background: "var(--surface)",
+                            border: "1px solid var(--border)",
+                            borderRadius: "4px",
+                            padding: "0.15rem 0.3rem",
+                            marginBottom: "0.15rem",
+                            fontSize: "0.75rem"
+                          }}
+                        >
+                          <span style={{ fontWeight: 500 }}>{sf?.name || col}</span>
+                          <div style={{ display: "flex", gap: "0.1rem" }}>
+                            <button
+                              type="button"
+                              className="btn"
+                              disabled={idx === 0}
+                              onClick={() => handleMoveColumn(f.key, idx, "up")}
+                              style={{ padding: "0.05rem 0.2rem", fontSize: "0.65rem" }}
+                            >
+                              ▲
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              disabled={idx === cfg.selected_columns.length - 1}
+                              onClick={() => handleMoveColumn(f.key, idx, "down")}
+                              style={{ padding: "0.05rem 0.2rem", fontSize: "0.65rem" }}
+                            >
+                              ▼
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
+                <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+                  Filters
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => setOpenFilterFieldKey(openFilterFieldKey === f.key ? null : f.key)}
+                  style={{
+                    padding: "0.25rem 0.5rem",
+                    fontSize: "0.75rem"
+                  }}
+                >
+                  <span>Filters {openFilterFieldKey === f.key ? "▲" : "▼"}</span>
+                </button>
+              </div>
+
+              {openFilterFieldKey === f.key && token && effectiveOrgId && (
+                <div style={{ marginBottom: "0.5rem" }}>
+                  <MultiItemsAdvancedFiltersPanel
+                    token={token}
+                    effectiveOrgId={effectiveOrgId}
+                    subFields={(f.sub_fields || [])}
+                    filterDraft={filterDrafts[f.key] || [emptyMultiFilterRow()]}
+                    setFilterDraft={(action) => {
+                      setFilterDrafts((prev) => {
+                        const old = prev[f.key] || [emptyMultiFilterRow()];
+                        const next = typeof action === "function" ? action(old) : action;
+                        return { ...prev, [f.key]: next };
+                      });
+                    }}
+                    sourceKpiFieldsById={sourceKpiFieldsById}
+                    setSourceKpiFieldsById={setSourceKpiFieldsById}
+                    refFilterOptions={refFilterOptions}
+                    setRefFilterOptions={setRefFilterOptions}
+                    onApply={(draft) => {
+                      const payload = filterDraftToPayload(draft, f.sub_fields || []);
+                      setMultiLineConfig((prev) => ({
+                        ...prev,
+                        [f.key]: {
+                          ...prev[f.key],
+                          filters: payload || { conditions: [], _version: 2 }
+                        }
+                      }));
+                      setOpenFilterFieldKey(null);
+                    }}
+                    onClose={() => setOpenFilterFieldKey(null)}
+                    showCloseButton={false}
+                  />
+                </div>
+              )}
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
+                {cfg.filters.conditions.length === 0 ? (
+                  <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>No active filters</span>
+                ) : (
+                  cfg.filters.conditions.map((cond, condIdx) => {
+                    const sub = f.sub_fields?.find((s) => s.key === cond.field);
+                    return (
+                      <div
+                        key={condIdx}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          background: "var(--bg-subtle)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "16px",
+                          padding: "0.1rem 0.4rem",
+                          fontSize: "0.7rem",
+                          gap: "0.2rem"
+                        }}
+                      >
+                        <span>
+                          {sub?.name || cond.field} {cond.op} {String(cond.value ?? cond.values?.join(", "))}
+                        </span>
+                        <button
+                          type="button"
+                          style={{ border: "none", background: "none", color: "var(--error)", cursor: "pointer", fontWeight: 700 }}
+                          onClick={() => {
+                            const nextPayload = removeConditionFromPayload(cfg.filters as any, condIdx);
+                            setMultiLineConfig((prev) => ({
+                              ...prev,
+                              [f.key]: {
+                                ...prev[f.key],
+                                filters: nextPayload || { conditions: [], _version: 2 }
+                              }
+                            }));
+                            setFilterDrafts((prev) => ({
+                              ...prev,
+                              [f.key]: payloadToFilterDraft(nextPayload)
+                            }));
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderFieldNode = (node: FieldNode, depth: number, index: number) => {
+    const field = node.field;
+    const isExcluded = field.field_type === "multi_line_items"
+      ? excludedMultiLineFields.includes(field.key) || excludedMultiLineFields.includes(String(field.id))
+      : excludedScalarFields.includes(field.key) || excludedScalarFields.includes(String(field.id));
+
+    if (isExcluded) return null;
+
+    const val = field.field_type === "multi_line_items"
+      ? field.name
+      : scalarFieldOverrides[field.key] || scalarFieldOverrides[String(field.id)] || field.name;
+
+    const isEditing = editingScalarFieldId === field.id;
+    const isRoot = depth === 0;
+
+    return (
+      <div 
+        key={field.id} 
+        style={{ 
+          display: "flex", 
+          flexDirection: "column", 
+          gap: "0.5rem",
+          marginLeft: depth > 0 ? `${depth * 1.25}rem` : "0",
+          borderLeft: depth > 0 ? "1px dashed var(--border)" : "none",
+          paddingLeft: depth > 0 ? "0.75rem" : "0",
+          marginBottom: "0.5rem"
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "0.5rem 0.75rem",
+            border: "1px solid var(--border)",
+            borderRadius: "6px",
+            background: isRoot ? "var(--bg-subtle)" : "var(--surface)"
+          }}
+        >
+          {isEditing ? (
+            <div style={{ display: "flex", flex: 1, gap: "0.5rem", alignItems: "center" }}>
+              <input
+                type="text"
+                value={editingScalarValue}
+                onChange={(e) => setEditingScalarValue(e.target.value)}
+                style={{ padding: "0.25rem 0.5rem", fontSize: "0.85rem", flex: 1, background: "var(--bg-subtle)", color: "var(--text)" }}
+                placeholder="Label override..."
+                autoFocus
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
+                onClick={() => {
+                  setScalarFieldOverrides((prev) => ({
+                    ...prev,
+                    [field.key]: editingScalarValue,
+                    [String(field.id)]: editingScalarValue,
+                  }));
+                  setEditingScalarFieldId(null);
+                }}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
+                onClick={() => setEditingScalarFieldId(null)}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.1rem" }}>
+                <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+                  {val}
+                  <span style={{ fontSize: "0.7rem", color: "var(--muted)", fontWeight: 400, marginLeft: "0.4rem" }}>
+                    ({field.field_type})
+                  </span>
+                </span>
+                {val !== field.name && (
+                  <span style={{ fontSize: "0.7rem", color: "var(--muted)" }}>
+                    Original: {field.name}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: "0.25rem" }}>
+                {isRoot && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={index === 0}
+                      onClick={() => moveRootNode(index, "up")}
+                      style={{ padding: "0.2rem 0.4rem", fontSize: "0.75rem" }}
+                    >
+                      ▲
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={index === fieldTree.length - 1}
+                      onClick={() => moveRootNode(index, "down")}
+                      style={{ padding: "0.2rem 0.4rem", fontSize: "0.75rem" }}
+                    >
+                      ▼
+                    </button>
+                  </>
+                )}
+                {field.field_type !== "multi_line_items" && (
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ padding: "0.2rem 0.4rem", fontSize: "0.75rem" }}
+                    onClick={() => {
+                      setEditingScalarFieldId(field.id);
+                      setEditingScalarValue(val);
+                    }}
+                  >
+                    Edit
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn"
+                  style={{
+                    padding: "0.2rem 0.4rem",
+                    fontSize: "0.75rem",
+                    color: "var(--error)",
+                    borderColor: "var(--error)"
+                  }}
+                  onClick={() => {
+                    if (field.field_type === "multi_line_items") {
+                      setExcludedMultiLineFields((prev) => [...prev, field.key, String(field.id)]);
+                    } else {
+                      setExcludedScalarFields((prev) => [...prev, field.key, String(field.id)]);
+                    }
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+
+        {field.field_type === "multi_line_items" && renderTableConfig(field)}
+
+        {node.children.map((child, childIdx) => renderFieldNode(child, depth + 1, childIdx))}
+      </div>
+    );
   };
 
   if (loading) {
@@ -485,9 +959,9 @@ export default function KpiReportBuilder() {
       </div>
 
       {/* Main Grid */}
-      <div className="report-design-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem" }}>
+      <div className="report-design-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr", gap: "1.5rem" }}>
         
-        {/* Left Column: General Configuration */}
+        {/* Left Column: General Configuration & Exclusions */}
         <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
           <div className="card">
             <h2 style={{ fontSize: "1.1rem", fontWeight: 600, marginBottom: "1.25rem", borderBottom: "1px solid var(--border)", paddingBottom: "0.5rem" }}>
@@ -540,683 +1014,78 @@ export default function KpiReportBuilder() {
             </div>
           </div>
 
-          {/* Scalar Field overrides */}
-          {orderedScalarBlocks.filter(block => {
-            const isParentExcluded = excludedScalarFields.includes(block.parent.key) || excludedScalarFields.includes(String(block.parent.id));
-            return !isParentExcluded;
-          }).length > 0 && (
+          {/* Excluded Fields & Tables Card */}
+          {(excludedScalarFields.length > 0 || excludedMultiLineFields.length > 0) && (
             <div className="card">
-              <h2 style={{ fontSize: "1.1rem", fontWeight: 600, marginBottom: "1.25rem", borderBottom: "1px solid var(--border)", paddingBottom: "0.5rem" }}>
-                Scalar Fields
+              <h2 style={{ fontSize: "1.1rem", fontWeight: 600, marginBottom: "0.75rem", borderBottom: "1px solid var(--border)", paddingBottom: "0.5rem" }}>
+                Excluded Fields & Tables
               </h2>
-              <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "1rem" }}>
-                Configure which scalar fields are included, customize display labels, and order them in the report. Dependent fields move automatically with their parent.
+              <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "0.75rem" }}>
+                Click "+" to restore any field or table back to the report.
               </p>
-              
-              <div style={{ display: "flex", flexDirection: "column", gap: "1rem", maxHeight: "500px", overflowY: "auto", paddingRight: "0.25rem" }}>
-                {(() => {
-                  const activeBlocks = orderedScalarBlocks.filter(block => {
-                    const isParentExcluded = excludedScalarFields.includes(block.parent.key) || excludedScalarFields.includes(String(block.parent.id));
-                    return !isParentExcluded;
-                  });
-
-                  return activeBlocks.map((block, blockIdx) => {
-                    const parentField = block.parent;
-                    const parentVal = scalarFieldOverrides[parentField.key] || scalarFieldOverrides[String(parentField.id)] || parentField.name;
-                    const isParentEditing = editingScalarFieldId === parentField.id;
-
-                    const activeChildren = block.children.filter(child => {
-                      return !excludedScalarFields.includes(child.key) && !excludedScalarFields.includes(String(child.id));
-                    });
-
-                    return (
-                      <div key={parentField.id} style={{ display: "flex", flexDirection: "column", gap: "0.5rem", borderBottom: "1px solid var(--border)", paddingBottom: "0.75rem" }}>
-                        {/* Parent Field */}
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            padding: "0.6rem 0.8rem",
-                            border: "1px solid var(--border)",
-                            borderRadius: "6px",
-                            background: "var(--bg-subtle)"
-                          }}
-                        >
-                          {isParentEditing ? (
-                            <div style={{ display: "flex", flex: 1, gap: "0.5rem", alignItems: "center" }}>
-                              <input
-                                type="text"
-                                value={editingScalarValue}
-                                onChange={(e) => setEditingScalarValue(e.target.value)}
-                                style={{ padding: "0.3rem 0.5rem", fontSize: "0.85rem", flex: 1 }}
-                                placeholder="Label override..."
-                                autoFocus
-                              />
-                              <button
-                                type="button"
-                                className="btn btn-primary"
-                                style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
-                                onClick={() => {
-                                  setScalarFieldOverrides((prev) => ({
-                                    ...prev,
-                                    [parentField.key]: editingScalarValue,
-                                    [String(parentField.id)]: editingScalarValue,
-                                  }));
-                                  setEditingScalarFieldId(null);
-                                }}
-                              >
-                                Save
-                              </button>
-                              <button
-                                type="button"
-                                className="btn"
-                                style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
-                                onClick={() => setEditingScalarFieldId(null)}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : (
-                            <>
-                              <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
-                                <span style={{ fontSize: "0.9rem", fontWeight: 600 }}>{parentVal}</span>
-                                {parentVal !== parentField.name && (
-                                  <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
-                                    Original: {parentField.name}
-                                  </span>
-                                )}
-                              </div>
-                              <div style={{ display: "flex", gap: "0.35rem" }}>
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  disabled={blockIdx === 0}
-                                  onClick={() => moveScalarBlock(blockIdx, "up")}
-                                  style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
-                                >
-                                  ▲
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  disabled={blockIdx === activeBlocks.length - 1}
-                                  onClick={() => moveScalarBlock(blockIdx, "down")}
-                                  style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
-                                >
-                                  ▼
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
-                                  onClick={() => {
-                                    setEditingScalarFieldId(parentField.id);
-                                    setEditingScalarValue(parentVal);
-                                  }}
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  style={{
-                                    padding: "0.3rem 0.6rem",
-                                    fontSize: "0.8rem",
-                                    color: "var(--error)",
-                                    borderColor: "var(--error)"
-                                  }}
-                                  onClick={() => {
-                                    setExcludedScalarFields((prev) => [...prev, parentField.key, String(parentField.id)]);
-                                  }}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </>
-                          )}
-                        </div>
-
-                        {/* Indented Dependent Child Fields */}
-                        {activeChildren.map((childField) => {
-                          const childVal = scalarFieldOverrides[childField.key] || scalarFieldOverrides[String(childField.id)] || childField.name;
-                          const isChildEditing = editingScalarFieldId === childField.id;
-
-                          return (
-                            <div
-                              key={childField.id}
-                              style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                alignItems: "center",
-                                padding: "0.5rem 0.75rem",
-                                border: "1px dashed var(--border)",
-                                borderRadius: "6px",
-                                background: "var(--surface)",
-                                marginLeft: "1.5rem"
-                              }}
-                            >
-                              {isChildEditing ? (
-                                <div style={{ display: "flex", flex: 1, gap: "0.5rem", alignItems: "center" }}>
-                                  <input
-                                    type="text"
-                                    value={editingScalarValue}
-                                    onChange={(e) => setEditingScalarValue(e.target.value)}
-                                    style={{ padding: "0.3rem 0.5rem", fontSize: "0.85rem", flex: 1 }}
-                                    placeholder="Label override..."
-                                    autoFocus
-                                  />
-                                  <button
-                                    type="button"
-                                    className="btn btn-primary"
-                                    style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
-                                    onClick={() => {
-                                      setScalarFieldOverrides((prev) => ({
-                                        ...prev,
-                                        [childField.key]: editingScalarValue,
-                                        [String(childField.id)]: editingScalarValue,
-                                      }));
-                                      setEditingScalarFieldId(null);
-                                    }}
-                                  >
-                                    Save
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn"
-                                    style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
-                                    onClick={() => setEditingScalarFieldId(null)}
-                                  >
-                                    Cancel
-                                  </button>
-                                </div>
-                              ) : (
-                                <>
-                                  <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
-                                    <span style={{ fontSize: "0.85rem", fontWeight: 500, color: "var(--text-secondary)" }}>
-                                      ↳ {childVal}
-                                    </span>
-                                    {childVal !== childField.name && (
-                                      <span style={{ fontSize: "0.7rem", color: "var(--muted)", marginLeft: "0.75rem" }}>
-                                        Original: {childField.name}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div style={{ display: "flex", gap: "0.35rem" }}>
-                                    <button
-                                      type="button"
-                                      className="btn"
-                                      style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
-                                      onClick={() => {
-                                        setEditingScalarFieldId(childField.id);
-                                        setEditingScalarValue(childVal);
-                                      }}
-                                    >
-                                      Edit
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="btn"
-                                      style={{
-                                        padding: "0.3rem 0.6rem",
-                                        fontSize: "0.8rem",
-                                        color: "var(--error)",
-                                        borderColor: "var(--error)"
-                                      }}
-                                      onClick={() => {
-                                        setExcludedScalarFields((prev) => [...prev, childField.key, String(childField.id)]);
-                                      }}
-                                    >
-                                      Delete
-                                    </button>
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  });
-                })()}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                {fields
+                  .filter(f => 
+                    excludedScalarFields.includes(f.key) || 
+                    excludedScalarFields.includes(String(f.id)) || 
+                    excludedMultiLineFields.includes(f.key) || 
+                    excludedMultiLineFields.includes(String(f.id))
+                  )
+                  .map(f => (
+                    <div
+                      key={f.id}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        background: "var(--bg-subtle)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "16px",
+                        padding: "0.2rem 0.5rem",
+                        fontSize: "0.75rem",
+                        gap: "0.25rem"
+                      }}
+                    >
+                      <span>{f.name}</span>
+                      <button
+                        type="button"
+                        style={{ border: "none", background: "none", color: "var(--text-secondary)", cursor: "pointer", fontWeight: 700 }}
+                        onClick={() => {
+                          if (f.field_type === "multi_line_items") {
+                            setExcludedMultiLineFields((prev) => prev.filter(k => k !== f.key && k !== String(f.id)));
+                          } else {
+                            setExcludedScalarFields((prev) => prev.filter(k => k !== f.key && k !== String(f.id)));
+                          }
+                        }}
+                      >
+                        +
+                      </button>
+                    </div>
+                  ))
+                }
               </div>
-              
-              {/* Optional: Restore Excluded Fields */}
-              {excludedScalarFields.length > 0 && (
-                <div style={{ marginTop: "1rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
-                  <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: "0.5rem" }}>
-                    Excluded Fields
-                  </span>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                    {(() => {
-                      const excludedObjects = scalarFields.filter(sf => excludedScalarFields.includes(sf.key) || excludedScalarFields.includes(String(sf.id)));
-                      return excludedObjects.map(sf => (
-                        <div
-                          key={sf.id}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            background: "var(--bg-subtle)",
-                            border: "1px solid var(--border)",
-                            borderRadius: "16px",
-                            padding: "0.2rem 0.5rem",
-                            fontSize: "0.75rem",
-                            gap: "0.25rem"
-                          }}
-                        >
-                          <span>{sf.name}</span>
-                          <button
-                            type="button"
-                            style={{ border: "none", background: "none", color: "var(--text-secondary)", cursor: "pointer", fontWeight: 700 }}
-                            onClick={() => {
-                              setExcludedScalarFields((prev) => prev.filter(k => k !== sf.key && k !== String(sf.id)));
-                            }}
-                          >
-                            +
-                          </button>
-                        </div>
-                      ));
-                    })()}
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>
 
-        {/* Right Column: Multi-Line Configuration Accordions */}
+        {/* Right Column: Unified KPI Fields Hierarchy */}
         <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
           <div className="card">
-            <h2 style={{ fontSize: "1.1rem", fontWeight: 600, marginBottom: "1rem", borderBottom: "1px solid var(--border)", paddingBottom: "0.5rem" }}>
-              Multi-Line Tables Config
+            <h2 style={{ fontSize: "1.1rem", fontWeight: 600, marginBottom: "0.5rem", borderBottom: "1px solid var(--border)", paddingBottom: "0.5rem" }}>
+              KPI Report Structure
             </h2>
+            <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "1.25rem" }}>
+              Dependent fields are nested hierarchically and will stay with their parents. Reorder root fields using ▲/▼. Tables can be configured inline.
+            </p>
             
-            {multiLineFields.length === 0 ? (
-              <p style={{ fontSize: "0.9rem", color: "var(--text-secondary)" }}>
-                This KPI does not contain any multi-line item fields.
-              </p>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                {multiLineFields
-                  .filter((f) => !excludedMultiLineFields.includes(f.key) && !excludedMultiLineFields.includes(String(f.id)))
-                  .map((f) => {
-                    const cfg = multiLineConfig[f.key];
-                    if (!cfg) return null;
-                    const isExpanded = expandedTableKeys[f.key] !== false;
-                    const warning = columnWarnings[f.key];
-
-                    return (
-                      <div
-                        key={f.id}
-                        style={{
-                          border: "1px solid var(--border)",
-                          borderRadius: "8px",
-                          overflow: "hidden"
-                        }}
-                      >
-                        {/* Accordion Header */}
-                        <div
-                          onClick={() => setExpandedTableKeys((prev) => ({ ...prev, [f.key]: !isExpanded }))}
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            padding: "0.75rem 1rem",
-                            background: "var(--bg-subtle)",
-                            cursor: "pointer",
-                            fontWeight: 600,
-                            fontSize: "0.95rem"
-                          }}
-                        >
-                          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                            <span>{f.name}</span>
-                            <span style={{ fontSize: "0.8rem", color: "var(--muted)", fontWeight: 400 }}>
-                              ({cfg.selected_columns.length} cols)
-                            </span>
-                            {warning && (
-                              <span style={{ color: "var(--error)", fontSize: "0.85rem" }}>⚠️ Limit Exceeded</span>
-                            )}
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                            <button
-                              type="button"
-                              className="btn"
-                              style={{
-                                padding: "0.2rem 0.5rem",
-                                fontSize: "0.75rem",
-                                color: "var(--error)",
-                                borderColor: "var(--error)",
-                                background: "var(--surface)"
-                              }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setExcludedMultiLineFields((prev) => [...prev, f.key, String(f.id)]);
-                              }}
-                            >
-                              Delete
-                            </button>
-                            <span>{isExpanded ? "▲" : "▼"}</span>
-                          </div>
-                        </div>
-
-                        {/* Accordion Body */}
-                        {isExpanded && (
-                          <div style={{ padding: "1rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
-                            
-                            {/* Warnings */}
-                            {warning && (
-                              <div style={{ color: "var(--error)", fontSize: "0.85rem", padding: "0.5rem", background: "rgba(220, 38, 38, 0.08)", borderRadius: "6px", border: "1px solid rgba(220, 38, 38, 0.2)" }}>
-                                {warning}
-                              </div>
-                            )}
-
-                            {/* Titles Overrides */}
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1.8fr 120px", gap: "0.75rem" }}>
-                              <div className="form-group" style={{ marginBottom: 0 }}>
-                                <label>Table Title</label>
-                                <input
-                                  type="text"
-                                  value={cfg.table_heading}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    setMultiLineConfig((prev) => ({
-                                      ...prev,
-                                      [f.key]: { ...prev[f.key], table_heading: val }
-                                    }));
-                                  }}
-                                  style={{ padding: "0.4rem 0.6rem", fontSize: "0.85rem", width: "100%" }}
-                                />
-                              </div>
-                              <div className="form-group" style={{ marginBottom: 0 }}>
-                                <label>Table Subtitle</label>
-                                <input
-                                  type="text"
-                                  value={cfg.table_subheader}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    setMultiLineConfig((prev) => ({
-                                      ...prev,
-                                      [f.key]: { ...prev[f.key], table_subheader: val }
-                                    }));
-                                  }}
-                                  style={{ padding: "0.4rem 0.6rem", fontSize: "0.85rem", width: "100%" }}
-                                />
-                              </div>
-                              <div className="form-group" style={{ marginBottom: 0 }}>
-                                <label>order</label>
-                                <input
-                                  type="number"
-                                  min={1}
-                                  value={cfg.sort_order ?? ""}
-                                  onChange={(e) => {
-                                    const val = e.target.value ? parseInt(e.target.value, 10) : "";
-                                    setMultiLineConfig((prev) => ({
-                                      ...prev,
-                                      [f.key]: { ...prev[f.key], sort_order: val }
-                                    }));
-                                  }}
-                                  placeholder="e.g. 2"
-                                  style={{ padding: "0.4rem 0.6rem", fontSize: "0.85rem", width: "100px" }}
-                                />
-                              </div>
-                            </div>
-
-                            {/* Column Selector List */}
-                            <div>
-                              <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem", color: "var(--text-secondary)" }}>
-                                Select & Order Columns (Max 8)
-                              </label>
-                              
-                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
-                                
-                                {/* Available Fields Checklist */}
-                                <div style={{ border: "1px solid var(--border)", borderRadius: "6px", padding: "0.5rem", maxHeight: "200px", overflowY: "auto" }}>
-                                  {f.sub_fields?.map((sf) => {
-                                    const isChecked = cfg.selected_columns.includes(sf.key);
-                                    return (
-                                      <label
-                                        key={sf.key}
-                                        style={{
-                                          display: "flex",
-                                          alignItems: "center",
-                                          gap: "0.4rem",
-                                          fontSize: "0.85rem",
-                                          padding: "0.25rem 0",
-                                          cursor: "pointer",
-                                          color: isChecked ? "var(--text)" : "var(--text-secondary)"
-                                        }}
-                                      >
-                                        <input
-                                          type="checkbox"
-                                          checked={isChecked}
-                                          onChange={() => handleToggleColumn(f.key, sf.key)}
-                                        />
-                                        <span>{sf.name}</span>
-                                      </label>
-                                    );
-                                  })}
-                                </div>
-
-                                {/* Ordered Columns List */}
-                                <div style={{ border: "1px solid var(--border)", borderRadius: "6px", padding: "0.5rem", maxHeight: "200px", overflowY: "auto", background: "var(--bg-subtle)" }}>
-                                  {cfg.selected_columns.length === 0 ? (
-                                    <span style={{ fontSize: "0.8rem", color: "var(--muted)", fontStyle: "italic" }}>
-                                      No columns selected
-                                    </span>
-                                  ) : (
-                                    cfg.selected_columns.map((col, idx) => {
-                                      const sf = f.sub_fields?.find((s) => s.key === col);
-                                      return (
-                                        <div
-                                          key={col}
-                                          style={{
-                                            display: "flex",
-                                            justifyContent: "space-between",
-                                            alignItems: "center",
-                                            background: "var(--surface)",
-                                            border: "1px solid var(--border)",
-                                            borderRadius: "4px",
-                                            padding: "0.25rem 0.5rem",
-                                            marginBottom: "0.25rem",
-                                            fontSize: "0.8rem"
-                                          }}
-                                        >
-                                          <span style={{ fontWeight: 500 }}>{sf?.name || col}</span>
-                                          <div style={{ display: "flex", gap: "0.15rem" }}>
-                                            <button
-                                              type="button"
-                                              className="btn"
-                                              disabled={idx === 0}
-                                              onClick={() => handleMoveColumn(f.key, idx, "up")}
-                                              style={{ padding: "0.1rem 0.3rem", fontSize: "0.7rem" }}
-                                            >
-                                              ▲
-                                            </button>
-                                            <button
-                                              type="button"
-                                              className="btn"
-                                              disabled={idx === cfg.selected_columns.length - 1}
-                                              onClick={() => handleMoveColumn(f.key, idx, "down")}
-                                              style={{ padding: "0.1rem 0.3rem", fontSize: "0.7rem" }}
-                                            >
-                                              ▼
-                                            </button>
-                                          </div>
-                                        </div>
-                                      );
-                                    })
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Advanced Filters Panel */}
-                            <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
-                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-                                <span style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text-secondary)" }}>
-                                  Filters
-                                </span>
-                                <button
-                                  type="button"
-                                  className="btn btn-primary"
-                                  onClick={() => setOpenFilterFieldKey(openFilterFieldKey === f.key ? null : f.key)}
-                                  style={{
-                                    display: "inline-flex",
-                                    alignItems: "center",
-                                    gap: "0.35rem",
-                                    padding: "0.5rem 1rem",
-                                    fontSize: "0.875rem",
-                                    fontWeight: 600,
-                                    borderRadius: "6px",
-                                    cursor: "pointer",
-                                    border: "1px solid #2563eb",
-                                    background: openFilterFieldKey === f.key ? "#1d4ed8" : "#2563eb",
-                                    color: "#ffffff",
-                                    boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
-                                    transition: "all 0.2s ease",
-                                  }}
-                                >
-                                  <span>Filters</span>
-                                  <span style={{ fontSize: "0.75rem" }}>
-                                    {openFilterFieldKey === f.key ? "▲" : "▼"}
-                                  </span>
-                                </button>
-                              </div>
-
-                              {openFilterFieldKey === f.key && token && effectiveOrgId && (
-                                <div style={{ marginBottom: "1rem" }}>
-                                  <MultiItemsAdvancedFiltersPanel
-                                    token={token}
-                                    effectiveOrgId={effectiveOrgId}
-                                    subFields={(f.sub_fields || [])}
-                                    filterDraft={filterDrafts[f.key] || [emptyMultiFilterRow()]}
-                                    setFilterDraft={(action) => {
-                                      setFilterDrafts((prev) => {
-                                        const old = prev[f.key] || [emptyMultiFilterRow()];
-                                        const next = typeof action === "function" ? action(old) : action;
-                                        return { ...prev, [f.key]: next };
-                                      });
-                                    }}
-                                    sourceKpiFieldsById={sourceKpiFieldsById}
-                                    setSourceKpiFieldsById={setSourceKpiFieldsById}
-                                    refFilterOptions={refFilterOptions}
-                                    setRefFilterOptions={setRefFilterOptions}
-                                    onApply={(draft) => {
-                                      const payload = filterDraftToPayload(draft, f.sub_fields || []);
-                                      setMultiLineConfig((prev) => ({
-                                        ...prev,
-                                        [f.key]: {
-                                          ...prev[f.key],
-                                          filters: payload || { conditions: [], _version: 2 }
-                                        }
-                                      }));
-                                      setOpenFilterFieldKey(null);
-                                    }}
-                                    onClose={() => setOpenFilterFieldKey(null)}
-                                    showCloseButton={false}
-                                  />
-                                </div>
-                              )}
-
-                              {/* Active Filter Chips */}
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                                {cfg.filters.conditions.length === 0 ? (
-                                  <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>No active filters</span>
-                                ) : (
-                                  cfg.filters.conditions.map((cond, condIdx) => {
-                                    const sub = f.sub_fields?.find((s) => s.key === cond.field);
-                                    return (
-                                      <div
-                                        key={condIdx}
-                                        style={{
-                                          display: "inline-flex",
-                                          alignItems: "center",
-                                          background: "var(--bg-subtle)",
-                                          border: "1px solid var(--border)",
-                                          borderRadius: "16px",
-                                          padding: "0.2rem 0.5rem",
-                                          fontSize: "0.75rem",
-                                          gap: "0.25rem"
-                                        }}
-                                      >
-                                        <span>
-                                          {sub?.name || cond.field} {cond.op} {String(cond.value ?? cond.values?.join(", "))}
-                                        </span>
-                                        <button
-                                          type="button"
-                                          style={{ border: "none", background: "none", color: "var(--error)", cursor: "pointer", fontWeight: 700 }}
-                                          onClick={() => {
-                                            const nextPayload = removeConditionFromPayload(cfg.filters as any, condIdx);
-                                            setMultiLineConfig((prev) => ({
-                                              ...prev,
-                                              [f.key]: {
-                                                ...prev[f.key],
-                                                filters: nextPayload || { conditions: [], _version: 2 }
-                                              }
-                                            }));
-                                            // Sync draft
-                                            setFilterDrafts((prev) => ({
-                                              ...prev,
-                                              [f.key]: payloadToFilterDraft(nextPayload)
-                                            }));
-                                          }}
-                                        >
-                                          ×
-                                        </button>
-                                      </div>
-                                    );
-                                  })
-                                )}
-                              </div>
-                            </div>
-
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
-
-            {/* Restore Excluded Multi-Line Fields */}
-            {excludedMultiLineFields.length > 0 && (
-              <div style={{ marginTop: "1rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
-                <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: "0.5rem" }}>
-                  Excluded Tables
-                </span>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                  {(() => {
-                    const excludedObjects = multiLineFields.filter(sf => excludedMultiLineFields.includes(sf.key) || excludedMultiLineFields.includes(String(sf.id)));
-                    return excludedObjects.map(sf => (
-                      <div
-                        key={sf.id}
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          background: "var(--bg-subtle)",
-                          border: "1px solid var(--border)",
-                          borderRadius: "16px",
-                          padding: "0.2rem 0.5rem",
-                          fontSize: "0.75rem",
-                          gap: "0.25rem"
-                        }}
-                      >
-                        <span>{sf.name}</span>
-                        <button
-                          type="button"
-                          style={{ border: "none", background: "none", color: "var(--text-secondary)", cursor: "pointer", fontWeight: 700 }}
-                          onClick={() => {
-                            setExcludedMultiLineFields((prev) => prev.filter(k => k !== sf.key && k !== String(sf.id)));
-                          }}
-                        >
-                          +
-                        </button>
-                      </div>
-                    ));
-                  })()}
-                </div>
-              </div>
-            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", maxHeight: "800px", overflowY: "auto", paddingRight: "0.25rem" }}>
+              {fieldTree.length === 0 ? (
+                <p style={{ fontSize: "0.9rem", color: "var(--text-secondary)", fontStyle: "italic" }}>
+                  No visible fields available in this period.
+                </p>
+              ) : (
+                fieldTree.map((node, index) => renderFieldNode(node, 0, index))
+              )}
+            </div>
           </div>
         </div>
 
