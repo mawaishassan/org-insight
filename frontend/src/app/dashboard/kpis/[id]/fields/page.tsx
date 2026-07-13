@@ -3673,7 +3673,7 @@ export default function KpiFieldsPage() {
 
         const eligibleDependents = isMultiTab
           ? subs.filter((s: any) => s.field_type !== "multi_line_items" && s.field_type !== "formula" && String(s.id || s.key) !== String(condTriggerId))
-          : list.filter((f) => f.field_type !== "formula" && f.id !== Number(condTriggerId));
+          : list.filter((f) => f.field_type !== "multi_line_items" && f.field_type !== "formula" && f.id !== Number(condTriggerId));
 
         return (
           <div
