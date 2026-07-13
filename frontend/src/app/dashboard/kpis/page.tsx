@@ -8,7 +8,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken, canEditKpis, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { KpiSearchInput } from "@/components/KpiSearchInput";
 
 function qs(params: Record<string, string | number | undefined>) {
   const entries = Object.entries(params)
@@ -293,7 +292,7 @@ export default function KPIsPage() {
 
   useEffect(() => {
     loadList();
-  }, [organizationId, effectiveOrgId, filterDomainId, filterCategoryId, filterTagId, filterName]);
+  }, [organizationId, effectiveOrgId, filterDomainId, filterCategoryId, filterTagId]);
 
   const createForm = useForm<CreateFormData>({
     resolver: zodResolver(createSchema),
@@ -415,10 +414,12 @@ export default function KPIsPage() {
       <div className="card" style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "1rem", alignItems: "flex-end" }}>
         <div className="form-group" style={{ marginBottom: 0, minWidth: "160px" }}>
           <label style={{ fontSize: "0.9rem" }}>Name</label>
-          <KpiSearchInput
+          <input
+            type="text"
             placeholder="Search by name..."
             value={filterName}
-            onChange={setFilterName}
+            onChange={(e) => setFilterName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && loadList()}
             style={{ padding: "0.5rem", width: "100%" }}
           />
         </div>

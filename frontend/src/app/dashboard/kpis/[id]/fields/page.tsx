@@ -403,7 +403,8 @@ export default function KpiFieldsPage() {
         const resolvedOrgId = kpi?.organization_id ?? kpiOrgId ?? orgIdFromUrl ?? null;
         const orgParam = resolvedOrgId != null ? `&organization_id=${resolvedOrgId}` : "";
         api<{ values: string[] }>(
-          `/fields/reference-allowed-values?source_kpi_id=${cfg.reference_source_kpi_id}&source_field_key=${cfg.reference_source_field_key}${cfg.reference_source_sub_field_key ? `&source_sub_field_key=${cfg.reference_source_sub_field_key}` : ""
+          `/fields/reference-allowed-values?source_kpi_id=${cfg.reference_source_kpi_id}&source_field_key=${cfg.reference_source_field_key}${
+            cfg.reference_source_sub_field_key ? `&source_sub_field_key=${cfg.reference_source_sub_field_key}` : ""
           }${orgParam}`,
           { token }
         )
@@ -835,12 +836,12 @@ export default function KpiFieldsPage() {
               ...(hasUiSection ? { ui_section: uiSection } : {}),
               ...(hasRefConfig
                 ? {
-                  reference_source_kpi_id: (s.config as any).reference_source_kpi_id,
-                  reference_source_field_key: (s.config as any).reference_source_field_key,
-                  ...((s.config as any).reference_source_sub_field_key
-                    ? { reference_source_sub_field_key: (s.config as any).reference_source_sub_field_key }
-                    : {}),
-                }
+                    reference_source_kpi_id: (s.config as any).reference_source_kpi_id,
+                    reference_source_field_key: (s.config as any).reference_source_field_key,
+                    ...((s.config as any).reference_source_sub_field_key
+                      ? { reference_source_sub_field_key: (s.config as any).reference_source_sub_field_key }
+                      : {}),
+                  }
                 : {}),
             };
           }
@@ -951,7 +952,7 @@ export default function KpiFieldsPage() {
               sCfg.reference_source_sub_field_key = (s.config as any).reference_source_sub_field_key;
             }
           }
-
+          
           sub.config = Object.keys(sCfg).length > 0 ? sCfg : undefined;
           return sub;
         });
@@ -1154,8 +1155,8 @@ export default function KpiFieldsPage() {
         }
 
         // 2. Prepare new rule object
-        const ruleId = (editingRuleId && !editingRuleId.startsWith("legacy:"))
-          ? editingRuleId
+        const ruleId = (editingRuleId && !editingRuleId.startsWith("legacy:")) 
+          ? editingRuleId 
           : `rule_${Date.now()}`;
 
         const newRule = {
@@ -1173,7 +1174,7 @@ export default function KpiFieldsPage() {
           let nextSubs = subs.map((s) => {
             const sIdOrKey = String(s.id || s.key);
             const triggerIdOrKey = String(triggerField.id || triggerField.key);
-
+            
             if (sIdOrKey === triggerIdOrKey) {
               const oldCfg = { ...(s.config ?? {}) };
               let rules = Array.isArray(oldCfg.conditional_rules) ? [...oldCfg.conditional_rules] : [];
@@ -1219,7 +1220,7 @@ export default function KpiFieldsPage() {
           let rules = Array.isArray(oldConfig.conditional_rules) ? [...oldConfig.conditional_rules] : [];
           rules = rules.filter((r: any) => r.id !== ruleId);
           rules.push(newRule);
-
+          
           await api(`/fields/${triggerField.id}?organization_id=${orgId}`, {
             method: "PATCH",
             body: JSON.stringify({ config: { ...oldConfig, conditional_rules: rules } }),
@@ -1244,7 +1245,7 @@ export default function KpiFieldsPage() {
             }
           }
         }
-
+        
         toast.success("Conditional visibility rule saved successfully");
         setIsCondModalOpen(false);
         loadList();
@@ -1315,7 +1316,7 @@ export default function KpiFieldsPage() {
     if (!token || orgId == null) return;
     try {
       const isMultiTab = superAdminFieldsTab.startsWith("multi:");
-
+      
       if (ruleId.startsWith("legacy:")) {
         const depId = ruleId.replace("legacy:", "");
         if (isMultiTab) {
@@ -1386,8 +1387,8 @@ export default function KpiFieldsPage() {
           };
           await executeFieldUpdate(field.id, body, nextSubs, undefined);
         } else {
-          const triggerField = list.find(f =>
-            Array.isArray(f.config?.conditional_rules) &&
+          const triggerField = list.find(f => 
+            Array.isArray(f.config?.conditional_rules) && 
             f.config.conditional_rules.some((r: any) => r.id === ruleId)
           );
           if (triggerField) {
@@ -1469,7 +1470,7 @@ export default function KpiFieldsPage() {
           if (
             sfConfig?.condition_trigger_field_id != null &&
             (String(sfConfig.condition_trigger_field_id) === String(targetId) ||
-              String(sfConfig.condition_trigger_field_id) === String(targetKey))
+             String(sfConfig.condition_trigger_field_id) === String(targetKey))
           ) {
             return true;
           }
@@ -1705,1618 +1706,1013 @@ export default function KpiFieldsPage() {
 
   const content = (
     <>
-      <div>
-        {!isOrgContext && (
-          <div style={{ marginBottom: "1rem" }}>
-            <Link href="/dashboard/kpis" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-              {"\u2190"} KPIs
-            </Link>
-          </div>
-        )}
+    <div>
+      {!isOrgContext && (
+        <div style={{ marginBottom: "1rem" }}>
+          <Link href="/dashboard/kpis" style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+            {"\u2190"} KPIs
+          </Link>
+        </div>
+      )}
 
-        {isOrgContext && (
+      {isOrgContext && (
+        <>
+          {kpi && (
           <>
-            {kpi && (
-              <>
-                {/* KPI summary card: name, collapse toggle, domains/categories/tags (add/remove), used in reports */}
-                <div
-                  className="card"
-                  style={{
-                    marginBottom: "1.25rem",
-                    padding: "1.25rem 1.5rem",
-                    border: "1px solid var(--border)",
-                    borderRadius: 10,
-                    background: "var(--surface)",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                    <h1 style={{ fontSize: "1.5rem", fontWeight: 700, margin: 0, letterSpacing: "-0.02em", color: "var(--text)" }}>
-                      {kpi.name}
-                    </h1>
-                    {kpi.entry_mode === "api" && (
-                      <span style={{ fontSize: "0.75rem", fontWeight: 500, color: "var(--primary)", padding: "0.2rem 0.5rem", borderRadius: 6, background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)" }}>
-                        API
-                      </span>
-                    )}
-                  </div>
-                  {(kpi.category_tags?.length ?? 0) > 0 && (
-                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.35rem", marginTop: "0.5rem" }}>
-                      {kpi.category_tags!.map((c) => {
-                        const full = c.domain_name ? `${c.domain_name} → ${c.name}` : c.name;
-                        return (
-                          <span
-                            key={c.id}
-                            style={{
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: "0.35rem",
-                              padding: "0.25rem 0.5rem",
-                              borderRadius: 6,
-                              background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)",
-                              border: "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)",
-                              fontSize: "0.8rem",
-                              color: "var(--text)",
-                              fontWeight: 500,
-                            }}
-                          >
-                            <span>{full}</span>
-                            {userRole === "SUPER_ADMIN" && (
-                              <button type="button" onClick={() => removeCategory(c.id)} disabled={domainCategorySaving} style={{ flexShrink: 0, background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${full}`}>×</button>
-                            )}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-            <div style={tabBarStyle} role="tablist" aria-label="KPI edit sections">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeEditTab === "details"}
-                style={tabButtonStyle(activeEditTab === "details")}
-                onClick={() => setEditTab("details")}
-              >
-                Details
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeEditTab === "fields"}
-                style={tabButtonStyle(activeEditTab === "fields")}
-                onClick={() => setEditTab("fields")}
-              >
-                Fields {list.length > 0 && <span style={{ marginLeft: "0.35rem", opacity: 0.8 }}>({list.length})</span>}
-              </button>
-              {userRole === "SUPER_ADMIN" && (
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeEditTab === "odoo"}
-                  style={tabButtonStyle(activeEditTab === "odoo")}
-                  onClick={() => setEditTab("odoo")}
-                >
-                  Odoo import
-                </button>
+          {/* KPI summary card: name, collapse toggle, domains/categories/tags (add/remove), used in reports */}
+          <div
+            className="card"
+            style={{
+              marginBottom: "1.25rem",
+              padding: "1.25rem 1.5rem",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              background: "var(--surface)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+              <h1 style={{ fontSize: "1.5rem", fontWeight: 700, margin: 0, letterSpacing: "-0.02em", color: "var(--text)" }}>
+                {kpi.name}
+              </h1>
+              {kpi.entry_mode === "api" && (
+                <span style={{ fontSize: "0.75rem", fontWeight: 500, color: "var(--primary)", padding: "0.2rem 0.5rem", borderRadius: 6, background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)" }}>
+                  API
+                </span>
               )}
+            </div>
+            {(kpi.category_tags?.length ?? 0) > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.35rem", marginTop: "0.5rem" }}>
+                {kpi.category_tags!.map((c) => {
+                  const full = c.domain_name ? `${c.domain_name} → ${c.name}` : c.name;
+                  return (
+                    <span
+                      key={c.id}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "0.35rem",
+                        padding: "0.25rem 0.5rem",
+                        borderRadius: 6,
+                        background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)",
+                        border: "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)",
+                        fontSize: "0.8rem",
+                        color: "var(--text)",
+                        fontWeight: 500,
+                      }}
+                    >
+                      <span>{full}</span>
+                      {userRole === "SUPER_ADMIN" && (
+                        <button type="button" onClick={() => removeCategory(c.id)} disabled={domainCategorySaving} style={{ flexShrink: 0, background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${full}`}>×</button>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          </>
+          )}
+          <div style={tabBarStyle} role="tablist" aria-label="KPI edit sections">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeEditTab === "details"}
+              style={tabButtonStyle(activeEditTab === "details")}
+              onClick={() => setEditTab("details")}
+            >
+              Details
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeEditTab === "fields"}
+              style={tabButtonStyle(activeEditTab === "fields")}
+              onClick={() => setEditTab("fields")}
+            >
+              Fields {list.length > 0 && <span style={{ marginLeft: "0.35rem", opacity: 0.8 }}>({list.length})</span>}
+            </button>
+            {userRole === "SUPER_ADMIN" && (
               <button
                 type="button"
                 role="tab"
-                aria-selected={activeEditTab === "settings"}
-                style={tabButtonStyle(activeEditTab === "settings")}
-                onClick={() => setEditTab("settings")}
+                aria-selected={activeEditTab === "odoo"}
+                style={tabButtonStyle(activeEditTab === "odoo")}
+                onClick={() => setEditTab("odoo")}
               >
-                Settings
+                Odoo import
+              </button>
+            )}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeEditTab === "settings"}
+              style={tabButtonStyle(activeEditTab === "settings")}
+              onClick={() => setEditTab("settings")}
+            >
+              Settings
+            </button>
+          </div>
+        </>
+      )}
+
+      {isOrgContext && activeEditTab === "details" && (
+        <div className="card" style={{ marginBottom: "1.5rem" }}>
+          <h2 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>KPI details</h2>
+          <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
+            <div className="form-group">
+              <label>Name *</label>
+              <input {...kpiEditForm.register("name")} />
+              {kpiEditForm.formState.errors.name && (
+                <p className="form-error">{kpiEditForm.formState.errors.name.message}</p>
+              )}
+            </div>
+            <div className="form-group">
+              <label>Description</label>
+              <textarea {...kpiEditForm.register("description")} rows={2} />
+            </div>
+            {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
+            <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={kpiEditForm.formState.isSubmitting || kpiSaving}
+              >
+                {kpiSaving ? "Saving…" : "Save"}
               </button>
             </div>
-          </>
-        )}
+          </form>
+        </div>
+      )}
 
-        {isOrgContext && activeEditTab === "details" && (
-          <div className="card" style={{ marginBottom: "1.5rem" }}>
-            <h2 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>KPI details</h2>
-            <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
-              <div className="form-group">
-                <label>Name *</label>
-                <input {...kpiEditForm.register("name")} />
-                {kpiEditForm.formState.errors.name && (
-                  <p className="form-error">{kpiEditForm.formState.errors.name.message}</p>
-                )}
-              </div>
-              <div className="form-group">
-                <label>Description</label>
-                <textarea {...kpiEditForm.register("description")} rows={2} />
-              </div>
-              {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
-              <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
+      {isOrgContext && activeEditTab === "settings" && (
+        <div className="card" style={{ marginBottom: "1.5rem" }}>
+          <h2 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>Settings</h2>
+          <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: "1.5rem", minHeight: 320, alignItems: "start" }}>
+            <nav style={{ display: "flex", flexDirection: "column", gap: "0.25rem", borderRight: "1px solid var(--border)", paddingRight: "1rem" }}>
+              {[
+                { id: "order" as const, label: "Order" },
+                { id: "time_dimension" as const, label: "Time dimension" },
+                { id: "entry_mode" as const, label: "Entry mode" },
+                { id: "domain" as const, label: "Domain" },
+                { id: "tags" as const, label: "Tags" },
+                { id: "danger_zone" as const, label: "Danger zone" },
+              ].map(({ id, label }) => (
                 <button
-                  type="submit"
-                  className="btn btn-primary"
-                  disabled={kpiEditForm.formState.isSubmitting || kpiSaving}
+                  key={id}
+                  type="button"
+                  onClick={() => setSettingsPanel(id)}
+                  style={{
+                    textAlign: "left",
+                    padding: "0.5rem 0.6rem",
+                    borderRadius: 6,
+                    border: "none",
+                    background: settingsPanel === id ? "rgba(var(--primary-rgb, 59, 130, 246), 0.12)" : "transparent",
+                    color: settingsPanel === id ? "var(--primary)" : "var(--text)",
+                    cursor: "pointer",
+                    fontSize: "0.9rem",
+                    fontWeight: settingsPanel === id ? 600 : 400,
+                  }}
                 >
-                  {kpiSaving ? "Saving…" : "Save"}
+                  {label}
                 </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {isOrgContext && activeEditTab === "settings" && (
-          <div className="card" style={{ marginBottom: "1.5rem" }}>
-            <h2 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>Settings</h2>
-            <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: "1.5rem", minHeight: 320, alignItems: "start" }}>
-              <nav style={{ display: "flex", flexDirection: "column", gap: "0.25rem", borderRight: "1px solid var(--border)", paddingRight: "1rem" }}>
-                {[
-                  { id: "order" as const, label: "Order" },
-                  { id: "time_dimension" as const, label: "Time dimension" },
-                  { id: "entry_mode" as const, label: "Entry mode" },
-                  { id: "domain" as const, label: "Domain" },
-                  { id: "tags" as const, label: "Tags" },
-                  { id: "danger_zone" as const, label: "Danger zone" },
-                ].map(({ id, label }) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setSettingsPanel(id)}
-                    style={{
-                      textAlign: "left",
-                      padding: "0.5rem 0.6rem",
-                      borderRadius: 6,
-                      border: "none",
-                      background: settingsPanel === id ? "rgba(var(--primary-rgb, 59, 130, 246), 0.12)" : "transparent",
-                      color: settingsPanel === id ? "var(--primary)" : "var(--text)",
-                      cursor: "pointer",
-                      fontSize: "0.9rem",
-                      fontWeight: settingsPanel === id ? 600 : 400,
-                    }}
-                  >
-                    {label}
+              ))}
+            </nav>
+            <div style={{ minWidth: 0 }}>
+              {settingsPanel === "order" && (
+                <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
+                  <div className="form-group">
+                    <label>Sort order</label>
+                    <input type="number" min={0} {...kpiEditForm.register("sort_order")} />
+                  </div>
+                  {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
+                  <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
+                    {kpiSaving ? "Saving…" : "Save"}
                   </button>
-                ))}
-              </nav>
-              <div style={{ minWidth: 0 }}>
-                {settingsPanel === "order" && (
-                  <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
-                    <div className="form-group">
-                      <label>Sort order</label>
-                      <input type="number" min={0} {...kpiEditForm.register("sort_order")} />
-                    </div>
-                    {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
-                    <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
-                      {kpiSaving ? "Saving…" : "Save"}
-                    </button>
-                  </form>
-                )}
-                {settingsPanel === "time_dimension" && (
-                  <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
-                    <div className="form-group">
-                      <label>Time dimension</label>
-                      <select {...kpiEditForm.register("time_dimension")}>
-                        <option value="">Inherit from organization ({TIME_DIMENSION_LABELS[orgTimeDimension] ?? orgTimeDimension})</option>
-                        {TIME_DIMENSION_ORDER.filter((td) => {
-                          const orgIdx = TIME_DIMENSION_ORDER.indexOf(orgTimeDimension as (typeof TIME_DIMENSION_ORDER)[number]);
-                          const kpiIdx = TIME_DIMENSION_ORDER.indexOf(td);
-                          return orgIdx >= 0 && kpiIdx >= orgIdx;
-                        }).map((td) => (
-                          <option key={td} value={td}>{TIME_DIMENSION_LABELS[td] ?? td}</option>
-                        ))}
-                      </select>
+                </form>
+              )}
+              {settingsPanel === "time_dimension" && (
+                <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
+                  <div className="form-group">
+                    <label>Time dimension</label>
+                    <select {...kpiEditForm.register("time_dimension")}>
+                      <option value="">Inherit from organization ({TIME_DIMENSION_LABELS[orgTimeDimension] ?? orgTimeDimension})</option>
+                      {TIME_DIMENSION_ORDER.filter((td) => {
+                        const orgIdx = TIME_DIMENSION_ORDER.indexOf(orgTimeDimension as (typeof TIME_DIMENSION_ORDER)[number]);
+                        const kpiIdx = TIME_DIMENSION_ORDER.indexOf(td);
+                        return orgIdx >= 0 && kpiIdx >= orgIdx;
+                      }).map((td) => (
+                        <option key={td} value={td}>{TIME_DIMENSION_LABELS[td] ?? td}</option>
+                      ))}
+                    </select>
+                    <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+                      Leave as inherit to use the organization default.
+                    </p>
+                  </div>
+                  {userRole === "SUPER_ADMIN" && (
+                    <div className="form-group" style={{ marginTop: "1rem" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                        <input type="checkbox" {...kpiEditForm.register("carry_forward_data")} />
+                        Carry forward data (non-cyclic)
+                      </label>
                       <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
-                        Leave as inherit to use the organization default.
+                        When enabled, new time cycles will pre-fill with values from the previous period until the user changes them. History is preserved per period.
                       </p>
                     </div>
-                    {userRole === "SUPER_ADMIN" && (
-                      <div className="form-group" style={{ marginTop: "1rem" }}>
-                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
-                          <input type="checkbox" {...kpiEditForm.register("carry_forward_data")} />
-                          Carry forward data (non-cyclic)
-                        </label>
-                        <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
-                          When enabled, new time cycles will pre-fill with values from the previous period until the user changes them. History is preserved per period.
-                        </p>
+                  )}
+                  {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
+                  <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
+                    {kpiSaving ? "Saving…" : "Save"}
+                  </button>
+                </form>
+              )}
+              {settingsPanel === "entry_mode" && (
+                <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
+                  <div className="form-group">
+                    <label>Entry mode</label>
+                    <select {...kpiEditForm.register("entry_mode")} disabled={userRole !== "SUPER_ADMIN"}>
+                      <option value="manual">Manual (default)</option>
+                      <option value="api">API</option>
+                    </select>
+                  </div>
+                  {userRole === "SUPER_ADMIN" && kpiEditForm.watch("entry_mode") === "api" && (
+                    <>
+                      <div className="form-group">
+                        <label>API endpoint URL</label>
+                        <input type="url" placeholder="https://your-server.com/kpi-data" {...kpiEditForm.register("api_endpoint_url")} style={{ width: "100%", maxWidth: "480px" }} />
                       </div>
-                    )}
-                    {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
-                    <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
-                      {kpiSaving ? "Saving…" : "Save"}
-                    </button>
-                  </form>
-                )}
-                {settingsPanel === "entry_mode" && (
-                  <form onSubmit={kpiEditForm.handleSubmit(onKpiUpdateSubmit)}>
-                    <div className="form-group">
-                      <label>Entry mode</label>
-                      <select {...kpiEditForm.register("entry_mode")} disabled={userRole !== "SUPER_ADMIN"}>
-                        <option value="manual">Manual (default)</option>
-                        <option value="api">API</option>
-                      </select>
-                    </div>
-                    {userRole === "SUPER_ADMIN" && kpiEditForm.watch("entry_mode") === "api" && (
-                      <>
+                      <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                        <button type="button" className="btn" onClick={fetchContract}>
+                          {contractOpen ? "Hide" : "Show"} operation contract
+                        </button>
+                        {contractOpen && contract && (
+                          <pre style={{ marginTop: "0.5rem", padding: "0.75rem", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 8, fontSize: "0.85rem", overflow: "auto", maxHeight: 320 }}>
+                            {JSON.stringify(contract, null, 2)}
+                          </pre>
+                        )}
+                      </div>
+                      {kpi?.entry_mode === "api" && kpi?.api_endpoint_url && (
                         <div className="form-group">
-                          <label>API endpoint URL</label>
-                          <input type="url" placeholder="https://your-server.com/kpi-data" {...kpiEditForm.register("api_endpoint_url")} style={{ width: "100%", maxWidth: "480px" }} />
-                        </div>
-                        <div className="form-group" style={{ marginBottom: "0.5rem" }}>
-                          <button type="button" className="btn" onClick={fetchContract}>
-                            {contractOpen ? "Hide" : "Show"} operation contract
-                          </button>
-                          {contractOpen && contract && (
-                            <pre style={{ marginTop: "0.5rem", padding: "0.75rem", background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: 8, fontSize: "0.85rem", overflow: "auto", maxHeight: 320 }}>
-                              {JSON.stringify(contract, null, 2)}
-                            </pre>
-                          )}
-                        </div>
-                        {kpi?.entry_mode === "api" && kpi?.api_endpoint_url && (
-                          <div className="form-group">
-                            <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.35rem" }}>When syncing:</p>
-                            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
-                              <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
-                                <input type="radio" name="syncMode" checked={syncMode === "override"} onChange={() => setSyncMode("override")} />
-                                Override existing data
-                              </label>
-                              <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
-                                <input type="radio" name="syncMode" checked={syncMode === "append"} onChange={() => setSyncMode("append")} />
-                                Append to existing (multi-line rows)
-                              </label>
-                              <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
-                                <input type="radio" name="syncMode" checked={syncMode === "upsert"} onChange={() => setSyncMode("upsert")} />
-                                Update or add (match per multi-line table)
-                              </label>
-                            </div>
-                            {syncMode === "upsert" &&
-                              multiLineFieldsForSync.map((mf) => (
-                                <div key={mf.id} className="form-group" style={{ marginBottom: "0.5rem" }}>
-                                  <label style={{ fontSize: "0.9rem" }}>
-                                    Match column — {mf.name} <span style={{ color: "var(--muted)" }}>({mf.key})</span>
-                                  </label>
-                                  <select
-                                    value={kpiSyncUpsertByFieldKey[mf.key] ?? ""}
-                                    onChange={(e) =>
-                                      setKpiSyncUpsertByFieldKey((prev) => ({ ...prev, [mf.key]: e.target.value }))
-                                    }
-                                    style={{ display: "block", marginTop: "0.25rem", maxWidth: 400, padding: "0.4rem 0.5rem" }}
-                                  >
-                                    <option value="">— Select sub-field —</option>
-                                    {(mf.sub_fields ?? []).map((s) => (
-                                      <option key={s.key} value={s.key}>
-                                        {s.name} ({s.key})
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-                              ))}
-                            <div className="form-group" style={{ marginBottom: "0.5rem" }}>
-                              <label>Year to sync</label>
-                              <input type="number" min={2000} max={2100} value={syncYear} onChange={(e) => setSyncYear(Number(e.target.value) || new Date().getFullYear())} style={{ width: "6rem" }} />
-                            </div>
-                            <button
-                              type="button"
-                              className="btn"
-                              disabled={
-                                syncLoading ||
-                                (syncMode === "upsert" &&
-                                  multiLineFieldsForSync.some((mf) => !(kpiSyncUpsertByFieldKey[mf.key] ?? "").trim()))
-                              }
-                              onClick={async () => {
-                                if (syncMode === "upsert") {
-                                  for (const mf of multiLineFieldsForSync) {
-                                    if (!(kpiSyncUpsertByFieldKey[mf.key] ?? "").trim()) {
-                                      toast.error(`Select a match column for "${mf.name}".`);
-                                      return;
-                                    }
+                          <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.35rem" }}>When syncing:</p>
+                          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" }}>
+                            <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                              <input type="radio" name="syncMode" checked={syncMode === "override"} onChange={() => setSyncMode("override")} />
+                              Override existing data
+                            </label>
+                            <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                              <input type="radio" name="syncMode" checked={syncMode === "append"} onChange={() => setSyncMode("append")} />
+                              Append to existing (multi-line rows)
+                            </label>
+                            <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                              <input type="radio" name="syncMode" checked={syncMode === "upsert"} onChange={() => setSyncMode("upsert")} />
+                              Update or add (match per multi-line table)
+                            </label>
+                          </div>
+                          {syncMode === "upsert" &&
+                            multiLineFieldsForSync.map((mf) => (
+                              <div key={mf.id} className="form-group" style={{ marginBottom: "0.5rem" }}>
+                                <label style={{ fontSize: "0.9rem" }}>
+                                  Match column — {mf.name} <span style={{ color: "var(--muted)" }}>({mf.key})</span>
+                                </label>
+                                <select
+                                  value={kpiSyncUpsertByFieldKey[mf.key] ?? ""}
+                                  onChange={(e) =>
+                                    setKpiSyncUpsertByFieldKey((prev) => ({ ...prev, [mf.key]: e.target.value }))
+                                  }
+                                  style={{ display: "block", marginTop: "0.25rem", maxWidth: 400, padding: "0.4rem 0.5rem" }}
+                                >
+                                  <option value="">— Select sub-field —</option>
+                                  {(mf.sub_fields ?? []).map((s) => (
+                                    <option key={s.key} value={s.key}>
+                                      {s.name} ({s.key})
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            ))}
+                          <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                            <label>Year to sync</label>
+                            <input type="number" min={2000} max={2100} value={syncYear} onChange={(e) => setSyncYear(Number(e.target.value) || new Date().getFullYear())} style={{ width: "6rem" }} />
+                          </div>
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={
+                              syncLoading ||
+                              (syncMode === "upsert" &&
+                                multiLineFieldsForSync.some((mf) => !(kpiSyncUpsertByFieldKey[mf.key] ?? "").trim()))
+                            }
+                            onClick={async () => {
+                              if (syncMode === "upsert") {
+                                for (const mf of multiLineFieldsForSync) {
+                                  if (!(kpiSyncUpsertByFieldKey[mf.key] ?? "").trim()) {
+                                    toast.error(`Select a match column for "${mf.name}".`);
+                                    return;
                                   }
                                 }
-                                setSyncLoading(true);
-                                try {
-                                  const upsertPayload: Record<string, string> = {};
-                                  if (syncMode === "upsert") {
-                                    for (const mf of multiLineFieldsForSync) {
-                                      upsertPayload[mf.key] = (kpiSyncUpsertByFieldKey[mf.key] ?? "").trim();
-                                    }
+                              }
+                              setSyncLoading(true);
+                              try {
+                                const upsertPayload: Record<string, string> = {};
+                                if (syncMode === "upsert") {
+                                  for (const mf of multiLineFieldsForSync) {
+                                    upsertPayload[mf.key] = (kpiSyncUpsertByFieldKey[mf.key] ?? "").trim();
                                   }
-                                  const syncQs =
-                                    syncMode === "upsert" && Object.keys(upsertPayload).length > 0
-                                      ? qs({
+                                }
+                                const syncQs =
+                                  syncMode === "upsert" && Object.keys(upsertPayload).length > 0
+                                    ? qs({
                                         year: syncYear,
                                         organization_id: orgIdFromUrl!,
                                         sync_mode: syncMode,
                                         upsert_match_keys: JSON.stringify(upsertPayload),
                                       })
-                                      : qs({ year: syncYear, organization_id: orgIdFromUrl!, sync_mode: syncMode });
-                                  const res = await api<{ skipped?: boolean; reason?: string }>(
-                                    `/kpis/${kpiId}/sync-from-api?${syncQs}`,
-                                    { method: "POST", token: token! }
-                                  );
-                                  if (res && typeof res === "object" && "skipped" in res && (res as { skipped?: boolean }).skipped) {
-                                    toast.error((res as { reason?: string }).reason ?? "Sync skipped");
-                                    return;
-                                  }
-                                  loadKpi();
-                                  toast.success("Sync completed");
-                                } catch (e) {
-                                  toast.error(e instanceof Error ? e.message : "Sync failed");
-                                } finally {
-                                  setSyncLoading(false);
+                                    : qs({ year: syncYear, organization_id: orgIdFromUrl!, sync_mode: syncMode });
+                                const res = await api<{ skipped?: boolean; reason?: string }>(
+                                  `/kpis/${kpiId}/sync-from-api?${syncQs}`,
+                                  { method: "POST", token: token! }
+                                );
+                                if (res && typeof res === "object" && "skipped" in res && (res as { skipped?: boolean }).skipped) {
+                                  toast.error((res as { reason?: string }).reason ?? "Sync skipped");
+                                  return;
                                 }
-                              }}
-                            >
-                              {syncLoading ? "Syncing…" : "Sync from API now"}
-                            </button>
-                            <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for the selected year from your endpoint. Override, append, or upsert applies to multi-line tables; other fields follow override behavior.</p>
-                          </div>
-                        )}
-                      </>
-                    )}
-                    {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
-                    <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
-                      {kpiSaving ? "Saving…" : "Save"}
-                    </button>
-                  </form>
-                )}
-                {settingsPanel === "domain" && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                    <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>Domain → Category</div>
-                    {(kpi?.category_tags?.length ?? 0) > 0 && (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.5rem" }}>
-                        {kpi!.category_tags!.map((c) => {
-                          const full = c.domain_name ? `${c.domain_name} → ${c.name}` : c.name;
+                                loadKpi();
+                                toast.success("Sync completed");
+                              } catch (e) {
+                                toast.error(e instanceof Error ? e.message : "Sync failed");
+                              } finally {
+                                setSyncLoading(false);
+                              }
+                            }}
+                          >
+                            {syncLoading ? "Syncing…" : "Sync from API now"}
+                          </button>
+                          <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.25rem" }}>Fetches entry data for the selected year from your endpoint. Override, append, or upsert applies to multi-line tables; other fields follow override behavior.</p>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
+                  <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>
+                    {kpiSaving ? "Saving…" : "Save"}
+                  </button>
+                </form>
+              )}
+              {settingsPanel === "domain" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                  <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>Domain → Category</div>
+                  {(kpi?.category_tags?.length ?? 0) > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.5rem" }}>
+                      {kpi!.category_tags!.map((c) => {
+                        const full = c.domain_name ? `${c.domain_name} → ${c.name}` : c.name;
+                        return (
+                          <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", padding: "0.25rem 0.5rem", borderRadius: 6, background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)", border: "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)", fontSize: "0.8rem" }}>
+                            <span>{full}</span>
+                            <button type="button" onClick={() => removeCategory(c.id)} disabled={domainCategorySaving} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${full}`}>×</button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: "1rem", flex: 1, minHeight: 200, overflow: "hidden" }}>
+                    <div style={{ flex: "0 0 44%", display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)", paddingRight: "0.75rem" }}>
+                      <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Domains</div>
+                      <input type="text" placeholder="Search domains..." value={addModalSearch} onChange={(e) => setAddModalSearch(e.target.value)} style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
+                      <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                        {orgDomains.filter((d) => !addModalSearch.trim() || d.name.toLowerCase().includes(addModalSearch.trim().toLowerCase())).map((d) => {
+                          const selected = addModalSelectedDomainIds.includes(d.id);
                           return (
-                            <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", padding: "0.25rem 0.5rem", borderRadius: 6, background: "rgba(var(--primary-rgb, 59, 130, 246), 0.12)", border: "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)", fontSize: "0.8rem" }}>
-                              <span>{full}</span>
-                              <button type="button" onClick={() => removeCategory(c.id)} disabled={domainCategorySaving} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${full}`}>×</button>
-                            </span>
+                            <li key={d.id} style={{ marginBottom: "0.2rem" }}>
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "0.5rem",
+                                  cursor: "pointer",
+                                  fontSize: "0.9rem",
+                                  padding: "0.35rem 0.5rem",
+                                  borderRadius: 6,
+                                  background: selected ? "rgba(var(--primary-rgb, 59, 130, 246), 0.12)" : "transparent",
+                                  border: selected ? "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)" : "1px solid transparent",
+                                  fontWeight: selected ? 600 : 400,
+                                  color: selected ? "var(--primary)" : "var(--text)",
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selected}
+                                  onChange={(e) => {
+                                    if (e.target.checked) setAddModalSelectedDomainIds((prev) => [...prev, d.id]);
+                                    else {
+                                      setAddModalSelectedDomainIds((prev) => prev.filter((id) => id !== d.id));
+                                      setAddModalSelectedIds((prev) => {
+                                        const inDomain = orgCategories.filter((c) => c.domain_id === d.id).map((c) => c.id);
+                                        return prev.filter((id) => !inDomain.includes(id));
+                                      });
+                                    }
+                                  }}
+                                />
+                                {d.name}
+                              </label>
+                            </li>
                           );
                         })}
-                      </div>
-                    )}
-                    <div style={{ display: "flex", gap: "1rem", flex: 1, minHeight: 200, overflow: "hidden" }}>
-                      <div style={{ flex: "0 0 44%", display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)", paddingRight: "0.75rem" }}>
-                        <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Domains</div>
-                        <input type="text" placeholder="Search domains..." value={addModalSearch} onChange={(e) => setAddModalSearch(e.target.value)} style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
-                        <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
-                          {orgDomains.filter((d) => !addModalSearch.trim() || d.name.toLowerCase().includes(addModalSearch.trim().toLowerCase())).map((d) => {
-                            const selected = addModalSelectedDomainIds.includes(d.id);
-                            return (
-                              <li key={d.id} style={{ marginBottom: "0.2rem" }}>
-                                <label
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: "0.5rem",
-                                    cursor: "pointer",
-                                    fontSize: "0.9rem",
-                                    padding: "0.35rem 0.5rem",
-                                    borderRadius: 6,
-                                    background: selected ? "rgba(var(--primary-rgb, 59, 130, 246), 0.12)" : "transparent",
-                                    border: selected ? "1px solid rgba(var(--primary-rgb, 59, 130, 246), 0.35)" : "1px solid transparent",
-                                    fontWeight: selected ? 600 : 400,
-                                    color: selected ? "var(--primary)" : "var(--text)",
-                                  }}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={selected}
-                                    onChange={(e) => {
-                                      if (e.target.checked) setAddModalSelectedDomainIds((prev) => [...prev, d.id]);
-                                      else {
-                                        setAddModalSelectedDomainIds((prev) => prev.filter((id) => id !== d.id));
-                                        setAddModalSelectedIds((prev) => {
-                                          const inDomain = orgCategories.filter((c) => c.domain_id === d.id).map((c) => c.id);
-                                          return prev.filter((id) => !inDomain.includes(id));
-                                        });
-                                      }
-                                    }}
-                                  />
-                                  {d.name}
-                                </label>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      </div>
-                      <div style={{ flex: "1", display: "flex", flexDirection: "column", minWidth: 0 }}>
-                        {addModalSelectedDomainIds.length === 0 ? (
-                          <>
-                            <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Categories</div>
-                            <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Select one or more domains to see their categories.</p>
-                          </>
-                        ) : (() => {
-                          const selectedDomainNames = orgDomains.filter((d) => addModalSelectedDomainIds.includes(d.id)).map((d) => d.name);
-                          const categoriesLabel = selectedDomainNames.length === 1
-                            ? `Categories for: ${selectedDomainNames[0]}`
-                            : `Categories for: ${selectedDomainNames.join(", ")}`;
-                          const allInSelectedDomains = orgCategories.filter((c) => c.domain_id != null && addModalSelectedDomainIds.includes(c.domain_id));
-                          const filtered = addModalCategorySearch.trim() ? allInSelectedDomains.filter((c) => c.name.toLowerCase().includes(addModalCategorySearch.trim().toLowerCase())) : allInSelectedDomains;
-                          const attachedIds = new Set((kpi?.category_tags ?? []).map((t) => t.id));
-                          return (
-                            <>
-                              <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>{categoriesLabel}</div>
-                              <input type="text" placeholder="Search categories..." value={addModalCategorySearch} onChange={(e) => setAddModalCategorySearch(e.target.value)} style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
-                              {filtered.length === 0 ? (
-                                <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>No categories match.</p>
-                              ) : (
-                                <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
-                                  {filtered.map((c) => {
-                                    const isAttached = attachedIds.has(c.id);
-                                    return (
-                                      <li key={c.id} style={{ marginBottom: "0.2rem" }}>
-                                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: isAttached ? "default" : "pointer", fontSize: "0.9rem", opacity: isAttached ? 0.85 : 1 }}>
-                                          <input
-                                            type="checkbox"
-                                            checked={isAttached || addModalSelectedIds.includes(c.id)}
-                                            disabled={isAttached}
-                                            onChange={(e) => {
-                                              if (isAttached) return;
-                                              if (e.target.checked) {
-                                                setAddModalSelectedIds((prev) => {
-                                                  const otherInDomain = orgCategories.filter((x) => x.domain_id === c.domain_id && x.id !== c.id).map((x) => x.id);
-                                                  return [...prev.filter((id) => !otherInDomain.includes(id)), c.id];
-                                                });
-                                              } else setAddModalSelectedIds((prev) => prev.filter((id) => id !== c.id));
-                                            }}
-                                          />
-                                          <span style={{ color: isAttached ? "var(--muted)" : undefined }}>{c.name}</span>
-                                          {isAttached && <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>(attached)</span>}
-                                        </label>
-                                      </li>
-                                    );
-                                  })}
-                                </ul>
-                              )}
-                            </>
-                          );
-                        })()}
-                      </div>
+                      </ul>
                     </div>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={addModalSelectedIds.length === 0 || domainCategorySaving}
-                      onClick={() => {
-                        if (addModalSelectedIds.length === 0) return;
-                        addCategoriesBatch(addModalSelectedIds);
-                        setAddModalSearch("");
-                        setAddModalCategorySearch("");
-                        setAddModalSelectedIds([]);
-                        setAddModalSelectedDomainIds([]);
-                      }}
-                    >
-                      {domainCategorySaving ? "Adding…" : "Add selected"}
-                    </button>
-                  </div>
-                )}
-                {settingsPanel === "tags" && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                    <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>Organization tags</div>
-                    {(kpi?.organization_tags?.length ?? 0) > 0 && (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.5rem" }}>
-                        {kpi!.organization_tags!.map((t) => (
-                          <span key={t.id} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", padding: "0.25rem 0.5rem", borderRadius: 6, background: "rgba(99, 102, 241, 0.12)", border: "1px solid rgba(99, 102, 241, 0.35)", fontSize: "0.8rem" }}>
-                            <span>{t.name}</span>
-                            <button type="button" onClick={() => updateOrgTags((kpi!.organization_tags ?? []).filter((x) => x.id !== t.id).map((x) => x.id))} disabled={tagSaving} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${t.name}`}>×</button>
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    <input type="text" placeholder="Search..." value={addModalSearch} onChange={(e) => setAddModalSearch(e.target.value)} style={{ marginBottom: "0.25rem", padding: "0.5rem 0.6rem" }} />
-                    <div style={{ flex: 1, overflowY: "auto", minHeight: 120, marginBottom: "0.5rem" }}>
-                      {(() => {
-                        const available = orgTags.filter((t) => !kpi?.organization_tags?.some((ot) => ot.id === t.id));
-                        const filtered = addModalSearch.trim() ? available.filter((t) => t.name.toLowerCase().includes(addModalSearch.trim().toLowerCase())) : available;
-                        return filtered.length === 0 ? (
-                          <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No tags to add.</p>
-                        ) : (
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-                            {filtered.map((t) => {
-                              const checked = addModalSelectedIds.includes(t.id);
-                              return (
-                                <button
-                                  key={t.id}
-                                  type="button"
-                                  onClick={() => {
-                                    if (!checked) setAddModalSelectedIds((prev) => [...prev, t.id]);
-                                    else setAddModalSelectedIds((prev) => prev.filter((id) => id !== t.id));
-                                  }}
-                                  style={{
-                                    padding: "0.35rem 0.75rem",
-                                    borderRadius: "999px",
-                                    fontSize: "0.85rem",
-                                    border: checked ? "1px solid var(--primary)" : "1px solid var(--border)",
-                                    background: checked ? "var(--primary)" : "transparent",
-                                    color: checked ? "var(--on-primary)" : "var(--text)",
-                                    cursor: "pointer",
-                                    transition: "all 0.2s ease-in-out",
-                                  }}
-                                >
-                                  {t.name}
-                                </button>
-                              );
-                            })}
-                          </div>
+                    <div style={{ flex: "1", display: "flex", flexDirection: "column", minWidth: 0 }}>
+                      {addModalSelectedDomainIds.length === 0 ? (
+                        <>
+                          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Categories</div>
+                          <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Select one or more domains to see their categories.</p>
+                        </>
+                      ) : (() => {
+                        const selectedDomainNames = orgDomains.filter((d) => addModalSelectedDomainIds.includes(d.id)).map((d) => d.name);
+                        const categoriesLabel = selectedDomainNames.length === 1
+                          ? `Categories for: ${selectedDomainNames[0]}`
+                          : `Categories for: ${selectedDomainNames.join(", ")}`;
+                        const allInSelectedDomains = orgCategories.filter((c) => c.domain_id != null && addModalSelectedDomainIds.includes(c.domain_id));
+                        const filtered = addModalCategorySearch.trim() ? allInSelectedDomains.filter((c) => c.name.toLowerCase().includes(addModalCategorySearch.trim().toLowerCase())) : allInSelectedDomains;
+                        const attachedIds = new Set((kpi?.category_tags ?? []).map((t) => t.id));
+                        return (
+                          <>
+                            <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>{categoriesLabel}</div>
+                            <input type="text" placeholder="Search categories..." value={addModalCategorySearch} onChange={(e) => setAddModalCategorySearch(e.target.value)} style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
+                            {filtered.length === 0 ? (
+                              <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>No categories match.</p>
+                            ) : (
+                              <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                                {filtered.map((c) => {
+                                  const isAttached = attachedIds.has(c.id);
+                                  return (
+                                    <li key={c.id} style={{ marginBottom: "0.2rem" }}>
+                                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: isAttached ? "default" : "pointer", fontSize: "0.9rem", opacity: isAttached ? 0.85 : 1 }}>
+                                        <input
+                                          type="checkbox"
+                                          checked={isAttached || addModalSelectedIds.includes(c.id)}
+                                          disabled={isAttached}
+                                          onChange={(e) => {
+                                            if (isAttached) return;
+                                            if (e.target.checked) {
+                                              setAddModalSelectedIds((prev) => {
+                                                const otherInDomain = orgCategories.filter((x) => x.domain_id === c.domain_id && x.id !== c.id).map((x) => x.id);
+                                                return [...prev.filter((id) => !otherInDomain.includes(id)), c.id];
+                                              });
+                                            } else setAddModalSelectedIds((prev) => prev.filter((id) => id !== c.id));
+                                          }}
+                                        />
+                                        <span style={{ color: isAttached ? "var(--muted)" : undefined }}>{c.name}</span>
+                                        {isAttached && <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>(attached)</span>}
+                                      </label>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            )}
+                          </>
                         );
                       })()}
                     </div>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={addModalSelectedIds.length === 0 || tagSaving}
-                      onClick={() => {
-                        if (addModalSelectedIds.length === 0) return;
-                        addTagsBatch(addModalSelectedIds);
-                        setAddModalSearch("");
-                        setAddModalSelectedIds([]);
-                      }}
-                    >
-                      {tagSaving ? "Adding…" : "Add selected"}
-                    </button>
                   </div>
-                )}
-                {settingsPanel === "danger_zone" && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                    <div style={{ padding: "1rem", border: "1px solid var(--error)", borderRadius: "8px", background: "rgba(239, 68, 68, 0.05)" }}>
-                      <h3 style={{ fontSize: "1rem", color: "var(--error)", margin: "0 0 0.5rem 0" }}>Danger Zone</h3>
-                      <p style={{ fontSize: "0.9rem", color: "var(--text)", margin: "0 0 1rem 0" }}>
-                        Once you delete a KPI, there is no going back. Please be certain.
-                      </p>
-                      <button
-                        type="button"
-                        className="btn"
-                        style={{ color: "var(--error)", border: "1px solid var(--error)", background: "transparent" }}
-                        onClick={onDeleteKpi}
-                      >
-                        Delete KPI
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {!settingsPanel && (
-                  <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Select a setting from the left.</p>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {isOrgContext && userRole === "SUPER_ADMIN" && activeEditTab === "odoo" && orgId != null && token && (
-          <OdooMultiLineImportAdmin
-            kpiId={kpiId}
-            orgId={orgId}
-            token={token}
-            fieldId={
-              editingId ??
-              list.find((f) => f.field_type === "multi_line_items")?.id
-            }
-            subFields={
-              (list.find((f) => f.id === editingId) || list.find((f) => f.field_type === "multi_line_items"))?.sub_fields?.map((s) => ({
-                key: s.key,
-                name: s.name,
-                field_type: s.field_type,
-                config: s.config ?? null,
-              })) ?? []
-            }
-            fieldConfig={
-              (list.find((f) => f.id === editingId) || list.find((f) => f.field_type === "multi_line_items"))?.config as Record<string, unknown> | null
-            }
-          />
-        )}
-
-        {(!isOrgContext || activeEditTab === "fields") && (
-          <>
-            {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
-
-
-
-            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "1rem" }}>
-              <button
-                type="button"
-                className={showCreate ? "btn" : "btn btn-primary"}
-                onClick={() => setShowCreate((s) => !s)}
-              >
-                {showCreate ? "Cancel" : "Add field"}
-              </button>
-            </div>
-
-            {showCreate && (
-              <div className="card" style={{ marginBottom: "1rem" }}>
-                <h2 style={{ marginBottom: "0.75rem", fontSize: "1.1rem" }}>Create field</h2>
-                <form
-                  onSubmit={createForm.handleSubmit(onCreateSubmit, (errors) => {
-                    const first = Object.entries(errors)[0];
-                    if (first) {
-                      const msg = typeof first[1]?.message === "string" ? first[1].message : "Please fix the form errors.";
-                      toast.error(msg);
-                    }
-                  })}
-                >
-                  {/* Row 1: Name, Key, Field type — one row on wide screens, wraps on narrow */}
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-                      gap: "0.75rem 1rem",
-                      alignItems: "flex-start",
-                      marginBottom: "0.75rem",
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={addModalSelectedIds.length === 0 || domainCategorySaving}
+                    onClick={() => {
+                      if (addModalSelectedIds.length === 0) return;
+                      addCategoriesBatch(addModalSelectedIds);
+                      setAddModalSearch("");
+                      setAddModalCategorySearch("");
+                      setAddModalSelectedIds([]);
+                      setAddModalSelectedDomainIds([]);
                     }}
                   >
-                    <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
-                      <label>Name *</label>
-                      <input
-                        placeholder="e.g. Total students"
-                        style={{ width: "100%" }}
-                        value={createForm.watch("name") ?? ""}
-                        onChange={(e) => {
-                          const name = e.target.value;
-                          createForm.setValue("name", name, { shouldValidate: true });
-                          if (!keyTouched) {
-                            createForm.setValue("key", slugifyKey(name), { shouldValidate: false, shouldDirty: true });
-                          }
-                        }}
-                      />
-                      {createForm.formState.errors.name && (
-                        <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
-                          {createForm.formState.errors.name.message}
-                        </p>
-                      )}
-                    </div>
-                    <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
-                      <label>Key * <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.8rem" }}>(auto from name)</span></label>
-                      <input
-                        {...createForm.register("key", { onChange: () => setKeyTouched(true) })}
-                        placeholder="key_name (auto from name)"
-                        style={{ width: "100%" }}
-                      />
-                      {createForm.formState.errors.key && (
-                        <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
-                          {createForm.formState.errors.key.message}
-                        </p>
-                      )}
-                    </div>
-                    <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
-                      <label>Type *</label>
-                      <select {...createForm.register("field_type")} style={{ width: "100%" }}>
-                        {FIELD_TYPES.map((t) => (
-                          <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  {/* Row 2: Required, Sort order */}
-                  <div
-                    style={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      alignItems: "center",
-                      gap: "1rem 1.5rem",
-                      marginBottom: "0.75rem",
-                    }}
-                  >
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer", fontSize: "0.9rem" }}>
-                      <input type="checkbox" {...createForm.register("is_required")} />
-                      Required
-                    </label>
-                    {createForm.watch("field_type") === "multi_line_items" && (
-                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
-                        <span style={{ fontWeight: 500 }}>Full-page editor</span>
-                        <span
-                          style={{
-                            position: "relative",
-                            width: 40,
-                            height: 22,
-                            borderRadius: 999,
-                            background: createForm.watch("full_page_multi_items") ? "var(--accent)" : "var(--border)",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            padding: 2,
-                            transition: "background 120ms ease",
-                          }}
-                        >
-                          <span
-                            style={{
-                              width: 18,
-                              height: 18,
-                              borderRadius: "50%",
-                              background: "var(--surface)",
-                              transform: createForm.watch("full_page_multi_items") ? "translateX(18px)" : "translateX(0)",
-                              transition: "transform 120ms ease",
-                              boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
-                            }}
-                          />
+                    {domainCategorySaving ? "Adding…" : "Add selected"}
+                  </button>
+                </div>
+              )}
+              {settingsPanel === "tags" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                  <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>Organization tags</div>
+                  {(kpi?.organization_tags?.length ?? 0) > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.5rem" }}>
+                      {kpi!.organization_tags!.map((t) => (
+                        <span key={t.id} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", padding: "0.25rem 0.5rem", borderRadius: 6, background: "rgba(99, 102, 241, 0.12)", border: "1px solid rgba(99, 102, 241, 0.35)", fontSize: "0.8rem" }}>
+                          <span>{t.name}</span>
+                          <button type="button" onClick={() => updateOrgTags((kpi!.organization_tags ?? []).filter((x) => x.id !== t.id).map((x) => x.id))} disabled={tagSaving} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--muted)", fontSize: "1rem", lineHeight: 1 }} aria-label={`Remove ${t.name}`}>×</button>
                         </span>
-                        <input
-                          type="checkbox"
-                          {...createForm.register("full_page_multi_items")}
-                          style={{ display: "none" }}
-                          aria-label="Use full-page editor for this multi-line field"
-                        />
-                      </label>
-                    )}
-                    {userRole === "SUPER_ADMIN" && (
-                      <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer", fontSize: "0.9rem" }}>
-                        <input type="checkbox" {...createForm.register("carry_forward_data")} />
-                        Carry forward (non-cyclic)
-                      </label>
-                    )}
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                      <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
-                      <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }} />
-                    </div>
-                    {createForm.watch("field_type") === "multi_line_items" && (
-                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                        <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Section</label>
-                        <select {...createForm.register("section_id")} style={{ padding: "0.35rem 0.5rem" }}>
-                          {sections.length === 0 && <option value="">General (default)</option>}
-                          {sections.map((s) => (
-                            <option key={s.id} value={s.id}>
-                              {s.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-                  </div>
-                  {(createForm.watch("field_type") === "reference" || createForm.watch("field_type") === "multi_reference") && (
-                    <div className="form-group">
-                      <label>Reference source</label>
-                      <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
-                        {createForm.watch("field_type") === "multi_reference"
-                          ? "Users may pick multiple values; each must appear in the distinct values from the selected KPI field."
-                          : "Values for this field will be restricted to distinct values from the selected KPI field."}
-                      </p>
-                      <ReferenceConfigUI
-                        organizationId={kpi?.organization_id ?? orgId ?? undefined}
-                        currentKpiId={kpiId}
-                        value={createRefConfig}
-                        onChange={setCreateRefConfig}
-                      />
+                      ))}
                     </div>
                   )}
-                  {createForm.watch("field_type") === "formula" && (
-                    <div className="form-group">
-                      <label>Formula</label>
-                      <input {...createForm.register("formula_expression")} placeholder="e.g. total_count + SUM_ITEMS(students, score)" style={{ width: "100%", marginBottom: "0.5rem" }} />
-                      <FormulaBuilder
-                        formulaValue={createForm.watch("formula_expression") ?? ""}
-                        onInsert={(text) => createForm.setValue("formula_expression", (createForm.getValues("formula_expression") ?? "") + text)}
-                        fields={list}
-                        organizationId={orgId ?? undefined}
-                        currentKpiId={kpiId}
-                      />
-                    </div>
-                  )}
-                  {createForm.watch("field_type") === "multi_line_items" && (
-                    <div className="form-group">
-                      <label>Sub-fields (columns for each row)</label>
-                      <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
-                        Define columns so data entry uses a table instead of raw JSON.
-                      </p>
-                      {createSubSections.length > 1 && (
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
-                          {createSubSections.map((sec) => {
-                            const isActive = sec === activeCreateSubSection;
+                  <input type="text" placeholder="Search..." value={addModalSearch} onChange={(e) => setAddModalSearch(e.target.value)} style={{ marginBottom: "0.25rem", padding: "0.5rem 0.6rem" }} />
+                  <div style={{ flex: 1, overflowY: "auto", minHeight: 120, marginBottom: "0.5rem" }}>
+                    {(() => {
+                      const available = orgTags.filter((t) => !kpi?.organization_tags?.some((ot) => ot.id === t.id));
+                      const filtered = addModalSearch.trim() ? available.filter((t) => t.name.toLowerCase().includes(addModalSearch.trim().toLowerCase())) : available;
+                      return filtered.length === 0 ? (
+                        <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No tags to add.</p>
+                      ) : (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                          {filtered.map((t) => {
+                            const checked = addModalSelectedIds.includes(t.id);
                             return (
                               <button
-                                key={sec}
+                                key={t.id}
                                 type="button"
-                                className={isActive ? "btn btn-primary" : "btn"}
-                                onClick={() => setActiveCreateSubSection(sec)}
-                                style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
+                                onClick={() => {
+                                  if (!checked) setAddModalSelectedIds((prev) => [...prev, t.id]);
+                                  else setAddModalSelectedIds((prev) => prev.filter((id) => id !== t.id));
+                                }}
+                                style={{
+                                  padding: "0.35rem 0.75rem",
+                                  borderRadius: "999px",
+                                  fontSize: "0.85rem",
+                                  border: checked ? "1px solid var(--primary)" : "1px solid var(--border)",
+                                  background: checked ? "var(--primary)" : "transparent",
+                                  color: checked ? "var(--on-primary)" : "var(--text)",
+                                  cursor: "pointer",
+                                  transition: "all 0.2s ease-in-out",
+                                }}
                               >
-                                {sec}
+                                {t.name}
                               </button>
                             );
                           })}
                         </div>
-                      )}
-                      <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
-                          <thead>
-                            <tr>
-                              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
-                              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
-                              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
-                              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (reference / multi reference)</th>
-                              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Section (UI)</th>
-                              <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
-                              <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {createSubFields.filter((s) => {
-                              const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
-                              const label = sec || "Other";
-                              return createSubSections.length <= 1 ? true : label === activeCreateSubSection;
-                            }).length === 0 ? (
-                              <tr>
-                                <td colSpan={7} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
-                                  No sub-fields in this section yet. Click &quot;Add sub-field&quot; below.
-                                </td>
-                              </tr>
-                            ) : createSubFields
-                              .map((s, idx) => ({ s, idx }))
-                              .filter(({ s }) => {
-                                const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
-                                const label = sec || "Other";
-                                return createSubSections.length <= 1 ? true : label === activeCreateSubSection;
-                              })
-                              .map(({ s, idx }) => (
-                                <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
-                                  <td style={{ padding: "0.4rem 0.5rem" }}>
-                                    <input
-                                      placeholder="Display name"
-                                      value={s.name}
-                                      onChange={(e) => {
-                                        const name = e.target.value;
-                                        setCreateSubFields((prev) =>
-                                          prev.map((x, i) =>
-                                            i === idx
-                                              ? { ...x, name, key: x.keyTouched ? x.key : slugifyKey(name) }
-                                              : x
-                                          )
-                                        );
-                                      }}
-                                      style={{ width: "100%", minWidth: "100px" }}
-                                    />
-                                  </td>
-                                  <td style={{ padding: "0.4rem 0.5rem" }}>
-                                    <input
-                                      placeholder="key_name (auto from name)"
-                                      value={s.key}
-                                      onChange={(e) =>
-                                        setCreateSubFields((prev) =>
-                                          prev.map((x, i) => (i === idx ? { ...x, key: e.target.value, keyTouched: true } : x))
-                                        )
-                                      }
-                                      style={{ width: "100%", minWidth: "90px" }}
-                                    />
-                                  </td>
-                                  <td style={{ padding: "0.4rem 0.5rem" }}>
-                                    <select
-                                      value={s.field_type}
-                                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
-                                      style={{ minWidth: "120px" }}
-                                    >
-                                      {SUB_FIELD_TYPES.map((t) => (
-                                        <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-                                      ))}
-                                    </select>
-                                  </td>
-                                  <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
-                                    {s.field_type === "reference" || s.field_type === "multi_reference" ? (
-                                      <ReferenceConfigUI
-                                        organizationId={kpi?.organization_id ?? orgId ?? undefined}
-                                        currentKpiId={kpiId}
-                                        value={s.config ?? {}}
-                                        onChange={(c) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, config: c } : x)))}
-                                        labelPrefix="Source"
-                                      />
-                                    ) : (
-                                      <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
-                                    )}
-                                  </td>
-                                  <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
-                                    {userRole === "SUPER_ADMIN" ? (
-                                      <input
-                                        placeholder="e.g. Program details"
-                                        value={s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "") : ""}
-                                        onChange={(e) => {
-                                          const section = e.target.value;
-                                          setCreateSubFields((prev) =>
-                                            prev.map((x, i) =>
-                                              i === idx
-                                                ? {
-                                                  ...x,
-                                                  config: {
-                                                    ...(x.config ?? {}),
-                                                    ui_section: section,
-                                                  },
-                                                }
-                                                : x
-                                            )
-                                          );
-                                        }}
-                                        style={{ width: "100%" }}
-                                      />
-                                    ) : (
-                                      <div style={{ padding: "0.35rem 0", fontSize: "0.85rem", color: "var(--muted)" }}>
-                                        {s.config && typeof s.config === "object" && "ui_section" in s.config && (s.config as any).ui_section
-                                          ? String((s.config as any).ui_section)
-                                          : "—"}
-                                      </div>
-                                    )}
-                                  </td>
-                                  <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
-                                    <input
-                                      type="checkbox"
-                                      checked={s.is_required}
-                                      onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
-                                      title="Required"
-                                    />
-                                    {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
-                                  </td>
-                                  <td style={{ padding: "0.4rem 0.5rem" }}>
-                                    <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
-                                  </td>
-                                </tr>
-                              ))}
-                          </tbody>
-                        </table>
-                      </div>
-                      <button type="button" className="btn btn-primary" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, keyTouched: false, config: undefined }])}>
-                        Add sub-field
-                      </button>
-                    </div>
-                  )}
-                  {createForm.watch("field_type") === "multi_line_items" && (
-                    <div
-                      className="form-group"
-                      style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}
+                      );
+                    })()}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={addModalSelectedIds.length === 0 || tagSaving}
+                    onClick={() => {
+                      if (addModalSelectedIds.length === 0) return;
+                      addTagsBatch(addModalSelectedIds);
+                      setAddModalSearch("");
+                      setAddModalSelectedIds([]);
+                    }}
+                  >
+                    {tagSaving ? "Adding…" : "Add selected"}
+                  </button>
+                </div>
+              )}
+              {settingsPanel === "danger_zone" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                  <div style={{ padding: "1rem", border: "1px solid var(--error)", borderRadius: "8px", background: "rgba(239, 68, 68, 0.05)" }}>
+                    <h3 style={{ fontSize: "1rem", color: "var(--error)", margin: "0 0 0.5rem 0" }}>Danger Zone</h3>
+                    <p style={{ fontSize: "0.9rem", color: "var(--text)", margin: "0 0 1rem 0" }}>
+                      Once you delete a KPI, there is no going back. Please be certain.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ color: "var(--error)", border: "1px solid var(--error)", background: "transparent" }}
+                      onClick={onDeleteKpi}
                     >
-                      <label style={{ margin: 0, whiteSpace: "nowrap" }}>API URL</label>
-                      <input
-                        type="url"
-                        placeholder="https://example.com/multi-items-api"
-                        {...createForm.register("multi_items_api_endpoint_url")}
-                        style={{ flex: "1 1 220px", minWidth: 0 }}
-                      />
-                    </div>
-                  )}
-                  <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem" }}>
-                    <button type="submit" className="btn btn-primary" disabled={createForm.formState.isSubmitting}>
-                      {createForm.formState.isSubmitting ? "Creating..." : "Create"}
-                    </button>
-                    <button type="button" className="btn" onClick={() => setShowCreate(false)}>
-                      Cancel
+                      Delete KPI
                     </button>
                   </div>
-                </form>
+                </div>
+              )}
+              {!settingsPanel && (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Select a setting from the left.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isOrgContext && userRole === "SUPER_ADMIN" && activeEditTab === "odoo" && orgId != null && token && (
+        <OdooMultiLineImportAdmin
+          kpiId={kpiId}
+          orgId={orgId}
+          token={token}
+          fieldId={
+            editingId ??
+            list.find((f) => f.field_type === "multi_line_items")?.id
+          }
+          subFields={
+            (list.find((f) => f.id === editingId) || list.find((f) => f.field_type === "multi_line_items"))?.sub_fields?.map((s) => ({
+              key: s.key,
+              name: s.name,
+              field_type: s.field_type,
+              config: s.config ?? null,
+            })) ?? []
+          }
+          fieldConfig={
+            (list.find((f) => f.id === editingId) || list.find((f) => f.field_type === "multi_line_items"))?.config as Record<string, unknown> | null
+          }
+        />
+      )}
+
+      {(!isOrgContext || activeEditTab === "fields") && (
+        <>
+          {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
+
+
+
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "1rem" }}>
+            <button
+              type="button"
+              className={showCreate ? "btn" : "btn btn-primary"}
+              onClick={() => setShowCreate((s) => !s)}
+            >
+              {showCreate ? "Cancel" : "Add field"}
+            </button>
+          </div>
+
+          {showCreate && (
+        <div className="card" style={{ marginBottom: "1rem" }}>
+          <h2 style={{ marginBottom: "0.75rem", fontSize: "1.1rem" }}>Create field</h2>
+          <form
+            onSubmit={createForm.handleSubmit(onCreateSubmit, (errors) => {
+              const first = Object.entries(errors)[0];
+              if (first) {
+                const msg = typeof first[1]?.message === "string" ? first[1].message : "Please fix the form errors.";
+                toast.error(msg);
+              }
+            })}
+          >
+            {/* Row 1: Name, Key, Field type — one row on wide screens, wraps on narrow */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                gap: "0.75rem 1rem",
+                alignItems: "flex-start",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+                <label>Name *</label>
+                <input
+                  placeholder="e.g. Total students"
+                  style={{ width: "100%" }}
+                  value={createForm.watch("name") ?? ""}
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    createForm.setValue("name", name, { shouldValidate: true });
+                    if (!keyTouched) {
+                      createForm.setValue("key", slugifyKey(name), { shouldValidate: false, shouldDirty: true });
+                    }
+                  }}
+                />
+                {createForm.formState.errors.name && (
+                  <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+                    {createForm.formState.errors.name.message}
+                  </p>
+                )}
+              </div>
+              <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+                <label>Key * <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: "0.8rem" }}>(auto from name)</span></label>
+                <input
+                  {...createForm.register("key", { onChange: () => setKeyTouched(true) })}
+                  placeholder="key_name (auto from name)"
+                  style={{ width: "100%" }}
+                />
+                {createForm.formState.errors.key && (
+                  <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>
+                    {createForm.formState.errors.key.message}
+                  </p>
+                )}
+              </div>
+              <div className="form-group" style={{ marginBottom: 0, minWidth: 0 }}>
+                <label>Type *</label>
+                <select {...createForm.register("field_type")} style={{ width: "100%" }}>
+                  {FIELD_TYPES.map((t) => (
+                    <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {/* Row 2: Required, Sort order */}
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: "1rem 1.5rem",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                <input type="checkbox" {...createForm.register("is_required")} />
+                Required
+              </label>
+              {createForm.watch("field_type") === "multi_line_items" && (
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                  <span style={{ fontWeight: 500 }}>Full-page editor</span>
+                  <span
+                    style={{
+                      position: "relative",
+                      width: 40,
+                      height: 22,
+                      borderRadius: 999,
+                      background: createForm.watch("full_page_multi_items") ? "var(--accent)" : "var(--border)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      padding: 2,
+                      transition: "background 120ms ease",
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 18,
+                        height: 18,
+                        borderRadius: "50%",
+                        background: "var(--surface)",
+                        transform: createForm.watch("full_page_multi_items") ? "translateX(18px)" : "translateX(0)",
+                        transition: "transform 120ms ease",
+                        boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                      }}
+                    />
+                  </span>
+                  <input
+                    type="checkbox"
+                    {...createForm.register("full_page_multi_items")}
+                    style={{ display: "none" }}
+                    aria-label="Use full-page editor for this multi-line field"
+                  />
+                </label>
+              )}
+              {userRole === "SUPER_ADMIN" && (
+                <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                  <input type="checkbox" {...createForm.register("carry_forward_data")} />
+                  Carry forward (non-cyclic)
+                </label>
+              )}
+              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Sort order</label>
+                <input type="number" min={0} {...createForm.register("sort_order")} style={{ width: "4.5rem", padding: "0.35rem 0.5rem" }} />
+              </div>
+              {createForm.watch("field_type") === "multi_line_items" && (
+                <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                  <label style={{ fontSize: "0.9rem", whiteSpace: "nowrap" }}>Section</label>
+                  <select {...createForm.register("section_id")} style={{ padding: "0.35rem 0.5rem" }}>
+                    {sections.length === 0 && <option value="">General (default)</option>}
+                    {sections.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+            {(createForm.watch("field_type") === "reference" || createForm.watch("field_type") === "multi_reference") && (
+              <div className="form-group">
+                <label>Reference source</label>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+                  {createForm.watch("field_type") === "multi_reference"
+                    ? "Users may pick multiple values; each must appear in the distinct values from the selected KPI field."
+                    : "Values for this field will be restricted to distinct values from the selected KPI field."}
+                </p>
+                <ReferenceConfigUI
+                  organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                  currentKpiId={kpiId}
+                  value={createRefConfig}
+                  onChange={setCreateRefConfig}
+                />
               </div>
             )}
-
-            <div className="card">
-              {list.length === 0 ? (
-                <p style={{ color: "var(--muted)" }}>No fields yet. Click &quot;Add field&quot; to create one.</p>
-              ) : (
-                <ul style={{ listStyle: "none" }}>
-                  {userRole === "SUPER_ADMIN" ? (
-                    <li style={{ padding: "0.75rem 0 0 0" }}>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.9rem" }}>
+            {createForm.watch("field_type") === "formula" && (
+              <div className="form-group">
+                <label>Formula</label>
+                <input {...createForm.register("formula_expression")} placeholder="e.g. total_count + SUM_ITEMS(students, score)" style={{ width: "100%", marginBottom: "0.5rem" }} />
+                <FormulaBuilder
+                  formulaValue={createForm.watch("formula_expression") ?? ""}
+                  onInsert={(text) => createForm.setValue("formula_expression", (createForm.getValues("formula_expression") ?? "") + text)}
+                  fields={list}
+                  organizationId={orgId ?? undefined}
+                  currentKpiId={kpiId}
+                />
+              </div>
+            )}
+            {createForm.watch("field_type") === "multi_line_items" && (
+              <div className="form-group">
+                <label>Sub-fields (columns for each row)</label>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0.5rem 0" }}>
+                  Define columns so data entry uses a table instead of raw JSON.
+                </p>
+                {createSubSections.length > 1 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                    {createSubSections.map((sec) => {
+                      const isActive = sec === activeCreateSubSection;
+                      return (
                         <button
+                          key={sec}
                           type="button"
-                          className={superAdminFieldsTab === "scalar" ? "btn btn-primary" : "btn"}
-                          onClick={() => setSuperAdminFieldsTab("scalar")}
-                          style={{ borderRadius: 999, padding: "0.35rem 0.65rem" }}
+                          className={isActive ? "btn btn-primary" : "btn"}
+                          onClick={() => setActiveCreateSubSection(sec)}
+                          style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
                         >
-                          Scalar fields <span style={{ opacity: 0.8 }}>({scalarFields.length})</span>
+                          {sec}
                         </button>
-                        {multiLineFields.map((mf) => {
-                          const tabKey = `multi:${mf.id}`;
-                          const active = superAdminFieldsTab === tabKey;
-                          return (
-                            <button
-                              key={mf.id}
-                              type="button"
-                              className={active ? "btn btn-primary" : "btn"}
-                              onClick={() => setSuperAdminFieldsTab(tabKey)}
-                              style={{ borderRadius: 999, padding: "0.35rem 0.65rem" }}
-                              title={mf.key}
-                            >
-                              {mf.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      {superAdminFieldsTab === "scalar" ? (
-                        <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-                          {scalarFields.map((f) => (
-                            <li key={f.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
-                              {editingId === f.id ? (
-                                <FieldEditForm
-                                  field={f}
-                                  list={list}
-                                  onSave={(data, subFields, refConfig) => onUpdateSubmit(f.id, data, subFields, refConfig)}
-                                  onCancel={() => setEditingId(null)}
-                                  organizationId={orgId ?? undefined}
-                                  currentKpiId={kpiId}
-                                  userRole={userRole}
-                                  sections={sections}
-                                />
-                              ) : (
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
-                                  <div>
-                                    <strong>{f.name}</strong>
-                                    <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>({f.key})</span>
-                                    <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}> - {f.field_type.replace(/_/g, " ")}</span>
-                                    {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
-                                    {f.field_type === "formula" && f.formula_expression && (
-                                      <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
-                                        Formula: {f.formula_expression}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-                                    <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", color: "var(--muted)" }}>
-                                      <input
-                                        type="checkbox"
-                                        checked={cardDisplayFieldIds.includes(f.id)}
-                                        onChange={(e) => onToggleCardDisplayField(f.id, e.target.checked)}
-                                      />
-                                      Show on card
-                                    </label>
-                                    <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
-                                    <button type="button" className="btn" onClick={() => openDeleteFieldModal(f)} style={{ color: "var(--error)" }}>Delete</button>
-                                  </div>
-                                </div>
-                              )}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (() => {
-                        const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
-                        const fieldId = match ? Number(match[1]) : null;
-                        const f = fieldId ? multiLineFields.find((x) => x.id === fieldId) : null;
-                        if (!f) return null;
-
-                        const subs = f.sub_fields ?? [];
-                        const editingPanel = multiFieldEditingPanelById[f.id] ?? null;
-                        const sections = (() => {
-                          const uniq = new Set<string>();
-                          subs.forEach((s) => {
-                            const sec = (s as any)?.config?.ui_section;
-                            const label = typeof sec === "string" ? sec.trim() : "";
-                            uniq.add(label || "Other");
-                          });
-                          (uiSectionCustomByMultiFieldId[f.id] ?? []).forEach((s) => {
-                            const label = typeof s === "string" ? s.trim() : "";
-                            if (label) uniq.add(label);
-                          });
-                          if (uniq.size === 0) uniq.add("Other");
-                          return Array.from(uniq).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
-                        })();
-
-                        const activeSection = (() => {
-                          const current = activeSubSectionByMultiFieldId[f.id];
-                          if (current && sections.includes(current)) return current;
-                          return sections[0] || "Other";
-                        })();
-
-                        const isEditing = editingId === f.id;
-                        const draft = multiFieldEditDraftById[f.id];
-                        const effectiveDraft = draft ?? {
-                          data: {
-                            name: f.name,
-                            key: f.key,
-                            field_type: f.field_type as any,
-                            formula_expression: f.formula_expression ?? "",
-                            is_required: f.is_required,
-                            sort_order: (f as any).sort_order ?? 0,
-                            carry_forward_data: (f as any).carry_forward_data ?? false,
-                            full_page_multi_items: (f as any).full_page_multi_items ?? false,
-                            multi_items_api_endpoint_url: ((f as any).config as any)?.multi_items_api_endpoint_url ?? "",
-                          } as UpdateFormData,
-                          subFields: (f.sub_fields ?? []).map((s) => ({
-                            ...(s as any),
-                            name: s.name,
-                            key: s.key,
-                            field_type: s.field_type as any,
-                            is_required: (s as any).is_required ?? false,
-                            sort_order: (s as any).sort_order ?? 0,
-                            config: (s as any).config ?? undefined,
-                            keyTouched: false,
-                          })) as SubFieldDef[],
-                        };
-
-                        return (
-                          <div style={{ padding: "0.25rem 0 0.75rem 0" }}>
-                            <div
-                              style={{
-                                marginTop: "-0.15rem",
-                                marginBottom: "0.6rem",
-                                padding: "0.6rem",
-                                border: "1px solid var(--border)",
-                                borderRadius: 10,
-                                background: "var(--bg-subtle, #f9fafb)",
+                      );
+                    })}
+                  </div>
+                )}
+                <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (reference / multi reference)</th>
+                        <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Section (UI)</th>
+                        <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                        <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {createSubFields.filter((s) => {
+                        const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
+                        const label = sec || "Other";
+                        return createSubSections.length <= 1 ? true : label === activeCreateSubSection;
+                      }).length === 0 ? (
+                        <tr>
+                          <td colSpan={7} style={{ padding: "0.75rem", color: "var(--muted)", fontSize: "0.9rem", textAlign: "center" }}>
+                            No sub-fields in this section yet. Click &quot;Add sub-field&quot; below.
+                          </td>
+                        </tr>
+                      ) : createSubFields
+                        .map((s, idx) => ({ s, idx }))
+                        .filter(({ s }) => {
+                          const sec = s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "").trim() : "";
+                          const label = sec || "Other";
+                          return createSubSections.length <= 1 ? true : label === activeCreateSubSection;
+                        })
+                        .map(({ s, idx }) => (
+                        <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <input
+                              placeholder="Display name"
+                              value={s.name}
+                              onChange={(e) => {
+                                const name = e.target.value;
+                                setCreateSubFields((prev) =>
+                                  prev.map((x, i) =>
+                                    i === idx
+                                      ? { ...x, name, key: x.keyTouched ? x.key : slugifyKey(name) }
+                                      : x
+                                  )
+                                );
                               }}
+                              style={{ width: "100%", minWidth: "100px" }}
+                            />
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <input
+                              placeholder="key_name (auto from name)"
+                              value={s.key}
+                              onChange={(e) =>
+                                setCreateSubFields((prev) =>
+                                  prev.map((x, i) => (i === idx ? { ...x, key: e.target.value, keyTouched: true } : x))
+                                )
+                              }
+                              style={{ width: "100%", minWidth: "90px" }}
+                            />
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <select
+                              value={s.field_type}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, field_type: e.target.value } : x)))}
+                              style={{ minWidth: "120px" }}
                             >
-                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
-                                <div style={{ fontWeight: 650, color: "var(--muted)" }}>Settings</div>
-                                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-                                  {isEditing && editingPanel === "general" ? (
-                                    <>
-                                      <button
-                                        type="button"
-                                        className="btn btn-primary"
-                                        onClick={async () => {
-                                          const payload = effectiveDraft.data as any;
-                                          const update: UpdateFormData = { ...payload };
-                                          await onUpdateSubmit(f.id, update, effectiveDraft.subFields, undefined);
-                                          setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
-                                          setEditingId(null);
-                                          setMultiFieldEditDraftById((prev) => {
-                                            const { [f.id]: _, ...rest } = prev;
-                                            return rest;
-                                          });
-                                        }}
-                                      >
-                                        Save
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="btn"
-                                        onClick={() => {
-                                          setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
-                                          setEditingId(null);
-                                          setMultiFieldEditDraftById((prev) => {
-                                            const { [f.id]: _, ...rest } = prev;
-                                            return rest;
-                                          });
-                                        }}
-                                      >
-                                        Cancel
-                                      </button>
-                                    </>
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      className="btn"
-                                      onClick={() => {
-                                        setMultiFieldEditDraftById((prev) => (prev[f.id] ? prev : { ...prev, [f.id]: effectiveDraft }));
-                                        setMultiFieldKeyTouchedById((prev) => (prev[f.id] != null ? prev : { ...prev, [f.id]: false }));
-                                        setEditingId(f.id);
-                                        setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: "general" }));
-                                      }}
-                                    >
-                                      Edit
-                                    </button>
-                                  )}
-                                  <button type="button" className="btn" onClick={() => openDeleteFieldModal(f)} style={{ color: "var(--error)" }}>
-                                    Delete
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn"
-                                    onClick={() => {
-                                      const resolvedOrgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
-                                      const year = new Date().getFullYear();
-                                      if (!resolvedOrgId) return;
-                                      router.push(
-                                        `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
-                                          organization_id: resolvedOrgId,
-                                        })}`
-                                      );
-                                    }}
-                                  >
-                                    Open data entry
-                                  </button>
-                                </div>
-                              </div>
-
-                              {isEditing && editingPanel === "general" ? (
-                                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0.5rem 1rem" }}>
-                                  <div className="form-group" style={{ margin: 0 }}>
-                                    <label>Name *</label>
-                                    <input
-                                      value={effectiveDraft.data.name ?? ""}
-                                      onChange={(e) =>
-                                        setMultiFieldEditDraftById((prev) => {
-                                          const nextName = e.target.value;
-                                          const touched = !!multiFieldKeyTouchedById[f.id];
-                                          return {
-                                            ...prev,
-                                            [f.id]: {
-                                              ...effectiveDraft,
-                                              data: {
-                                                ...effectiveDraft.data,
-                                                name: nextName,
-                                                ...(touched ? {} : { key: slugifyKey(nextName) }),
-                                              },
+                              {SUB_FIELD_TYPES.map((t) => (
+                                <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                            {s.field_type === "reference" || s.field_type === "multi_reference" ? (
+                              <ReferenceConfigUI
+                                organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                                currentKpiId={kpiId}
+                                value={s.config ?? {}}
+                                onChange={(c) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, config: c } : x)))}
+                                labelPrefix="Source"
+                              />
+                            ) : (
+                              <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>—</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem", minWidth: "200px" }}>
+                            {userRole === "SUPER_ADMIN" ? (
+                              <input
+                                placeholder="e.g. Program details"
+                                value={s.config && typeof s.config === "object" && "ui_section" in s.config ? String((s.config as any).ui_section ?? "") : ""}
+                                onChange={(e) => {
+                                  const section = e.target.value;
+                                  setCreateSubFields((prev) =>
+                                    prev.map((x, i) =>
+                                      i === idx
+                                        ? {
+                                            ...x,
+                                            config: {
+                                              ...(x.config ?? {}),
+                                              ui_section: section,
                                             },
-                                          };
-                                        })
-                                      }
-                                    />
-                                  </div>
-                                  <div className="form-group" style={{ margin: 0 }}>
-                                    <label>Key *</label>
-                                    <input
-                                      value={effectiveDraft.data.key ?? ""}
-                                      onChange={(e) => {
-                                        const nextKey = e.target.value;
-                                        setMultiFieldKeyTouchedById((prev) => ({ ...prev, [f.id]: true }));
-                                        setMultiFieldEditDraftById((prev) => ({
-                                          ...prev,
-                                          [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, key: nextKey } },
-                                        }));
-                                      }}
-                                    />
-                                  </div>
-                                  <div className="form-group" style={{ margin: 0 }}>
-                                    <label>Type *</label>
-                                    <select
-                                      value={effectiveDraft.data.field_type as any}
-                                      onChange={(e) =>
-                                        setMultiFieldEditDraftById((prev) => ({
-                                          ...prev,
-                                          [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, field_type: e.target.value as any } },
-                                        }))
-                                      }
-                                    >
-                                      {FIELD_TYPES.map((t) => (
-                                        <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                  <div
-                                    className="form-group"
-                                    style={{
-                                      margin: 0,
-                                      gridColumn: "1 / -1",
-                                      display: "flex",
-                                      alignItems: "center",
-                                      gap: "0.5rem",
-                                      flexWrap: "wrap",
-                                    }}
-                                  >
-                                    <label style={{ margin: 0, whiteSpace: "nowrap" }}>API URL</label>
-                                    <input
-                                      type="url"
-                                      placeholder="https://example.com/multi-items-api"
-                                      value={(effectiveDraft.data as any).multi_items_api_endpoint_url ?? ""}
-                                      onChange={(e) =>
-                                        setMultiFieldEditDraftById((prev) => ({
-                                          ...prev,
-                                          [f.id]: {
-                                            ...effectiveDraft,
-                                            data: { ...(effectiveDraft.data as any), multi_items_api_endpoint_url: e.target.value },
-                                          },
-                                        }))
-                                      }
-                                      style={{ flex: "1 1 220px", minWidth: 0 }}
-                                    />
-                                  </div>
-                                  <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 1.25rem", alignItems: "center", gridColumn: "1 / -1" }}>
-                                    <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
-                                      <input
-                                        type="checkbox"
-                                        checked={!!effectiveDraft.data.is_required}
-                                        onChange={(e) =>
-                                          setMultiFieldEditDraftById((prev) => ({
-                                            ...prev,
-                                            [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, is_required: e.target.checked } },
-                                          }))
-                                        }
-                                      />
-                                      Required
-                                    </label>
-                                    <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
-                                      <input
-                                        type="checkbox"
-                                        checked={!!(effectiveDraft.data as any).carry_forward_data}
-                                        onChange={(e) =>
-                                          setMultiFieldEditDraftById((prev) => ({
-                                            ...prev,
-                                            [f.id]: {
-                                              ...effectiveDraft,
-                                              data: { ...(effectiveDraft.data as any), carry_forward_data: e.target.checked },
-                                            },
-                                          }))
-                                        }
-                                      />
-                                      Carry forward
-                                    </label>
-                                    <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
-                                      <input
-                                        type="checkbox"
-                                        checked={!!(effectiveDraft.data as any).full_page_multi_items}
-                                        onChange={(e) =>
-                                          setMultiFieldEditDraftById((prev) => ({
-                                            ...prev,
-                                            [f.id]: {
-                                              ...effectiveDraft,
-                                              data: { ...(effectiveDraft.data as any), full_page_multi_items: e.target.checked },
-                                            },
-                                          }))
-                                        }
-                                      />
-                                      Full-page
-                                    </label>
-                                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                                      <label>Sort</label>
-                                      <input
-                                        type="number"
-                                        min={0}
-                                        value={Number(effectiveDraft.data.sort_order ?? 0)}
-                                        onChange={(e) =>
-                                          setMultiFieldEditDraftById((prev) => ({
-                                            ...prev,
-                                            [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, sort_order: Number(e.target.value || 0) } },
-                                          }))
-                                        }
-                                        style={{ width: "5rem" }}
-                                      />
-                                    </div>
-                                  </div>
-                                </div>
-                              ) : (
-                                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0.4rem 0.9rem" }}>
-                                  <div><strong>Type</strong><div style={{ color: "var(--muted)" }}>{f.field_type.replace(/_/g, " ")}</div></div>
-                                  <div><strong>Required</strong><div style={{ color: "var(--muted)" }}>{f.is_required ? "Yes" : "No"}</div></div>
-                                  <div><strong>Carry forward</strong><div style={{ color: "var(--muted)" }}>{(f as any).carry_forward_data ? "Yes" : "No"}</div></div>
-                                  <div><strong>Full-page</strong><div style={{ color: "var(--muted)" }}>{(f as any).full_page_multi_items ? "Yes" : "No"}</div></div>
-                                  <div><strong>Sort</strong><div style={{ color: "var(--muted)" }}>{String((f as any).sort_order ?? "—")}</div></div>
-                                  <div
-                                    style={{
-                                      gridColumn: "1 / -1",
-                                      display: "flex",
-                                      alignItems: "baseline",
-                                      gap: "0.5rem",
-                                      flexWrap: "wrap",
-                                    }}
-                                  >
-                                    <strong style={{ whiteSpace: "nowrap" }}>API URL</strong>
-                                    <span style={{ color: "var(--muted)", wordBreak: "break-all", flex: "1 1 200px", minWidth: 0 }}>
-                                      {((f as any).config as any)?.multi_items_api_endpoint_url
-                                        ? String(((f as any).config as any).multi_items_api_endpoint_url)
-                                        : "—"}
-                                    </span>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-
-                            <div
-                              style={{
-                                border: "1px solid var(--border)",
-                                borderRadius: 10,
-                                padding: "0.75rem",
-                                background: "var(--surface)",
-                              }}
-                            >
-                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
-                                <div style={{ fontWeight: 750 }}>Sub-fields</div>
-                                <button
-                                  type="button"
-                                  className="btn btn-primary"
-                                  onClick={() => {
-                                    const nextUiSection = activeSection === "Other" ? "" : activeSection;
-                                    setAddSubFieldDraft({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: nextUiSection, config: {} });
-                                    setAddSubFieldModal({ fieldId: f.id, activeSection });
-                                  }}
-                                >
-                                  Add Sub Field
-                                </button>
-                              </div>
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
-                                {sections.map((sec) => {
-                                  const isActive = sec === activeSection;
-                                  const isRenaming = uiSectionRenameDraft?.fieldId === f.id && uiSectionRenameDraft.from === sec;
-                                  const canDelete = sec !== "Other";
-                                  return (
-                                    <div key={sec} style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem" }}>
-                                      {isRenaming ? (
-                                        <>
-                                          <input
-                                            value={uiSectionRenameDraft.to}
-                                            onChange={(e) => setUiSectionRenameDraft((p) => (p ? { ...p, to: e.target.value } : p))}
-                                            onKeyDown={async (e) => {
-                                              if (e.key === "Escape") setUiSectionRenameDraft(null);
-                                              if (e.key !== "Enter") return;
-                                              const to = uiSectionRenameDraft.to.trim();
-                                              const from = uiSectionRenameDraft.from;
-                                              if (!to || to === "Other" || to === from) {
-                                                setUiSectionRenameDraft(null);
-                                                return;
-                                              }
-                                              const field = list.find((x) => x.id === f.id) as any;
-                                              if (!field) return;
-                                              const nextSubs = (field.sub_fields ?? []).map((sf: any) => {
-                                                const raw = sf?.config?.ui_section;
-                                                const label = typeof raw === "string" ? raw.trim() : "";
-                                                if ((label || "Other") !== from) return sf;
-                                                return { ...sf, config: { ...(sf.config ?? {}), ui_section: to } };
-                                              });
-                                              setUiSectionCustomByMultiFieldId((prev) => {
-                                                const current = prev[f.id] ?? [];
-                                                const mapped = current.map((x) => (x === from ? to : x));
-                                                const unique = Array.from(new Set(mapped.filter((x) => x && x !== "Other")));
-                                                return { ...prev, [f.id]: unique };
-                                              });
-                                              if (activeSection === from) setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: to }));
-                                              setUiSectionRenameDraft(null);
-                                              await onUpdateSubmit(f.id, buildMultiLineUpdateFromField(field), nextSubs as any, undefined);
-                                            }}
-                                            onBlur={() => setUiSectionRenameDraft(null)}
-                                            style={{
-                                              padding: "0.32rem 0.55rem",
-                                              borderRadius: 999,
-                                              border: "1px solid var(--border)",
-                                              minWidth: 120,
-                                              fontSize: "0.9rem",
-                                            }}
-                                            autoFocus
-                                          />
-                                          {canDelete && (
-                                            <button
-                                              type="button"
-                                              className="btn"
-                                              style={{ borderRadius: 999, padding: "0.25rem 0.45rem", color: "var(--error)" }}
-                                              title="Delete section (move fields to Other)"
-                                              onMouseDown={(e) => e.preventDefault()}
-                                              onClick={async (e) => {
-                                                e.stopPropagation();
-                                                const field = list.find((x) => x.id === f.id) as any;
-                                                if (!field) return;
-                                                const affected = (field.sub_fields ?? []).filter((sf: any) => {
-                                                  const raw = sf?.config?.ui_section;
-                                                  const label = typeof raw === "string" ? raw.trim() : "";
-                                                  return (label || "Other") === sec;
-                                                }).length;
-                                                const ok = window.confirm(
-                                                  `Delete UI section "${sec}"?\n\n` +
-                                                  `This will move ${affected} sub-field(s) to "Other".`
-                                                );
-                                                if (!ok) return;
-                                                const nextSubs = (field.sub_fields ?? []).map((sf: any) => {
-                                                  const raw = sf?.config?.ui_section;
-                                                  const label = typeof raw === "string" ? raw.trim() : "";
-                                                  if ((label || "Other") !== sec) return sf;
-                                                  const cfg = { ...(sf.config ?? {}) } as any;
-                                                  delete cfg.ui_section;
-                                                  return { ...sf, config: cfg };
-                                                });
-                                                setUiSectionCustomByMultiFieldId((prev) => {
-                                                  const current = prev[f.id] ?? [];
-                                                  return { ...prev, [f.id]: current.filter((x) => x !== sec) };
-                                                });
-                                                if (activeSection === sec) setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: "Other" }));
-                                                setUiSectionRenameDraft(null);
-                                                await onUpdateSubmit(f.id, buildMultiLineUpdateFromField(field), nextSubs as any, undefined);
-                                              }}
-                                            >
-                                              ×
-                                            </button>
-                                          )}
-                                        </>
-                                      ) : (
-                                        <button
-                                          type="button"
-                                          className={isActive ? "btn btn-primary" : "btn"}
-                                          onClick={() => setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: sec }))}
-                                          onDoubleClick={() => {
-                                            if (sec === "Other") return;
-                                            setUiSectionRenameDraft({ fieldId: f.id, from: sec, to: sec });
-                                          }}
-                                          title={sec === "Other" ? undefined : "Double-click to rename"}
-                                          style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
-                                        >
-                                          {sec}
-                                        </button>
-                                      )}
-                                    </div>
+                                          }
+                                        : x
+                                    )
                                   );
-                                })}
+                                }}
+                                style={{ width: "100%" }}
+                              />
+                            ) : (
+                              <div style={{ padding: "0.35rem 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                                {s.config && typeof s.config === "object" && "ui_section" in s.config && (s.config as any).ui_section
+                                  ? String((s.config as any).ui_section)
+                                  : "—"}
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={s.is_required}
+                              onChange={(e) => setCreateSubFields((prev) => prev.map((x, i) => (i === idx ? { ...x, is_required: e.target.checked } : x)))}
+                              title="Required"
+                            />
+                            {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button type="button" className="btn btn-primary" onClick={() => setCreateSubFields((prev) => [...prev, { name: "", key: "", field_type: "single_line_text", is_required: false, sort_order: prev.length, keyTouched: false, config: undefined }])}>
+                  Add sub-field
+                </button>
+              </div>
+            )}
+            {createForm.watch("field_type") === "multi_line_items" && (
+              <div
+                className="form-group"
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}
+              >
+                <label style={{ margin: 0, whiteSpace: "nowrap" }}>API URL</label>
+                <input
+                  type="url"
+                  placeholder="https://example.com/multi-items-api"
+                  {...createForm.register("multi_items_api_endpoint_url")}
+                  style={{ flex: "1 1 220px", minWidth: 0 }}
+                />
+              </div>
+            )}
+            <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem" }}>
+              <button type="submit" className="btn btn-primary" disabled={createForm.formState.isSubmitting}>
+                {createForm.formState.isSubmitting ? "Creating..." : "Create"}
+              </button>
+              <button type="button" className="btn" onClick={() => setShowCreate(false)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+          )}
 
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
-                                  onClick={() => {
-                                    const name = window.prompt("New UI section name");
-                                    const trimmed = (name ?? "").trim();
-                                    if (!trimmed || trimmed === "Other") return;
-                                    setUiSectionCustomByMultiFieldId((prev) => {
-                                      const current = prev[f.id] ?? [];
-                                      const next = Array.from(new Set([...current, trimmed].filter((x) => x && x !== "Other")));
-                                      return { ...prev, [f.id]: next };
-                                    });
-                                    setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: trimmed }));
-                                  }}
-                                  title="Add UI section"
-                                >
-                                  + Add section
-                                </button>
-                              </div>
-                              <div style={{ overflowX: "auto" }}>
-                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
-                                  <thead>
-                                    <tr>
-                                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
-                                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
-                                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
-                                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source</th>
-                                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>UI section</th>
-                                      <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
-                                      <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600, width: 140 }}>Actions</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {(() => {
-                                      const rows = subs.map((s, i) => ({ s, i }));
-                                      const filtered = rows.filter(({ s, i }) => {
-                                        const sec = (s as any)?.config?.ui_section;
-                                        const label = typeof sec === "string" ? sec.trim() : "";
-                                        const group = label || "Other";
-                                        return sections.length <= 1 ? true : group === activeSection;
-                                      });
-                                      return filtered.map(({ s, i }) => {
-                                        const fieldType = String((s as any).field_type ?? "");
-                                        const uiSectionVal = typeof (s as any)?.config?.ui_section === "string" ? String((s as any).config.ui_section) : "";
-                                        const keyForRow = (s as any).id ?? `${(s as any).key}:${i}`;
-                                        const cfg = ((s as any).config ?? {}) as any;
-                                        const refLabel =
-                                          (fieldType === "reference" || fieldType === "multi_reference") &&
-                                            (cfg.reference_source_kpi_id || cfg.reference_source_field_key)
-                                            ? `${cfg.reference_source_kpi_id ?? "?"} • ${String(cfg.reference_source_field_key ?? "—")}${cfg.reference_source_sub_field_key ? ` • ${String(cfg.reference_source_sub_field_key)}` : ""}`
-                                            : "—";
-                                        return (
-                                          <tr key={keyForRow} style={{ borderBottom: "1px solid var(--border)" }}>
-                                            <>
-                                              <td style={{ padding: "0.4rem 0.5rem" }}>{(s as any).name}</td>
-                                              <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{(s as any).key}</td>
-                                              <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{fieldType.replace(/_/g, " ")}</td>
-                                              <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{refLabel}</td>
-                                              <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>
-                                                {uiSectionVal.trim() ? uiSectionVal : "—"}
-                                              </td>
-                                              <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>{(s as any).is_required ? "Yes" : "No"}</td>
-                                              <td style={{ padding: "0.4rem 0.5rem", textAlign: "right", whiteSpace: "nowrap" }}>
-                                                <button
-                                                  type="button"
-                                                  className="btn"
-                                                  onClick={() => {
-                                                    const cfgObj = ((s as any).config ?? {}) as any;
-                                                    const uiSec = typeof cfgObj.ui_section === "string" ? String(cfgObj.ui_section) : "";
-                                                    setEditSubFieldDraft({
-                                                      name: String((s as any).name ?? ""),
-                                                      key: String((s as any).key ?? ""),
-                                                      keyTouched: true,
-                                                      field_type: fieldType || "single_line_text",
-                                                      is_required: !!(s as any).is_required,
-                                                      ui_section: uiSec,
-                                                      config: {
-                                                        ...cfgObj,
-                                                        reference_source_kpi_id: cfgObj.reference_source_kpi_id,
-                                                        reference_source_field_key: cfgObj.reference_source_field_key,
-                                                        reference_source_sub_field_key: cfgObj.reference_source_sub_field_key,
-                                                      },
-                                                    });
-                                                    setEditSubFieldModal({ fieldId: f.id, subIndex: i });
-                                                  }}
-                                                >
-                                                  Edit
-                                                </button>
-                                                <button
-                                                  type="button"
-                                                  className="btn"
-                                                  style={{ color: "var(--error)", marginLeft: "0.35rem" }}
-                                                  onClick={() => {
-                                                    const n = String((s as any).name ?? "");
-                                                    const k = String((s as any).key ?? "");
-                                                    setDeleteSubFieldConfirm({ name: "", key: "" });
-                                                    setDeleteSubFieldModal({ fieldId: f.id, subIndex: i, name: n, key: k });
-                                                  }}
-                                                >
-                                                  Delete
-                                                </button>
-                                              </td>
-                                            </>
-                                          </tr>
-                                        );
-                                      });
-                                    })()}
-                                  </tbody>
-                                </table>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })()}
-                    </li>
-                  ) : (
-                    list.map((f) => (
+      <div className="card">
+        {list.length === 0 ? (
+          <p style={{ color: "var(--muted)" }}>No fields yet. Click &quot;Add field&quot; to create one.</p>
+        ) : (
+          <ul style={{ listStyle: "none" }}>
+            {userRole === "SUPER_ADMIN" ? (
+              <li style={{ padding: "0.75rem 0 0 0" }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.9rem" }}>
+                  <button
+                    type="button"
+                    className={superAdminFieldsTab === "scalar" ? "btn btn-primary" : "btn"}
+                    onClick={() => setSuperAdminFieldsTab("scalar")}
+                    style={{ borderRadius: 999, padding: "0.35rem 0.65rem" }}
+                  >
+                    Scalar fields <span style={{ opacity: 0.8 }}>({scalarFields.length})</span>
+                  </button>
+                  {multiLineFields.map((mf) => {
+                    const tabKey = `multi:${mf.id}`;
+                    const active = superAdminFieldsTab === tabKey;
+                    return (
+                      <button
+                        key={mf.id}
+                        type="button"
+                        className={active ? "btn btn-primary" : "btn"}
+                        onClick={() => setSuperAdminFieldsTab(tabKey)}
+                        style={{ borderRadius: 999, padding: "0.35rem 0.65rem" }}
+                        title={mf.key}
+                      >
+                        {mf.name}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {superAdminFieldsTab === "scalar" ? (
+                  <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                    {scalarFields.map((f) => (
                       <li key={f.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
                         {editingId === f.id ? (
                           <FieldEditForm
@@ -3327,31 +2723,12 @@ export default function KpiFieldsPage() {
                             organizationId={orgId ?? undefined}
                             currentKpiId={kpiId}
                             userRole={userRole}
-                            extraUiSections={f.field_type === "multi_line_items" ? uiSectionCustomByMultiFieldId[f.id] ?? [] : undefined}
                             sections={sections}
                           />
                         ) : (
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
                             <div>
-                              <strong
-                                style={{
-                                  cursor: f.field_type === "multi_line_items" ? "pointer" : "default",
-                                  textDecoration: f.field_type === "multi_line_items" ? "underline" : "none",
-                                }}
-                                onClick={() => {
-                                  if (f.field_type !== "multi_line_items") return;
-                                  const resolvedOrgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
-                                  const year = new Date().getFullYear();
-                                  if (!resolvedOrgId) return;
-                                  router.push(
-                                    `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
-                                      organization_id: resolvedOrgId,
-                                    })}`
-                                  );
-                                }}
-                              >
-                                {f.name}
-                              </strong>
+                              <strong>{f.name}</strong>
                               <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>({f.key})</span>
                               <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}> - {f.field_type.replace(/_/g, " ")}</span>
                               {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
@@ -3360,383 +2737,1141 @@ export default function KpiFieldsPage() {
                                   Formula: {f.formula_expression}
                                 </span>
                               )}
-                              {f.config?.condition_trigger_field_id != null && (
-                                <span style={{ display: "block", color: "var(--primary)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
-                                  Only visible when trigger field <strong>{list.find(x => x.id === f.config?.condition_trigger_field_id)?.name || f.config?.condition_trigger_field_id}</strong> is <strong>{f.config?.condition_trigger_value ? 'Yes' : 'No'}</strong>
-                                </span>
-                              )}
                             </div>
                             <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                              <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", color: "var(--muted)" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={cardDisplayFieldIds.includes(f.id)}
+                                  onChange={(e) => onToggleCardDisplayField(f.id, e.target.checked)}
+                                />
+                                Show on card
+                              </label>
                               <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
                               <button type="button" className="btn" onClick={() => openDeleteFieldModal(f)} style={{ color: "var(--error)" }}>Delete</button>
                             </div>
                           </div>
                         )}
                       </li>
-                    ))
-                  )}
-                </ul>
-              )}
+                    ))}
+                  </ul>
+                ) : (() => {
+                  const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
+                  const fieldId = match ? Number(match[1]) : null;
+                  const f = fieldId ? multiLineFields.find((x) => x.id === fieldId) : null;
+                  if (!f) return null;
 
-              {/* Conditional Visibility Rules Card */}
-              {(superAdminFieldsTab === "scalar" || superAdminFieldsTab.startsWith("multi:")) && (() => {
-                const isMultiTab = superAdminFieldsTab.startsWith("multi:");
-                const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
-                const activeParentFieldId = match ? Number(match[1]) : null;
-                const activeParentField = activeParentFieldId ? list.find(f => f.id === activeParentFieldId) : null;
+                  const subs = f.sub_fields ?? [];
+                  const editingPanel = multiFieldEditingPanelById[f.id] ?? null;
+                  const sections = (() => {
+                    const uniq = new Set<string>();
+                    subs.forEach((s) => {
+                      const sec = (s as any)?.config?.ui_section;
+                      const label = typeof sec === "string" ? sec.trim() : "";
+                      uniq.add(label || "Other");
+                    });
+                    (uiSectionCustomByMultiFieldId[f.id] ?? []).forEach((s) => {
+                      const label = typeof s === "string" ? s.trim() : "";
+                      if (label) uniq.add(label);
+                    });
+                    if (uniq.size === 0) uniq.add("Other");
+                    return Array.from(uniq).sort((a, b) => (a === "Other" ? 1 : b === "Other" ? -1 : a.localeCompare(b)));
+                  })();
 
-                if (isMultiTab && !activeParentField) return null;
+                  const activeSection = (() => {
+                    const current = activeSubSectionByMultiFieldId[f.id];
+                    if (current && sections.includes(current)) return current;
+                    return sections[0] || "Other";
+                  })();
 
-                const subs = (activeParentField?.sub_fields ?? []) as any[];
+                  const isEditing = editingId === f.id;
+                  const draft = multiFieldEditDraftById[f.id];
+                  const effectiveDraft = draft ?? {
+                    data: {
+                      name: f.name,
+                      key: f.key,
+                      field_type: f.field_type as any,
+                      formula_expression: f.formula_expression ?? "",
+                      is_required: f.is_required,
+                      sort_order: (f as any).sort_order ?? 0,
+                      carry_forward_data: (f as any).carry_forward_data ?? false,
+                      full_page_multi_items: (f as any).full_page_multi_items ?? false,
+                      multi_items_api_endpoint_url: ((f as any).config as any)?.multi_items_api_endpoint_url ?? "",
+                    } as UpdateFormData,
+                    subFields: (f.sub_fields ?? []).map((s) => ({
+                      ...(s as any),
+                      name: s.name,
+                      key: s.key,
+                      field_type: s.field_type as any,
+                      is_required: (s as any).is_required ?? false,
+                      sort_order: (s as any).sort_order ?? 0,
+                      config: (s as any).config ?? undefined,
+                      keyTouched: false,
+                    })) as SubFieldDef[],
+                  };
 
-                // Collect all rules: legacy and new format
-                const allRules: {
-                  id: string;
-                  isLegacy: boolean;
-                  triggerFieldId: number | string;
-                  triggerFieldKey?: string;
-                  operator: string;
-                  value: any;
-                  dependentFieldIds: (number | string)[];
-                  dependentNames: string;
-                  logical_operator?: string;
-                  additional_conditions?: { operator: string; value: string }[];
-                }[] = [];
-
-                if (isMultiTab) {
-                  // MLI Subfields
-                  subs.forEach((s: any) => {
-                    const triggerId = s.config?.condition_trigger_field_id;
-                    const triggerKey = s.config?.condition_trigger_field_key;
-                    if (triggerId != null || triggerKey != null) {
-                      allRules.push({
-                        id: `legacy:${s.id || s.key}`,
-                        isLegacy: true,
-                        triggerFieldId: triggerId || triggerKey || "",
-                        triggerFieldKey: triggerKey,
-                        operator: "eq",
-                        value: s.config.condition_trigger_value ?? true,
-                        dependentFieldIds: [s.id || s.key],
-                        dependentNames: s.name,
-                      });
-                    }
-                    const rules = s.config?.conditional_rules;
-                    if (Array.isArray(rules)) {
-                      rules.forEach((r: any) => {
-                        const depKeys = r.dependent_fields || r.dependent_field_ids || [];
-                        const depNames = depKeys
-                          .map((k: any) => subs.find(x => String(x.id) === String(k) || String(x.key) === String(k))?.name || k)
-                          .join(", ");
-                        allRules.push({
-                          id: r.id || `rule:${s.id || s.key}:${Date.now()}`,
-                          isLegacy: false,
-                          triggerFieldId: s.id || s.key,
-                          triggerFieldKey: s.key,
-                          operator: r.operator || "eq",
-                          value: r.value,
-                          dependentFieldIds: depKeys,
-                          dependentNames: depNames,
-                          logical_operator: r.logical_operator || "or",
-                          additional_conditions: r.additional_conditions || [],
-                        });
-                      });
-                    }
-                  });
-                } else {
-                  // Scalar Fields
-                  list.forEach((f: any) => {
-                    const triggerId = f.config?.condition_trigger_field_id;
-                    if (triggerId != null) {
-                      allRules.push({
-                        id: `legacy:${f.id}`,
-                        isLegacy: true,
-                        triggerFieldId: triggerId,
-                        operator: "eq",
-                        value: f.config.condition_trigger_value ?? true,
-                        dependentFieldIds: [f.id],
-                        dependentNames: f.name,
-                      });
-                    }
-                    const rules = f.config?.conditional_rules;
-                    if (Array.isArray(rules)) {
-                      rules.forEach((r: any) => {
-                        const depIds = r.dependent_fields || r.dependent_field_ids || [];
-                        const depNames = depIds
-                          .map((id: any) => list.find(x => String(x.id) === String(id))?.name || id)
-                          .join(", ");
-                        allRules.push({
-                          id: r.id || `rule:${f.id}:${Date.now()}`,
-                          isLegacy: false,
-                          triggerFieldId: f.id,
-                          operator: r.operator || "eq",
-                          value: r.value,
-                          dependentFieldIds: depIds,
-                          dependentNames: depNames,
-                          logical_operator: r.logical_operator || "or",
-                          additional_conditions: r.additional_conditions || [],
-                        });
-                      });
-                    }
-                  });
-                }
-
-                function formatConditionText(operator: string, value: any, triggerFieldType?: string): string {
-                  const op = operator.toLowerCase();
-                  const isBool = triggerFieldType === "boolean" || typeof value === "boolean";
-                  if (op === "eq") {
-                    if (isBool) return value ? "is Yes" : "is No";
-                    return `= ${value}`;
-                  }
-                  if (op === "neq") {
-                    if (isBool) return value ? "is No" : "is Yes";
-                    return `!= ${value}`;
-                  }
-                  if (op === "gt") return `> ${value}`;
-                  if (op === "lt") return `< ${value}`;
-                  if (op === "gte") return `>= ${value}`;
-                  if (op === "lte") return `<= ${value}`;
-                  if (op === "between") {
-                    const vals = Array.isArray(value) ? value : [value, ""];
-                    return `Between ${vals[0]} and ${vals[1]}`;
-                  }
-                  if (op === "outside") {
-                    const vals = Array.isArray(value) ? value : [value, ""];
-                    return `Outside ${vals[0]} and ${vals[1]}`;
-                  }
-                  return `${operator} ${value}`;
-                }
-
-                return (
-                  <div className="card" style={{ marginTop: "2rem", padding: "1.5rem" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1rem", flexWrap: "wrap", gap: "1rem" }}>
-                      <div>
-                        <h3 style={{ fontSize: "1.1rem", fontWeight: 600, margin: 0 }}>
-                          Conditional Visibility Rules
-                        </h3>
-                        <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
-                          Configure fields to dynamically show or hide based on the value of another field.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={() => {
-                          setCondEditingFieldId(null);
-                          setCondTriggerId("");
-                          setCondTriggerVal(true);
-                          setCondDepType("existing");
-                          setCondDepFieldId("");
-                          setCondNewName("");
-                          setCondNewKey("");
-                          setCondNewFieldType("single_line_text");
-                          setCondNewRequired(false);
-                          setCondNewRefConfig({});
-                          setCondOperator("eq");
-                          setCondValueText("");
-                          setCondValueText2("");
-                          setCondDepFieldIds([]);
-                          setCondLogicalOperator("or");
-                          setCondAdditionalConditions([]);
-                          setEditingRuleId(null);
-                          setIsCondModalOpen(true);
+                  return (
+                    <div style={{ padding: "0.25rem 0 0.75rem 0" }}>
+                      <div
+                        style={{
+                          marginTop: "-0.15rem",
+                          marginBottom: "0.6rem",
+                          padding: "0.6rem",
+                          border: "1px solid var(--border)",
+                          borderRadius: 10,
+                          background: "var(--bg-subtle, #f9fafb)",
                         }}
                       >
-                        Add Rule
-                      </button>
-                    </div>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+                          <div style={{ fontWeight: 650, color: "var(--muted)" }}>Settings</div>
+                          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                            {isEditing && editingPanel === "general" ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  onClick={async () => {
+                                    const payload = effectiveDraft.data as any;
+                                    const update: UpdateFormData = { ...payload };
+                                    await onUpdateSubmit(f.id, update, effectiveDraft.subFields, undefined);
+                                    setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
+                                    setEditingId(null);
+                                    setMultiFieldEditDraftById((prev) => {
+                                      const { [f.id]: _, ...rest } = prev;
+                                      return rest;
+                                    });
+                                  }}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  onClick={() => {
+                                    setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: null }));
+                                    setEditingId(null);
+                                    setMultiFieldEditDraftById((prev) => {
+                                      const { [f.id]: _, ...rest } = prev;
+                                      return rest;
+                                    });
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => {
+                                  setMultiFieldEditDraftById((prev) => (prev[f.id] ? prev : { ...prev, [f.id]: effectiveDraft }));
+                                  setMultiFieldKeyTouchedById((prev) => (prev[f.id] != null ? prev : { ...prev, [f.id]: false }));
+                                  setEditingId(f.id);
+                                  setMultiFieldEditingPanelById((prev) => ({ ...prev, [f.id]: "general" }));
+                                }}
+                              >
+                                Edit
+                              </button>
+                            )}
+                            <button type="button" className="btn" onClick={() => openDeleteFieldModal(f)} style={{ color: "var(--error)" }}>
+                              Delete
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              onClick={() => {
+                                const resolvedOrgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
+                                const year = new Date().getFullYear();
+                                if (!resolvedOrgId) return;
+                                router.push(
+                                  `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
+                                    organization_id: resolvedOrgId,
+                                  })}`
+                                );
+                              }}
+                            >
+                              Open data entry
+                            </button>
+                          </div>
+                        </div>
 
-                    {allRules.length === 0 ? (
-                      <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "1rem 0 0" }}>
-                        No conditional visibility rules configured yet.
-                      </p>
-                    ) : (
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem", marginTop: "1rem" }}>
-                        <thead>
-                          <tr>
-                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Dependent Field(s)</th>
-                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Trigger Field</th>
-                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Condition</th>
-                            <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "1px solid var(--border)", width: 140 }}>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {allRules.map((rule) => {
-                            let triggerName = "";
-                            let triggerKey = "";
-                            let triggerType = "";
+                        {isEditing && editingPanel === "general" ? (
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0.5rem 1rem" }}>
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Name *</label>
+                              <input
+                                value={effectiveDraft.data.name ?? ""}
+                                onChange={(e) =>
+                                  setMultiFieldEditDraftById((prev) => {
+                                    const nextName = e.target.value;
+                                    const touched = !!multiFieldKeyTouchedById[f.id];
+                                    return {
+                                      ...prev,
+                                      [f.id]: {
+                                        ...effectiveDraft,
+                                        data: {
+                                          ...effectiveDraft.data,
+                                          name: nextName,
+                                          ...(touched ? {} : { key: slugifyKey(nextName) }),
+                                        },
+                                      },
+                                    };
+                                  })
+                                }
+                              />
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Key *</label>
+                              <input
+                                value={effectiveDraft.data.key ?? ""}
+                                onChange={(e) => {
+                                  const nextKey = e.target.value;
+                                  setMultiFieldKeyTouchedById((prev) => ({ ...prev, [f.id]: true }));
+                                  setMultiFieldEditDraftById((prev) => ({
+                                    ...prev,
+                                    [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, key: nextKey } },
+                                  }));
+                                }}
+                              />
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Type *</label>
+                              <select
+                                value={effectiveDraft.data.field_type as any}
+                                onChange={(e) =>
+                                  setMultiFieldEditDraftById((prev) => ({
+                                    ...prev,
+                                    [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, field_type: e.target.value as any } },
+                                  }))
+                                }
+                              >
+                                {FIELD_TYPES.map((t) => (
+                                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div
+                              className="form-group"
+                              style={{
+                                margin: 0,
+                                gridColumn: "1 / -1",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "0.5rem",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <label style={{ margin: 0, whiteSpace: "nowrap" }}>API URL</label>
+                              <input
+                                type="url"
+                                placeholder="https://example.com/multi-items-api"
+                                value={(effectiveDraft.data as any).multi_items_api_endpoint_url ?? ""}
+                                onChange={(e) =>
+                                  setMultiFieldEditDraftById((prev) => ({
+                                    ...prev,
+                                    [f.id]: {
+                                      ...effectiveDraft,
+                                      data: { ...(effectiveDraft.data as any), multi_items_api_endpoint_url: e.target.value },
+                                    },
+                                  }))
+                                }
+                                style={{ flex: "1 1 220px", minWidth: 0 }}
+                              />
+                            </div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 1.25rem", alignItems: "center", gridColumn: "1 / -1" }}>
+                              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!effectiveDraft.data.is_required}
+                                  onChange={(e) =>
+                                    setMultiFieldEditDraftById((prev) => ({
+                                      ...prev,
+                                      [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, is_required: e.target.checked } },
+                                    }))
+                                  }
+                                />
+                                Required
+                              </label>
+                              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!(effectiveDraft.data as any).carry_forward_data}
+                                  onChange={(e) =>
+                                    setMultiFieldEditDraftById((prev) => ({
+                                      ...prev,
+                                      [f.id]: {
+                                        ...effectiveDraft,
+                                        data: { ...(effectiveDraft.data as any), carry_forward_data: e.target.checked },
+                                      },
+                                    }))
+                                  }
+                                />
+                                Carry forward
+                              </label>
+                              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!(effectiveDraft.data as any).full_page_multi_items}
+                                  onChange={(e) =>
+                                    setMultiFieldEditDraftById((prev) => ({
+                                      ...prev,
+                                      [f.id]: {
+                                        ...effectiveDraft,
+                                        data: { ...(effectiveDraft.data as any), full_page_multi_items: e.target.checked },
+                                      },
+                                    }))
+                                  }
+                                />
+                                Full-page
+                              </label>
+                              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                                <label>Sort</label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={Number(effectiveDraft.data.sort_order ?? 0)}
+                                  onChange={(e) =>
+                                    setMultiFieldEditDraftById((prev) => ({
+                                      ...prev,
+                                      [f.id]: { ...effectiveDraft, data: { ...effectiveDraft.data, sort_order: Number(e.target.value || 0) } },
+                                    }))
+                                  }
+                                  style={{ width: "5rem" }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0.4rem 0.9rem" }}>
+                            <div><strong>Type</strong><div style={{ color: "var(--muted)" }}>{f.field_type.replace(/_/g, " ")}</div></div>
+                            <div><strong>Required</strong><div style={{ color: "var(--muted)" }}>{f.is_required ? "Yes" : "No"}</div></div>
+                            <div><strong>Carry forward</strong><div style={{ color: "var(--muted)" }}>{(f as any).carry_forward_data ? "Yes" : "No"}</div></div>
+                            <div><strong>Full-page</strong><div style={{ color: "var(--muted)" }}>{(f as any).full_page_multi_items ? "Yes" : "No"}</div></div>
+                            <div><strong>Sort</strong><div style={{ color: "var(--muted)" }}>{String((f as any).sort_order ?? "—")}</div></div>
+                            <div
+                              style={{
+                                gridColumn: "1 / -1",
+                                display: "flex",
+                                alignItems: "baseline",
+                                gap: "0.5rem",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <strong style={{ whiteSpace: "nowrap" }}>API URL</strong>
+                              <span style={{ color: "var(--muted)", wordBreak: "break-all", flex: "1 1 200px", minWidth: 0 }}>
+                                {((f as any).config as any)?.multi_items_api_endpoint_url
+                                  ? String(((f as any).config as any).multi_items_api_endpoint_url)
+                                  : "—"}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
 
-                            const trigger = isMultiTab
-                              ? subs.find(t => String(t.id || t.key) === String(rule.triggerFieldId))
-                              : list.find(t => t.id === Number(rule.triggerFieldId));
-                            if (trigger) {
-                              triggerName = trigger.name;
-                              triggerKey = trigger.key;
-                              triggerType = trigger.field_type;
-                            }
-
+                      <div
+                        style={{
+                          border: "1px solid var(--border)",
+                          borderRadius: 10,
+                          padding: "0.75rem",
+                          background: "var(--surface)",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+                          <div style={{ fontWeight: 750 }}>Sub-fields</div>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => {
+                              const nextUiSection = activeSection === "Other" ? "" : activeSection;
+                              setAddSubFieldDraft({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: nextUiSection, config: {} });
+                              setAddSubFieldModal({ fieldId: f.id, activeSection });
+                            }}
+                          >
+                            Add Sub Field
+                          </button>
+                        </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                          {sections.map((sec) => {
+                            const isActive = sec === activeSection;
+                            const isRenaming = uiSectionRenameDraft?.fieldId === f.id && uiSectionRenameDraft.from === sec;
+                            const canDelete = sec !== "Other";
                             return (
-                              <tr key={rule.id}>
-                                <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                  <strong>{rule.dependentNames}</strong>
-                                </td>
-                                <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                  {triggerName ? (
-                                    <span>{triggerName} <span style={{ color: "var(--muted)" }}>({triggerKey})</span></span>
-                                  ) : (
-                                    <span style={{ color: "var(--error)" }}>Missing Trigger</span>
-                                  )}
-                                </td>
-                                <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                  Show when trigger {formatConditionText(rule.operator, rule.value, triggerType)}
-                                  {Array.isArray(rule.additional_conditions) && rule.additional_conditions.length > 0 && (
-                                    <span>
-                                      {" "}{rule.logical_operator?.toUpperCase() || "OR"}{" "}
-                                      {rule.additional_conditions.map((ac: any, i: number) => (
-                                        <span key={i}>
-                                          {i > 0 ? ` ${rule.logical_operator?.toUpperCase() || "OR"} ` : ""}
-                                          {formatConditionText(ac.operator, ac.value, triggerType)}
-                                        </span>
-                                      ))}
-                                    </span>
-                                  )}
-                                </td>
-                                <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
-                                  <button
-                                    type="button"
-                                    className="btn"
-                                    style={{ marginRight: "0.35rem" }}
-                                    onClick={() => {
-                                      setCondEditingFieldId(rule.id);
-                                      setEditingRuleId(rule.id);
-                                      setCondTriggerId(rule.triggerFieldId);
-                                      setCondOperator(rule.operator);
-                                      setCondDepFieldIds(rule.dependentFieldIds);
-                                      setCondDepType("existing");
-                                      setCondLogicalOperator(rule.logical_operator || "or");
-                                      setCondAdditionalConditions(rule.additional_conditions || []);
-
-                                      if (trigger && trigger.field_type === "boolean") {
-                                        setCondTriggerVal(rule.value);
-                                      } else {
-                                        if (Array.isArray(rule.value)) {
-                                          setCondValueText(String(rule.value[0] ?? ""));
-                                          setCondValueText2(String(rule.value[1] ?? ""));
-                                        } else {
-                                          setCondValueText(String(rule.value ?? ""));
-                                          setCondValueText2("");
+                              <div key={sec} style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem" }}>
+                                {isRenaming ? (
+                                  <>
+                                    <input
+                                      value={uiSectionRenameDraft.to}
+                                      onChange={(e) => setUiSectionRenameDraft((p) => (p ? { ...p, to: e.target.value } : p))}
+                                      onKeyDown={async (e) => {
+                                        if (e.key === "Escape") setUiSectionRenameDraft(null);
+                                        if (e.key !== "Enter") return;
+                                        const to = uiSectionRenameDraft.to.trim();
+                                        const from = uiSectionRenameDraft.from;
+                                        if (!to || to === "Other" || to === from) {
+                                          setUiSectionRenameDraft(null);
+                                          return;
                                         }
-                                      }
-                                      setIsCondModalOpen(true);
-                                    }}
-                                  >
-                                    Edit
-                                  </button>
+                                        const field = list.find((x) => x.id === f.id) as any;
+                                        if (!field) return;
+                                        const nextSubs = (field.sub_fields ?? []).map((sf: any) => {
+                                          const raw = sf?.config?.ui_section;
+                                          const label = typeof raw === "string" ? raw.trim() : "";
+                                          if ((label || "Other") !== from) return sf;
+                                          return { ...sf, config: { ...(sf.config ?? {}), ui_section: to } };
+                                        });
+                                        setUiSectionCustomByMultiFieldId((prev) => {
+                                          const current = prev[f.id] ?? [];
+                                          const mapped = current.map((x) => (x === from ? to : x));
+                                          const unique = Array.from(new Set(mapped.filter((x) => x && x !== "Other")));
+                                          return { ...prev, [f.id]: unique };
+                                        });
+                                        if (activeSection === from) setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: to }));
+                                        setUiSectionRenameDraft(null);
+                                        await onUpdateSubmit(f.id, buildMultiLineUpdateFromField(field), nextSubs as any, undefined);
+                                      }}
+                                      onBlur={() => setUiSectionRenameDraft(null)}
+                                      style={{
+                                        padding: "0.32rem 0.55rem",
+                                        borderRadius: 999,
+                                        border: "1px solid var(--border)",
+                                        minWidth: 120,
+                                        fontSize: "0.9rem",
+                                      }}
+                                      autoFocus
+                                    />
+                                    {canDelete && (
+                                      <button
+                                        type="button"
+                                        className="btn"
+                                        style={{ borderRadius: 999, padding: "0.25rem 0.45rem", color: "var(--error)" }}
+                                        title="Delete section (move fields to Other)"
+                                        onMouseDown={(e) => e.preventDefault()}
+                                        onClick={async (e) => {
+                                          e.stopPropagation();
+                                          const field = list.find((x) => x.id === f.id) as any;
+                                          if (!field) return;
+                                          const affected = (field.sub_fields ?? []).filter((sf: any) => {
+                                            const raw = sf?.config?.ui_section;
+                                            const label = typeof raw === "string" ? raw.trim() : "";
+                                            return (label || "Other") === sec;
+                                          }).length;
+                                          const ok = window.confirm(
+                                            `Delete UI section "${sec}"?\n\n` +
+                                              `This will move ${affected} sub-field(s) to "Other".`
+                                          );
+                                          if (!ok) return;
+                                          const nextSubs = (field.sub_fields ?? []).map((sf: any) => {
+                                            const raw = sf?.config?.ui_section;
+                                            const label = typeof raw === "string" ? raw.trim() : "";
+                                            if ((label || "Other") !== sec) return sf;
+                                            const cfg = { ...(sf.config ?? {}) } as any;
+                                            delete cfg.ui_section;
+                                            return { ...sf, config: cfg };
+                                          });
+                                          setUiSectionCustomByMultiFieldId((prev) => {
+                                            const current = prev[f.id] ?? [];
+                                            return { ...prev, [f.id]: current.filter((x) => x !== sec) };
+                                          });
+                                          if (activeSection === sec) setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: "Other" }));
+                                          setUiSectionRenameDraft(null);
+                                          await onUpdateSubmit(f.id, buildMultiLineUpdateFromField(field), nextSubs as any, undefined);
+                                        }}
+                                      >
+                                        ×
+                                      </button>
+                                    )}
+                                  </>
+                                ) : (
                                   <button
                                     type="button"
-                                    className="btn"
-                                    style={{ color: "var(--error)" }}
-                                    onClick={() => handleRemoveConditionalRule(rule.id)}
+                                    className={isActive ? "btn btn-primary" : "btn"}
+                                    onClick={() => setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: sec }))}
+                                    onDoubleClick={() => {
+                                      if (sec === "Other") return;
+                                      setUiSectionRenameDraft({ fieldId: f.id, from: sec, to: sec });
+                                    }}
+                                    title={sec === "Other" ? undefined : "Double-click to rename"}
+                                    style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
                                   >
-                                    Remove
+                                    {sec}
                                   </button>
-                                </td>
-                              </tr>
+                                )}
+                              </div>
                             );
                           })}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-          </>
+
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ borderRadius: 999, padding: "0.35rem 0.65rem", fontSize: "0.9rem" }}
+                            onClick={() => {
+                              const name = window.prompt("New UI section name");
+                              const trimmed = (name ?? "").trim();
+                              if (!trimmed || trimmed === "Other") return;
+                              setUiSectionCustomByMultiFieldId((prev) => {
+                                const current = prev[f.id] ?? [];
+                                const next = Array.from(new Set([...current, trimmed].filter((x) => x && x !== "Other")));
+                                return { ...prev, [f.id]: next };
+                              });
+                              setActiveSubSectionByMultiFieldId((prev) => ({ ...prev, [f.id]: trimmed }));
+                            }}
+                            title="Add UI section"
+                          >
+                            + Add section
+                          </button>
+                        </div>
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                            <thead>
+                              <tr>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source</th>
+                                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>UI section</th>
+                                <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
+                                <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600, width: 140 }}>Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(() => {
+                                const rows = subs.map((s, i) => ({ s, i }));
+                                const filtered = rows.filter(({ s, i }) => {
+                                  const sec = (s as any)?.config?.ui_section;
+                                  const label = typeof sec === "string" ? sec.trim() : "";
+                                  const group = label || "Other";
+                                  return sections.length <= 1 ? true : group === activeSection;
+                                });
+                                return filtered.map(({ s, i }) => {
+                                  const fieldType = String((s as any).field_type ?? "");
+                                  const uiSectionVal = typeof (s as any)?.config?.ui_section === "string" ? String((s as any).config.ui_section) : "";
+                                  const keyForRow = (s as any).id ?? `${(s as any).key}:${i}`;
+                                  const cfg = ((s as any).config ?? {}) as any;
+                                  const refLabel =
+                                    (fieldType === "reference" || fieldType === "multi_reference") &&
+                                    (cfg.reference_source_kpi_id || cfg.reference_source_field_key)
+                                      ? `${cfg.reference_source_kpi_id ?? "?"} • ${String(cfg.reference_source_field_key ?? "—")}${cfg.reference_source_sub_field_key ? ` • ${String(cfg.reference_source_sub_field_key)}` : ""}`
+                                      : "—";
+                                  return (
+                                    <tr key={keyForRow} style={{ borderBottom: "1px solid var(--border)" }}>
+                                      <>
+                                        <td style={{ padding: "0.4rem 0.5rem" }}>{(s as any).name}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{(s as any).key}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{fieldType.replace(/_/g, " ")}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{refLabel}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>
+                                          {uiSectionVal.trim() ? uiSectionVal : "—"}
+                                        </td>
+                                        <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>{(s as any).is_required ? "Yes" : "No"}</td>
+                                        <td style={{ padding: "0.4rem 0.5rem", textAlign: "right", whiteSpace: "nowrap" }}>
+                                          <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() => {
+                                              const cfgObj = ((s as any).config ?? {}) as any;
+                                              const uiSec = typeof cfgObj.ui_section === "string" ? String(cfgObj.ui_section) : "";
+                                              setEditSubFieldDraft({
+                                                name: String((s as any).name ?? ""),
+                                                key: String((s as any).key ?? ""),
+                                                keyTouched: true,
+                                                field_type: fieldType || "single_line_text",
+                                                is_required: !!(s as any).is_required,
+                                                ui_section: uiSec,
+                                                config: {
+                                                  ...cfgObj,
+                                                  reference_source_kpi_id: cfgObj.reference_source_kpi_id,
+                                                  reference_source_field_key: cfgObj.reference_source_field_key,
+                                                  reference_source_sub_field_key: cfgObj.reference_source_sub_field_key,
+                                                },
+                                              });
+                                              setEditSubFieldModal({ fieldId: f.id, subIndex: i });
+                                            }}
+                                          >
+                                            Edit
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="btn"
+                                            style={{ color: "var(--error)", marginLeft: "0.35rem" }}
+                                            onClick={() => {
+                                              const n = String((s as any).name ?? "");
+                                              const k = String((s as any).key ?? "");
+                                              setDeleteSubFieldConfirm({ name: "", key: "" });
+                                              setDeleteSubFieldModal({ fieldId: f.id, subIndex: i, name: n, key: k });
+                                            }}
+                                          >
+                                            Delete
+                                          </button>
+                                        </td>
+                                      </>
+                                    </tr>
+                                  );
+                                });
+                              })()}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </li>
+            ) : (
+              list.map((f) => (
+                <li key={f.id} style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)" }}>
+                  {editingId === f.id ? (
+                    <FieldEditForm
+                      field={f}
+                      list={list}
+                      onSave={(data, subFields, refConfig) => onUpdateSubmit(f.id, data, subFields, refConfig)}
+                      onCancel={() => setEditingId(null)}
+                      organizationId={orgId ?? undefined}
+                      currentKpiId={kpiId}
+                      userRole={userRole}
+                      extraUiSections={f.field_type === "multi_line_items" ? uiSectionCustomByMultiFieldId[f.id] ?? [] : undefined}
+                      sections={sections}
+                    />
+                  ) : (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem" }}>
+                      <div>
+                        <strong
+                          style={{
+                            cursor: f.field_type === "multi_line_items" ? "pointer" : "default",
+                            textDecoration: f.field_type === "multi_line_items" ? "underline" : "none",
+                          }}
+                          onClick={() => {
+                            if (f.field_type !== "multi_line_items") return;
+                            const resolvedOrgId = kpi?.organization_id ?? orgIdFromUrl ?? orgId;
+                            const year = new Date().getFullYear();
+                            if (!resolvedOrgId) return;
+                            router.push(
+                              `/dashboard/entries/${kpiId}/${year}/multi/${f.id}?${qs({
+                                organization_id: resolvedOrgId,
+                              })}`
+                            );
+                          }}
+                        >
+                          {f.name}
+                        </strong>
+                        <span style={{ color: "var(--muted)", marginLeft: "0.5rem", fontSize: "0.9rem" }}>({f.key})</span>
+                        <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}> - {f.field_type.replace(/_/g, " ")}</span>
+                        {f.is_required && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Required</span>}
+                        {f.field_type === "formula" && f.formula_expression && (
+                          <span style={{ display: "block", color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                            Formula: {f.formula_expression}
+                          </span>
+                        )}
+                        {f.config?.condition_trigger_field_id != null && (
+                          <span style={{ display: "block", color: "var(--primary)", fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                            Only visible when trigger field <strong>{list.find(x => x.id === f.config?.condition_trigger_field_id)?.name || f.config?.condition_trigger_field_id}</strong> is <strong>{f.config?.condition_trigger_value ? 'Yes' : 'No'}</strong>
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+                        <button type="button" className="btn" onClick={() => setEditingId(f.id)}>Edit</button>
+                        <button type="button" className="btn" onClick={() => openDeleteFieldModal(f)} style={{ color: "var(--error)" }}>Delete</button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              ))
+            )}
+          </ul>
         )}
-      </div>
 
-      {/* Conditional Visibility Rule Modal */}
-      {isCondModalOpen && (() => {
-        const isMultiTab = superAdminFieldsTab.startsWith("multi:");
-        const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
-        const activeParentFieldId = match ? Number(match[1]) : null;
-        const activeParentField = activeParentFieldId ? list.find(f => f.id === activeParentFieldId) : null;
-        const subs = (activeParentField?.sub_fields ?? []) as any[];
+        {/* Conditional Visibility Rules Card */}
+        {(superAdminFieldsTab === "scalar" || superAdminFieldsTab.startsWith("multi:")) && (() => {
+          const isMultiTab = superAdminFieldsTab.startsWith("multi:");
+          const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
+          const activeParentFieldId = match ? Number(match[1]) : null;
+          const activeParentField = activeParentFieldId ? list.find(f => f.id === activeParentFieldId) : null;
+          
+          if (isMultiTab && !activeParentField) return null;
+          
+          const subs = (activeParentField?.sub_fields ?? []) as any[];
 
-        // Filter eligible trigger fields: Boolean, Dropdown/Reference, Number
-        const triggerFields = isMultiTab
-          ? subs.filter((s: any) => ["boolean", "reference", "number"].includes(s.field_type))
-          : list.filter((f) => ["boolean", "reference", "number"].includes(f.field_type));
+          // Collect all rules: legacy and new format
+          const allRules: {
+            id: string;
+            isLegacy: boolean;
+            triggerFieldId: number | string;
+            triggerFieldKey?: string;
+            operator: string;
+            value: any;
+            dependentFieldIds: (number | string)[];
+            dependentNames: string;
+            logical_operator?: string;
+            additional_conditions?: { operator: string; value: string }[];
+          }[] = [];
 
-        const selectedTrigger = isMultiTab
-          ? subs.find((s) => String(s.id) === String(condTriggerId) || s.key === String(condTriggerId))
-          : list.find((f) => String(f.id) === String(condTriggerId));
+          if (isMultiTab) {
+            // MLI Subfields
+            subs.forEach((s: any) => {
+              const triggerId = s.config?.condition_trigger_field_id;
+              const triggerKey = s.config?.condition_trigger_field_key;
+              if (triggerId != null || triggerKey != null) {
+                allRules.push({
+                  id: `legacy:${s.id || s.key}`,
+                  isLegacy: true,
+                  triggerFieldId: triggerId || triggerKey || "",
+                  triggerFieldKey: triggerKey,
+                  operator: "eq",
+                  value: s.config.condition_trigger_value ?? true,
+                  dependentFieldIds: [s.id || s.key],
+                  dependentNames: s.name,
+                });
+              }
+              const rules = s.config?.conditional_rules;
+              if (Array.isArray(rules)) {
+                rules.forEach((r: any) => {
+                  const depKeys = r.dependent_fields || r.dependent_field_ids || [];
+                  const depNames = depKeys
+                    .map((k: any) => subs.find(x => String(x.id) === String(k) || String(x.key) === String(k))?.name || k)
+                    .join(", ");
+                  allRules.push({
+                    id: r.id || `rule:${s.id || s.key}:${Date.now()}`,
+                    isLegacy: false,
+                    triggerFieldId: s.id || s.key,
+                    triggerFieldKey: s.key,
+                    operator: r.operator || "eq",
+                    value: r.value,
+                    dependentFieldIds: depKeys,
+                    dependentNames: depNames,
+                    logical_operator: r.logical_operator || "or",
+                    additional_conditions: r.additional_conditions || [],
+                  });
+                });
+              }
+            });
+          } else {
+            // Scalar Fields
+            list.forEach((f: any) => {
+              const triggerId = f.config?.condition_trigger_field_id;
+              if (triggerId != null) {
+                allRules.push({
+                  id: `legacy:${f.id}`,
+                  isLegacy: true,
+                  triggerFieldId: triggerId,
+                  operator: "eq",
+                  value: f.config.condition_trigger_value ?? true,
+                  dependentFieldIds: [f.id],
+                  dependentNames: f.name,
+                });
+              }
+              const rules = f.config?.conditional_rules;
+              if (Array.isArray(rules)) {
+                rules.forEach((r: any) => {
+                  const depIds = r.dependent_fields || r.dependent_field_ids || [];
+                  const depNames = depIds
+                    .map((id: any) => list.find(x => String(x.id) === String(id))?.name || id)
+                    .join(", ");
+                  allRules.push({
+                    id: r.id || `rule:${f.id}:${Date.now()}`,
+                    isLegacy: false,
+                    triggerFieldId: f.id,
+                    operator: r.operator || "eq",
+                    value: r.value,
+                    dependentFieldIds: depIds,
+                    dependentNames: depNames,
+                    logical_operator: r.logical_operator || "or",
+                    additional_conditions: r.additional_conditions || [],
+                  });
+                });
+              }
+            });
+          }
 
-        const eligibleDependents = isMultiTab
-          ? subs.filter((s: any) => s.field_type !== "multi_line_items" && s.field_type !== "formula" && String(s.id || s.key) !== String(condTriggerId))
-          : list.filter((f) => f.field_type !== "multi_line_items" && f.field_type !== "formula" && f.id !== Number(condTriggerId));
+          function formatConditionText(operator: string, value: any, triggerFieldType?: string): string {
+            const op = operator.toLowerCase();
+            const isBool = triggerFieldType === "boolean" || typeof value === "boolean";
+            if (op === "eq") {
+              if (isBool) return value ? "is Yes" : "is No";
+              return `= ${value}`;
+            }
+            if (op === "neq") {
+              if (isBool) return value ? "is No" : "is Yes";
+              return `!= ${value}`;
+            }
+            if (op === "gt") return `> ${value}`;
+            if (op === "lt") return `< ${value}`;
+            if (op === "gte") return `>= ${value}`;
+            if (op === "lte") return `<= ${value}`;
+            if (op === "between") {
+              const vals = Array.isArray(value) ? value : [value, ""];
+              return `Between ${vals[0]} and ${vals[1]}`;
+            }
+            if (op === "outside") {
+              const vals = Array.isArray(value) ? value : [value, ""];
+              return `Outside ${vals[0]} and ${vals[1]}`;
+            }
+            return `${operator} ${value}`;
+          }
 
-        return (
-          <div
-            style={{
-              position: "fixed",
-              inset: 0,
-              zIndex: 1000,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "rgba(0,0,0,0.45)",
-              padding: "1rem",
-            }}
-            onClick={() => setIsCondModalOpen(false)}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Add/Edit Conditional Visibility Rule"
-          >
-            <div
-              className="card"
-              style={{ width: "min(560px, 95vw)", padding: "1.5rem", maxHeight: "90vh", overflow: "auto" }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <h2 style={{ fontSize: "1.2rem", marginBottom: "1rem" }}>
-                {editingRuleId ? "Edit Conditional Visibility Rule" : "Add Conditional Visibility Rule"}
-              </h2>
-
-              {/* 1. Select Trigger Field */}
-              <div className="form-group" style={{ marginBottom: "1rem" }}>
-                <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Trigger Field</label>
-                <select
-                  value={condTriggerId}
-                  onChange={(e) => {
-                    const val = e.target.value ? (isNaN(Number(e.target.value)) ? e.target.value : Number(e.target.value)) : "";
-                    setCondTriggerId(val);
+          return (
+            <div className="card" style={{ marginTop: "2rem", padding: "1.5rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1rem", flexWrap: "wrap", gap: "1rem" }}>
+                <div>
+                  <h3 style={{ fontSize: "1.1rem", fontWeight: 600, margin: 0 }}>
+                    Conditional Visibility Rules
+                  </h3>
+                  <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
+                    Configure fields to dynamically show or hide based on the value of another field.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setCondEditingFieldId(null);
+                    setCondTriggerId("");
+                    setCondTriggerVal(true);
+                    setCondDepType("existing");
+                    setCondDepFieldId("");
+                    setCondNewName("");
+                    setCondNewKey("");
+                    setCondNewFieldType("single_line_text");
+                    setCondNewRequired(false);
+                    setCondNewRefConfig({});
                     setCondOperator("eq");
                     setCondValueText("");
                     setCondValueText2("");
-                    setCondTriggerVal(true);
+                    setCondDepFieldIds([]);
+                    setCondLogicalOperator("or");
+                    setCondAdditionalConditions([]);
+                    setEditingRuleId(null);
+                    setIsCondModalOpen(true);
                   }}
-                  style={{ width: "100%", padding: "0.5rem" }}
                 >
-                  <option value="">— Select Trigger Field —</option>
-                  {triggerFields.map((f: any) => (
-                    <option key={f.id || f.key} value={f.id || f.key}>
-                      {f.name} ({f.key} - {f.field_type})
-                    </option>
-                  ))}
-                </select>
+                  Add Rule
+                </button>
               </div>
 
-              {/* 2. Condition & Values */}
-              {selectedTrigger && (
-                <div style={{ border: "1px solid var(--border)", padding: "1rem", borderRadius: 8, marginBottom: "1rem" }}>
-                  <h4 style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>Rule Condition</h4>
+              {allRules.length === 0 ? (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "1rem 0 0" }}>
+                  No conditional visibility rules configured yet.
+                </p>
+              ) : (
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem", marginTop: "1rem" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Dependent Field(s)</th>
+                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Trigger Field</th>
+                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Condition</th>
+                      <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "1px solid var(--border)", width: 140 }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {allRules.map((rule) => {
+                      let triggerName = "";
+                      let triggerKey = "";
+                      let triggerType = "";
+                      
+                      const trigger = isMultiTab
+                        ? subs.find(t => String(t.id || t.key) === String(rule.triggerFieldId))
+                        : list.find(t => t.id === Number(rule.triggerFieldId));
+                      if (trigger) {
+                        triggerName = trigger.name;
+                        triggerKey = trigger.key;
+                        triggerType = trigger.field_type;
+                      }
+                      
+                      return (
+                        <tr key={rule.id}>
+                          <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                            <strong>{rule.dependentNames}</strong>
+                          </td>
+                          <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                            {triggerName ? (
+                              <span>{triggerName} <span style={{ color: "var(--muted)" }}>({triggerKey})</span></span>
+                            ) : (
+                              <span style={{ color: "var(--error)" }}>Missing Trigger</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
+                             Show when trigger {formatConditionText(rule.operator, rule.value, triggerType)}
+                             {Array.isArray(rule.additional_conditions) && rule.additional_conditions.length > 0 && (
+                               <span>
+                                 {" "}{rule.logical_operator?.toUpperCase() || "OR"}{" "}
+                                 {rule.additional_conditions.map((ac: any, i: number) => (
+                                   <span key={i}>
+                                     {i > 0 ? ` ${rule.logical_operator?.toUpperCase() || "OR"} ` : ""}
+                                     {formatConditionText(ac.operator, ac.value, triggerType)}
+                                   </span>
+                                 ))}
+                               </span>
+                             )}
+                          </td>
+                          <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ marginRight: "0.35rem" }}
+                              onClick={() => {
+                                setCondEditingFieldId(rule.id);
+                                setEditingRuleId(rule.id);
+                                setCondTriggerId(rule.triggerFieldId);
+                                setCondOperator(rule.operator);
+                                setCondDepFieldIds(rule.dependentFieldIds);
+                                setCondDepType("existing");
+                                setCondLogicalOperator(rule.logical_operator || "or");
+                                setCondAdditionalConditions(rule.additional_conditions || []);
+                                
+                                if (trigger && trigger.field_type === "boolean") {
+                                  setCondTriggerVal(rule.value);
+                                } else {
+                                  if (Array.isArray(rule.value)) {
+                                    setCondValueText(String(rule.value[0] ?? ""));
+                                    setCondValueText2(String(rule.value[1] ?? ""));
+                                  } else {
+                                    setCondValueText(String(rule.value ?? ""));
+                                    setCondValueText2("");
+                                  }
+                                }
+                                setIsCondModalOpen(true);
+                              }}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ color: "var(--error)" }}
+                              onClick={() => handleRemoveConditionalRule(rule.id)}
+                            >
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          );
+        })()}
+      </div>
+        </>
+      )}
+    </div>
 
-                  {/* Operator Selection */}
-                  <div className="form-group" style={{ marginBottom: "0.75rem" }}>
-                    <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Operator</label>
+    {/* Conditional Visibility Rule Modal */}
+    {isCondModalOpen && (() => {
+      const isMultiTab = superAdminFieldsTab.startsWith("multi:");
+      const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
+      const activeParentFieldId = match ? Number(match[1]) : null;
+      const activeParentField = activeParentFieldId ? list.find(f => f.id === activeParentFieldId) : null;
+      const subs = (activeParentField?.sub_fields ?? []) as any[];
+
+      // Filter eligible trigger fields: Boolean, Dropdown/Reference, Number
+      const triggerFields = isMultiTab
+        ? subs.filter((s: any) => ["boolean", "reference", "number"].includes(s.field_type))
+        : list.filter((f) => ["boolean", "reference", "number"].includes(f.field_type));
+
+      const selectedTrigger = isMultiTab
+        ? subs.find((s) => String(s.id) === String(condTriggerId) || s.key === String(condTriggerId))
+        : list.find((f) => String(f.id) === String(condTriggerId));
+
+      const eligibleDependents = isMultiTab
+        ? subs.filter((s: any) => s.field_type !== "multi_line_items" && s.field_type !== "formula" && String(s.id || s.key) !== String(condTriggerId))
+        : list.filter((f) => f.field_type !== "multi_line_items" && f.field_type !== "formula" && f.id !== Number(condTriggerId));
+
+      return (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.45)",
+            padding: "1rem",
+          }}
+          onClick={() => setIsCondModalOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Add/Edit Conditional Visibility Rule"
+        >
+          <div
+            className="card"
+            style={{ width: "min(560px, 95vw)", padding: "1.5rem", maxHeight: "90vh", overflow: "auto" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 style={{ fontSize: "1.2rem", marginBottom: "1rem" }}>
+              {editingRuleId ? "Edit Conditional Visibility Rule" : "Add Conditional Visibility Rule"}
+            </h2>
+
+            {/* 1. Select Trigger Field */}
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
+              <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Trigger Field</label>
+              <select
+                value={condTriggerId}
+                onChange={(e) => {
+                  const val = e.target.value ? (isNaN(Number(e.target.value)) ? e.target.value : Number(e.target.value)) : "";
+                  setCondTriggerId(val);
+                  setCondOperator("eq");
+                  setCondValueText("");
+                  setCondValueText2("");
+                  setCondTriggerVal(true);
+                }}
+                style={{ width: "100%", padding: "0.5rem" }}
+              >
+                <option value="">— Select Trigger Field —</option>
+                {triggerFields.map((f: any) => (
+                  <option key={f.id || f.key} value={f.id || f.key}>
+                    {f.name} ({f.key} - {f.field_type})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* 2. Condition & Values */}
+            {selectedTrigger && (
+              <div style={{ border: "1px solid var(--border)", padding: "1rem", borderRadius: 8, marginBottom: "1rem" }}>
+                <h4 style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>Rule Condition</h4>
+                
+                {/* Operator Selection */}
+                <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Operator</label>
+                  <select
+                    value={condOperator}
+                    onChange={(e) => setCondOperator(e.target.value)}
+                    style={{ width: "100%", padding: "0.45rem" }}
+                  >
+                    {selectedTrigger.field_type === "number" ? (
+                      <>
+                        <option value="eq">Equal (=)</option>
+                        <option value="neq">Not Equal (!=)</option>
+                        <option value="gt">Greater Than (&gt;)</option>
+                        <option value="lt">Less Than (&lt;)</option>
+                        <option value="gte">Greater Than or Equal (&gt;=)</option>
+                        <option value="lte">Less Than or Equal (&lt;=)</option>
+                        <option value="between">Between (Inclusive)</option>
+                        <option value="outside">Outside Range</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="eq">Equal (=)</option>
+                        <option value="neq">Not Equal (!=)</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+
+                {/* Values Inputs based on trigger type */}
+                {selectedTrigger.field_type === "boolean" && (
+                  <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Value</label>
                     <select
-                      value={condOperator}
-                      onChange={(e) => setCondOperator(e.target.value)}
+                      value={condTriggerVal ? "true" : "false"}
+                      onChange={(e) => setCondTriggerVal(e.target.value === "true")}
                       style={{ width: "100%", padding: "0.45rem" }}
+                    >
+                      <option value="true">Yes / True</option>
+                      <option value="false">No / False</option>
+                    </select>
+                  </div>
+                )}
+
+                {(selectedTrigger.field_type === "reference" || selectedTrigger.field_type === "multi_reference") && (
+                  <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Value</label>
+                    <div style={{ display: "flex", gap: "0.5rem", flexDirection: "column" }}>
+                      {refAllowedValuesList.length > 0 && (
+                        <select
+                          value={condValueText}
+                          onChange={(e) => setCondValueText(e.target.value)}
+                          style={{ width: "100%", padding: "0.45rem" }}
+                        >
+                          <option value="">— Select Extracted Value —</option>
+                          {refAllowedValuesList.map((val) => (
+                            <option key={val} value={val}>
+                              {val}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <input
+                        type="text"
+                        value={condValueText}
+                        onChange={(e) => setCondValueText(e.target.value)}
+                        placeholder="Or enter value manually"
+                        style={{ width: "100%", padding: "0.45rem" }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {selectedTrigger.field_type === "number" && (
+                  <div className="form-group" style={{ marginBottom: "0.5rem" }}>
+                    {["between", "outside"].includes(condOperator) ? (
+                      <div style={{ display: "flex", gap: "0.5rem" }}>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Min Value</label>
+                          <input
+                            type="number"
+                            value={condValueText}
+                            onChange={(e) => setCondValueText(e.target.value)}
+                            style={{ width: "100%", padding: "0.45rem" }}
+                          />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Max Value</label>
+                          <input
+                            type="number"
+                            value={condValueText2}
+                            onChange={(e) => setCondValueText2(e.target.value)}
+                            style={{ width: "100%", padding: "0.45rem" }}
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Numeric Value</label>
+                        <input
+                          type="number"
+                          value={condValueText}
+                          onChange={(e) => setCondValueText(e.target.value)}
+                          style={{ width: "100%", padding: "0.45rem" }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Additional Conditions and logical operators */}
+            {selectedTrigger && (
+              <div style={{ border: "1px solid var(--border)", padding: "1rem", borderRadius: 8, marginBottom: "1rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+                  <h4 style={{ margin: 0, fontSize: "0.95rem" }}>Additional Conditions</h4>
+                  {condAdditionalConditions.length > 0 && (
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Operator:</label>
+                      <select
+                        value={condLogicalOperator}
+                        onChange={(e) => setCondLogicalOperator(e.target.value)}
+                        style={{ padding: "0.25rem" }}
+                      >
+                        <option value="or">OR</option>
+                        <option value="and">AND</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+
+                {condAdditionalConditions.map((ac, acIdx) => (
+                  <div key={acIdx} style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
+                    <select
+                      value={ac.operator}
+                      onChange={(e) => {
+                        const next = [...condAdditionalConditions];
+                        next[acIdx].operator = e.target.value;
+                        setCondAdditionalConditions(next);
+                      }}
+                      style={{ padding: "0.35rem", flex: 1 }}
                     >
                       {selectedTrigger.field_type === "number" ? (
                         <>
@@ -3746,8 +3881,6 @@ export default function KpiFieldsPage() {
                           <option value="lt">Less Than (&lt;)</option>
                           <option value="gte">Greater Than or Equal (&gt;=)</option>
                           <option value="lte">Less Than or Equal (&lt;=)</option>
-                          <option value="between">Between (Inclusive)</option>
-                          <option value="outside">Outside Range</option>
                         </>
                       ) : (
                         <>
@@ -3756,183 +3889,38 @@ export default function KpiFieldsPage() {
                         </>
                       )}
                     </select>
-                  </div>
 
-                  {/* Values Inputs based on trigger type */}
-                  {selectedTrigger.field_type === "boolean" && (
-                    <div className="form-group" style={{ marginBottom: "0.5rem" }}>
-                      <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Value</label>
+                    {selectedTrigger.field_type === "boolean" ? (
                       <select
-                        value={condTriggerVal ? "true" : "false"}
-                        onChange={(e) => setCondTriggerVal(e.target.value === "true")}
-                        style={{ width: "100%", padding: "0.45rem" }}
+                        value={ac.value}
+                        onChange={(e) => {
+                          const next = [...condAdditionalConditions];
+                          next[acIdx].value = e.target.value;
+                          setCondAdditionalConditions(next);
+                        }}
+                        style={{ padding: "0.35rem", flex: 2 }}
                       >
                         <option value="true">Yes / True</option>
                         <option value="false">No / False</option>
                       </select>
-                    </div>
-                  )}
-
-                  {(selectedTrigger.field_type === "reference" || selectedTrigger.field_type === "multi_reference") && (
-                    <div className="form-group" style={{ marginBottom: "0.5rem" }}>
-                      <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Value</label>
-                      <div style={{ display: "flex", gap: "0.5rem", flexDirection: "column" }}>
+                    ) : (selectedTrigger.field_type === "reference" || selectedTrigger.field_type === "multi_reference") ? (
+                      <div style={{ display: "flex", gap: "0.25rem", flex: 2, flexDirection: "column" }}>
                         {refAllowedValuesList.length > 0 && (
                           <select
-                            value={condValueText}
-                            onChange={(e) => setCondValueText(e.target.value)}
-                            style={{ width: "100%", padding: "0.45rem" }}
-                          >
-                            <option value="">— Select Extracted Value —</option>
-                            {refAllowedValuesList.map((val) => (
-                              <option key={val} value={val}>
-                                {val}
-                              </option>
-                            ))}
-                          </select>
-                        )}
-                        <input
-                          type="text"
-                          value={condValueText}
-                          onChange={(e) => setCondValueText(e.target.value)}
-                          placeholder="Or enter value manually"
-                          style={{ width: "100%", padding: "0.45rem" }}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {selectedTrigger.field_type === "number" && (
-                    <div className="form-group" style={{ marginBottom: "0.5rem" }}>
-                      {["between", "outside"].includes(condOperator) ? (
-                        <div style={{ display: "flex", gap: "0.5rem" }}>
-                          <div style={{ flex: 1 }}>
-                            <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Min Value</label>
-                            <input
-                              type="number"
-                              value={condValueText}
-                              onChange={(e) => setCondValueText(e.target.value)}
-                              style={{ width: "100%", padding: "0.45rem" }}
-                            />
-                          </div>
-                          <div style={{ flex: 1 }}>
-                            <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Max Value</label>
-                            <input
-                              type="number"
-                              value={condValueText2}
-                              onChange={(e) => setCondValueText2(e.target.value)}
-                              style={{ width: "100%", padding: "0.45rem" }}
-                            />
-                          </div>
-                        </div>
-                      ) : (
-                        <div>
-                          <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Numeric Value</label>
-                          <input
-                            type="number"
-                            value={condValueText}
-                            onChange={(e) => setCondValueText(e.target.value)}
-                            style={{ width: "100%", padding: "0.45rem" }}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Additional Conditions and logical operators */}
-              {selectedTrigger && (
-                <div style={{ border: "1px solid var(--border)", padding: "1rem", borderRadius: 8, marginBottom: "1rem" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
-                    <h4 style={{ margin: 0, fontSize: "0.95rem" }}>Additional Conditions</h4>
-                    {condAdditionalConditions.length > 0 && (
-                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                        <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Operator:</label>
-                        <select
-                          value={condLogicalOperator}
-                          onChange={(e) => setCondLogicalOperator(e.target.value)}
-                          style={{ padding: "0.25rem" }}
-                        >
-                          <option value="or">OR</option>
-                          <option value="and">AND</option>
-                        </select>
-                      </div>
-                    )}
-                  </div>
-
-                  {condAdditionalConditions.map((ac, acIdx) => (
-                    <div key={acIdx} style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
-                      <select
-                        value={ac.operator}
-                        onChange={(e) => {
-                          const next = [...condAdditionalConditions];
-                          next[acIdx].operator = e.target.value;
-                          setCondAdditionalConditions(next);
-                        }}
-                        style={{ padding: "0.35rem", flex: 1 }}
-                      >
-                        {selectedTrigger.field_type === "number" ? (
-                          <>
-                            <option value="eq">Equal (=)</option>
-                            <option value="neq">Not Equal (!=)</option>
-                            <option value="gt">Greater Than (&gt;)</option>
-                            <option value="lt">Less Than (&lt;)</option>
-                            <option value="gte">Greater Than or Equal (&gt;=)</option>
-                            <option value="lte">Less Than or Equal (&lt;=)</option>
-                          </>
-                        ) : (
-                          <>
-                            <option value="eq">Equal (=)</option>
-                            <option value="neq">Not Equal (!=)</option>
-                          </>
-                        )}
-                      </select>
-
-                      {selectedTrigger.field_type === "boolean" ? (
-                        <select
-                          value={ac.value}
-                          onChange={(e) => {
-                            const next = [...condAdditionalConditions];
-                            next[acIdx].value = e.target.value;
-                            setCondAdditionalConditions(next);
-                          }}
-                          style={{ padding: "0.35rem", flex: 2 }}
-                        >
-                          <option value="true">Yes / True</option>
-                          <option value="false">No / False</option>
-                        </select>
-                      ) : (selectedTrigger.field_type === "reference" || selectedTrigger.field_type === "multi_reference") ? (
-                        <div style={{ display: "flex", gap: "0.25rem", flex: 2, flexDirection: "column" }}>
-                          {refAllowedValuesList.length > 0 && (
-                            <select
-                              value={ac.value}
-                              onChange={(e) => {
-                                const next = [...condAdditionalConditions];
-                                next[acIdx].value = e.target.value;
-                                setCondAdditionalConditions(next);
-                              }}
-                              style={{ padding: "0.35rem", flex: 1 }}
-                            >
-                              <option value="">— Select Extracted Value —</option>
-                              {refAllowedValuesList.map((val) => (
-                                <option key={val} value={val}>{val}</option>
-                              ))}
-                            </select>
-                          )}
-                          <input
-                            type="text"
                             value={ac.value}
                             onChange={(e) => {
                               const next = [...condAdditionalConditions];
                               next[acIdx].value = e.target.value;
                               setCondAdditionalConditions(next);
                             }}
-                            placeholder="Or enter value manually"
-                            style={{ padding: "0.35rem", flex: 1, minWidth: 0 }}
-                          />
-                        </div>
-                      ) : (
+                            style={{ padding: "0.35rem", flex: 1 }}
+                          >
+                            <option value="">— Select Extracted Value —</option>
+                            {refAllowedValuesList.map((val) => (
+                              <option key={val} value={val}>{val}</option>
+                            ))}
+                          </select>
+                        )}
                         <input
                           type="text"
                           value={ac.value}
@@ -3941,1141 +3929,1154 @@ export default function KpiFieldsPage() {
                             next[acIdx].value = e.target.value;
                             setCondAdditionalConditions(next);
                           }}
-                          placeholder="Value"
-                          style={{ padding: "0.35rem", flex: 2 }}
+                          placeholder="Or enter value manually"
+                          style={{ padding: "0.35rem", flex: 1, minWidth: 0 }}
                         />
-                      )}
-
-                      <button
-                        type="button"
-                        className="btn"
-                        style={{ color: "var(--error)", padding: "0.35rem 0.5rem" }}
-                        onClick={() => {
-                          setCondAdditionalConditions(condAdditionalConditions.filter((_, idx) => idx !== acIdx));
-                        }}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ fontSize: "0.85rem", padding: "0.25rem 0.5rem" }}
-                    onClick={() => {
-                      setCondAdditionalConditions([...condAdditionalConditions, { operator: "eq", value: "" }]);
-                    }}
-                  >
-                    + Add Condition
-                  </button>
-                </div>
-              )}
-
-              {/* 3. Choose Dependency Type */}
-              {!editingRuleId && !isMultiTab && (
-                <div className="form-group" style={{ marginBottom: "1rem" }}>
-                  <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Choose Dependency Type</label>
-                  <div style={{ display: "flex", gap: "1rem" }}>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
-                      <input
-                        type="radio"
-                        name="condDepType"
-                        checked={condDepType === "existing"}
-                        onChange={() => setCondDepType("existing")}
-                      />
-                      Use Existing Scalar Field
-                    </label>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
-                      <input
-                        type="radio"
-                        name="condDepType"
-                        checked={condDepType === "new"}
-                        onChange={() => setCondDepType("new")}
-                      />
-                      Create New Scalar Field
-                    </label>
-                  </div>
-                </div>
-              )}
-
-              {/* 4. Select Dependent Field(s) */}
-              {condDepType === "existing" ? (
-                <div className="form-group" style={{ marginBottom: "1.5rem" }}>
-                  <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>
-                    Select Dependent Field(s)
-                  </label>
-                  <div style={{ maxHeight: "180px", overflowY: "auto", border: "1px solid var(--border)", padding: "0.5rem", borderRadius: 4 }}>
-                    {eligibleDependents.length === 0 ? (
-                      <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.5rem" }}>No eligible fields available.</p>
+                      </div>
                     ) : (
-                      eligibleDependents.map((f: any) => {
-                        const idOrKey = isMultiTab ? f.key : f.id;
-                        const isChecked = condDepFieldIds.map(String).includes(String(idOrKey));
-                        return (
-                          <label key={idOrKey} style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.25rem", cursor: "pointer" }}>
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={(e) => {
-                                if (e.target.checked) {
-                                  setCondDepFieldIds([...condDepFieldIds.filter(x => String(x) !== String(idOrKey)), idOrKey]);
-                                } else {
-                                  setCondDepFieldIds(condDepFieldIds.filter(x => String(x) !== String(idOrKey)));
-                                }
-                              }}
-                            />
-                            <span>{f.name} <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>({f.key} - {f.field_type})</span></span>
-                          </label>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div style={{ border: "1px solid var(--border)", padding: "1rem", borderRadius: 8, marginBottom: "1.5rem" }}>
-                  <h4 style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>Create Dependent Scalar Field</h4>
-                  <div className="form-group" style={{ marginBottom: "0.75rem" }}>
-                    <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Field Name</label>
-                    <input
-                      type="text"
-                      value={condNewName}
-                      onChange={(e) => {
-                        setCondNewName(e.target.value);
-                        setCondNewKey(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 50));
-                      }}
-                      placeholder="e.g. Funding Amount"
-                      style={{ width: "100%", padding: "0.45rem" }}
-                    />
-                  </div>
-                  <div className="form-group" style={{ marginBottom: "0.75rem" }}>
-                    <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Field Key</label>
-                    <input
-                      type="text"
-                      value={condNewKey}
-                      onChange={(e) => setCondNewKey(e.target.value)}
-                      placeholder="e.g. funding_amount"
-                      style={{ width: "100%", padding: "0.45rem" }}
-                    />
-                  </div>
-                  <div className="form-group" style={{ marginBottom: "0.75rem" }}>
-                    <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Field Type</label>
-                    <select
-                      value={condNewFieldType}
-                      onChange={(e) => setCondNewFieldType(e.target.value)}
-                      style={{ width: "100%", padding: "0.45rem" }}
-                    >
-                      <option value="single_line_text">Single line text</option>
-                      <option value="multi_line_text">Multi line text</option>
-                      <option value="number">Numeric</option>
-                      <option value="date">Date</option>
-                      <option value="boolean">Boolean</option>
-                      <option value="attachment">Attachment</option>
-                      <option value="mixed_list">Mixed list</option>
-                      <option value="reference">Reference</option>
-                      <option value="multi_reference">Multi Reference</option>
-                    </select>
-                  </div>
-                  <div className="form-group" style={{ marginBottom: "0.75rem" }}>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer", fontSize: "0.85rem" }}>
                       <input
-                        type="checkbox"
-                        checked={condNewRequired}
-                        onChange={(e) => setCondNewRequired(e.target.checked)}
+                        type="text"
+                        value={ac.value}
+                        onChange={(e) => {
+                          const next = [...condAdditionalConditions];
+                          next[acIdx].value = e.target.value;
+                          setCondAdditionalConditions(next);
+                        }}
+                        placeholder="Value"
+                        style={{ padding: "0.35rem", flex: 2 }}
                       />
-                      Required Field
-                    </label>
+                    )}
+
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ color: "var(--error)", padding: "0.35rem 0.5rem" }}
+                      onClick={() => {
+                        setCondAdditionalConditions(condAdditionalConditions.filter((_, idx) => idx !== acIdx));
+                      }}
+                    >
+                      ✕
+                    </button>
                   </div>
+                ))}
 
-                  {(condNewFieldType === "reference" || condNewFieldType === "multi_reference") && (
-                    <div className="form-group" style={{ marginTop: "0.75rem" }}>
-                      <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Reference config</label>
-                      <ReferenceConfigUI
-                        organizationId={kpi?.organization_id ?? orgId ?? undefined}
-                        currentKpiId={kpiId}
-                        value={condNewRefConfig}
-                        onChange={setCondNewRefConfig}
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1.5rem" }}>
                 <button
                   type="button"
                   className="btn"
-                  onClick={() => setIsCondModalOpen(false)}
+                  style={{ fontSize: "0.85rem", padding: "0.25rem 0.5rem" }}
+                  onClick={() => {
+                    setCondAdditionalConditions([...condAdditionalConditions, { operator: "eq", value: "" }]);
+                  }}
                 >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={handleSaveConditionalRule}
-                >
-                  Save Rule
+                  + Add Condition
                 </button>
               </div>
-            </div>
-          </div>
-        );
-      })()}
+            )}
 
-      {typeChangeWarning && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1200,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.45)",
-            padding: "1rem",
-          }}
-          onClick={() => setTypeChangeWarning(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Confirm Field Data Type Change"
-        >
-          <div
-            className="card"
-            style={{ width: "min(480px, 95vw)", padding: "1.5rem" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 style={{ fontSize: "1.1rem", fontWeight: 600, margin: "0 0 0.75rem" }}>
-              Warning: Data Loss Potential
-            </h3>
-            <p style={{ fontSize: "0.9rem", color: "var(--text)", margin: "0 0 1.25rem", lineHeight: 1.5 }}>
-              Changing this field data type may delete existing saved values because the current data cannot be converted to the new type. Do you want to continue?
-            </p>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => setTypeChangeWarning(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                style={{ background: "var(--error, #ef4444)", borderColor: "var(--error, #ef4444)" }}
-                onClick={async () => {
-                  const info = typeChangeWarning;
-                  setTypeChangeWarning(null);
-                  await executeFieldUpdate(info.fieldId, info.data, info.subFields, info.refConfig);
-                }}
-              >
-                Continue and Delete Invalid Values
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+            {/* 3. Choose Dependency Type */}
+            {!editingRuleId && !isMultiTab && (
+              <div className="form-group" style={{ marginBottom: "1rem" }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>Choose Dependency Type</label>
+                <div style={{ display: "flex", gap: "1rem" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                    <input
+                      type="radio"
+                      name="condDepType"
+                      checked={condDepType === "existing"}
+                      onChange={() => setCondDepType("existing")}
+                    />
+                    Use Existing Scalar Field
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}>
+                    <input
+                      type="radio"
+                      name="condDepType"
+                      checked={condDepType === "new"}
+                      onChange={() => setCondDepType("new")}
+                    />
+                    Create New Scalar Field
+                  </label>
+                </div>
+              </div>
+            )}
 
-      {addSubFieldModal && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1100,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.45)",
-            padding: "1rem",
-          }}
-          onClick={() => setAddSubFieldModal(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Add sub field"
-        >
-          <div
-            className="card"
-            style={{ width: "min(680px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {(() => {
-              const field = list.find((x) => x.id === addSubFieldModal.fieldId) as any;
-              const uiSectionOptions = mergeUiSectionLabelsForMultiField(
-                field?.sub_fields as SubFieldDef[] | undefined,
-                uiSectionCustomByMultiFieldId[addSubFieldModal.fieldId] ?? []
-              );
-              return (
-                <>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
-                    <h2 style={{ fontSize: "1.1rem", margin: 0 }}>Add Sub Field</h2>
-                    <button type="button" className="btn" onClick={() => setAddSubFieldModal(null)}>Close</button>
-                  </div>
-
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "0.75rem 1rem", marginTop: "1rem" }}>
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label>Name *</label>
-                      <input
-                        value={addSubFieldDraft.name}
-                        onChange={(e) => {
-                          const nextName = e.target.value;
-                          setAddSubFieldDraft((p) => ({ ...p, name: nextName, ...(p.keyTouched ? {} : { key: slugifyKey(nextName) }) }));
-                        }}
-                        placeholder="e.g. Campus"
-                        style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
-                        autoFocus
-                      />
-                    </div>
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label>Key *</label>
-                      <input
-                        value={addSubFieldDraft.key}
-                        onChange={(e) => setAddSubFieldDraft((p) => ({ ...p, key: e.target.value, keyTouched: true }))}
-                        placeholder="campus"
-                        style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
-                      />
-                    </div>
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label>Type *</label>
-                      <select
-                        value={addSubFieldDraft.field_type}
-                        onChange={(e) => {
-                          const nextType = e.target.value;
-                          setAddSubFieldDraft((p) => ({
-                            ...p,
-                            field_type: nextType,
-                            config: nextType === "reference" || nextType === "multi_reference" ? p.config : {},
-                          }));
-                        }}
-                        style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
-                      >
-                        {SUB_FIELD_TYPES.map((t) => (
-                          <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label>UI section</label>
-                      <select
-                        value={addSubFieldDraft.ui_section.trim() ? addSubFieldDraft.ui_section : "Other"}
-                        onChange={(e) => setAddSubFieldDraft((p) => ({ ...p, ui_section: e.target.value === "Other" ? "" : e.target.value }))}
-                        style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, maxWidth: "100%" }}
-                      >
-                        {uiSectionOptions.map((sec) => (
-                          <option key={sec} value={sec}>{truncateLabel(sec, 40)}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 1.25rem", alignItems: "center", marginTop: "0.75rem" }}>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
-                      <input
-                        type="checkbox"
-                        checked={addSubFieldDraft.is_required}
-                        onChange={(e) => setAddSubFieldDraft((p) => ({ ...p, is_required: e.target.checked }))}
-                      />
-                      Required
-                    </label>
-                  </div>
-
-                  {(addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") && (
-                    <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
-                      <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Reference source</div>
-                      <ReferenceConfigUI
-                        organizationId={kpi?.organization_id ?? orgId ?? undefined}
-                        currentKpiId={kpiId}
-                        value={addSubFieldDraft.config}
-                        onChange={(c) => setAddSubFieldDraft((p) => ({ ...p, config: c }))}
-                        labelPrefix="Source"
-                      />
-                    </div>
-                  )}
-
-                  {addSubFieldDraft.field_type === "formula" && (() => {
-                    const parentField = addSubFieldModal ? list.find(x => x.id === addSubFieldModal.fieldId) : null;
-                    return (
-                      <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
-                        <div className="form-group" style={{ marginBottom: "0.75rem" }}>
-                          <label style={{ fontSize: "0.85rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Formula Expression *</label>
-                          <textarea
-                            value={addSubFieldDraft.config.formula_expression || ""}
-                            onChange={(e) => setAddSubFieldDraft((p) => ({
-                              ...p,
-                              config: { ...p.config, formula_expression: e.target.value }
-                            }))}
-                            placeholder="e.g. CurrentRow.quantity * CurrentRow.price"
-                            rows={3}
-                            style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
-                          />
-                        </div>
-                        <div style={{ marginTop: "0.5rem" }}>
-                          <FormulaBuilder
-                            formulaValue={addSubFieldDraft.config.formula_expression || ""}
-                            onInsert={(text) => {
-                              const current = addSubFieldDraft.config.formula_expression || "";
-                              setAddSubFieldDraft((p) => ({
-                                ...p,
-                                config: { ...p.config, formula_expression: current + text }
-                              }));
+            {/* 4. Select Dependent Field(s) */}
+            {condDepType === "existing" ? (
+              <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: "0.35rem" }}>
+                  Select Dependent Field(s)
+                </label>
+                <div style={{ maxHeight: "180px", overflowY: "auto", border: "1px solid var(--border)", padding: "0.5rem", borderRadius: 4 }}>
+                  {eligibleDependents.length === 0 ? (
+                    <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.5rem" }}>No eligible fields available.</p>
+                  ) : (
+                    eligibleDependents.map((f: any) => {
+                      const idOrKey = isMultiTab ? f.key : f.id;
+                      const isChecked = condDepFieldIds.map(String).includes(String(idOrKey));
+                      return (
+                        <label key={idOrKey} style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.25rem", cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setCondDepFieldIds([...condDepFieldIds.filter(x => String(x) !== String(idOrKey)), idOrKey]);
+                              } else {
+                                setCondDepFieldIds(condDepFieldIds.filter(x => String(x) !== String(idOrKey)));
+                              }
                             }}
-                            fields={list}
-                            organizationId={orgId ?? undefined}
-                            currentKpiId={kpiId}
-                            currentMliSubFields={parentField?.sub_fields}
-                            currentSubFieldKey={addSubFieldDraft.key}
                           />
-                        </div>
-                      </div>
-                    );
-                  })()}
-
-                  <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
-                    <button type="button" className="btn" onClick={() => setAddSubFieldModal(null)}>Cancel</button>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={async () => {
-                        const modal = addSubFieldModal;
-                        if (!modal) return;
-                        const name = addSubFieldDraft.name.trim();
-                        const key = addSubFieldDraft.key.trim();
-                        if (!name || !key) {
-                          toast.error("Name and key are required.");
-                          return;
-                        }
-                        if (
-                          (addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") &&
-                          (!addSubFieldDraft.config.reference_source_kpi_id || !addSubFieldDraft.config.reference_source_field_key)
-                        ) {
-                          toast.error("Please select a source KPI and field.");
-                          return;
-                        }
-                        if (
-                          addSubFieldDraft.field_type === "formula" &&
-                          !addSubFieldDraft.config.formula_expression?.trim()
-                        ) {
-                          toast.error("Please enter a formula expression.");
-                          return;
-                        }
-                        const field = list.find((x) => x.id === modal.fieldId) as any;
-                        if (!field) return;
-                        const sectionLabel = addSubFieldDraft.ui_section.trim();
-                        const existingSubs = (field.sub_fields ?? []) as any[];
-                        const nextIndex = existingSubs.length;
-                        const cfg: Record<string, unknown> = {};
-                        if (sectionLabel) cfg.ui_section = sectionLabel;
-                        if (addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") {
-                          cfg.reference_source_kpi_id = addSubFieldDraft.config.reference_source_kpi_id;
-                          cfg.reference_source_field_key = addSubFieldDraft.config.reference_source_field_key;
-                          if (addSubFieldDraft.config.reference_source_sub_field_key) cfg.reference_source_sub_field_key = addSubFieldDraft.config.reference_source_sub_field_key;
-                        } else if (addSubFieldDraft.field_type === "formula") {
-                          cfg.formula_expression = addSubFieldDraft.config.formula_expression;
-                        }
-                        const nextSub = {
-                          name,
-                          key,
-                          field_type: addSubFieldDraft.field_type,
-                          is_required: addSubFieldDraft.is_required,
-                          sort_order: nextIndex,
-                          config: cfg,
-                        } as any;
-                        const update: UpdateFormData = {
-                          name: String(field.name ?? ""),
-                          key: String(field.key ?? ""),
-                          field_type: "multi_line_items" as any,
-                          formula_expression: String(field.formula_expression ?? ""),
-                          is_required: !!field.is_required,
-                          sort_order: Number(field.sort_order ?? 0),
-                          carry_forward_data: !!field.carry_forward_data,
-                          full_page_multi_items: !!field.full_page_multi_items,
-                          multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
-                        };
-                        await onUpdateSubmit(modal.fieldId, update, [...existingSubs, nextSub] as any, undefined);
-                        setAddSubFieldModal(null);
-                      }}
-                    >
-                      Add
-                    </button>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
-
-      {editSubFieldModal && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1100,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.45)",
-            padding: "1rem",
-          }}
-          onClick={() => setEditSubFieldModal(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Edit sub field"
-        >
-          <div
-            className="card"
-            style={{ width: "min(720px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {(() => {
-              const field = list.find((x) => x.id === editSubFieldModal.fieldId) as any;
-              const uiSectionOptions = mergeUiSectionLabelsForMultiField(
-                field?.sub_fields as SubFieldDef[] | undefined,
-                uiSectionCustomByMultiFieldId[editSubFieldModal.fieldId] ?? []
-              );
-              return (
-                <>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
-                    <h2 style={{ fontSize: "1.1rem", margin: 0 }}>Edit Sub Field</h2>
-                    <button type="button" className="btn" onClick={() => setEditSubFieldModal(null)}>Close</button>
-                  </div>
-
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "0.75rem 1rem", marginTop: "1rem" }}>
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label>Name *</label>
-                      <input
-                        value={editSubFieldDraft.name}
-                        onChange={(e) => {
-                          const nextName = e.target.value;
-                          setEditSubFieldDraft((p) => ({ ...p, name: nextName, ...(p.keyTouched ? {} : { key: slugifyKey(nextName) }) }));
-                        }}
-                        style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
-                        autoFocus
-                      />
-                    </div>
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label>Key *</label>
-                      <input
-                        value={editSubFieldDraft.key}
-                        onChange={(e) => setEditSubFieldDraft((p) => ({ ...p, key: e.target.value, keyTouched: true }))}
-                        style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
-                      />
-                    </div>
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label>Type *</label>
-                      <select
-                        value={editSubFieldDraft.field_type}
-                        onChange={(e) => {
-                          const nextType = e.target.value;
-                          setEditSubFieldDraft((p) => ({
-                            ...p,
-                            field_type: nextType,
-                            config: nextType === "reference" || nextType === "multi_reference" ? p.config : {},
-                          }));
-                        }}
-                        style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
-                      >
-                        {SUB_FIELD_TYPES.map((t) => (
-                          <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label>UI section</label>
-                      <select
-                        value={editSubFieldDraft.ui_section.trim() ? editSubFieldDraft.ui_section : "Other"}
-                        onChange={(e) => setEditSubFieldDraft((p) => ({ ...p, ui_section: e.target.value === "Other" ? "" : e.target.value }))}
-                        style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, maxWidth: "100%" }}
-                      >
-                        {uiSectionOptions.map((sec) => (
-                          <option key={sec} value={sec}>{truncateLabel(sec, 40)}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 1.25rem", alignItems: "center", marginTop: "0.75rem" }}>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
-                      <input
-                        type="checkbox"
-                        checked={editSubFieldDraft.is_required}
-                        onChange={(e) => setEditSubFieldDraft((p) => ({ ...p, is_required: e.target.checked }))}
-                      />
-                      Required
-                    </label>
-                  </div>
-
-                  {(editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") && (
-                    <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
-                      <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Reference source</div>
-                      <ReferenceConfigUI
-                        organizationId={kpi?.organization_id ?? orgId ?? undefined}
-                        currentKpiId={kpiId}
-                        value={editSubFieldDraft.config}
-                        onChange={(c) => setEditSubFieldDraft((p) => ({ ...p, config: c }))}
-                        labelPrefix="Source"
-                      />
-                    </div>
+                          <span>{f.name} <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>({f.key} - {f.field_type})</span></span>
+                        </label>
+                      );
+                    })
                   )}
-
-                  {editSubFieldDraft.field_type === "formula" && (() => {
-                    const parentField = editSubFieldModal ? list.find(x => x.id === editSubFieldModal.fieldId) : null;
-                    return (
-                      <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
-                        <div className="form-group" style={{ marginBottom: "0.75rem" }}>
-                          <label style={{ fontSize: "0.85rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Formula Expression *</label>
-                          <textarea
-                            value={editSubFieldDraft.config.formula_expression || ""}
-                            onChange={(e) => setEditSubFieldDraft((p) => ({
-                              ...p,
-                              config: { ...p.config, formula_expression: e.target.value }
-                            }))}
-                            placeholder="e.g. CurrentRow.quantity * CurrentRow.price"
-                            rows={3}
-                            style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
-                          />
-                        </div>
-                        <div style={{ marginTop: "0.5rem" }}>
-                          <FormulaBuilder
-                            formulaValue={editSubFieldDraft.config.formula_expression || ""}
-                            onInsert={(text) => {
-                              const current = editSubFieldDraft.config.formula_expression || "";
-                              setEditSubFieldDraft((p) => ({
-                                ...p,
-                                config: { ...p.config, formula_expression: current + text }
-                              }));
-                            }}
-                            fields={list}
-                            organizationId={orgId ?? undefined}
-                            currentKpiId={kpiId}
-                            currentMliSubFields={parentField?.sub_fields}
-                            currentSubFieldKey={editSubFieldDraft.key}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })()}
-
-                  <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
-                    <button type="button" className="btn" onClick={() => setEditSubFieldModal(null)}>Cancel</button>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={async () => {
-                        const modal = editSubFieldModal;
-                        if (!modal) return;
-                        const name = editSubFieldDraft.name.trim();
-                        const key = editSubFieldDraft.key.trim();
-                        if (!name || !key) {
-                          toast.error("Name and key are required.");
-                          return;
-                        }
-                        if (
-                          (editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") &&
-                          (!editSubFieldDraft.config.reference_source_kpi_id || !editSubFieldDraft.config.reference_source_field_key)
-                        ) {
-                          toast.error("Please select a source KPI and field.");
-                          return;
-                        }
-                        if (
-                          editSubFieldDraft.field_type === "formula" &&
-                          !editSubFieldDraft.config.formula_expression?.trim()
-                        ) {
-                          toast.error("Please enter a formula expression.");
-                          return;
-                        }
-                        const field = list.find((x) => x.id === modal.fieldId) as any;
-                        if (!field) return;
-                        const existingSubs = (field.sub_fields ?? []) as any[];
-                        if (modal.subIndex < 0 || modal.subIndex >= existingSubs.length) {
-                          toast.error("Sub-field no longer exists. Please refresh.");
-                          return;
-                        }
-                        const uiSection = editSubFieldDraft.ui_section.trim();
-                        const cfg: Record<string, unknown> = {
-                          ...(editSubFieldDraft.config ?? {}),
-                        };
-                        if (uiSection) {
-                          cfg.ui_section = uiSection;
-                        } else {
-                          delete cfg.ui_section;
-                        }
-                        if (editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") {
-                          cfg.reference_source_kpi_id = editSubFieldDraft.config.reference_source_kpi_id;
-                          cfg.reference_source_field_key = editSubFieldDraft.config.reference_source_field_key;
-                          if (editSubFieldDraft.config.reference_source_sub_field_key) {
-                            cfg.reference_source_sub_field_key = editSubFieldDraft.config.reference_source_sub_field_key;
-                          }
-                          delete cfg.formula_expression;
-                        } else if (editSubFieldDraft.field_type === "formula") {
-                          cfg.formula_expression = editSubFieldDraft.config.formula_expression;
-                          delete cfg.reference_source_kpi_id;
-                          delete cfg.reference_source_field_key;
-                          delete cfg.reference_source_sub_field_key;
-                        } else {
-                          delete cfg.reference_source_kpi_id;
-                          delete cfg.reference_source_field_key;
-                          delete cfg.reference_source_sub_field_key;
-                          delete cfg.formula_expression;
-                        }
-                        const nextSub = {
-                          ...existingSubs[modal.subIndex],
-                          name,
-                          key,
-                          field_type: editSubFieldDraft.field_type,
-                          is_required: editSubFieldDraft.is_required,
-                          config: cfg,
-                        } as any;
-                        const nextSubs = existingSubs.map((s, idx) => (idx === modal.subIndex ? nextSub : s));
-                        const update: UpdateFormData = {
-                          name: String(field.name ?? ""),
-                          key: String(field.key ?? ""),
-                          field_type: "multi_line_items" as any,
-                          formula_expression: String(field.formula_expression ?? ""),
-                          is_required: !!field.is_required,
-                          sort_order: Number(field.sort_order ?? 0),
-                          carry_forward_data: !!field.carry_forward_data,
-                          full_page_multi_items: !!field.full_page_multi_items,
-                          multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
-                        };
-                        await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
-                        setEditSubFieldModal(null);
-                      }}
-                    >
-                      Save
-                    </button>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
-
-      {deleteSubFieldModal && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1100,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.45)",
-            padding: "1rem",
-          }}
-          onClick={() => setDeleteSubFieldModal(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Delete sub field"
-        >
-          <div
-            className="card"
-            style={{ width: "min(620px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
-              <h2 style={{ fontSize: "1.1rem", margin: 0, color: "var(--error)" }}>Delete Sub Field</h2>
-              <button type="button" className="btn" onClick={() => setDeleteSubFieldModal(null)}>Close</button>
-            </div>
-
-            <div style={{ marginTop: "0.75rem", color: "var(--muted)", fontSize: "0.95rem" }}>
-              You are about to delete the sub-field <strong>{deleteSubFieldModal.name}</strong>{" "}
-              (<span style={{ fontFamily: "monospace" }}>{deleteSubFieldModal.key}</span>) from this multi-line field.
-            </div>
-            <div style={{ marginTop: "0.5rem", color: "var(--muted)", fontSize: "0.9rem" }}>
-              This is permanent. Existing multi-line rows may lose this column&apos;s values after deletion.
-            </div>
-
-            <div style={{ marginTop: "0.75rem", padding: "0.75rem", borderRadius: 10, border: "1px solid var(--border)", background: "rgba(239, 68, 68, 0.04)" }}>
-              <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Type to confirm</div>
-              <div style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
-                Enter the exact <strong>name</strong> and <strong>key</strong> to enable deletion.
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0.75rem 1rem" }}>
-                <div className="form-group" style={{ margin: 0 }}>
-                  <label>Name</label>
-                  <input
-                    value={deleteSubFieldConfirm.name}
-                    onChange={(e) => setDeleteSubFieldConfirm((p) => ({ ...p, name: e.target.value }))}
-                    placeholder={deleteSubFieldModal.name}
-                    style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
-                  />
-                </div>
-                <div className="form-group" style={{ margin: 0 }}>
-                  <label>Key</label>
-                  <input
-                    value={deleteSubFieldConfirm.key}
-                    onChange={(e) => setDeleteSubFieldConfirm((p) => ({ ...p, key: e.target.value }))}
-                    placeholder={deleteSubFieldModal.key}
-                    style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
-              <button type="button" className="btn" onClick={() => setDeleteSubFieldModal(null)}>Cancel</button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                style={{ background: "var(--error)", borderColor: "var(--error)" }}
-                disabled={
-                  deleteSubFieldConfirm.name.trim() !== deleteSubFieldModal.name.trim() ||
-                  deleteSubFieldConfirm.key.trim() !== deleteSubFieldModal.key.trim()
-                }
-                onClick={async () => {
-                  const modal = deleteSubFieldModal;
-                  if (!modal) return;
-                  if (isFieldOrSubFieldUsedInRules(modal.key, modal.fieldId, true)) {
-                    const ruleOk = window.confirm(
-                      "Warning: Deleting this subfield will delete the conditional visibility rules associated with it. Do you want to proceed?"
-                    );
-                    if (!ruleOk) return;
-                  }
-                  const ok = window.confirm(
-                    `Permanently delete this sub-field?\n\n` +
-                    `Name: ${modal.name}\n` +
-                    `Key: ${modal.key}\n\n` +
-                    `This may remove existing stored values for this column.`
-                  );
-                  if (!ok) return;
-                  const field = list.find((x) => x.id === modal.fieldId) as any;
-                  if (!field) return;
-                  const existingSubs = (field.sub_fields ?? []) as any[];
-                  if (modal.subIndex < 0 || modal.subIndex >= existingSubs.length) {
-                    toast.error("Sub-field no longer exists. Please refresh.");
-                    return;
-                  }
-                  const nextSubs = existingSubs.filter((_, idx) => idx !== modal.subIndex);
-                  const update: UpdateFormData = {
-                    name: String(field.name ?? ""),
-                    key: String(field.key ?? ""),
-                    field_type: "multi_line_items" as any,
-                    formula_expression: String(field.formula_expression ?? ""),
-                    is_required: !!field.is_required,
-                    sort_order: Number(field.sort_order ?? 0),
-                    carry_forward_data: !!field.carry_forward_data,
-                    full_page_multi_items: !!field.full_page_multi_items,
-                    multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
-                  };
-                  await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
-                  setDeleteSubFieldModal(null);
-                }}
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {deleteFieldModal && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1100,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.45)",
-            padding: "1rem",
-          }}
-          onClick={() => setDeleteFieldModal(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Delete field"
-        >
-          <div
-            className="card"
-            style={{ width: "min(680px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
-              <h2 style={{ fontSize: "1.1rem", margin: 0, color: "var(--error)" }}>Delete Field</h2>
-              <button type="button" className="btn" onClick={() => setDeleteFieldModal(null)}>Close</button>
-            </div>
-
-            <div style={{ marginTop: "0.75rem", color: "var(--muted)", fontSize: "0.95rem" }}>
-              You are about to delete the field <strong>{deleteFieldModal.name}</strong> (
-              <span style={{ fontFamily: "monospace" }}>{deleteFieldModal.key}</span>).
-            </div>
-
-            <div style={{ marginTop: "0.5rem", color: "var(--muted)", fontSize: "0.9rem" }}>
-              This is permanent. Existing entries may lose stored values for this field.
-            </div>
-
-            <div style={{ marginTop: "0.75rem", padding: "0.75rem", borderRadius: 10, border: "1px solid var(--border)", background: "rgba(239, 68, 68, 0.04)" }}>
-              <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Type to confirm</div>
-              <div style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
-                Enter the exact <strong>name</strong> and <strong>key</strong> to enable deletion.
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "0.75rem 1rem" }}>
-                <div className="form-group" style={{ margin: 0 }}>
-                  <label>Name</label>
-                  <input
-                    value={deleteFieldConfirm.name}
-                    onChange={(e) => setDeleteFieldConfirm((p) => ({ ...p, name: e.target.value }))}
-                    placeholder={deleteFieldModal.name}
-                    style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
-                  />
-                </div>
-                <div className="form-group" style={{ margin: 0 }}>
-                  <label>Key</label>
-                  <input
-                    value={deleteFieldConfirm.key}
-                    onChange={(e) => setDeleteFieldConfirm((p) => ({ ...p, key: e.target.value }))}
-                    placeholder={deleteFieldModal.key}
-                    style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div style={{ marginTop: "0.75rem", padding: "0.75rem", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-subtle, #f8f9fa)" }}>
-              <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Impact</div>
-              {deleteFieldSummaryLoading ? (
-                <div style={{ color: "var(--muted)" }}>Loading…</div>
-              ) : deleteFieldSummaryError ? (
-                <div className="form-error">{deleteFieldSummaryError}</div>
-              ) : (
-                <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-                  Stored values: <strong>{deleteFieldSummary?.field_values_count ?? "—"}</strong> · Report template references:{" "}
-                  <strong>{deleteFieldSummary?.report_template_fields_count ?? "—"}</strong>
-                </div>
-              )}
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
-              <button type="button" className="btn" onClick={() => setDeleteFieldModal(null)}>Cancel</button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                style={{ background: "var(--error)", borderColor: "var(--error)" }}
-                disabled={
-                  deleteFieldConfirm.name.trim() !== deleteFieldModal.name.trim() ||
-                  deleteFieldConfirm.key.trim() !== deleteFieldModal.key.trim()
-                }
-                onClick={async () => {
-                  const modal = deleteFieldModal;
-                  if (!modal) return;
-                  if (isFieldOrSubFieldUsedInRules(modal.key, modal.fieldId, false)) {
-                    const ruleOk = window.confirm(
-                      "Warning: This field is used in conditional visibility rules. Deleting it will also delete those rules. Do you want to proceed?"
-                    );
-                    if (!ruleOk) return;
-                  }
-                  const ok = window.confirm(
-                    `Permanently delete this field?\n\n` +
-                    `Name: ${modal.name}\n` +
-                    `Key: ${modal.key}\n\n` +
-                    `This may remove existing stored values for this field.`
-                  );
-                  if (!ok) return;
-                  await performDeleteField(modal.fieldId);
-                  setDeleteFieldModal(null);
-                }}
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-
-      {addModal && kpi && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1000,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.4)",
-          }}
-          onClick={() => setAddModal(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-label={addModal === "categories" ? "Add domain → category" : "Add tags"}
-        >
-          <div
-            className="card"
-            style={{
-              maxWidth: addModal === "categories" ? 560 : 420,
-              width: "90%",
-              maxHeight: "80vh",
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 style={{ fontSize: "1.1rem", margin: "0 0 1rem 0", paddingRight: "2rem" }}>
-              {addModal === "categories" ? "Add domain → category" : "Add tags"}
-            </h2>
-            {addModal === "categories" ? (
-              <div style={{ display: "flex", gap: "1rem", flex: 1, minHeight: 200, overflow: "hidden" }}>
-                <div style={{ flex: "0 0 44%", display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)", paddingRight: "0.75rem" }}>
-                  <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Domains</div>
-                  <input
-                    type="text"
-                    placeholder="Search domains..."
-                    value={addModalSearch}
-                    onChange={(e) => setAddModalSearch(e.target.value)}
-                    style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
-                  />
-                  <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
-                    {orgDomains
-                      .filter((d) => !addModalSearch.trim() || d.name.toLowerCase().includes(addModalSearch.trim().toLowerCase()))
-                      .map((d) => (
-                        <li key={d.id} style={{ marginBottom: "0.2rem" }}>
-                          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
-                            <input
-                              type="checkbox"
-                              checked={addModalSelectedDomainIds.includes(d.id)}
-                              onChange={(e) => {
-                                if (e.target.checked) {
-                                  setAddModalSelectedDomainIds((prev) => [...prev, d.id]);
-                                } else {
-                                  setAddModalSelectedDomainIds((prev) => prev.filter((id) => id !== d.id));
-                                  setAddModalSelectedIds((prev) => {
-                                    const inDomain = orgCategories.filter((c) => c.domain_id === d.id).map((c) => c.id);
-                                    return prev.filter((id) => !inDomain.includes(id));
-                                  });
-                                }
-                              }}
-                            />
-                            {d.name}
-                          </label>
-                        </li>
-                      ))}
-                  </ul>
-                </div>
-                <div style={{ flex: "1", display: "flex", flexDirection: "column", minWidth: 0 }}>
-                  <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Categories (select domains first)</div>
-                  {addModalSelectedDomainIds.length === 0 ? (
-                    <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Select one or more domains to see their categories.</p>
-                  ) : (() => {
-                    const allInSelectedDomains = orgCategories.filter(
-                      (c) => c.domain_id != null && addModalSelectedDomainIds.includes(c.domain_id)
-                    );
-                    const filtered = addModalCategorySearch.trim()
-                      ? allInSelectedDomains.filter((c) => c.name.toLowerCase().includes(addModalCategorySearch.trim().toLowerCase()))
-                      : allInSelectedDomains;
-                    const attachedIds = new Set((kpi.category_tags ?? []).map((t) => t.id));
-                    return (
-                      <>
-                        <input
-                          type="text"
-                          placeholder="Search categories..."
-                          value={addModalCategorySearch}
-                          onChange={(e) => setAddModalCategorySearch(e.target.value)}
-                          style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
-                        />
-                        {filtered.length === 0 ? (
-                          <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>No categories match.</p>
-                        ) : (
-                          <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
-                            {filtered.map((c) => {
-                              const isAttached = attachedIds.has(c.id);
-                              return (
-                                <li key={c.id} style={{ marginBottom: "0.2rem" }}>
-                                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: isAttached ? "default" : "pointer", fontSize: "0.9rem", opacity: isAttached ? 0.85 : 1 }}>
-                                    <input
-                                      type="checkbox"
-                                      checked={isAttached || addModalSelectedIds.includes(c.id)}
-                                      disabled={isAttached}
-                                      onChange={(e) => {
-                                        if (isAttached) return;
-                                        if (e.target.checked) {
-                                          setAddModalSelectedIds((prev) => {
-                                            const otherInDomain = orgCategories.filter((x) => x.domain_id === c.domain_id && x.id !== c.id).map((x) => x.id);
-                                            return [...prev.filter((id) => !otherInDomain.includes(id)), c.id];
-                                          });
-                                        } else {
-                                          setAddModalSelectedIds((prev) => prev.filter((id) => id !== c.id));
-                                        }
-                                      }}
-                                    />
-                                    <span style={{ color: isAttached ? "var(--muted)" : undefined }}>{c.name}</span>
-                                    {isAttached && <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>(attached)</span>}
-                                  </label>
-                                </li>
-                              );
-                            })}
-                          </ul>
-                        )}
-                      </>
-                    );
-                  })()}
                 </div>
               </div>
             ) : (
-              <>
-                <input
-                  type="text"
-                  placeholder="Search..."
-                  value={addModalSearch}
-                  onChange={(e) => setAddModalSearch(e.target.value)}
-                  style={{ marginBottom: "0.75rem", padding: "0.5rem 0.6rem" }}
-                  autoFocus
-                />
-                <div style={{ flex: 1, overflowY: "auto", minHeight: 120, marginBottom: "1rem" }}>
-                  {addModal === "tags" && (() => {
-                    const available = orgTags.filter((t) => !kpi.organization_tags?.some((ot) => ot.id === t.id));
-                    const filtered = addModalSearch.trim()
-                      ? available.filter((t) => t.name.toLowerCase().includes(addModalSearch.trim().toLowerCase()))
-                      : available;
-                    return filtered.length === 0 ? (
-                      <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No tags to add.</p>
-                    ) : (
-                      <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-                        {filtered.map((t) => (
-                          <li key={t.id} style={{ marginBottom: "0.25rem" }}>
-                            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.95rem" }}>
-                              <input
-                                type="checkbox"
-                                checked={addModalSelectedIds.includes(t.id)}
-                                onChange={(e) => {
-                                  if (e.target.checked) setAddModalSelectedIds((prev) => [...prev, t.id]);
-                                  else setAddModalSelectedIds((prev) => prev.filter((id) => id !== t.id));
-                                }}
-                              />
-                              {t.name}
-                            </label>
-                          </li>
-                        ))}
-                      </ul>
-                    );
-                  })()}
+              <div style={{ border: "1px solid var(--border)", padding: "1rem", borderRadius: 8, marginBottom: "1.5rem" }}>
+                <h4 style={{ margin: "0 0 0.75rem", fontSize: "0.95rem" }}>Create Dependent Scalar Field</h4>
+                <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Field Name</label>
+                  <input
+                    type="text"
+                    value={condNewName}
+                    onChange={(e) => {
+                      setCondNewName(e.target.value);
+                      setCondNewKey(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 50));
+                    }}
+                    placeholder="e.g. Funding Amount"
+                    style={{ width: "100%", padding: "0.45rem" }}
+                  />
                 </div>
-              </>
+                <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Field Key</label>
+                  <input
+                    type="text"
+                    value={condNewKey}
+                    onChange={(e) => setCondNewKey(e.target.value)}
+                    placeholder="e.g. funding_amount"
+                    style={{ width: "100%", padding: "0.45rem" }}
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Field Type</label>
+                  <select
+                    value={condNewFieldType}
+                    onChange={(e) => setCondNewFieldType(e.target.value)}
+                    style={{ width: "100%", padding: "0.45rem" }}
+                  >
+                    <option value="single_line_text">Single line text</option>
+                    <option value="multi_line_text">Multi line text</option>
+                    <option value="number">Numeric</option>
+                    <option value="date">Date</option>
+                    <option value="boolean">Boolean</option>
+                    <option value="attachment">Attachment</option>
+                    <option value="mixed_list">Mixed list</option>
+                    <option value="reference">Reference</option>
+                    <option value="multi_reference">Multi Reference</option>
+                  </select>
+                </div>
+                <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", cursor: "pointer", fontSize: "0.85rem" }}>
+                    <input
+                      type="checkbox"
+                      checked={condNewRequired}
+                      onChange={(e) => setCondNewRequired(e.target.checked)}
+                    />
+                    Required Field
+                  </label>
+                </div>
+
+                {(condNewFieldType === "reference" || condNewFieldType === "multi_reference") && (
+                  <div className="form-group" style={{ marginTop: "0.75rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>Reference config</label>
+                    <ReferenceConfigUI
+                      organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                      currentKpiId={kpiId}
+                      value={condNewRefConfig}
+                      onChange={setCondNewRefConfig}
+                    />
+                  </div>
+                )}
+              </div>
             )}
-            {addModal === "categories" && <div style={{ marginBottom: "1rem" }} />}
-            <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1.5rem" }}>
               <button
                 type="button"
                 className="btn"
-                onClick={() => { setAddModal(null); setAddModalSearch(""); setAddModalCategorySearch(""); setAddModalSelectedIds([]); setAddModalSelectedDomainIds([]); }}
+                onClick={() => setIsCondModalOpen(false)}
               >
                 Cancel
               </button>
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={addModalSelectedIds.length === 0 || (addModal === "categories" && domainCategorySaving) || (addModal === "tags" && tagSaving)}
-                onClick={() => {
-                  if (addModal === "categories") addCategoriesBatch(addModalSelectedIds);
-                  else addTagsBatch(addModalSelectedIds);
-                }}
+                onClick={handleSaveConditionalRule}
               >
-                {addModal === "categories" ? (domainCategorySaving ? "Adding…" : "Add selected") : (tagSaving ? "Adding…" : "Add selected")}
+                Save Rule
               </button>
             </div>
           </div>
         </div>
-      )}
+      );
+    })()}
+
+    {typeChangeWarning && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1200,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setTypeChangeWarning(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Confirm Field Data Type Change"
+      >
+        <div
+          className="card"
+          style={{ width: "min(480px, 95vw)", padding: "1.5rem" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 style={{ fontSize: "1.1rem", fontWeight: 600, margin: "0 0 0.75rem" }}>
+            Warning: Data Loss Potential
+          </h3>
+          <p style={{ fontSize: "0.9rem", color: "var(--text)", margin: "0 0 1.25rem", lineHeight: 1.5 }}>
+            Changing this field data type may delete existing saved values because the current data cannot be converted to the new type. Do you want to continue?
+          </p>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setTypeChangeWarning(null)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ background: "var(--error, #ef4444)", borderColor: "var(--error, #ef4444)" }}
+              onClick={async () => {
+                const info = typeChangeWarning;
+                setTypeChangeWarning(null);
+                await executeFieldUpdate(info.fieldId, info.data, info.subFields, info.refConfig);
+              }}
+            >
+              Continue and Delete Invalid Values
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {addSubFieldModal && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setAddSubFieldModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add sub field"
+      >
+        <div
+          className="card"
+          style={{ width: "min(680px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {(() => {
+            const field = list.find((x) => x.id === addSubFieldModal.fieldId) as any;
+            const uiSectionOptions = mergeUiSectionLabelsForMultiField(
+              field?.sub_fields as SubFieldDef[] | undefined,
+              uiSectionCustomByMultiFieldId[addSubFieldModal.fieldId] ?? []
+            );
+            return (
+              <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
+            <h2 style={{ fontSize: "1.1rem", margin: 0 }}>Add Sub Field</h2>
+            <button type="button" className="btn" onClick={() => setAddSubFieldModal(null)}>Close</button>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "0.75rem 1rem", marginTop: "1rem" }}>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Name *</label>
+              <input
+                value={addSubFieldDraft.name}
+                onChange={(e) => {
+                  const nextName = e.target.value;
+                  setAddSubFieldDraft((p) => ({ ...p, name: nextName, ...(p.keyTouched ? {} : { key: slugifyKey(nextName) }) }));
+                }}
+                placeholder="e.g. Campus"
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+                autoFocus
+              />
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Key *</label>
+              <input
+                value={addSubFieldDraft.key}
+                onChange={(e) => setAddSubFieldDraft((p) => ({ ...p, key: e.target.value, keyTouched: true }))}
+                placeholder="campus"
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+              />
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Type *</label>
+              <select
+                value={addSubFieldDraft.field_type}
+                onChange={(e) => {
+                  const nextType = e.target.value;
+                  setAddSubFieldDraft((p) => ({
+                    ...p,
+                    field_type: nextType,
+                    config: nextType === "reference" || nextType === "multi_reference" ? p.config : {},
+                  }));
+                }}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+              >
+                {SUB_FIELD_TYPES.map((t) => (
+                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>UI section</label>
+              <select
+                value={addSubFieldDraft.ui_section.trim() ? addSubFieldDraft.ui_section : "Other"}
+                onChange={(e) => setAddSubFieldDraft((p) => ({ ...p, ui_section: e.target.value === "Other" ? "" : e.target.value }))}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, maxWidth: "100%" }}
+              >
+                {uiSectionOptions.map((sec) => (
+                  <option key={sec} value={sec}>{truncateLabel(sec, 40)}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 1.25rem", alignItems: "center", marginTop: "0.75rem" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={addSubFieldDraft.is_required}
+                onChange={(e) => setAddSubFieldDraft((p) => ({ ...p, is_required: e.target.checked }))}
+              />
+              Required
+            </label>
+          </div>
+
+          {(addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") && (
+            <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
+              <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Reference source</div>
+              <ReferenceConfigUI
+                organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                currentKpiId={kpiId}
+                value={addSubFieldDraft.config}
+                onChange={(c) => setAddSubFieldDraft((p) => ({ ...p, config: c }))}
+                labelPrefix="Source"
+              />
+            </div>
+          )}
+
+          {addSubFieldDraft.field_type === "formula" && (() => {
+            const parentField = addSubFieldModal ? list.find(x => x.id === addSubFieldModal.fieldId) : null;
+            return (
+              <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
+                <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                  <label style={{ fontSize: "0.85rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Formula Expression *</label>
+                  <textarea
+                    value={addSubFieldDraft.config.formula_expression || ""}
+                    onChange={(e) => setAddSubFieldDraft((p) => ({
+                      ...p,
+                      config: { ...p.config, formula_expression: e.target.value }
+                    }))}
+                    placeholder="e.g. CurrentRow.quantity * CurrentRow.price"
+                    rows={3}
+                    style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
+                  />
+                </div>
+                <div style={{ marginTop: "0.5rem" }}>
+                  <FormulaBuilder
+                    formulaValue={addSubFieldDraft.config.formula_expression || ""}
+                    onInsert={(text) => {
+                      const current = addSubFieldDraft.config.formula_expression || "";
+                      setAddSubFieldDraft((p) => ({
+                        ...p,
+                        config: { ...p.config, formula_expression: current + text }
+                      }));
+                    }}
+                    fields={list}
+                    organizationId={orgId ?? undefined}
+                    currentKpiId={kpiId}
+                    currentMliSubFields={parentField?.sub_fields}
+                    currentSubFieldKey={addSubFieldDraft.key}
+                  />
+                </div>
+              </div>
+            );
+          })()}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+            <button type="button" className="btn" onClick={() => setAddSubFieldModal(null)}>Cancel</button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={async () => {
+                const modal = addSubFieldModal;
+                if (!modal) return;
+                const name = addSubFieldDraft.name.trim();
+                const key = addSubFieldDraft.key.trim();
+                if (!name || !key) {
+                  toast.error("Name and key are required.");
+                  return;
+                }
+                if (
+                  (addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") &&
+                  (!addSubFieldDraft.config.reference_source_kpi_id || !addSubFieldDraft.config.reference_source_field_key)
+                ) {
+                  toast.error("Please select a source KPI and field.");
+                  return;
+                }
+                if (
+                  addSubFieldDraft.field_type === "formula" &&
+                  !addSubFieldDraft.config.formula_expression?.trim()
+                ) {
+                  toast.error("Please enter a formula expression.");
+                  return;
+                }
+                const field = list.find((x) => x.id === modal.fieldId) as any;
+                if (!field) return;
+                const sectionLabel = addSubFieldDraft.ui_section.trim();
+                const existingSubs = (field.sub_fields ?? []) as any[];
+                const nextIndex = existingSubs.length;
+                const cfg: Record<string, unknown> = {};
+                if (sectionLabel) cfg.ui_section = sectionLabel;
+                if (addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") {
+                  cfg.reference_source_kpi_id = addSubFieldDraft.config.reference_source_kpi_id;
+                  cfg.reference_source_field_key = addSubFieldDraft.config.reference_source_field_key;
+                  if (addSubFieldDraft.config.reference_source_sub_field_key) cfg.reference_source_sub_field_key = addSubFieldDraft.config.reference_source_sub_field_key;
+                } else if (addSubFieldDraft.field_type === "formula") {
+                  cfg.formula_expression = addSubFieldDraft.config.formula_expression;
+                }
+                const nextSub = {
+                  name,
+                  key,
+                  field_type: addSubFieldDraft.field_type,
+                  is_required: addSubFieldDraft.is_required,
+                  sort_order: nextIndex,
+                  config: cfg,
+                } as any;
+                const update: UpdateFormData = {
+                  name: String(field.name ?? ""),
+                  key: String(field.key ?? ""),
+                  field_type: "multi_line_items" as any,
+                  formula_expression: String(field.formula_expression ?? ""),
+                  is_required: !!field.is_required,
+                  sort_order: Number(field.sort_order ?? 0),
+                  carry_forward_data: !!field.carry_forward_data,
+                  full_page_multi_items: !!field.full_page_multi_items,
+                  multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
+                };
+                await onUpdateSubmit(modal.fieldId, update, [...existingSubs, nextSub] as any, undefined);
+                setAddSubFieldModal(null);
+              }}
+            >
+              Add
+            </button>
+          </div>
+              </>
+            );
+          })()}
+        </div>
+      </div>
+    )}
+
+    {editSubFieldModal && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setEditSubFieldModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit sub field"
+      >
+        <div
+          className="card"
+          style={{ width: "min(720px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {(() => {
+            const field = list.find((x) => x.id === editSubFieldModal.fieldId) as any;
+            const uiSectionOptions = mergeUiSectionLabelsForMultiField(
+              field?.sub_fields as SubFieldDef[] | undefined,
+              uiSectionCustomByMultiFieldId[editSubFieldModal.fieldId] ?? []
+            );
+            return (
+              <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
+            <h2 style={{ fontSize: "1.1rem", margin: 0 }}>Edit Sub Field</h2>
+            <button type="button" className="btn" onClick={() => setEditSubFieldModal(null)}>Close</button>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "0.75rem 1rem", marginTop: "1rem" }}>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Name *</label>
+              <input
+                value={editSubFieldDraft.name}
+                onChange={(e) => {
+                  const nextName = e.target.value;
+                  setEditSubFieldDraft((p) => ({ ...p, name: nextName, ...(p.keyTouched ? {} : { key: slugifyKey(nextName) }) }));
+                }}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+                autoFocus
+              />
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Key *</label>
+              <input
+                value={editSubFieldDraft.key}
+                onChange={(e) => setEditSubFieldDraft((p) => ({ ...p, key: e.target.value, keyTouched: true }))}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+              />
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>Type *</label>
+              <select
+                value={editSubFieldDraft.field_type}
+                onChange={(e) => {
+                  const nextType = e.target.value;
+                  setEditSubFieldDraft((p) => ({
+                    ...p,
+                    field_type: nextType,
+                    config: nextType === "reference" || nextType === "multi_reference" ? p.config : {},
+                  }));
+                }}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+              >
+                {SUB_FIELD_TYPES.map((t) => (
+                  <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label>UI section</label>
+              <select
+                value={editSubFieldDraft.ui_section.trim() ? editSubFieldDraft.ui_section : "Other"}
+                onChange={(e) => setEditSubFieldDraft((p) => ({ ...p, ui_section: e.target.value === "Other" ? "" : e.target.value }))}
+                style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, maxWidth: "100%" }}
+              >
+                {uiSectionOptions.map((sec) => (
+                  <option key={sec} value={sec}>{truncateLabel(sec, 40)}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 1.25rem", alignItems: "center", marginTop: "0.75rem" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={editSubFieldDraft.is_required}
+                onChange={(e) => setEditSubFieldDraft((p) => ({ ...p, is_required: e.target.checked }))}
+              />
+              Required
+            </label>
+          </div>
+
+          {(editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") && (
+            <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
+              <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Reference source</div>
+              <ReferenceConfigUI
+                organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                currentKpiId={kpiId}
+                value={editSubFieldDraft.config}
+                onChange={(c) => setEditSubFieldDraft((p) => ({ ...p, config: c }))}
+                labelPrefix="Source"
+              />
+            </div>
+          )}
+
+          {editSubFieldDraft.field_type === "formula" && (() => {
+            const parentField = editSubFieldModal ? list.find(x => x.id === editSubFieldModal.fieldId) : null;
+            return (
+              <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
+                <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+                  <label style={{ fontSize: "0.85rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Formula Expression *</label>
+                  <textarea
+                    value={editSubFieldDraft.config.formula_expression || ""}
+                    onChange={(e) => setEditSubFieldDraft((p) => ({
+                      ...p,
+                      config: { ...p.config, formula_expression: e.target.value }
+                    }))}
+                    placeholder="e.g. CurrentRow.quantity * CurrentRow.price"
+                    rows={3}
+                    style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
+                  />
+                </div>
+                <div style={{ marginTop: "0.5rem" }}>
+                  <FormulaBuilder
+                    formulaValue={editSubFieldDraft.config.formula_expression || ""}
+                    onInsert={(text) => {
+                      const current = editSubFieldDraft.config.formula_expression || "";
+                      setEditSubFieldDraft((p) => ({
+                        ...p,
+                        config: { ...p.config, formula_expression: current + text }
+                      }));
+                    }}
+                    fields={list}
+                    organizationId={orgId ?? undefined}
+                    currentKpiId={kpiId}
+                    currentMliSubFields={parentField?.sub_fields}
+                    currentSubFieldKey={editSubFieldDraft.key}
+                  />
+                </div>
+              </div>
+            );
+          })()}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+            <button type="button" className="btn" onClick={() => setEditSubFieldModal(null)}>Cancel</button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={async () => {
+                const modal = editSubFieldModal;
+                if (!modal) return;
+                const name = editSubFieldDraft.name.trim();
+                const key = editSubFieldDraft.key.trim();
+                if (!name || !key) {
+                  toast.error("Name and key are required.");
+                  return;
+                }
+                if (
+                  (editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") &&
+                  (!editSubFieldDraft.config.reference_source_kpi_id || !editSubFieldDraft.config.reference_source_field_key)
+                ) {
+                  toast.error("Please select a source KPI and field.");
+                  return;
+                }
+                if (
+                  editSubFieldDraft.field_type === "formula" &&
+                  !editSubFieldDraft.config.formula_expression?.trim()
+                ) {
+                  toast.error("Please enter a formula expression.");
+                  return;
+                }
+                const field = list.find((x) => x.id === modal.fieldId) as any;
+                if (!field) return;
+                const existingSubs = (field.sub_fields ?? []) as any[];
+                if (modal.subIndex < 0 || modal.subIndex >= existingSubs.length) {
+                  toast.error("Sub-field no longer exists. Please refresh.");
+                  return;
+                }
+                const uiSection = editSubFieldDraft.ui_section.trim();
+                const cfg: Record<string, unknown> = {
+                  ...(editSubFieldDraft.config ?? {}),
+                };
+                if (uiSection) {
+                  cfg.ui_section = uiSection;
+                } else {
+                  delete cfg.ui_section;
+                }
+                if (editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") {
+                  cfg.reference_source_kpi_id = editSubFieldDraft.config.reference_source_kpi_id;
+                  cfg.reference_source_field_key = editSubFieldDraft.config.reference_source_field_key;
+                  if (editSubFieldDraft.config.reference_source_sub_field_key) {
+                    cfg.reference_source_sub_field_key = editSubFieldDraft.config.reference_source_sub_field_key;
+                  }
+                  delete cfg.formula_expression;
+                } else if (editSubFieldDraft.field_type === "formula") {
+                  cfg.formula_expression = editSubFieldDraft.config.formula_expression;
+                  delete cfg.reference_source_kpi_id;
+                  delete cfg.reference_source_field_key;
+                  delete cfg.reference_source_sub_field_key;
+                } else {
+                  delete cfg.reference_source_kpi_id;
+                  delete cfg.reference_source_field_key;
+                  delete cfg.reference_source_sub_field_key;
+                  delete cfg.formula_expression;
+                }
+                const nextSub = {
+                  ...existingSubs[modal.subIndex],
+                  name,
+                  key,
+                  field_type: editSubFieldDraft.field_type,
+                  is_required: editSubFieldDraft.is_required,
+                  config: cfg,
+                } as any;
+                const nextSubs = existingSubs.map((s, idx) => (idx === modal.subIndex ? nextSub : s));
+                const update: UpdateFormData = {
+                  name: String(field.name ?? ""),
+                  key: String(field.key ?? ""),
+                  field_type: "multi_line_items" as any,
+                  formula_expression: String(field.formula_expression ?? ""),
+                  is_required: !!field.is_required,
+                  sort_order: Number(field.sort_order ?? 0),
+                  carry_forward_data: !!field.carry_forward_data,
+                  full_page_multi_items: !!field.full_page_multi_items,
+                  multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
+                };
+                await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
+                setEditSubFieldModal(null);
+              }}
+            >
+              Save
+            </button>
+          </div>
+              </>
+            );
+          })()}
+        </div>
+      </div>
+    )}
+
+    {deleteSubFieldModal && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setDeleteSubFieldModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Delete sub field"
+      >
+        <div
+          className="card"
+          style={{ width: "min(620px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
+            <h2 style={{ fontSize: "1.1rem", margin: 0, color: "var(--error)" }}>Delete Sub Field</h2>
+            <button type="button" className="btn" onClick={() => setDeleteSubFieldModal(null)}>Close</button>
+          </div>
+
+          <div style={{ marginTop: "0.75rem", color: "var(--muted)", fontSize: "0.95rem" }}>
+            You are about to delete the sub-field <strong>{deleteSubFieldModal.name}</strong>{" "}
+            (<span style={{ fontFamily: "monospace" }}>{deleteSubFieldModal.key}</span>) from this multi-line field.
+          </div>
+          <div style={{ marginTop: "0.5rem", color: "var(--muted)", fontSize: "0.9rem" }}>
+            This is permanent. Existing multi-line rows may lose this column&apos;s values after deletion.
+          </div>
+
+          <div style={{ marginTop: "0.75rem", padding: "0.75rem", borderRadius: 10, border: "1px solid var(--border)", background: "rgba(239, 68, 68, 0.04)" }}>
+            <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Type to confirm</div>
+            <div style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
+              Enter the exact <strong>name</strong> and <strong>key</strong> to enable deletion.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0.75rem 1rem" }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Name</label>
+                <input
+                  value={deleteSubFieldConfirm.name}
+                  onChange={(e) => setDeleteSubFieldConfirm((p) => ({ ...p, name: e.target.value }))}
+                  placeholder={deleteSubFieldModal.name}
+                  style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+                />
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Key</label>
+                <input
+                  value={deleteSubFieldConfirm.key}
+                  onChange={(e) => setDeleteSubFieldConfirm((p) => ({ ...p, key: e.target.value }))}
+                  placeholder={deleteSubFieldModal.key}
+                  style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+            <button type="button" className="btn" onClick={() => setDeleteSubFieldModal(null)}>Cancel</button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ background: "var(--error)", borderColor: "var(--error)" }}
+              disabled={
+                deleteSubFieldConfirm.name.trim() !== deleteSubFieldModal.name.trim() ||
+                deleteSubFieldConfirm.key.trim() !== deleteSubFieldModal.key.trim()
+              }
+              onClick={async () => {
+                const modal = deleteSubFieldModal;
+                if (!modal) return;
+                if (isFieldOrSubFieldUsedInRules(modal.key, modal.fieldId, true)) {
+                  const ruleOk = window.confirm(
+                    "Warning: Deleting this subfield will delete the conditional visibility rules associated with it. Do you want to proceed?"
+                  );
+                  if (!ruleOk) return;
+                }
+                const ok = window.confirm(
+                  `Permanently delete this sub-field?\n\n` +
+                    `Name: ${modal.name}\n` +
+                    `Key: ${modal.key}\n\n` +
+                    `This may remove existing stored values for this column.`
+                );
+                if (!ok) return;
+                const field = list.find((x) => x.id === modal.fieldId) as any;
+                if (!field) return;
+                const existingSubs = (field.sub_fields ?? []) as any[];
+                if (modal.subIndex < 0 || modal.subIndex >= existingSubs.length) {
+                  toast.error("Sub-field no longer exists. Please refresh.");
+                  return;
+                }
+                const nextSubs = existingSubs.filter((_, idx) => idx !== modal.subIndex);
+                const update: UpdateFormData = {
+                  name: String(field.name ?? ""),
+                  key: String(field.key ?? ""),
+                  field_type: "multi_line_items" as any,
+                  formula_expression: String(field.formula_expression ?? ""),
+                  is_required: !!field.is_required,
+                  sort_order: Number(field.sort_order ?? 0),
+                  carry_forward_data: !!field.carry_forward_data,
+                  full_page_multi_items: !!field.full_page_multi_items,
+                  multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
+                };
+                await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
+                setDeleteSubFieldModal(null);
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {deleteFieldModal && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.45)",
+          padding: "1rem",
+        }}
+        onClick={() => setDeleteFieldModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Delete field"
+      >
+        <div
+          className="card"
+          style={{ width: "min(680px, 95vw)", maxHeight: "85vh", overflow: "auto" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
+            <h2 style={{ fontSize: "1.1rem", margin: 0, color: "var(--error)" }}>Delete Field</h2>
+            <button type="button" className="btn" onClick={() => setDeleteFieldModal(null)}>Close</button>
+          </div>
+
+          <div style={{ marginTop: "0.75rem", color: "var(--muted)", fontSize: "0.95rem" }}>
+            You are about to delete the field <strong>{deleteFieldModal.name}</strong> (
+            <span style={{ fontFamily: "monospace" }}>{deleteFieldModal.key}</span>).
+          </div>
+
+          <div style={{ marginTop: "0.5rem", color: "var(--muted)", fontSize: "0.9rem" }}>
+            This is permanent. Existing entries may lose stored values for this field.
+          </div>
+
+          <div style={{ marginTop: "0.75rem", padding: "0.75rem", borderRadius: 10, border: "1px solid var(--border)", background: "rgba(239, 68, 68, 0.04)" }}>
+            <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Type to confirm</div>
+            <div style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
+              Enter the exact <strong>name</strong> and <strong>key</strong> to enable deletion.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "0.75rem 1rem" }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Name</label>
+                <input
+                  value={deleteFieldConfirm.name}
+                  onChange={(e) => setDeleteFieldConfirm((p) => ({ ...p, name: e.target.value }))}
+                  placeholder={deleteFieldModal.name}
+                  style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
+                />
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label>Key</label>
+                <input
+                  value={deleteFieldConfirm.key}
+                  onChange={(e) => setDeleteFieldConfirm((p) => ({ ...p, key: e.target.value }))}
+                  placeholder={deleteFieldModal.key}
+                  style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10, fontFamily: "monospace" }}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div style={{ marginTop: "0.75rem", padding: "0.75rem", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-subtle, #f8f9fa)" }}>
+            <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Impact</div>
+            {deleteFieldSummaryLoading ? (
+              <div style={{ color: "var(--muted)" }}>Loading…</div>
+            ) : deleteFieldSummaryError ? (
+              <div className="form-error">{deleteFieldSummaryError}</div>
+            ) : (
+              <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+                Stored values: <strong>{deleteFieldSummary?.field_values_count ?? "—"}</strong> · Report template references:{" "}
+                <strong>{deleteFieldSummary?.report_template_fields_count ?? "—"}</strong>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+            <button type="button" className="btn" onClick={() => setDeleteFieldModal(null)}>Cancel</button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              style={{ background: "var(--error)", borderColor: "var(--error)" }}
+              disabled={
+                deleteFieldConfirm.name.trim() !== deleteFieldModal.name.trim() ||
+                deleteFieldConfirm.key.trim() !== deleteFieldModal.key.trim()
+              }
+              onClick={async () => {
+                const modal = deleteFieldModal;
+                if (!modal) return;
+                if (isFieldOrSubFieldUsedInRules(modal.key, modal.fieldId, false)) {
+                  const ruleOk = window.confirm(
+                    "Warning: This field is used in conditional visibility rules. Deleting it will also delete those rules. Do you want to proceed?"
+                  );
+                  if (!ruleOk) return;
+                }
+                const ok = window.confirm(
+                  `Permanently delete this field?\n\n` +
+                    `Name: ${modal.name}\n` +
+                    `Key: ${modal.key}\n\n` +
+                    `This may remove existing stored values for this field.`
+                );
+                if (!ok) return;
+                await performDeleteField(modal.fieldId);
+                setDeleteFieldModal(null);
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+
+    {addModal && kpi && (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1000,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.4)",
+        }}
+        onClick={() => setAddModal(null)}
+        role="dialog"
+        aria-modal="true"
+        aria-label={addModal === "categories" ? "Add domain → category" : "Add tags"}
+      >
+        <div
+          className="card"
+          style={{
+            maxWidth: addModal === "categories" ? 560 : 420,
+            width: "90%",
+            maxHeight: "80vh",
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h2 style={{ fontSize: "1.1rem", margin: "0 0 1rem 0", paddingRight: "2rem" }}>
+            {addModal === "categories" ? "Add domain → category" : "Add tags"}
+          </h2>
+          {addModal === "categories" ? (
+            <div style={{ display: "flex", gap: "1rem", flex: 1, minHeight: 200, overflow: "hidden" }}>
+              <div style={{ flex: "0 0 44%", display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)", paddingRight: "0.75rem" }}>
+                <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Domains</div>
+                <input
+                  type="text"
+                  placeholder="Search domains..."
+                  value={addModalSearch}
+                  onChange={(e) => setAddModalSearch(e.target.value)}
+                  style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+                />
+                <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                  {orgDomains
+                    .filter((d) => !addModalSearch.trim() || d.name.toLowerCase().includes(addModalSearch.trim().toLowerCase()))
+                    .map((d) => (
+                      <li key={d.id} style={{ marginBottom: "0.2rem" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                          <input
+                            type="checkbox"
+                            checked={addModalSelectedDomainIds.includes(d.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setAddModalSelectedDomainIds((prev) => [...prev, d.id]);
+                              } else {
+                                setAddModalSelectedDomainIds((prev) => prev.filter((id) => id !== d.id));
+                                setAddModalSelectedIds((prev) => {
+                                  const inDomain = orgCategories.filter((c) => c.domain_id === d.id).map((c) => c.id);
+                                  return prev.filter((id) => !inDomain.includes(id));
+                                });
+                              }
+                            }}
+                          />
+                          {d.name}
+                        </label>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+              <div style={{ flex: "1", display: "flex", flexDirection: "column", minWidth: 0 }}>
+                <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.5rem" }}>Categories (select domains first)</div>
+                {addModalSelectedDomainIds.length === 0 ? (
+                  <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Select one or more domains to see their categories.</p>
+                ) : (() => {
+                  const allInSelectedDomains = orgCategories.filter(
+                    (c) => c.domain_id != null && addModalSelectedDomainIds.includes(c.domain_id)
+                  );
+                  const filtered = addModalCategorySearch.trim()
+                    ? allInSelectedDomains.filter((c) => c.name.toLowerCase().includes(addModalCategorySearch.trim().toLowerCase()))
+                    : allInSelectedDomains;
+                  const attachedIds = new Set((kpi.category_tags ?? []).map((t) => t.id));
+                  return (
+                    <>
+                      <input
+                        type="text"
+                        placeholder="Search categories..."
+                        value={addModalCategorySearch}
+                        onChange={(e) => setAddModalCategorySearch(e.target.value)}
+                        style={{ marginBottom: "0.5rem", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+                      />
+                      {filtered.length === 0 ? (
+                        <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>No categories match.</p>
+                      ) : (
+                        <ul style={{ listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }}>
+                          {filtered.map((c) => {
+                            const isAttached = attachedIds.has(c.id);
+                            return (
+                              <li key={c.id} style={{ marginBottom: "0.2rem" }}>
+                                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: isAttached ? "default" : "pointer", fontSize: "0.9rem", opacity: isAttached ? 0.85 : 1 }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={isAttached || addModalSelectedIds.includes(c.id)}
+                                    disabled={isAttached}
+                                    onChange={(e) => {
+                                      if (isAttached) return;
+                                      if (e.target.checked) {
+                                        setAddModalSelectedIds((prev) => {
+                                          const otherInDomain = orgCategories.filter((x) => x.domain_id === c.domain_id && x.id !== c.id).map((x) => x.id);
+                                          return [...prev.filter((id) => !otherInDomain.includes(id)), c.id];
+                                        });
+                                      } else {
+                                        setAddModalSelectedIds((prev) => prev.filter((id) => id !== c.id));
+                                      }
+                                    }}
+                                  />
+                                  <span style={{ color: isAttached ? "var(--muted)" : undefined }}>{c.name}</span>
+                                  {isAttached && <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>(attached)</span>}
+                                </label>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          ) : (
+            <>
+          <input
+            type="text"
+            placeholder="Search..."
+            value={addModalSearch}
+            onChange={(e) => setAddModalSearch(e.target.value)}
+            style={{ marginBottom: "0.75rem", padding: "0.5rem 0.6rem" }}
+            autoFocus
+          />
+          <div style={{ flex: 1, overflowY: "auto", minHeight: 120, marginBottom: "1rem" }}>
+            {addModal === "tags" && (() => {
+              const available = orgTags.filter((t) => !kpi.organization_tags?.some((ot) => ot.id === t.id));
+              const filtered = addModalSearch.trim()
+                ? available.filter((t) => t.name.toLowerCase().includes(addModalSearch.trim().toLowerCase()))
+                : available;
+              return filtered.length === 0 ? (
+                <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No tags to add.</p>
+              ) : (
+                <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                  {filtered.map((t) => (
+                    <li key={t.id} style={{ marginBottom: "0.25rem" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.95rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={addModalSelectedIds.includes(t.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) setAddModalSelectedIds((prev) => [...prev, t.id]);
+                            else setAddModalSelectedIds((prev) => prev.filter((id) => id !== t.id));
+                          }}
+                        />
+                        {t.name}
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
+          </div>
+          </>
+          )}
+          {addModal === "categories" && <div style={{ marginBottom: "1rem" }} />}
+          <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => { setAddModal(null); setAddModalSearch(""); setAddModalCategorySearch(""); setAddModalSelectedIds([]); setAddModalSelectedDomainIds([]); }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={addModalSelectedIds.length === 0 || (addModal === "categories" && domainCategorySaving) || (addModal === "tags" && tagSaving)}
+              onClick={() => {
+                if (addModal === "categories") addCategoriesBatch(addModalSelectedIds);
+                else addTagsBatch(addModalSelectedIds);
+              }}
+            >
+              {addModal === "categories" ? (domainCategorySaving ? "Adding…" : "Add selected") : (tagSaving ? "Adding…" : "Add selected")}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
     </>
   );
   return content;
@@ -5258,7 +5259,7 @@ function FormulaBuilder({
   const isOther = sourceKpi === "other";
   const selectedOtherKpi = refOtherKpiId === "" ? null : otherKpis.find((k) => k.id === refOtherKpiId);
   const otherKpiFields = selectedOtherKpi?.fields ?? [];
-
+  
   const activeField = isOther
     ? (selectedOtherKpi?.fields.find((f) => f.key === selectedFieldKey) ?? null)
     : (fields.find((f) => f.key === selectedFieldKey) ?? null);
@@ -5320,7 +5321,7 @@ function FormulaBuilder({
     if (!activeMliField) return;
     const isOther = sourceKpi === "other";
     const kpiIdPrefix = isOther ? `${refOtherKpiId}, ` : "";
-
+    
     let baseFn = refGroupFn;
     if (isOther) {
       baseFn = refGroupFn.replace("_ITEMS", "_KPI_ITEMS");
@@ -5332,19 +5333,19 @@ function FormulaBuilder({
         if (!c.filterSubKey) return;
         const isLhsCurrent = c.filterSubKey.startsWith("CurrentRow.");
         const resolvedFilterSubKey = isLhsCurrent ? c.filterSubKey.substring(11) : c.filterSubKey;
-
+        
         const sfRow = subFields.find((s: SubFieldDef) => s.key === (isLhsCurrent ? c.value : resolvedFilterSubKey));
         const allowedOps = operatorsForSubFieldType(sfRow?.field_type);
         const resolvedOp = allowedOps.some((o) => o.value === c.op) ? c.op : (allowedOps[0]?.value ?? "op_eq");
-
+        
         const rawVals: string[] = [c.value];
         const trimmedVals = rawVals.map((r) => String(r ?? "").trim()).filter((v) => v !== "");
         if (trimmedVals.length === 0) return;
-
+        
         const raw = trimmedVals[0]!;
-
+        
         if (idx > 0) condArgs.push(c.logicWithPrev);
-
+        
         if (isLhsCurrent) {
           const val = `CurrentRow.${resolvedFilterSubKey}`;
           if (isOther) {
@@ -5394,7 +5395,7 @@ function FormulaBuilder({
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: "8px", padding: "1rem", background: "var(--bg-subtle, #f8f9fa)", width: "100%", maxWidth: "100%", boxSizing: "border-box", overflowX: "hidden" }}>
       <div style={{ fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>Insert reference</div>
-
+      
       {/* Step 1: Source Selector */}
       <div style={{ display: "flex", gap: "1rem", marginBottom: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
         <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>Source:</span>
@@ -5509,7 +5510,7 @@ function FormulaBuilder({
           {whereConditions.map((c, idx) => {
             const isLhsCurrent = c.filterSubKey.startsWith("CurrentRow.");
             const resolvedLhsSubKey = isLhsCurrent ? c.filterSubKey.substring(11) : c.filterSubKey;
-
+            
             const sfCond = isLhsCurrent
               ? currentMliSubFields?.find((s: SubFieldDef) => s.key === resolvedLhsSubKey)
               : subFields.find((s: SubFieldDef) => s.key === resolvedLhsSubKey);
@@ -5586,8 +5587,8 @@ function FormulaBuilder({
                             ...x,
                             op: next,
                             ...(collapseMulti
-                              ? { value: x.multiValues?.[0] ?? x.value, multiValues: [] }
-                              : {}),
+                                ? { value: x.multiValues?.[0] ?? x.value, multiValues: [] }
+                                : {}),
                           };
                         })
                       );
@@ -5601,7 +5602,7 @@ function FormulaBuilder({
                 </div>
                 <div style={{ flex: "2 1 220px", minWidth: "180px", maxWidth: "100%", boxSizing: "border-box" }}>
                   <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Value</label>
-
+                  
                   {c.filterSubKey && (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.25rem" }}>
                       {c.filterSubKey.startsWith("CurrentRow.") ? (
@@ -5633,7 +5634,7 @@ function FormulaBuilder({
                                 checked={c.compareType === "subfield"}
                                 onChange={() => setRow({ compareType: "subfield", value: "" })}
                               />
-                              Row Subfield
+                               Row Subfield
                             </label>
                           )}
                           <label style={{ fontSize: "0.75rem", display: "flex", alignItems: "center", gap: "0.25rem", cursor: "pointer" }}>
@@ -6258,12 +6259,12 @@ function FieldEditForm({
                                   prev.map((x, i) =>
                                     i === idx
                                       ? {
-                                        ...x,
-                                        config: {
-                                          ...(x.config ?? {}),
-                                          ui_section: section,
-                                        },
-                                      }
+                                          ...x,
+                                          config: {
+                                            ...(x.config ?? {}),
+                                            ui_section: section,
+                                          },
+                                        }
                                       : x
                                   )
                                 );

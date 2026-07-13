@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useRef } from "react";
 import { api } from "@/lib/api";
-import { KpiSearchInput } from "@/components/KpiSearchInput";
 import {
   getAccessToken,
   clearTokens,
@@ -66,6 +65,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const orgId = user?.organization_id ?? null;
   const canEnter = user && canEnterData(user.role as UserRole);
   const canShowFilters = onEntries && canEnter && orgId != null;
+  const [entriesSearchDraft, setEntriesSearchDraft] = useState<string>(searchParams.get("q") ?? "");
 
   /** When super admin is in any organization context: org detail path, or organization_id in URL, or breadcrumb (e.g. report page loads org from API). */
   const orgDetailMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)(?:\/|$)/);
@@ -441,7 +441,23 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     router.replace(`/dashboard/entries?${next.toString()}`);
   };
 
+  // Keep draft in sync with URL changes (e.g. back/forward, clicking filter tags).
+  useEffect(() => {
+    if (!onEntries) return;
+    setEntriesSearchDraft(searchParams.get("q") ?? "");
+  }, [onEntries, searchParams.get("q")]);
 
+  // Debounce: do not navigate + re-fetch overview per keystroke.
+  useEffect(() => {
+    if (!canShowFilters) return;
+    const handle = window.setTimeout(() => {
+      const trimmed = entriesSearchDraft.trim();
+      const current = (searchParams.get("q") ?? "").trim();
+      if (trimmed === current) return;
+      updateEntriesParams({ q: trimmed || undefined });
+    }, 250);
+    return () => window.clearTimeout(handle);
+  }, [entriesSearchDraft, canShowFilters, searchParams]);
 
   if (loading) {
     return (
@@ -603,10 +619,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {canShowFilters && (
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", flex: 1, minWidth: 0 }}>
-            <KpiSearchInput
-              placeholder="Search KPIs..."
-              value={searchParams.get("q") ?? ""}
-              onChange={(val) => updateEntriesParams({ q: val || undefined })}
+            <input
+              type="search"
+              placeholder={'Search KPIs...'}
+              value={entriesSearchDraft}
+              onChange={(e) => setEntriesSearchDraft(e.target.value)}
               style={{
                 padding: "0.35rem 0.6rem",
                 borderRadius: 6,

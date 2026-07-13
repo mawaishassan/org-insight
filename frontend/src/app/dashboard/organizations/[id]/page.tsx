@@ -9,7 +9,6 @@ import { z } from "zod";
 import toast from "react-hot-toast";
 import { getAccessToken, clearTokens, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { KpiSearchInput } from "@/components/KpiSearchInput";
 import { ApiExportContent } from "./ApiExportContent";
 import {
   buildReportPrintDocument,
@@ -390,7 +389,6 @@ export default function OrganizationDetailPage() {
   const [kpiFilterTagId, setKpiFilterTagId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const latestKpiSearchIdRef = useRef(0);
 
   const [domainShowCreate, setDomainShowCreate] = useState(false);
   const [domainEditingId, setDomainEditingId] = useState<number | null>(null);
@@ -473,23 +471,14 @@ export default function OrganizationDetailPage() {
   const loadKpis = () => {
     if (!token || !orgId) return;
     setError(null);
-    const searchId = ++latestKpiSearchIdRef.current;
     const params: Record<string, string | number> = { organization_id: orgId };
     if (kpiFilterName?.trim()) params.name = kpiFilterName.trim();
     if (kpiFilterDomainId != null) params.domain_id = kpiFilterDomainId;
     if (kpiFilterCategoryId != null) params.category_id = kpiFilterCategoryId;
     if (kpiFilterTagId != null) params.organization_tag_id = kpiFilterTagId;
     api<KpiRow[]>(`/kpis?${qs(params)}`, { token })
-      .then((data) => {
-        if (searchId === latestKpiSearchIdRef.current) {
-          setKpis(data);
-        }
-      })
-      .catch((e) => {
-        if (searchId === latestKpiSearchIdRef.current) {
-          setError(e instanceof Error ? e.message : "Failed");
-        }
-      });
+      .then(setKpis)
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed"));
   };
 
   useEffect(() => {
@@ -2305,10 +2294,11 @@ function KpisSection({
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", flex: 1, minWidth: 0 }}>
-          <KpiSearchInput
+          <input
+            type="search"
             placeholder="Search KPIs…"
             value={filterName}
-            onChange={setFilterName}
+            onChange={(e) => setFilterName(e.target.value)}
             style={{
               padding: "0.5rem 0.75rem",
               borderRadius: 8,
