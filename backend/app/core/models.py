@@ -526,7 +526,7 @@ class KPIField(Base):
         Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name = Column(String(255), nullable=False)
-    key = Column(String(100), nullable=False, index=True)
+    key = Column(String(255), nullable=False, index=True)
     field_type = Column(Enum(FieldType), nullable=False)
     formula_expression = Column(Text, nullable=True)
     is_required = Column(Boolean, default=False)
@@ -590,7 +590,7 @@ class KPIFieldSubField(Base):
         Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name = Column(String(255), nullable=False)
-    key = Column(String(100), nullable=False, index=True)
+    key = Column(String(255), nullable=False, index=True)
     field_type = Column(Enum(FieldType), nullable=False)  # single_line_text, number, date, boolean, reference
     is_required = Column(Boolean, default=False)
     sort_order = Column(Integer, default=0)
