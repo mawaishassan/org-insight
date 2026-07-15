@@ -25,7 +25,7 @@ class KPIFieldSubFieldCreate(BaseModel):
 
     id: int | None = None
     name: str = Field(..., min_length=1, max_length=255)
-    key: str = Field(..., min_length=1, max_length=100)
+    key: str = Field(..., min_length=1, max_length=255)
     field_type: FieldType = Field(...)  # single_line_text, number, date, boolean, reference, multi_reference, attachment, mixed_list
     is_required: bool = False
     sort_order: int = 0
@@ -61,7 +61,7 @@ class KPIFieldCreate(BaseModel):
 
     kpi_id: int = Field(...)
     name: str = Field(..., min_length=1, max_length=255)
-    key: str = Field(..., min_length=1, max_length=100)
+    key: str = Field(..., min_length=1, max_length=255)
     field_type: FieldType = Field(...)
     formula_expression: str | None = None
     is_required: bool = False
@@ -80,7 +80,7 @@ class KPIFieldUpdate(BaseModel):
     """Update KPI field."""
 
     name: str | None = Field(None, min_length=1, max_length=255)
-    key: str | None = Field(None, min_length=1, max_length=100)
+    key: str | None = Field(None, min_length=1, max_length=255)
     field_type: FieldType | None = None
     formula_expression: str | None = None
     is_required: bool | None = None
