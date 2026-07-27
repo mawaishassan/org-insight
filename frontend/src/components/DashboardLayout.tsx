@@ -335,7 +335,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             orgId: 0,
             orgName: null,
             segments: [
-              { label: "Users", href: "/dashboard/users" },
+              { label: "Access", href: "/dashboard/access" },
               { label: u.full_name || u.username, href: `/dashboard/users/${userId}` },
             ],
           });
@@ -552,7 +552,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       breadcrumbs.push({ label: "Home", href: "/dashboard/entries" });
     }
     if (pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users") {
-      breadcrumbs.push({ label: "Users", href: "/dashboard/users" });
+      breadcrumbs.push({ label: "Access", href: "/dashboard/access" });
     }
     if (pathname === "/dashboard/dashboards") {
       if (hasKpiRights) {

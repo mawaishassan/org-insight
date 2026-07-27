@@ -26,6 +26,7 @@ interface OrgTagOption {
 }
 
 const updateSchema = z.object({
+  username: z.string().min(1, "Username required"),
   email: z.string().email("Invalid email").optional().or(z.literal("")),
   full_name: z.string().optional(),
   password: z.string().min(8, "Min 8 characters").optional().or(z.literal("")),
@@ -49,6 +50,7 @@ export default function UserDetailPage() {
   const form = useForm<UpdateFormData>({
     resolver: zodResolver(updateSchema),
     defaultValues: {
+      username: "",
       email: "",
       full_name: "",
       password: "",
@@ -75,6 +77,7 @@ export default function UserDetailPage() {
       .then((u) => {
         setUser(u);
         form.reset({
+          username: u.username ?? "",
           email: u.email ?? "",
           full_name: u.full_name ?? "",
           password: "",
@@ -96,6 +99,7 @@ export default function UserDetailPage() {
     setError(null);
     try {
       const body: Record<string, unknown> = {
+        username: data.username,
         email: data.email || null,
         full_name: data.full_name || null,
         role: data.role,
@@ -121,7 +125,7 @@ export default function UserDetailPage() {
     try {
       await api(`/users/${user.id}`, { method: "DELETE", token });
       toast.success("User deleted successfully");
-      router.push("/dashboard/users");
+      router.push("/dashboard/access");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
       toast.error(e instanceof Error ? e.message : "Delete failed");
@@ -129,7 +133,7 @@ export default function UserDetailPage() {
   };
 
   if (loading && !user) return <p>Loading...</p>;
-  if (!user) return <div><p className="form-error">{error ?? "User not found"}</p><Link href="/dashboard/users">Users</Link></div>;
+  if (!user) return <div><p className="form-error">{error ?? "User not found"}</p><Link href="/dashboard/access">Back to Access</Link></div>;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.01rem" }}>
@@ -144,8 +148,9 @@ export default function UserDetailPage() {
         <form onSubmit={form.handleSubmit(onSaveGeneral)}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "0.5rem 1.25rem", maxWidth: "560px" }}>
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label style={{ fontSize: "0.85rem" }}>Username</label>
-              <div style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem", color: "var(--muted)", background: "var(--bg-subtle)", borderRadius: 6, border: "1px solid var(--border)" }}>{user.username}</div>
+              <label style={{ fontSize: "0.85rem" }}>Username *</label>
+              <input {...form.register("username")} style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
+              {form.formState.errors.username && <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>{form.formState.errors.username.message}</p>}
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label style={{ fontSize: "0.85rem" }}>Role</label>
@@ -203,9 +208,19 @@ export default function UserDetailPage() {
               <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>{form.watch("is_active") ? "On" : "Off"}</span>
             </div>
           </div>
-          <button type="submit" className="btn btn-primary" disabled={form.formState.isSubmitting} style={{ marginTop: "0.5rem", fontSize: "0.9rem", padding: "0.4rem 0.75rem" }}>
-            {form.formState.isSubmitting ? "Saving..." : "Save"}
-          </button>
+          <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
+            <button type="submit" className="btn btn-primary" disabled={form.formState.isSubmitting} style={{ fontSize: "0.9rem", padding: "0.4rem 0.75rem" }}>
+              {form.formState.isSubmitting ? "Saving..." : "Save"}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              style={{ fontSize: "0.9rem", padding: "0.4rem 0.75rem" }}
+              onClick={() => router.push("/dashboard/access")}
+            >
+              Cancel
+            </button>
+          </div>
         </form>
       </section>
 

@@ -264,7 +264,10 @@ async def delete_role(db: AsyncSession, role_id: int, organization_id: int) -> b
     role = await get_role(db, role_id, organization_id)
     if not role:
         return False
+    from app.core.models import UserOrganizationRole, KpiRoleAssignment, KpiFieldAccessByRole
     await db.execute(delete(UserOrganizationRole).where(UserOrganizationRole.organization_role_id == role_id))
+    await db.execute(delete(KpiRoleAssignment).where(KpiRoleAssignment.organization_role_id == role_id))
+    await db.execute(delete(KpiFieldAccessByRole).where(KpiFieldAccessByRole.organization_role_id == role_id))
     await db.delete(role)
     await db.flush()
     return True
