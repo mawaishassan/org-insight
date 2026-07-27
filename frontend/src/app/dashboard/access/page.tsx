@@ -136,35 +136,24 @@ export default function AccessDashboardPage() {
       .catch(() => setRoleUsers([]));
   }, [token, orgId, roleUsersModal]);
 
-  // Load role membership map for chips in Users tab
+  // Load role membership map for chips in Users tab (deferred to when Users tab is active)
   useEffect(() => {
-    if (!token || !orgId || roles.length === 0) {
-      setRoleMembersByRoleId({});
+    if (!token || !orgId || roles.length === 0 || activeTab !== "users") {
       return;
     }
     setRoleMembersLoading(true);
-    Promise.all(
-      roles.map((role) =>
-        api<{ id: number; username: string; full_name: string | null }[]>(
-          `/organizations/${orgId}/roles/${role.id}/users`,
-          { token }
-        )
-          .then((list) => ({ roleId: role.id, list: list ?? [] }))
-          .catch(() => ({ roleId: role.id, list: [] }))
-      )
+    api<Record<number, { id: number; username: string; full_name: string | null }[]>>(
+      `/organizations/${orgId}/roles-memberships`,
+      { token }
     )
-      .then((results) => {
-        const map: Record<
-          number,
-          { id: number; username: string; full_name: string | null }[]
-        > = {};
-        results.forEach(({ roleId, list }) => {
-          map[roleId] = list;
-        });
-        setRoleMembersByRoleId(map);
+      .then((res) => {
+        setRoleMembersByRoleId(res ?? {});
+      })
+      .catch(() => {
+        setRoleMembersByRoleId({});
       })
       .finally(() => setRoleMembersLoading(false));
-  }, [token, orgId, roles]);
+  }, [token, orgId, roles, activeTab]);
 
   if (!token) {
     return (
