@@ -499,48 +499,6 @@ async def list_role_users(
     return [UserResponse.model_validate(u) for u in users]
 
 
-@router.get("/{org_id}/roles-memberships", response_model=dict[int, list[UserResponse]])
-async def list_org_roles_memberships(
-    org_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_org_admin_for_org),
-):
-    """List all role memberships in the organization in a single query."""
-    org = await get_organization(db, org_id)
-    if not org:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
-    from app.core.models import UserOrganizationRole, OrganizationRole, User, ExternalUser
-    result = await db.execute(
-        select(UserOrganizationRole.organization_role_id, User)
-        .join(User, User.id == UserOrganizationRole.user_id)
-        .join(OrganizationRole, OrganizationRole.id == UserOrganizationRole.organization_role_id)
-        .where(OrganizationRole.organization_id == org_id)
-    )
-    rows = result.all()
-    user_ids = list({row[1].id for row in rows})
-    ext_res = await db.execute(select(ExternalUser).where(ExternalUser.user_id.in_(user_ids))) if user_ids else None
-    ext_map = {eu.user_id: eu for eu in ext_res.scalars().all()} if ext_res else {}
-
-    out = {}
-    for role_id, user_obj in rows:
-        eu = ext_map.get(user_obj.id)
-        u_res = UserResponse(
-            id=user_obj.id,
-            username=user_obj.username,
-            email=user_obj.email,
-            full_name=user_obj.full_name,
-            role=user_obj.role,
-            organization_id=user_obj.organization_id,
-            is_active=user_obj.is_active,
-            description=eu.description if eu else None,
-            is_external=eu is not None,
-        )
-        if role_id not in out:
-            out[role_id] = []
-        out[role_id].append(u_res)
-    return out
-
-
 @router.put("/{org_id}/roles/{role_id}/users", status_code=status.HTTP_200_OK)
 async def set_role_users(
     org_id: int,
