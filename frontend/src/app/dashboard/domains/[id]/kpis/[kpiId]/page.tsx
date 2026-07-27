@@ -647,6 +647,7 @@ export default function DomainKpiDetailPage() {
           organizationId: effectiveOrgId,
           entryId: entry.id,
           fieldId: f.id,
+          countOnly: true,
         })
           .then((rows) => [f.id, rows] as const)
           .catch(() => [f.id, [] as Record<string, unknown>[]] as const)
@@ -902,10 +903,9 @@ export default function DomainKpiDetailPage() {
     const apiInfoQuery = `?${qs({ kpi_id: kpiId, organization_id: effectiveOrgId })}`;
 
     // Critical path: render the entry page as soon as fields + entries are ready.
-    const [fieldsList, entriesList, overviewList, kpiResp] = await Promise.all([
+    const [fieldsList, entriesList, kpiResp] = await Promise.all([
       api<FieldDef[]>(`/entries/fields${fieldsQuery}`, { token }).catch(() => []),
       api<EntryRow[]>(`/entries${entriesQuery}`, { token }).then((list) => list).catch(() => []),
-      api<OverviewItem[]>(`/entries/overview${overviewQuery}`, { token }).catch(() => []),
       api<{ name: string; domain_id: number | null }>(`/kpis/${kpiId}${kpiQuery}`, { token }).catch(() => null),
     ]);
     if (loadId !== entryDetailLoadGenRef.current) return;
@@ -948,17 +948,13 @@ export default function DomainKpiDetailPage() {
       setEntry(entriesList[0] ?? null);
     }
     if (loadId !== entryDetailLoadGenRef.current) return;
-    setOverviewItem(overviewList.find((x) => x.kpi_id === kpiId) ?? null);
-    const ov = overviewList.find((x) => x.kpi_id === kpiId);
-    if (loadId !== entryDetailLoadGenRef.current) return;
     if (kpiResp?.name) setKpiName(kpiResp.name);
-    else if (ov?.kpi_name) setKpiName(ov.kpi_name);
     else setKpiName(`KPI #${kpiId}`);
 
-    // Non-critical path: assignments, org users, API info, files, and time-dimension can load after first paint.
+    // Non-critical path: assignments, org users, API info, files, overview, and time-dimension can load after first paint.
     void (async () => {
       const isOrgAdmin = meRole === "ORG_ADMIN";
-      const [assignmentsList, roleAssignmentsList, usersList, apiInfo] = await Promise.all([
+      const [assignmentsList, roleAssignmentsList, usersList, apiInfo, overviewList] = await Promise.all([
         api<UserRef[]>(`/kpis/${kpiId}/assignments${kpiQuery}`, { token }).catch(() => []),
         api<Array<{ id: number; name: string; description?: string | null; permission: string }>>(
           `/kpis/${kpiId}/assignments-by-role${kpiQuery}`,
@@ -967,6 +963,7 @@ export default function DomainKpiDetailPage() {
         // `/users` can be very large; only load it for org admins (needed for assignment pickers / security UIs).
         isOrgAdmin ? api<UserRef[]>(`/users${usersQuery}`, { token }).catch(() => []) : Promise.resolve([] as UserRef[]),
         api<{ entry_mode?: string; api_endpoint_url?: string | null; can_edit?: boolean }>(`/entries/kpi-api-info${apiInfoQuery}`, { token }).catch(() => null),
+        api<OverviewItem[]>(`/entries/overview${overviewQuery}`, { token }).catch(() => []),
       ]);
       if (loadId !== entryDetailLoadGenRef.current) return;
 
@@ -985,6 +982,12 @@ export default function DomainKpiDetailPage() {
       setEditRoleAssignments(Array.isArray(roleAssignmentsList) ? roleAssignmentsList.map((r: any) => ({ role_id: r.id, permission: r.permission || "data_entry", allow_add_row: r.allow_add_row !== false, allow_bulk_upload: r.allow_bulk_upload !== false })) : []);
       setOrgUsers(Array.isArray(usersList) ? usersList : []);
       setKpiApiInfo(apiInfo ?? null);
+
+      const ov = overviewList.find((x) => x.kpi_id === kpiId) ?? null;
+      setOverviewItem(ov);
+      if (ov?.kpi_name) {
+        setKpiName(ov.kpi_name);
+      }
 
       api<KpiFileItem[]>(`/kpis/${kpiId}/files?${qs({ year })}`, { token })
         .then((files) => {
