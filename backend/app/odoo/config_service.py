@@ -23,6 +23,7 @@ async def upsert_org_odoo_config(
     odoo_db: str | None,
     username: str,
     password: str,
+    attachment_url_template: str | None = None,
 ) -> OrganizationOdooConfig:
     cfg = await get_org_odoo_config(db, org_id)
     if cfg is None:
@@ -30,6 +31,7 @@ async def upsert_org_odoo_config(
             organization_id=org_id,
             login_url=login_url,
             data_fetch_url=data_fetch_url,
+            attachment_url_template=attachment_url_template,
             odoo_db=odoo_db,
             username=username,
             password=password,
@@ -38,6 +40,7 @@ async def upsert_org_odoo_config(
     else:
         cfg.login_url = login_url
         cfg.data_fetch_url = data_fetch_url
+        cfg.attachment_url_template = attachment_url_template
         cfg.odoo_db = odoo_db
         cfg.username = username
         if password and password != "***":

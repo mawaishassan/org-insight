@@ -12,7 +12,7 @@ import {
   openKpiStoredFileInNewTab,
   postFormDataWithUploadProgress,
 } from "@/lib/api";
-import { getAttachmentDisplayName, getAttachmentUrl } from "@/lib/attachmentCellValue";
+import { getAttachmentDisplayName, getAttachmentUrl, parseAttachmentList } from "@/lib/attachmentCellValue";
 import { downloadBlob } from "@/lib/download";
 import toast from "react-hot-toast";
 import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
@@ -137,6 +137,7 @@ interface RowAccessUser {
   username: string;
   can_edit: boolean;
   can_delete: boolean;
+  can_add: boolean;
 }
 
 export default function FullPageMultiItems() {
@@ -276,6 +277,8 @@ export default function FullPageMultiItems() {
   const [rowAccessAddAccess, setRowAccessAddAccess] = useState<"view" | "edit" | "edit_delete">("edit_delete");
   const [rowAccessSaving, setRowAccessSaving] = useState(false);
   const [rowAccessUserSearch, setRowAccessUserSearch] = useState("");
+  const [availableUsersPage, setAvailableUsersPage] = useState(1);
+  const [newAssignPermissions, setNewAssignPermissions] = useState<Record<number, { edit: boolean; add: boolean }>>({});
   const [includeExistingRowsInTemplate, setIncludeExistingRowsInTemplate] = useState(true);
 
   /** Ignore stale API responses when year/org/field changes quickly (fixes missing rows / wrong permissions UI). */
@@ -533,6 +536,9 @@ export default function FullPageMultiItems() {
     if (format === "pdf" && pdfTitleParam && pdfTitleParam.trim()) params.set("pdf_title", pdfTitleParam.trim());
     if (format === "pdf" && pdfSubtitleParam && pdfSubtitleParam.trim()) {
       params.set("pdf_subtitle", pdfSubtitleParam.trim());
+    }
+    if (typeof window !== "undefined") {
+      params.set("frontend_base_url", window.location.origin);
     }
     return params;
   };
@@ -878,7 +884,7 @@ export default function FullPageMultiItems() {
     if (!token || !entryId || !fieldId || selectedIndices.length === 0) return;
     if (!window.confirm(`Delete ${selectedIndices.length} row(s)?`)) return;
     try {
-      await api(
+      const res = await api<{ warning?: string | null }>(
         `/entries/multi-items/rows/bulk-delete?${new URLSearchParams({
           entry_id: String(entryId),
           field_id: String(fieldId),
@@ -886,6 +892,9 @@ export default function FullPageMultiItems() {
         }).toString()}`,
         { method: "POST", body: JSON.stringify({ indices: selectedIndices }), token }
       );
+      if (res?.warning) {
+        window.alert(res.warning);
+      }
       toast.success("Rows deleted");
       setSelectedIndices([]);
       await refreshRows();
@@ -988,7 +997,7 @@ export default function FullPageMultiItems() {
   const removeUserFromRow = async (userId: number) => {
     if (!rowAccessModal || !token || !kpiId || !entryId || !fieldId || effectiveOrgId == null) return;
     try {
-      const existing = await api<{ row_index: number; can_edit: boolean; can_delete: boolean }[]>(
+      const existing = await api<{ row_index: number; can_edit: boolean; can_delete: boolean; can_add: boolean }[]>(
         `/kpis/${kpiId}/row-access?${new URLSearchParams({
           user_id: String(userId),
           entry_id: String(entryId),
@@ -999,7 +1008,7 @@ export default function FullPageMultiItems() {
       );
       const rowsToSend = existing
         .filter((r) => r.row_index !== rowAccessModal.rowIndex)
-        .map((r) => ({ row_index: r.row_index, can_edit: r.can_edit, can_delete: r.can_delete }));
+        .map((r) => ({ row_index: r.row_index, can_edit: r.can_edit, can_delete: r.can_delete, can_add: r.can_add }));
       await api(`/kpis/${kpiId}/row-access?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`, {
         method: "PUT",
         body: JSON.stringify({ user_id: userId, entry_id: entryId, field_id: fieldId, rows: rowsToSend }),
@@ -1012,36 +1021,34 @@ export default function FullPageMultiItems() {
     }
   };
 
-  const saveAddUserToRow = async () => {
-    if (!rowAccessModal || rowAccessAddUserId == null || !token || !kpiId || !entryId || !fieldId || effectiveOrgId == null) return;
+  const saveAddUserToRow = async (userId: number, canEdit: boolean, canAdd: boolean) => {
+    if (!rowAccessModal || !token || !kpiId || !entryId || !fieldId || effectiveOrgId == null) return;
     setRowAccessSaving(true);
     try {
-      const existing = await api<{ row_index: number; can_edit: boolean; can_delete: boolean }[]>(
+      const existing = await api<{ row_index: number; can_edit: boolean; can_delete: boolean; can_add: boolean }[]>(
         `/kpis/${kpiId}/row-access?${new URLSearchParams({
-          user_id: String(rowAccessAddUserId),
+          user_id: String(userId),
           entry_id: String(entryId),
           field_id: String(fieldId),
           organization_id: String(effectiveOrgId),
         }).toString()}`,
         { token }
       );
-      const can_edit = rowAccessAddAccess !== "view";
-      const can_delete = rowAccessAddAccess === "edit_delete";
       const merged = (Array.isArray(existing) ? existing : []).filter((r) => r.row_index !== rowAccessModal.rowIndex);
-      merged.push({ row_index: rowAccessModal.rowIndex, can_edit, can_delete });
+      merged.push({ row_index: rowAccessModal.rowIndex, can_edit: canEdit, can_delete: canEdit, can_add: canAdd });
       merged.sort((a, b) => a.row_index - b.row_index);
       await api(`/kpis/${kpiId}/row-access?${new URLSearchParams({ organization_id: String(effectiveOrgId) }).toString()}`, {
         method: "PUT",
         body: JSON.stringify({
-          user_id: rowAccessAddUserId,
+          user_id: userId,
           entry_id: entryId,
           field_id: fieldId,
-          rows: merged.map((r) => ({ row_index: r.row_index, can_edit: r.can_edit, can_delete: r.can_delete })),
+          rows: merged.map((r) => ({ row_index: r.row_index, can_edit: r.can_edit, can_delete: r.can_delete, can_add: r.can_add })),
         }),
         token,
       });
-      toast.success(rowAccessAddAccess === "view" ? "Row view access granted" : "User access added to row");
-      setRowAccessModal(null);
+      toast.success("User row access saved");
+      refetchRowAccessUsers();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to save");
     } finally {
@@ -1254,13 +1261,15 @@ export default function FullPageMultiItems() {
               >
                 Add row
               </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => setBulkPanelOpen((open) => !open)}
-              >
-                Bulk upload
-              </button>
+              {(!field?.row_level_user_access_enabled || isAdmin) && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setBulkPanelOpen((open) => !open)}
+                >
+                  Bulk upload
+                </button>
+              )}
             </>
           )}
           <button
@@ -1454,7 +1463,7 @@ export default function FullPageMultiItems() {
       )}
 
       {/* Bulk upload panel */}
-      {canAddRowEffective && bulkPanelOpen && (
+      {canAddRowEffective && bulkPanelOpen && (!field?.row_level_user_access_enabled || isAdmin) && (
         <div className="card" style={{ padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
             <span style={{ fontSize: "0.9rem", fontWeight: 600 }}>Bulk upload</span>
@@ -2057,6 +2066,7 @@ export default function FullPageMultiItems() {
                       rows_imported?: number;
                       rows_updated?: number;
                       rows_appended?: number;
+                      attachment_errors?: string[];
                     }>(`/entries/multi-items/sync-from-odoo?${params.toString()}`, { method: "POST", token });
                     if (uploadOption === "upsert") {
                       toast.success(
@@ -2065,6 +2075,11 @@ export default function FullPageMultiItems() {
                     } else {
                       const n = res?.rows_imported ?? 0;
                       toast.success(n > 0 ? `Imported ${n} record(s) from Odoo.` : "Odoo sync completed (no records imported).");
+                    }
+                    if (res?.attachment_errors && res.attachment_errors.length > 0) {
+                      for (const err of res.attachment_errors) {
+                        toast.error(err, { duration: 6000 });
+                      }
                     }
                     await refreshRows();
                   } catch (e) {
@@ -2741,7 +2756,39 @@ export default function FullPageMultiItems() {
                     />
                   </th>
                 )}
-                <th style={{ padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "left" }}>#</th>
+                {(() => {
+                  const isSrNoActive = sortBy === "__index__";
+                  const srNoNextDir = isSrNoActive && sortDir === "asc" ? "desc" : "asc";
+                  return (
+                    <th
+                      style={{
+                        padding: "0.4rem 0.5rem",
+                        borderBottom: "1px solid var(--border)",
+                        textAlign: "left",
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
+                        background: isSrNoActive ? "var(--accent-muted, rgba(0, 0, 0, 0.06))" : undefined,
+                        fontWeight: isSrNoActive ? 600 : undefined,
+                      }}
+                      onClick={() => {
+                        setPage(1);
+                        if (sortBy === "__index__") {
+                          setSortDir(srNoNextDir);
+                        } else {
+                          setSortBy("__index__");
+                          setSortDir("asc");
+                        }
+                      }}
+                    >
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        Sr No
+                        <span style={{ fontSize: "0.85rem", color: isSrNoActive ? "var(--accent, inherit)" : "var(--muted)" }}>
+                          {isSrNoActive ? (sortDir === "asc" ? " ↑" : " ↓") : " ⇅"}
+                        </span>
+                      </span>
+                    </th>
+                  );
+                })()}
                 {gridSubFields
                   .filter((sf) => visibleColumns.length === 0 || visibleColumns.includes(sf.key))
                   .map((sf) => {
@@ -2887,7 +2934,7 @@ export default function FullPageMultiItems() {
                   {(canEditKpi || canManageRowAccess) && (
                     <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "right", whiteSpace: "nowrap" }}>
                       <div style={{ display: "inline-flex", gap: "0.25rem", alignItems: "center", justifyContent: "flex-end" }}>
-                        {canManageRowAccess && (
+                        {canManageRowAccess && field?.row_level_user_access_enabled && (
                         <button
                           type="button"
                           title="Row access"
@@ -3110,135 +3157,266 @@ export default function FullPageMultiItems() {
         )}
       </div>
 
-      {rowAccessModal && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.4)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-          }}
-          onClick={() => setRowAccessModal(null)}
-        >
+      {rowAccessModal && (() => {
+        const assignedUserIds = new Set(rowAccessUsers.map((u) => u.user_id));
+        const availableUsers = rowAccessAssignments.filter((u) => !assignedUserIds.has(u.id));
+        const searchFiltered = availableUsers.filter((u) => {
+          const term = rowAccessUserSearch.toLowerCase().trim();
+          if (!term) return true;
+          return (
+            (u.full_name || "").toLowerCase().includes(term) ||
+            u.username.toLowerCase().includes(term)
+          );
+        });
+
+        const pageSize = 5;
+        const totalAvailable = searchFiltered.length;
+        const maxPage = Math.max(1, Math.ceil(totalAvailable / pageSize));
+        const curPage = Math.min(availableUsersPage, maxPage);
+        const pageStart = (curPage - 1) * pageSize;
+        const pageUsers = searchFiltered.slice(pageStart, pageStart + pageSize);
+
+        return (
           <div
-            className="card"
-            style={{ width: "90%", maxWidth: 440, padding: "1.25rem", maxHeight: "85vh", overflow: "auto" }}
-            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.4)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 1000,
+            }}
+            onClick={() => setRowAccessModal(null)}
           >
-            <h3 style={{ margin: "0 0 0.5rem 0" }}>Row access</h3>
-            <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "1rem" }}>
-              Record #{rowAccessModal.rowIndex + 1}{rowAccessModal.preview ? ` — ${rowAccessModal.preview}${rowAccessModal.preview.length >= 80 ? "…" : ""}` : ""}
-            </p>
-            <p style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
-              Assign which users can view, edit, or delete this row.
-            </p>
-            <div style={{ marginBottom: "1rem" }}>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
-                {rowAccessUsers.map((u) => (
-                  <span
-                    key={u.user_id}
+            <div
+              className="card"
+              style={{
+                width: "95%",
+                maxWidth: 680,
+                padding: "1.5rem",
+                maxHeight: "90vh",
+                overflow: "auto",
+                display: "flex",
+                flexDirection: "column",
+                gap: "1.25rem",
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", borderBottom: "1px solid var(--border)", paddingBottom: "0.5rem" }}>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: "1.2rem", fontWeight: 600 }}>Row Level Access Controls</h3>
+                  <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: "0.25rem 0 0" }}>
+                    Record #{rowAccessModal.rowIndex + 1}{rowAccessModal.preview ? ` — ${rowAccessModal.preview}${rowAccessModal.preview.length >= 60 ? "…" : ""}` : ""}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRowAccessModal(null)}
+                  style={{ border: "none", background: "transparent", fontSize: "1.5rem", cursor: "pointer", color: "var(--muted)", padding: 0, lineHeight: 1 }}
+                >
+                  &times;
+                </button>
+              </div>
+
+              <div>
+                <h4 style={{ margin: "0 0 0.5rem 0", fontSize: "0.95rem", fontWeight: 600 }}>Currently Assigned Users</h4>
+                {rowAccessUsers.length === 0 ? (
+                  <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--muted)" }}>No users assigned to this row yet.</p>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem", textAlign: "left" }}>
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                          <th style={{ padding: "0.4rem 0.5rem" }}>User</th>
+                          <th style={{ padding: "0.4rem 0.5rem", width: "80px", textAlign: "center" }}>View</th>
+                          <th style={{ padding: "0.4rem 0.5rem", width: "80px", textAlign: "center" }}>Edit</th>
+                          <th style={{ padding: "0.4rem 0.5rem", width: "90px", textAlign: "center" }}>Add Row</th>
+                          <th style={{ padding: "0.4rem 0.5rem", width: "100px", textAlign: "center" }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rowAccessUsers.map((u) => (
+                          <tr key={u.user_id} style={{ borderBottom: "1px solid var(--border)" }}>
+                            <td style={{ padding: "0.4rem 0.5rem" }}>
+                              <div style={{ fontWeight: 500 }}>{u.full_name || u.username}</div>
+                              {u.full_name && <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>{u.username}</div>}
+                            </td>
+                            <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                              <input type="checkbox" checked disabled />
+                            </td>
+                            <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                              <input
+                                type="checkbox"
+                                checked={u.can_edit}
+                                onChange={(e) => {
+                                  void saveAddUserToRow(u.user_id, e.target.checked, u.can_add);
+                                }}
+                              />
+                            </td>
+                            <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                              <input
+                                type="checkbox"
+                                checked={u.can_add}
+                                onChange={(e) => {
+                                  void saveAddUserToRow(u.user_id, u.can_edit, e.target.checked);
+                                }}
+                              />
+                            </td>
+                            <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => {
+                                  if (window.confirm(`Are you sure you want to revoke all access for ${u.full_name || u.username} on this row?`)) {
+                                    void removeUserFromRow(u.user_id);
+                                  }
+                                }}
+                                style={{ padding: "0.15rem 0.4rem", fontSize: "0.75rem", border: "1px solid var(--danger, #ef4444)", color: "var(--danger, #ef4444)" }}
+                              >
+                                Revoke
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h4 style={{ margin: "0 0 0.5rem 0", fontSize: "0.95rem", fontWeight: 600 }}>Available Users</h4>
+                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                  <input
+                    type="text"
+                    placeholder="Search available users by name/username..."
+                    value={rowAccessUserSearch}
+                    onChange={(e) => {
+                      setRowAccessUserSearch(e.target.value);
+                      setAvailableUsersPage(1);
+                    }}
                     style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "0.25rem",
-                      padding: "0.2rem 0.5rem",
+                      flex: 1,
+                      padding: "0.35rem 0.5rem",
                       borderRadius: 6,
-                      background: "var(--bg-subtle)",
+                      border: "1px solid var(--border)",
                       fontSize: "0.8rem",
                     }}
-                  >
-                    {u.full_name || u.username} ({!u.can_edit ? "View" : u.can_delete ? "Edit+Delete" : "Edit"})
-                    <button
-                      type="button"
-                      onClick={() => removeUserFromRow(u.user_id)}
-                      style={{
-                        border: "none",
-                        background: "transparent",
-                        cursor: "pointer",
-                        padding: "0 0.15rem",
-                        color: "var(--muted)",
-                        fontSize: "1rem",
-                        lineHeight: 1,
-                      }}
-                      aria-label="Remove user from row"
-                      title="Remove from row"
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
+                  />
+                </div>
+
+                {pageUsers.length === 0 ? (
+                  <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--muted)" }}>No available users found.</p>
+                ) : (
+                  <div style={{ overflowX: "auto", marginBottom: "0.5rem" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem", textAlign: "left" }}>
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                          <th style={{ padding: "0.4rem 0.5rem" }}>User</th>
+                          <th style={{ padding: "0.4rem 0.5rem", width: "80px", textAlign: "center" }}>View</th>
+                          <th style={{ padding: "0.4rem 0.5rem", width: "80px", textAlign: "center" }}>Edit</th>
+                          <th style={{ padding: "0.4rem 0.5rem", width: "90px", textAlign: "center" }}>Add Row</th>
+                          <th style={{ padding: "0.4rem 0.5rem", width: "120px", textAlign: "center" }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pageUsers.map((u) => {
+                          const state = newAssignPermissions[u.id] || { edit: false, add: false };
+                          return (
+                            <tr key={u.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                              <td style={{ padding: "0.4rem 0.5rem" }}>
+                                <div style={{ fontWeight: 500 }}>{u.full_name || u.username}</div>
+                                {u.full_name && <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>{u.username}</div>}
+                              </td>
+                              <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                                <input type="checkbox" checked disabled />
+                              </td>
+                              <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={state.edit}
+                                  onChange={(e) => {
+                                    setNewAssignPermissions((prev) => ({
+                                      ...prev,
+                                      [u.id]: { ...state, edit: e.target.checked },
+                                    }));
+                                  }}
+                                />
+                              </td>
+                              <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={state.add}
+                                  onChange={(e) => {
+                                    setNewAssignPermissions((prev) => ({
+                                      ...prev,
+                                      [u.id]: { ...state, add: e.target.checked },
+                                    }));
+                                  }}
+                                />
+                              </td>
+                              <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  onClick={async () => {
+                                    await saveAddUserToRow(u.id, state.edit, state.add);
+                                    setNewAssignPermissions((prev) => {
+                                      const next = { ...prev };
+                                      delete next[u.id];
+                                      return next;
+                                    });
+                                  }}
+                                  style={{ padding: "0.15rem 0.4rem", fontSize: "0.75rem" }}
+                                >
+                                  Grant Access
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {maxPage > 1 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.8rem" }}>
+                    <span style={{ color: "var(--muted)" }}>
+                      Page {curPage} of {maxPage} ({totalAvailable} users total)
+                    </span>
+                    <div style={{ display: "flex", gap: "0.25rem" }}>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={curPage === 1}
+                        onClick={() => setAvailableUsersPage((p) => Math.max(1, p - 1))}
+                        style={{ padding: "0.15rem 0.4rem" }}
+                      >
+                        Prev
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={curPage === maxPage}
+                        onClick={() => setAvailableUsersPage((p) => Math.min(maxPage, p + 1))}
+                        style={{ padding: "0.15rem 0.4rem" }}
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
+                <button type="button" className="btn" onClick={() => setRowAccessModal(null)}>Close</button>
               </div>
             </div>
-            <div style={{ marginBottom: "0.75rem" }}>
-              <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.25rem" }}>Add user</label>
-              <input
-                type="text"
-                placeholder="Search user by name or username"
-                value={rowAccessUserSearch}
-                onChange={(e) => setRowAccessUserSearch(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "0.4rem 0.6rem",
-                  borderRadius: 8,
-                  border: "1px solid var(--border)",
-                  marginBottom: "0.35rem",
-                  fontSize: "0.85rem",
-                }}
-              />
-              {rowAccessAssignments.length > 0 && rowAccessUserSearch.trim() !== "" && (
-                <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: "0.25rem" }}>
-                  {rowAccessAssignments.filter((a) => {
-                    const term = rowAccessUserSearch.toLowerCase();
-                    return (
-                      (a.full_name || "").toLowerCase().includes(term) ||
-                      a.username.toLowerCase().includes(term)
-                    );
-                  }).length === 0
-                    ? "No users match this search."
-                    : ""}
-                </p>
-              )}
-              <select
-                value={rowAccessAddUserId ?? ""}
-                onChange={(e) => setRowAccessAddUserId(e.target.value ? Number(e.target.value) : null)}
-                style={{ width: "100%", padding: "0.5rem 0.75rem", borderRadius: 8, border: "1px solid var(--border)", marginBottom: "0.5rem" }}
-              >
-                <option value="">— Select user —</option>
-                {rowAccessAssignments
-                  .filter((a) => {
-                    if (!rowAccessUserSearch.trim()) return true;
-                    const term = rowAccessUserSearch.toLowerCase();
-                    return (
-                      (a.full_name || "").toLowerCase().includes(term) ||
-                      a.username.toLowerCase().includes(term)
-                    );
-                  })
-                  .map((a) => (
-                  <option key={a.id} value={a.id}>{a.full_name || a.username}</option>
-                ))}
-              </select>
-              <select
-                value={rowAccessAddAccess}
-                onChange={(e) => setRowAccessAddAccess(e.target.value as "view" | "edit" | "edit_delete")}
-                style={{ width: "100%", padding: "0.5rem 0.75rem", borderRadius: 8, border: "1px solid var(--border)" }}
-              >
-                <option value="view">View only</option>
-                <option value="edit">Edit only</option>
-                <option value="edit_delete">Edit + Delete</option>
-              </select>
-            </div>
-            <div style={{ display: "flex", gap: "0.5rem" }}>
-              <button type="button" className="btn btn-primary" disabled={rowAccessSaving || rowAccessAddUserId == null} onClick={saveAddUserToRow}>
-                {rowAccessSaving ? "Saving…" : "Add and save"}
-              </button>
-              <button type="button" className="btn" onClick={() => setRowAccessModal(null)}>Close</button>
-            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

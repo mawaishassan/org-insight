@@ -11,7 +11,7 @@ import logging
 import asyncio
 import re
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,6 +66,7 @@ from app.entries.service import (
     user_can_add_row_multi_line_field,
     user_can_edit_row,
     user_can_delete_row,
+    user_can_edit_cell,
     user_can_export_multi_line_field,
     get_user_row_edit_map,
     save_entry_values,
@@ -117,37 +118,59 @@ async def _reindex_row_access_after_delete(
     """
     if not deleted_indices:
         return
+    # Find all entries in the group of entry_id to shift them all
+    entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return
+    group_res = await db.execute(
+        select(KPIEntry.id).where(
+            KPIEntry.kpi_id == entry.kpi_id,
+            KPIEntry.year == entry.year,
+            KPIEntry.period_key == entry.period_key,
+            KPIEntry.organization_id == entry.organization_id,
+        )
+    )
+    group_entry_ids = [rid for rid, in group_res.all()]
+
     rules_res = await db.execute(
         select(KpiMultiLineRowAccess).where(
-            KpiMultiLineRowAccess.entry_id == entry_id,
+            KpiMultiLineRowAccess.entry_id.in_(group_entry_ids),
             KpiMultiLineRowAccess.field_id == field_id,
         )
     )
     rules = list(rules_res.scalars().all())
     if not rules:
         return
-    sorted_deleted = sorted(deleted_indices)
-    to_shift: list[tuple[KpiMultiLineRowAccess, int]] = []
-    for rule in rules:
-        current = int(rule.row_index)
-        if current in deleted_indices:
-            await db.delete(rule)
-            continue
-        shift = 0
-        for deleted_idx in sorted_deleted:
-            if deleted_idx < current:
-                shift += 1
-        if shift > 0:
-            to_shift.append((rule, current - shift))
-    await db.flush()
-    # Two-phase reindex avoids transient uniqueness collisions on
-    # (user_id, entry_id, field_id, row_index) while rows are shifting.
-    for idx, (rule, _) in enumerate(to_shift, start=1):
-        rule.row_index = -idx
-    await db.flush()
-    for rule, final_index in to_shift:
-        rule.row_index = final_index
-    await db.flush()
+
+    from collections import defaultdict
+    rules_by_entry = defaultdict(list)
+    for r in rules:
+        rules_by_entry[r.entry_id].append(r)
+
+    for gid, entry_rules in rules_by_entry.items():
+        sorted_deleted = sorted(deleted_indices)
+        to_shift: list[tuple[KpiMultiLineRowAccess, int]] = []
+        for rule in entry_rules:
+            current = int(rule.row_index)
+            if current in deleted_indices:
+                await db.delete(rule)
+                continue
+            shift = 0
+            for deleted_idx in sorted_deleted:
+                if deleted_idx < current:
+                    shift += 1
+            if shift > 0:
+                to_shift.append((rule, current - shift))
+        await db.flush()
+        # Two-phase reindex avoids transient uniqueness collisions on
+        # (user_id, entry_id, field_id, row_index) while rows are shifting.
+        for idx, (rule, _) in enumerate(to_shift, start=1):
+            rule.row_index = -idx
+        await db.flush()
+        for rule, final_index in to_shift:
+            rule.row_index = final_index
+        await db.flush()
 
 
 async def _reindex_multi_line_rows(
@@ -314,17 +337,17 @@ async def _replace_multi_line_rows_from_dicts(
 
 def _entry_to_response(entry):
     entered_by_name = None
-    if getattr(entry, "user", None):
+    if "user" in entry.__dict__ and entry.user:
         u = entry.user
         entered_by_name = (getattr(u, "full_name", None) or getattr(u, "username", None) or "").strip() or getattr(u, "username", None)
         
     submitted_by_name = None
-    if getattr(entry, "submitted_by", None):
+    if "submitted_by" in entry.__dict__ and entry.submitted_by:
         sub_u = entry.submitted_by
         submitted_by_name = (getattr(sub_u, "full_name", None) or getattr(sub_u, "username", None) or "").strip() or getattr(sub_u, "username", None)
         
     last_modified_by_name = None
-    if getattr(entry, "last_modified_by", None):
+    if "last_modified_by" in entry.__dict__ and entry.last_modified_by:
         mod_u = entry.last_modified_by
         last_modified_by_name = (getattr(mod_u, "full_name", None) or getattr(mod_u, "username", None) or "").strip() or getattr(mod_u, "username", None)
 
@@ -550,6 +573,7 @@ def _xlsx_bytes_for_multi_items_export(
     key_to_sf: dict[str, KPIFieldSubField],
     export_keys: list[str],
     rows: list[dict],
+    base_url: str | None = None,
 ) -> bytes:
     """Build a professional .xlsx workbook for filtered multi-line export: bold headers,
     auto-sized columns, and native Excel types per sub-field (reuses the same field-type
@@ -569,20 +593,60 @@ def _xlsx_bytes_for_multi_items_export(
         cell.font = bold
 
     col_widths = [len(str(h)) for h in headers]
+    link_font = Font(color="0563C1", underline="single")
+
+    row_idx = 2  # Row 1 is header
     for r in rows:
-        row_cells = []
         for idx, k in enumerate(export_keys):
+            col_idx = idx + 1
+            cell = ws.cell(row=row_idx, column=col_idx)
             sf = key_to_sf.get(k)
             ft = getattr(sf, "field_type", None) if sf else None
             from app.entries.service import _is_subfield_satisfied_for_row
             if sf and not _is_subfield_satisfied_for_row(sf, r, key_to_sf):
                 v = None
             else:
-                v = _typed_value_for_xlsx_export(r.get(k) if isinstance(r, dict) else None, ft)
-            row_cells.append(v)
-            col_widths[idx] = max(col_widths[idx], len(str(v)) if v is not None else 0)
-        ws.append(row_cells)
+                v = r.get(k) if isinstance(r, dict) else None
 
+            is_link = False
+            if ft in (FieldType.attachment.value, "attachment") and v:
+                obj = None
+                if isinstance(v, str):
+                    s = v.strip()
+                    if s.startswith("{"):
+                        try:
+                            obj = json.loads(s)
+                        except Exception:
+                            obj = None
+                    else:
+                        obj = None
+                        if s:
+                            fn = s.rstrip("/").rsplit("/", 1)[-1]
+                            url = s
+                            obj = {"filename": fn, "url": url}
+                elif isinstance(v, dict):
+                    obj = v
+
+                if isinstance(obj, dict):
+                    fn = obj.get("filename")
+                    url = str(obj.get("url") or obj.get("download_url") or "")
+                    if url:
+                        m = re.search(r"kpis/(\d+)/files/(\d+)/download", url)
+                        if m:
+                            kpi_id = m.group(1)
+                            file_id = m.group(2)
+                            frontend_path = f"/dashboard/entries/attachments/{kpi_id}/{file_id}"
+                            full_url = f"{base_url.rstrip('/')}{frontend_path}" if base_url else frontend_path
+                            cell.value = f'=HYPERLINK("{full_url}", "{fn}")'
+                            cell.font = link_font
+                            is_link = True
+                            col_widths[idx] = max(col_widths[idx], len(str(fn)))
+
+            if not is_link:
+                typed_v = _typed_value_for_xlsx_export(v, ft)
+                cell.value = typed_v
+                col_widths[idx] = max(col_widths[idx], len(str(typed_v)) if typed_v is not None else 0)
+        row_idx += 1
 
     for idx, width in enumerate(col_widths, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = min(max(width + 2, 10), 60)
@@ -1033,6 +1097,9 @@ async def upload_multi_items_excel(
 
     field = await _load_multi_items_field(db, org_id, field_id)
     if field:
+        is_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+        if getattr(field, "row_level_user_access_enabled", False) and not is_admin:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Bulk upload is disallowed when row-level access is enabled")
         can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
         if not can_add:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to add rows to this field")
@@ -1706,17 +1773,20 @@ async def list_multi_items_rows(
     # Sort (by row data; original index is preserved in the tuple)
     if sort_by:
         reverse = sort_dir == "desc"
-        def sort_key(row: dict):
-            v = row.get(sort_by)
-            # Try numeric, then string
+        if sort_by in ("__index__", "row_index"):
+            rows = sorted(rows, key=lambda ir: ir[0], reverse=reverse)
+        else:
+            def sort_key(row: dict):
+                v = row.get(sort_by)
+                # Try numeric, then string
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return str(v) if v is not None else ""
             try:
-                return float(v)
-            except (TypeError, ValueError):
-                return str(v) if v is not None else ""
-        try:
-            rows = sorted(rows, key=lambda ir: sort_key(ir[1]), reverse=reverse)
-        except Exception:
-            pass
+                rows = sorted(rows, key=lambda ir: sort_key(ir[1]), reverse=reverse)
+            except Exception:
+                pass
 
     # Per-row permissions for current user (edit/delete) - used for editable_only filtering and row payload.
     out_rows: list[MultiItemsRow] = []
@@ -1725,6 +1795,22 @@ async def list_multi_items_rows(
     row_rule_map: dict[int, tuple[bool, bool]] = {}
 
     is_org_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+    kpi_level_can_edit = is_org_admin
+    if not is_org_admin:
+        kpi_level_res = await db.execute(
+            select(KpiRoleAssignment.id)
+            .join(
+                UserOrganizationRole,
+                UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+            )
+            .where(
+                UserOrganizationRole.user_id == current_user.id,
+                KpiRoleAssignment.kpi_id == entry.kpi_id,
+                KpiRoleAssignment.assignment_type == "data_entry",
+            )
+            .limit(1)
+        )
+        kpi_level_can_edit = kpi_level_res.scalar_one_or_none() is not None
 
     # Common permissions when row-level access is disabled.
     # When row-level access is enabled, non-admins must be readonly unless explicitly allowed per-row.
@@ -1829,40 +1915,44 @@ async def list_multi_items_rows(
 
         order_stmt = base_rows_stmt
         if sort_by:
-            # SQL sort on a specific sub-field to avoid the slow in-memory path on large datasets.
-            # This keeps paging in SQL even for 20k+ rows.
-            sort_sf = next((s for s in (field.sub_fields or []) if str(getattr(s, "key", "")) == str(sort_by)), None)
-            sort_sf_id = int(getattr(sort_sf, "id", 0) or 0) if sort_sf is not None else 0
-            sort_ft = getattr(getattr(sort_sf, "field_type", None), "value", getattr(sort_sf, "field_type", None)) if sort_sf is not None else None
-            if sort_sf_id > 0:
-                order_cell = KpiMultiLineCell
-                order_stmt = order_stmt.outerjoin(
-                    order_cell,
-                    and_(
-                        order_cell.row_id == KpiMultiLineRow.id,
-                        order_cell.sub_field_id == sort_sf_id,
-                    ),
-                )
-                if str(sort_ft) == "number":
-                    sort_expr = order_cell.value_number
-                elif str(sort_ft) == "date":
-                    sort_expr = order_cell.value_date
-                elif str(sort_ft) == "boolean":
-                    # bool sorts false < true; keep nulls last
-                    sort_expr = order_cell.value_boolean
-                else:
-                    # text / json / reference-like: sort by stringified value
-                    sort_expr = func.coalesce(
-                        cast(order_cell.value_text, String()),
-                        cast(order_cell.value_json, String()),
-                        cast(order_cell.value_number, String()),
-                        cast(order_cell.value_boolean, String()),
-                        cast(order_cell.value_date, String()),
-                    )
+            if sort_by in ("__index__", "row_index"):
                 reverse = sort_dir == "desc"
-                order_stmt = order_stmt.order_by(nulls_last(sort_expr.desc() if reverse else sort_expr.asc()))
+                order_stmt = order_stmt.order_by(nulls_last(KpiMultiLineRow.row_index.desc() if reverse else KpiMultiLineRow.row_index.asc()))
             else:
-                order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
+                # SQL sort on a specific sub-field to avoid the slow in-memory path on large datasets.
+                # This keeps paging in SQL even for 20k+ rows.
+                sort_sf = next((s for s in (field.sub_fields or []) if str(getattr(s, "key", "")) == str(sort_by)), None)
+                sort_sf_id = int(getattr(sort_sf, "id", 0) or 0) if sort_sf is not None else 0
+                sort_ft = getattr(getattr(sort_sf, "field_type", None), "value", getattr(sort_sf, "field_type", None)) if sort_sf is not None else None
+                if sort_sf_id > 0:
+                    order_cell = KpiMultiLineCell
+                    order_stmt = order_stmt.outerjoin(
+                        order_cell,
+                        and_(
+                            order_cell.row_id == KpiMultiLineRow.id,
+                            order_cell.sub_field_id == sort_sf_id,
+                        ),
+                    )
+                    if str(sort_ft) == "number":
+                        sort_expr = order_cell.value_number
+                    elif str(sort_ft) == "date":
+                        sort_expr = order_cell.value_date
+                    elif str(sort_ft) == "boolean":
+                        # bool sorts false < true; keep nulls last
+                        sort_expr = order_cell.value_boolean
+                    else:
+                        # text / json / reference-like: sort by stringified value
+                        sort_expr = func.coalesce(
+                            cast(order_cell.value_text, String()),
+                            cast(order_cell.value_json, String()),
+                            cast(order_cell.value_number, String()),
+                            cast(order_cell.value_boolean, String()),
+                            cast(order_cell.value_date, String()),
+                        )
+                    reverse = sort_dir == "desc"
+                    order_stmt = order_stmt.order_by(nulls_last(sort_expr.desc() if reverse else sort_expr.asc()))
+                else:
+                    order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
         else:
             order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
 
@@ -1919,8 +2009,8 @@ async def list_multi_items_rows(
             r = row_data_by_index.get(orig_index, {})
             if field_row_access_enabled and not is_org_admin:
                 rule = row_rule_map.get(int(orig_index))
-                can_edit = rule[0] if rule else False
-                can_delete = rule[1] if rule else False
+                can_edit = (rule[0] if rule else False) and kpi_level_can_edit
+                can_delete = False
             else:
                 can_edit = can_edit_common
                 can_delete = can_delete_common
@@ -2064,8 +2154,8 @@ async def list_multi_items_rows(
         if field_row_access_enabled and not is_org_admin:
             # Non-admins: readonly unless explicitly allowed for this row.
             rule = row_rule_map.get(int(orig_index))
-            can_edit = rule[0] if rule else False
-            can_delete = rule[1] if rule else False
+            can_edit = (rule[0] if rule else False) and kpi_level_can_edit
+            can_delete = False
         else:
             # Row-level disabled, or org/super admin: use normal permissions.
             can_edit = can_edit_common
@@ -2328,7 +2418,7 @@ async def update_multi_items_row(
         
         # If the user has edits for this column, verify edit permission
         if row and sf.key in row:
-            if not await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, sub_id):
+            if not await user_can_edit_cell(db, current_user.id, entry.id, field.id, row_index, sub_id):
                 continue
 
         cell = existing_cells.get(sub_id)
@@ -2392,7 +2482,7 @@ async def update_multi_items_row_cell(
     sub = next((s for s in (field.sub_fields or []) if getattr(s, "key", None) == key), None)
     if not sub:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sub-field not found")
-    can_edit_cell = await user_can_edit_field(db, current_user.id, entry.kpi_id, field.id, getattr(sub, "id", None))
+    can_edit_cell = await user_can_edit_cell(db, current_user.id, entry.id, field.id, row_index, int(getattr(sub, "id")))
     if not can_edit_cell:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this column")
 
@@ -2598,7 +2688,62 @@ async def preview_row_formulas(
     return computed_formulas
 
 
-@router.delete("/multi-items/rows/{row_index}", status_code=status.HTTP_204_NO_CONTENT)
+async def _check_only_row_access_users(
+    db: AsyncSession,
+    entry: KPIEntry,
+    field_id: int,
+    deleted_indices: set[int]
+) -> str | None:
+    # 1. Find all entry IDs in the same group
+    group_res = await db.execute(
+        select(KPIEntry.id).where(
+            KPIEntry.kpi_id == entry.kpi_id,
+            KPIEntry.year == entry.year,
+            KPIEntry.period_key == entry.period_key,
+            KPIEntry.organization_id == entry.organization_id,
+        )
+    )
+    group_entry_ids = [rid for rid, in group_res.all()]
+
+    # 2. Get all row access rules for this field and entry group
+    rules_res = await db.execute(
+        select(KpiMultiLineRowAccess).where(
+            KpiMultiLineRowAccess.entry_id.in_(group_entry_ids),
+            KpiMultiLineRowAccess.field_id == field_id,
+        )
+    )
+    rules = list(rules_res.scalars().all())
+    
+    # 3. Group rules by user_id
+    from collections import defaultdict
+    user_rows = defaultdict(set)
+    for r in rules:
+        if r.can_edit or r.can_delete or r.can_add:
+            user_rows[r.user_id].add(r.row_index)
+            
+    # 4. Check if any user's set of accessible rows is a subset of deleted_indices
+    affected_user_ids = []
+    for user_id, row_set in user_rows.items():
+        if row_set and row_set.issubset(deleted_indices):
+            affected_user_ids.append(user_id)
+            
+    if affected_user_ids:
+        # Load user usernames
+        users_res = await db.execute(
+            select(User.username).where(User.id.in_(affected_user_ids))
+        )
+        usernames = [u for u, in users_res.all()]
+        if usernames:
+            names_str = ", ".join(usernames)
+            if len(usernames) == 1:
+                return f"User '{names_str}' has rights only on the deleted record. It will be deleted from their portal as well."
+            else:
+                return f"Users ({names_str}) have rights only on the deleted records. They will be deleted from their portals as well."
+            
+    return None
+
+
+@router.delete("/multi-items/rows/{row_index}")
 async def delete_multi_items_row(
     row_index: int,
     entry_id: int = Query(...),
@@ -2622,6 +2767,8 @@ async def delete_multi_items_row(
     if not can_delete:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to delete this row")
 
+    warning_msg = await _check_only_row_access_users(db, entry, field.id, {row_index})
+
     mlr_res = await db.execute(
         select(KpiMultiLineRow).where(
             KpiMultiLineRow.entry_id == entry.id,
@@ -2631,7 +2778,7 @@ async def delete_multi_items_row(
     )
     mlr = mlr_res.scalar_one_or_none()
     if not mlr:
-        return
+        return {"warning": warning_msg}
     await db.delete(mlr)
     await db.flush()
     await _reindex_multi_line_rows(db, entry_id=entry.id, field_id=field.id)
@@ -2644,9 +2791,10 @@ async def delete_multi_items_row(
     mark_entry_modified(entry, current_user.id)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
+    return {"warning": warning_msg}
 
 
-@router.post("/multi-items/rows/bulk-delete", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/multi-items/rows/bulk-delete")
 async def bulk_delete_multi_items_rows(
     entry_id: int = Query(...),
     field_id: int = Query(...),
@@ -2669,14 +2817,16 @@ async def bulk_delete_multi_items_rows(
 
     raw_index_set = {i for i in indices if isinstance(i, int) and i >= 0}
     if not raw_index_set:
-        return
+        return {"warning": None}
     # Only delete rows the user is allowed to delete (record-level or field-level)
     index_set: set[int] = set()
     for idx in raw_index_set:
         if await user_can_delete_row(db, current_user.id, entry.id, field.id, idx):
             index_set.add(int(idx))
     if not index_set:
-        return
+        return {"warning": None}
+
+    warning_msg = await _check_only_row_access_users(db, entry, field.id, index_set)
 
     # Delete rows matching indices
     del_res = await db.execute(
@@ -2700,6 +2850,7 @@ async def bulk_delete_multi_items_rows(
     mark_entry_modified(entry, current_user.id)
     await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
+    return {"warning": warning_msg}
 
 
 @router.post("/multi-items/sync-from-api")
@@ -2881,6 +3032,14 @@ async def multi_items_import_capabilities(
         channels.append("odoo")
 
     odoo_blockers: list[str] = []
+    has_attachment_subfield = any(
+        getattr(sf, "field_type", None) in (FieldType.attachment, "attachment") for sf in (field.sub_fields or [])
+    )
+    if has_attachment_subfield and org_odoo and not (org_odoo.attachment_url_template or "").strip():
+        odoo_blockers.append(
+            "Attachment Download URL Template is not configured in Organization Odoo settings. Super Admin must configure it before importing attachment fields."
+        )
+
     if current_user.role == UserRole.SUPER_ADMIN:
         if not odoo_org_configured:
             odoo_blockers.append(
@@ -2899,7 +3058,7 @@ async def multi_items_import_capabilities(
     return {
         "import_channel": channel,
         "channels": sorted(set(channels)),
-        "odoo_ready": odoo_ready,
+        "odoo_ready": odoo_ready and not odoo_blockers,
         "odoo_org_configured": odoo_org_configured,
         "odoo_kpi_configured": odoo_kpi_configured,
         "odoo_blockers": odoo_blockers,
@@ -2929,6 +3088,9 @@ async def sync_multi_items_from_odoo(
         odoo_fetch_items,
         apply_odoo_field_mappings,
         apply_odoo_sub_field_mappings,
+        download_and_store_odoo_attachments,
+        store_pre_downloaded_odoo_attachments,
+        extract_odoo_attachment_ids,
     )
     from app.entries.service import user_can_add_row_multi_line_field, user_can_edit_multi_line_field
 
@@ -2963,6 +3125,15 @@ async def sync_multi_items_from_odoo(
     kpi_odoo = await get_kpi_odoo_config(db, field.kpi_id)
     if not org_odoo or not kpi_odoo:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Odoo is not fully configured for this organization/KPI")
+
+    att_sub_keys = [
+        s.key for s in (field.sub_fields or []) if getattr(s, "field_type", None) in (FieldType.attachment, "attachment")
+    ]
+    if att_sub_keys and not (org_odoo.attachment_url_template or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Attachment Download URL Template must be configured in Organization Odoo settings before importing attachment fields.",
+        )
 
     try:
         session_id = await odoo_authenticate(org_odoo)
@@ -3001,6 +3172,69 @@ async def sync_multi_items_from_odoo(
         if isinstance(x, dict) and not _is_multi_items_row_effectively_empty(dict(x))
     ]
 
+    all_attachment_errors: list[str] = []
+    if att_sub_keys and (org_odoo.attachment_url_template or "").strip():
+        att_template = org_odoo.attachment_url_template.strip()
+        
+        # 1. Collect all attachment IDs to download concurrently
+        all_att_ids = []
+        for row in item_dicts:
+            for att_key in att_sub_keys:
+                raw_att_val = row.get(att_key)
+                if raw_att_val is not None and raw_att_val != "":
+                    all_att_ids.extend(extract_odoo_attachment_ids(raw_att_val))
+        
+        unique_att_ids = list(set(all_att_ids))
+        
+        # 2. Download all files in parallel
+        downloaded_data = {}
+        if unique_att_ids:
+            import httpx
+            import asyncio
+            
+            async def fetch_one(att_id):
+                target_url = (
+                    att_template.replace("{ATTACHMENT_ID}", str(att_id))
+                    .replace("{attachment_id}", str(att_id))
+                    .replace("__ATTACHMENT_ID__", str(att_id))
+                    .replace("{SESSION_ID}", session_id)
+                    .replace("{session_id}", session_id)
+                    .replace("__SESSION_ID__", session_id)
+                )
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                    resp = await client.get(target_url, cookies={"session_id": session_id})
+                    if resp.status_code < 200 or resp.status_code >= 300:
+                        raise ValueError(f"HTTP {resp.status_code}")
+                    return att_id, resp.content, dict(resp.headers)
+
+            tasks = [fetch_one(aid) for aid in unique_att_ids]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for aid, res in zip(unique_att_ids, results):
+                if isinstance(res, Exception):
+                    msg = f"Failed to download Odoo attachment ID {aid}: {res}"
+                    all_attachment_errors.append(msg)
+                else:
+                    downloaded_data[aid] = (res[1], res[2])  # (content, headers)
+
+        # 3. Store downloaded attachments sequentially for DB safety
+        for row in item_dicts:
+            for att_key in att_sub_keys:
+                raw_att_val = row.get(att_key)
+                if raw_att_val is not None and raw_att_val != "":
+                    converted, att_errs = await store_pre_downloaded_odoo_attachments(
+                        db,
+                        org_id=org_id,
+                        kpi_id=field.kpi_id,
+                        entry_id=entry.id,
+                        year=entry.year,
+                        user_id=current_user.id,
+                        raw_attachment_val=raw_att_val,
+                        downloaded_data=downloaded_data,
+                    )
+                    row[att_key] = converted
+                    if att_errs:
+                        all_attachment_errors.extend(att_errs)
+
     existing_pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
     existing_rows: list[dict] = [r for _, r in existing_pairs] if existing_pairs else []
 
@@ -3033,6 +3267,8 @@ async def sync_multi_items_from_odoo(
     if effective_mode == "upsert":
         out["rows_updated"] = rows_updated
         out["rows_appended"] = rows_added
+    if all_attachment_errors:
+        out["attachment_errors"] = all_attachment_errors
     return out
 
 
@@ -3077,6 +3313,10 @@ async def import_multi_items_from_year(
     can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
     if not can_add:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to add rows to this field")
+
+    is_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+    if getattr(field, "row_level_user_access_enabled", False) and not is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Bulk upload is disallowed when row-level access is enabled")
 
     can_edit = await user_can_edit_multi_line_field(db, current_user.id, entry.kpi_id, field)
     if not can_edit:
@@ -3198,6 +3438,7 @@ async def list_multi_items_available_source_years(
 
 @router.get("/multi-items/export")
 async def export_multi_items_csv(
+    request: Request,
     entry_id: int = Query(...),
     field_id: int = Query(...),
     organization_id: int | None = Query(None),
@@ -3232,6 +3473,7 @@ async def export_multi_items_csv(
         description="PDF only: sub-header — an explanatory line shown just above the table for "
         "this export. Falls back to the KPI name and year when omitted or blank.",
     ),
+    frontend_base_url: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -3415,7 +3657,29 @@ async def export_multi_items_csv(
     if format == "xlsx":
         kpi_res = await db.execute(select(KPI.name).where(KPI.id == entry.kpi_id))
         kpi_name = kpi_res.scalar_one_or_none() or field.name or "Export"
-        content = _xlsx_bytes_for_multi_items_export(kpi_name, key_to_sf, export_keys, row_dicts)
+        # Determine frontend base URL dynamically from request headers or fallback to config CORS_ORIGINS
+        from app.core.config import get_settings
+        from urllib.parse import urlparse
+        settings = get_settings()
+        referer = request.headers.get("referer")
+        origin = request.headers.get("origin")
+        
+        frontend_base_url = None
+        if origin:
+            frontend_base_url = origin
+        elif referer:
+            parsed = urlparse(referer)
+            frontend_base_url = f"{parsed.scheme}://{parsed.netloc}"
+            
+        if not frontend_base_url:
+            if settings.CORS_ORIGINS:
+                frontend_base_url = settings.CORS_ORIGINS[0]
+            else:
+                frontend_base_url = "http://localhost:3000"
+
+        content = _xlsx_bytes_for_multi_items_export(
+            kpi_name, key_to_sf, export_keys, row_dicts, base_url=frontend_base_url
+        )
         # Default file name is the Multi Line Item (field) name, not the KPI name — the sheet
         # tab still identifies the KPI, but the download name identifies which item it is.
         default_base = f"{field.name or kpi_name}_{entry.year}"
@@ -4044,7 +4308,6 @@ async def export_entry_excel(
         KPIEntry.year == year,
         KPIEntry.period_key == pk,
         KPIEntry.is_draft == True,
-        KPIEntry.user_id == current_user.id,
     ).options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
     entry_res = await db.execute(entry_stmt)
     entry = entry_res.scalar_one_or_none()

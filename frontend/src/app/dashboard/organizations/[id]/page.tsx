@@ -1362,6 +1362,7 @@ interface OdooConfigResponse {
   configured: boolean;
   login_url?: string | null;
   data_fetch_url?: string | null;
+  attachment_url_template?: string | null;
   odoo_db?: string | null;
   username?: string | null;
   password?: string;
@@ -1375,6 +1376,7 @@ function OdooConfigSection({ orgId, token }: { orgId: number; token: string }) {
   const [form, setForm] = useState({
     login_url: "",
     data_fetch_url: "",
+    attachment_url_template: "",
     odoo_db: "",
     username: "",
     password: "",
@@ -1389,6 +1391,7 @@ function OdooConfigSection({ orgId, token }: { orgId: number; token: string }) {
           setForm({
             login_url: c.login_url || "",
             data_fetch_url: c.data_fetch_url || "",
+            attachment_url_template: c.attachment_url_template || "",
             odoo_db: c.odoo_db || "",
             username: c.username || "",
             password: "",
@@ -1417,6 +1420,7 @@ function OdooConfigSection({ orgId, token }: { orgId: number; token: string }) {
     const payload: Record<string, string | null> = {
       login_url: form.login_url.trim(),
       data_fetch_url: form.data_fetch_url.trim(),
+      attachment_url_template: form.attachment_url_template.trim() || null,
       odoo_db: form.odoo_db.trim() || null,
       username: form.username.trim(),
     };
@@ -1456,7 +1460,7 @@ function OdooConfigSection({ orgId, token }: { orgId: number; token: string }) {
         )}
       </p>
       <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
-        Configure Odoo login and data fetch URLs for KPI multi-line bulk import. Credentials are used server-side only.
+        Configure Odoo login, data fetch, and attachment download URLs for KPI multi-line bulk import. Credentials are used server-side only.
       </p>
       <form onSubmit={handleSave}>
         <div className="form-group">
@@ -1466,6 +1470,18 @@ function OdooConfigSection({ orgId, token }: { orgId: number; token: string }) {
         <div className="form-group">
           <label>Odoo data fetch URL</label>
           <input value={form.data_fetch_url} onChange={(e) => setForm((p) => ({ ...p, data_fetch_url: e.target.value }))} required style={{ width: "100%" }} />
+        </div>
+        <div className="form-group">
+          <label>Attachment Download URL Template (optional)</label>
+          <input
+            value={form.attachment_url_template}
+            onChange={(e) => setForm((p) => ({ ...p, attachment_url_template: e.target.value }))}
+            placeholder="e.g. https://domain/web/binary/saveas?model=ir.attachment&field=datas&id={ATTACHMENT_ID}&filename_field=datas_fname"
+            style={{ width: "100%" }}
+          />
+          <small style={{ color: "var(--muted)", display: "block", marginTop: "0.25rem" }}>
+            Use <code>&#123;ATTACHMENT_ID&#125;</code> as placeholder for the Odoo attachment ID.
+          </small>
         </div>
         <div className="form-group">
           <label>Odoo database (optional)</label>

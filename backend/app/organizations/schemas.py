@@ -75,6 +75,9 @@ class OdooConfigUpdate(BaseModel):
 
     login_url: str = Field(..., min_length=1, max_length=2048)
     data_fetch_url: str = Field(..., min_length=1, max_length=2048)
+    attachment_url_template: str | None = Field(
+        None, max_length=2048, description="Optional static template URL for downloading Odoo attachments (supports {ATTACHMENT_ID})"
+    )
     odoo_db: str | None = Field(None, max_length=255, description="Odoo database name for login")
     username: str = Field(..., min_length=1, max_length=255)
     password: str | None = Field(
@@ -91,6 +94,7 @@ class OdooConfigResponse(BaseModel):
     configured: bool
     login_url: str | None = None
     data_fetch_url: str | None = None
+    attachment_url_template: str | None = None
     odoo_db: str | None = None
     username: str | None = None
     password: str = Field(default="***", description="Masked")

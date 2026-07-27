@@ -129,7 +129,7 @@ async def _resolve_attachment_filenames_to_urls(
                 s = val.strip()
                 if not s:
                     new_row[k] = None
-                elif s.startswith("{"):
+                elif s.startswith("{") or s.startswith("["):
                     try:
                         new_row[k] = json.loads(s)
                     except Exception:
@@ -782,85 +782,86 @@ async def _copy_carry_forward_from_previous(
 
 
 async def _copy_entry_values(db: AsyncSession, src_id: int, dest_id: int) -> None:
-    from app.core.models import KPIFieldValue, KpiMultiLineRow, KpiMultiLineCell, KpiMultiLineRowAccess, KpiFile
-    
+    from sqlalchemy import text
+
     # 1. Copy scalar values
-    scalar_res = await db.execute(
-        select(KPIFieldValue).where(KPIFieldValue.entry_id == src_id)
+    await db.execute(
+        text(
+            """
+            INSERT INTO kpi_field_values (entry_id, field_id, value_text, value_number, value_json, value_boolean, value_date)
+            SELECT :dest_id, field_id, value_text, value_number, value_json, value_boolean, value_date
+            FROM kpi_field_values
+            WHERE entry_id = :src_id
+            """
+        ),
+        {"src_id": src_id, "dest_id": dest_id},
     )
-    for fv in scalar_res.scalars().all():
-        new_fv = KPIFieldValue(
-            entry_id=dest_id,
-            field_id=fv.field_id,
-            value_text=fv.value_text,
-            value_number=fv.value_number,
-            value_json=fv.value_json,
-            value_boolean=fv.value_boolean,
-            value_date=fv.value_date
-        )
-        db.add(new_fv)
-        
+
     # 2. Copy MLI rows
-    mli_rows_res = await db.execute(
-        select(KpiMultiLineRow)
-        .where(KpiMultiLineRow.entry_id == src_id)
-        .options(selectinload(KpiMultiLineRow.cells))
+    await db.execute(
+        text(
+            """
+            INSERT INTO kpi_multi_line_rows (entry_id, field_id, row_index, search_text)
+            SELECT :dest_id, field_id, row_index, search_text
+            FROM kpi_multi_line_rows
+            WHERE entry_id = :src_id
+            """
+        ),
+        {"src_id": src_id, "dest_id": dest_id},
     )
-    for r in mli_rows_res.scalars().all():
-        new_r = KpiMultiLineRow(
-            entry_id=dest_id,
-            field_id=r.field_id,
-            row_index=r.row_index,
-            search_text=r.search_text
-        )
-        db.add(new_r)
-        await db.flush()
-        
-        for c in r.cells:
-            new_c = KpiMultiLineCell(
-                row_id=new_r.id,
-                sub_field_id=c.sub_field_id,
-                value_text=c.value_text,
-                value_number=c.value_number,
-                value_json=c.value_json,
-                value_boolean=c.value_boolean,
-                value_date=c.value_date
-            )
-            db.add(new_c)
 
-    # 3. Copy row access records
-    access_res = await db.execute(
-        select(KpiMultiLineRowAccess).where(KpiMultiLineRowAccess.entry_id == src_id)
+    # Disable trigger before inserting cells to avoid O(N^2) updates on rows search_text
+    await db.execute(
+        text("ALTER TABLE kpi_multi_line_cells DISABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
     )
-    for ra in access_res.scalars().all():
-        new_ra = KpiMultiLineRowAccess(
-            user_id=ra.user_id,
-            entry_id=dest_id,
-            field_id=ra.field_id,
-            row_index=ra.row_index,
-            can_edit=ra.can_edit,
-            can_delete=ra.can_delete
-        )
-        db.add(new_ra)
 
-    # 4. Copy KPI files
-    files_res = await db.execute(
-        select(KpiFile).where(KpiFile.entry_id == src_id)
-    )
-    for f in files_res.scalars().all():
-        new_f = KpiFile(
-            kpi_id=f.kpi_id,
-            organization_id=f.organization_id,
-            year=f.year,
-            entry_id=dest_id,
-            original_filename=f.original_filename,
-            stored_path=f.stored_path,
-            content_type=f.content_type,
-            size=f.size,
-            uploaded_by_user_id=f.uploaded_by_user_id
+    try:
+        # 3. Copy MLI cells
+        await db.execute(
+            text(
+                """
+                INSERT INTO kpi_multi_line_cells (row_id, sub_field_id, value_text, value_number, value_json, value_boolean, value_date)
+                SELECT nr.id, oc.sub_field_id, oc.value_text, oc.value_number, oc.value_json, oc.value_boolean, oc.value_date
+                FROM kpi_multi_line_cells oc
+                JOIN kpi_multi_line_rows orw ON oc.row_id = orw.id
+                JOIN kpi_multi_line_rows nr ON nr.field_id = orw.field_id AND nr.row_index = orw.row_index
+                WHERE orw.entry_id = :src_id AND nr.entry_id = :dest_id
+                """
+            ),
+            {"src_id": src_id, "dest_id": dest_id},
         )
-        db.add(new_f)
-            
+    finally:
+        # Re-enable trigger
+        await db.execute(
+            text("ALTER TABLE kpi_multi_line_cells ENABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
+        )
+
+    # 4. Copy row access records
+    await db.execute(
+        text(
+            """
+            INSERT INTO kpi_multi_line_row_access (user_id, entry_id, field_id, row_index, can_edit, can_delete, can_add)
+            SELECT user_id, :dest_id, field_id, row_index, can_edit, can_delete, can_add
+            FROM kpi_multi_line_row_access
+            WHERE entry_id = :src_id
+            """
+        ),
+        {"src_id": src_id, "dest_id": dest_id},
+    )
+
+    # 5. Copy KPI files
+    await db.execute(
+        text(
+            """
+            INSERT INTO kpi_files (kpi_id, organization_id, year, entry_id, original_filename, stored_path, content_type, size, uploaded_by_user_id)
+            SELECT kpi_id, organization_id, year, :dest_id, original_filename, stored_path, content_type, size, uploaded_by_user_id
+            FROM kpi_files
+            WHERE entry_id = :src_id
+            """
+        ),
+        {"src_id": src_id, "dest_id": dest_id},
+    )
+
     await db.flush()
 
 
@@ -885,7 +886,7 @@ async def get_or_create_entry(
     can_edit = await user_can_edit_kpi(db, user_id, kpi_id, org_id)
     
     if can_edit:
-        # User is editor: load or create their private draft
+        # User is editor: load or create a shared draft for the period group
         result = await db.execute(
             select(KPIEntry).where(
                 KPIEntry.organization_id == org_id,
@@ -893,7 +894,6 @@ async def get_or_create_entry(
                 KPIEntry.year == year,
                 KPIEntry.period_key == pk,
                 KPIEntry.is_draft == True,
-                KPIEntry.user_id == user_id,
             )
         )
         entry = result.scalar_one_or_none()
@@ -1258,11 +1258,6 @@ async def user_can_add_row_multi_line_field(
 ) -> bool:
     """
     True if user can add a new row to a specific multi_line_items field.
-    This is an explicit permission separate from edit/delete.
-
-    Important: merged field access treats whole-field data_entry as stronger than add_row, so users
-    with KPI-level or whole-field edit plus an Add Row grant in Security would lose add_row in the
-    combined map. We therefore check explicit add_row rows (and role whole-field add_row) directly.
     """
     user_res = await db.execute(select(User).where(User.id == user_id))
     user = user_res.scalar_one_or_none()
@@ -1271,41 +1266,49 @@ async def user_can_add_row_multi_line_field(
     if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
         return True
 
-    # Per-user Add Row from Security tab (KpiFieldAccess) — independent of merged map strength order
-    direct_res = await db.execute(
-        select(KpiFieldAccess.id).where(
-            KpiFieldAccess.kpi_id == kpi_id,
-            KpiFieldAccess.user_id == user_id,
-            KpiFieldAccess.field_id == field_id,
-            KpiFieldAccess.sub_field_id.is_(None),
-            KpiFieldAccess.access_type == "add_row",
-        ).limit(1)
-    )
-    if direct_res.scalar_one_or_none() is not None:
-        return True
-
-    # Whole-field add_row on any of the user's org roles (same idea: do not rely on merge)
-    user_roles_res = await db.execute(
-        select(UserOrganizationRole.organization_role_id).where(UserOrganizationRole.user_id == user_id)
-    )
-    role_ids = [row[0] for row in user_roles_res.all()]
-    if role_ids:
-        role_add_res = await db.execute(
-            select(KpiFieldAccessByRole.id).where(
-                KpiFieldAccessByRole.kpi_id == kpi_id,
-                KpiFieldAccessByRole.organization_role_id.in_(role_ids),
-                KpiFieldAccessByRole.field_id == field_id,
-                KpiFieldAccessByRole.sub_field_id.is_(None),
-                KpiFieldAccessByRole.access_type == "add_row",
-            ).limit(1)
+    # 1. Check KPI Role Access: Does the user have a role assigned to this KPI with allow_add_row?
+    role_assignments_res = await db.execute(
+        select(KpiRoleAssignment.allow_add_row, KpiRoleAssignment.assignment_type)
+        .join(UserOrganizationRole, UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id)
+        .where(
+            UserOrganizationRole.user_id == user_id,
+            KpiRoleAssignment.kpi_id == kpi_id,
         )
-        if role_add_res.scalar_one_or_none() is not None:
-            return True
-
-    access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
-    if access_map is None:
+    )
+    role_rows = role_assignments_res.all()
+    if not role_rows:
         return False
-    return access_map.get((field_id, None)) == "add_row"
+
+    kpi_allows_add = False
+    for allow_add, assign_type in role_rows:
+        atype = assign_type.value if hasattr(assign_type, "value") else str(assign_type)
+        if atype == "data_entry" and allow_add:
+            kpi_allows_add = True
+            break
+
+    if not kpi_allows_add:
+        return False
+
+    # 2. Check Row-Level Access
+    field_res = await db.execute(select(KPIField).where(KPIField.id == field_id))
+    field = field_res.scalar_one_or_none()
+    if not field:
+        return False
+
+    if getattr(field, "row_level_user_access_enabled", False):
+        # Must have at least one row assignment with can_add = True!
+        row_access_res = await db.execute(
+            select(KpiMultiLineRowAccess.id)
+            .where(
+                KpiMultiLineRowAccess.user_id == user_id,
+                KpiMultiLineRowAccess.field_id == field_id,
+                KpiMultiLineRowAccess.can_add == True,
+            )
+            .limit(1)
+        )
+        return row_access_res.scalar_one_or_none() is not None
+    else:
+        return True
 
 
 def _user_can_edit_sub_field(access_map: dict | None, field_id: int, sub_field_id: int | None) -> bool:
@@ -1331,18 +1334,37 @@ async def user_can_edit_multi_line_field(
 async def user_can_edit_row(
     db: AsyncSession, user_id: int, entry_id: int, field_id: int, row_index: int
 ) -> bool:
-    """True if user can edit this specific row. When row_level_user_access_enabled is False, all rows follow role/field access; when True, row-level user access is enforced."""
+    """True if user can edit this specific row. Enforces KPI Role Access -> Row-Level Access priority."""
     user_res = await db.execute(select(User).where(User.id == user_id))
     user = user_res.scalar_one_or_none()
     if not user:
         return False
     if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
         return True
-    # Load field to check row_level_user_access_enabled
+
     entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
     entry = entry_res.scalar_one_or_none()
     if not entry:
         return False
+
+    # 1. KPI Role Access: User's role must be assigned to this KPI with 'data_entry'
+    kpi_role_res = await db.execute(
+        select(KpiRoleAssignment.id)
+        .join(
+            UserOrganizationRole,
+            UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+        )
+        .where(
+            UserOrganizationRole.user_id == user_id,
+            KpiRoleAssignment.kpi_id == entry.kpi_id,
+            KpiRoleAssignment.assignment_type == "data_entry",
+        )
+        .limit(1)
+    )
+    if kpi_role_res.scalar_one_or_none() is None:
+        return False
+
+    # Load field to check row_level_user_access_enabled
     field_res = await db.execute(
         select(KPIField)
         .where(KPIField.id == field_id, KPIField.kpi_id == entry.kpi_id)
@@ -1354,6 +1376,7 @@ async def user_can_edit_row(
         if field.field_type == FieldType.multi_line_items:
             return await user_can_edit_multi_line_field(db, user_id, entry.kpi_id, field)
         return await user_can_edit_field(db, user_id, entry.kpi_id, field_id, None)
+
     # Row-level user access enabled: check KpiMultiLineRowAccess
     row_res = await db.execute(
         select(KpiMultiLineRowAccess).where(
@@ -1375,23 +1398,46 @@ async def user_can_edit_row(
 async def user_can_delete_row(
     db: AsyncSession, user_id: int, entry_id: int, field_id: int, row_index: int
 ) -> bool:
-    """True if user can delete this specific row. When row_level_user_access_enabled is False, all rows follow role/field access; when True, row-level user access is enforced."""
+    """True if user can delete this specific row. Enforces KPI Role Access -> Row-Level Access priority."""
     user_res = await db.execute(select(User).where(User.id == user_id))
     user = user_res.scalar_one_or_none()
     if not user:
         return False
     if user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
         return True
+
     entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
     entry = entry_res.scalar_one_or_none()
     if not entry:
         return False
+
+    # 1. KPI Role Access: User's role must be assigned to this KPI with 'data_entry'
+    kpi_role_res = await db.execute(
+        select(KpiRoleAssignment.id)
+        .join(
+            UserOrganizationRole,
+            UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+        )
+        .where(
+            UserOrganizationRole.user_id == user_id,
+            KpiRoleAssignment.kpi_id == entry.kpi_id,
+            KpiRoleAssignment.assignment_type == "data_entry",
+        )
+        .limit(1)
+    )
+    if kpi_role_res.scalar_one_or_none() is None:
+        return False
+
     field_res = await db.execute(
         select(KPIField).where(KPIField.id == field_id, KPIField.kpi_id == entry.kpi_id)
     )
     field = field_res.scalar_one_or_none()
+    if field and getattr(field, "row_level_user_access_enabled", False):
+        if user.role.value not in ("ORG_ADMIN", "SUPER_ADMIN"):
+            return False
     if field and not getattr(field, "row_level_user_access_enabled", False):
         return await user_can_edit_field(db, user_id, entry.kpi_id, field_id, None)
+
     row_res = await db.execute(
         select(KpiMultiLineRowAccess).where(
             KpiMultiLineRowAccess.user_id == user_id,
@@ -1407,6 +1453,35 @@ async def user_can_delete_row(
         if r.row_index == row_index and r.can_delete:
             return True
     return False
+
+
+async def user_can_edit_cell(
+    db: AsyncSession, user_id: int, entry_id: int, field_id: int, row_index: int, sub_field_id: int
+) -> bool:
+    """True if user can edit this specific cell (row index & sub_field/column index)."""
+    # 1. First, check row-level edit rights (includes KPI role check).
+    row_editable = await user_can_edit_row(db, user_id, entry_id, field_id, row_index)
+    if not row_editable:
+        return False
+
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if user and user.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
+        return True
+
+    # 2. Check Column-Level (Multi-Field) Access restrictions.
+    entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return False
+
+    access_map = await get_user_field_access_for_kpi(db, user_id, entry.kpi_id)
+    if access_map is None:
+        # No column restrictions configured: inherits row permission.
+        return True
+
+    perm = access_map.get((field_id, sub_field_id)) or access_map.get((field_id, None))
+    return perm == "data_entry"
 
 
 async def get_user_row_edit_map(
@@ -1923,6 +1998,9 @@ async def recompute_formula_fields_for_kpi(
 
         for f in fields:
             fv = fv_by_field_id.get(f.id)
+            if f.field_type == FieldType.multi_line_items:
+                multi_line_items_data[f.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=f)
+                continue
             if not fv:
                 continue
             if f.field_type == FieldType.number and fv.value_number is not None:
@@ -1930,8 +2008,6 @@ async def recompute_formula_fields_for_kpi(
                     value_by_key[f.key] = float(fv.value_number)
                 except (TypeError, ValueError):
                     pass
-            elif f.field_type == FieldType.multi_line_items:
-                multi_line_items_data[f.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=f)
             elif f.field_type == FieldType.formula and fv.value_number is not None:
                 # Keep existing formula values as baseline; overridden when recomputed below.
                 try:
@@ -2241,8 +2317,8 @@ async def list_entries(
 
     filtered_entries: list[KPIEntry] = []
     for key, group in grouped.items():
-        # Find current user's draft entry
-        my_draft = next((e for e in group if e.is_draft and e.user_id == user_id), None)
+        # Find the shared draft entry for this period group
+        my_draft = next((e for e in group if e.is_draft), None)
         if my_draft:
             filtered_entries.append(my_draft)
         else:

@@ -115,16 +115,11 @@ async def create_org(
 async def get_org(
     org_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_org_admin_for_org),
+    current_user: User = Depends(get_current_user),
 ):
-    """Get organization by id. Org Admin (for their own org) or Super Admin.
-
-    OrganizationResponse only exposes name/description/is_active/time_dimension — nothing an
-    org admin shouldn't see about their own organization. Several frontend pages already fetch
-    this defensively (falling back to null on failure), which is what made the previous
-    super-admin-only restriction a silent, functionally-invisible bug for org admins rather than
-    a hard failure: the org name/time-dimension info they'd expect to see just came back empty.
-    """
+    """Get organization by id. Member of that organization or Super Admin."""
+    if current_user.role.value != "SUPER_ADMIN" and current_user.organization_id != org_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this organization")
     org = await get_organization(db, org_id)
     if not org:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
@@ -305,6 +300,7 @@ async def get_org_odoo_config(
         configured=True,
         login_url=config.login_url,
         data_fetch_url=config.data_fetch_url,
+        attachment_url_template=config.attachment_url_template,
         odoo_db=config.odoo_db,
         username=config.username,
         password="***",
@@ -355,6 +351,7 @@ async def update_org_odoo_config(
         password = raw_password
     else:
         password = existing.password
+    att_url = (body.attachment_url_template or "").strip() or None
     config = await upsert_org_odoo_config(
         db,
         org_id,
@@ -363,6 +360,7 @@ async def update_org_odoo_config(
         (body.odoo_db or "").strip() or None,
         body.username.strip(),
         password,
+        attachment_url_template=att_url,
     )
     await db.commit()
     return OdooConfigResponse(
@@ -370,6 +368,7 @@ async def update_org_odoo_config(
         configured=True,
         login_url=config.login_url,
         data_fetch_url=config.data_fetch_url,
+        attachment_url_template=config.attachment_url_template,
         odoo_db=config.odoo_db,
         username=config.username,
         password="***",

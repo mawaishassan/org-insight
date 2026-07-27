@@ -916,6 +916,7 @@ async def _kpi_bar_chart_payload(
         use_sql_agg = agg_w in ("count_rows", "sum", "avg")
         filter_where_sql: str | None = None
         filter_sql_params: dict[str, Any] | None = None
+        filter_sid_params: list[str] | None = None
         if use_sql_agg:
             f_full = await get_field_with_subfields_only(db, int(f_obj.id), org_id) or f_obj
             sub_id_by_key: dict[str, int] = {}
@@ -957,9 +958,9 @@ async def _kpi_bar_chart_payload(
                                 continue
                             labs = await _distinct_multiline_subfield_labels(
                                 db,
-                                entry_id=int(eid),
-                                multiline_field_id=int(f_obj.id),
-                                sub_field_id=int(sid),
+                                  entry_id=int(eid),
+                                  multiline_field_id=int(f_obj.id),
+                                  sub_field_id=int(sid),
                             )
                             # Build a minimal row_dict list so reference_filter_resolve can discover labels.
                             row_dicts = [{fk_s: lab} for lab in labs]
@@ -995,7 +996,7 @@ async def _kpi_bar_chart_payload(
                 if compiled is None:
                     use_sql_agg = False
                 else:
-                    filter_where_sql, filter_sql_params = compiled
+                    filter_where_sql, filter_sql_params, filter_sid_params = compiled
                     if not (filter_where_sql or "").strip():
                         filter_where_sql = None
                         filter_sql_params = None
@@ -1011,6 +1012,7 @@ async def _kpi_bar_chart_payload(
                         agg=agg_w,
                         filter_where_sql=filter_where_sql,
                         filter_params=filter_sql_params,
+                        filter_sid_params=filter_sid_params,
                     )
                 except Exception:
                     buckets = None
@@ -1628,6 +1630,43 @@ async def _dashboard_card_payload(
             e_rev,
         )
 
+    if sm == "multi_line_agg":
+        fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+        fmap = build_kpi_field_maps(fields)
+        mls = (merged.get("source_field_key") or "").strip()
+        f_obj = next((f for f in fields if f.key == mls and f.field_type == FieldType.multi_line_items), None)
+        if not f_obj or not eid:
+            return (
+                {
+                    "kpi_id": kpi_id,
+                    "year": year,
+                    "period_key": _period_key_norm(period_key),
+                    "entry_id": eid,
+                    "row_count": 0,
+                },
+                {"source_mode": "multi_line_agg", "numeric": None, "raw_rows": []},
+                e_rev,
+            )
+        f_obj = await _field_with_subs_if_mline_filters(
+            db, org_id, f_obj, merged.get("filters")
+        )
+        rows, _n = await load_multi_line_row_dicts_filtered(
+            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=merged.get("filters")
+        )
+        agg = merged.get("agg") or "sum"
+        n = aggregate_single_value(rows, agg=agg, value_key=merged.get("value_sub_field_key") or None)
+        return (
+            {
+                "kpi_id": kpi_id,
+                "year": year,
+                "period_key": _period_key_norm(period_key),
+                "entry_id": eid,
+                "row_count": len(rows),
+            },
+            {"source_mode": "multi_line_agg", "numeric": n, "raw_rows": rows, "field_map": fmap},
+            e_rev,
+        )
+
     return (
         {"kpi_id": kpi_id, "year": year, "row_count": 0},
         {"error": "unsupported source_mode for fast card endpoint", "source_mode": sm},
@@ -1718,6 +1757,19 @@ async def resolve_dashboard_card_widget_data_batch(
                 "data": {"source_mode": "static", "static_value": w.get("static_value")},
                 "entry_revision": None,
             }
+            continue
+        if sm == "multi_line_agg":
+            try:
+                meta, data, e_rev = await _dashboard_card_payload(db, org_id, w)
+                out[key] = {
+                    "ok": True,
+                    "widget_type": "kpi_card_single_value",
+                    "meta": meta,
+                    "data": data,
+                    "entry_revision": e_rev,
+                }
+            except Exception as e:
+                out[key] = {"ok": False, "error": str(e)}
             continue
         if sm != "field":
             out[key] = {"ok": False, "error": f"unsupported source_mode: {sm}"}

@@ -555,8 +555,8 @@ async def replace_kpi_assignments(
 
 async def list_kpi_role_assignments(
     db: AsyncSession, kpi_id: int, org_id: int
-) -> list[tuple[OrganizationRole, str]]:
-    """List (role, permission) assigned to this KPI. Permission is 'data_entry' or 'view'."""
+) -> list[tuple[OrganizationRole, str, bool, bool]]:
+    """List (role, permission, allow_add_row, allow_bulk_upload) assigned to this KPI."""
     kpi = await get_kpi(db, kpi_id, org_id)
     if not kpi:
         return []
@@ -568,23 +568,34 @@ async def list_kpi_role_assignments(
     )
     out = []
     for row in result.all():
-        perm = getattr(row[1], "assignment_type", None) or "data_entry"
+        ra = row[1]
+        perm = getattr(ra, "assignment_type", None) or "data_entry"
         perm = perm.value if hasattr(perm, "value") else str(perm)
-        out.append((row[0], perm))
+        allow_add_row = getattr(ra, "allow_add_row", True)
+        allow_bulk_upload = getattr(ra, "allow_bulk_upload", True)
+        out.append((row[0], perm, allow_add_row, allow_bulk_upload))
     return out
 
 
 async def replace_kpi_role_assignments(
     db: AsyncSession,
     kpi_id: int,
-    assignments: list[tuple[int, str]],
+    assignments: list[tuple[int, str, bool, bool]],
     org_id: int,
 ) -> bool:
-    """Replace all role assignments for this KPI. assignments: list of (role_id, permission)."""
+    """Replace all role assignments for this KPI. assignments: list of (role_id, permission, allow_add_row, allow_bulk_upload)."""
     kpi = await get_kpi(db, kpi_id, org_id)
     if not kpi:
         return False
-    for role_id, _ in assignments:
+    # Deduplicate assignments by role_id to prevent duplicates in the database insert/update batch
+    seen_role_ids = set()
+    unique_assignments = []
+    for role_id, perm, allow_add, allow_bulk in assignments:
+        if role_id not in seen_role_ids:
+            seen_role_ids.add(role_id)
+            unique_assignments.append((role_id, perm, allow_add, allow_bulk))
+
+    for role_id, _, _, _ in unique_assignments:
         result = await db.execute(
             select(OrganizationRole).where(
                 OrganizationRole.id == role_id,
@@ -593,12 +604,24 @@ async def replace_kpi_role_assignments(
         )
         if result.scalar_one_or_none() is None:
             return False
+
     await db.execute(delete(KpiRoleAssignment).where(KpiRoleAssignment.kpi_id == kpi_id))
-    for role_id, perm in assignments:
+    # Flush deletion before adding new assignments to avoid temporary unique constraint violation in transaction
+    await db.flush()
+
+    for role_id, perm, allow_add, allow_bulk in unique_assignments:
         p = (perm or "data_entry").strip().lower() if isinstance(perm, str) else "data_entry"
         if p not in ("data_entry", "view"):
             p = "data_entry"
-        db.add(KpiRoleAssignment(kpi_id=kpi_id, organization_role_id=role_id, assignment_type=p))
+        db.add(
+            KpiRoleAssignment(
+                kpi_id=kpi_id,
+                organization_role_id=role_id,
+                assignment_type=p,
+                allow_add_row=allow_add,
+                allow_bulk_upload=allow_bulk,
+            )
+        )
     await db.flush()
     return True
 
@@ -875,12 +898,13 @@ async def replace_add_row_users_for_field(
 async def get_row_access_for_user(
     db: AsyncSession, user_id: int, entry_id: int, field_id: int
 ) -> list[dict]:
-    """List record-level access for a user on an entry+field (multi_line_items). Returns list of {row_index, can_edit, can_delete}."""
+    """List record-level access for a user on an entry+field (multi_line_items). Returns list of {row_index, can_edit, can_delete, can_add}."""
     result = await db.execute(
         select(
             KpiMultiLineRowAccess.row_index,
             KpiMultiLineRowAccess.can_edit,
             KpiMultiLineRowAccess.can_delete,
+            KpiMultiLineRowAccess.can_add,
         ).where(
             KpiMultiLineRowAccess.user_id == user_id,
             KpiMultiLineRowAccess.entry_id == entry_id,
@@ -888,7 +912,7 @@ async def get_row_access_for_user(
         )
     )
     return [
-        {"row_index": r[0], "can_edit": r[1], "can_delete": r[2]}
+        {"row_index": r[0], "can_edit": r[1], "can_delete": r[2], "can_add": r[3]}
         for r in result.all()
     ]
 
@@ -907,9 +931,9 @@ async def replace_row_access(
     entry_id: int,
     field_id: int,
     org_id: int,
-    rows: list[tuple[int, bool, bool]],
+    rows: list[tuple[int, bool, bool, bool]],
 ) -> bool:
-    """Replace record-level access for a user on an entry+field. rows: list of (row_index, can_edit, can_delete)."""
+    """Replace record-level access for a user on an entry+field. rows: list of (row_index, can_edit, can_delete, can_add)."""
     # Validate entry belongs to org and field is multi_line_items on same KPI
     entry_res = await db.execute(
         select(KPIEntry).where(
@@ -931,24 +955,38 @@ async def replace_row_access(
     user_res = await db.execute(select(User).where(User.id == user_id, User.organization_id == org_id))
     if user_res.scalar_one_or_none() is None:
         return False
-    await db.execute(
-        delete(KpiMultiLineRowAccess).where(
-            KpiMultiLineRowAccess.user_id == user_id,
-            KpiMultiLineRowAccess.entry_id == entry_id,
-            KpiMultiLineRowAccess.field_id == field_id,
+
+    # Find all entries in the same KPI/year/period/org group to synchronize permissions
+    group_res = await db.execute(
+        select(KPIEntry.id).where(
+            KPIEntry.kpi_id == entry.kpi_id,
+            KPIEntry.year == entry.year,
+            KPIEntry.period_key == entry.period_key,
+            KPIEntry.organization_id == org_id,
         )
     )
-    for row_index, can_edit, can_delete in rows:
-        db.add(
-            KpiMultiLineRowAccess(
-                user_id=user_id,
-                entry_id=entry_id,
-                field_id=field_id,
-                row_index=row_index,
-                can_edit=can_edit,
-                can_delete=can_delete,
+    group_ids = [rid for rid, in group_res.all()]
+
+    for gid in group_ids:
+        await db.execute(
+            delete(KpiMultiLineRowAccess).where(
+                KpiMultiLineRowAccess.user_id == user_id,
+                KpiMultiLineRowAccess.entry_id == gid,
+                KpiMultiLineRowAccess.field_id == field_id,
             )
         )
+        for row_index, can_edit, can_delete, can_add in rows:
+            db.add(
+                KpiMultiLineRowAccess(
+                    user_id=user_id,
+                    entry_id=gid,
+                    field_id=field_id,
+                    row_index=row_index,
+                    can_edit=can_edit,
+                    can_delete=can_delete,
+                    can_add=can_add,
+                )
+            )
     await db.flush()
     return True
 
@@ -1053,6 +1091,7 @@ async def get_row_access_by_entry(
             KpiMultiLineRowAccess.row_index,
             KpiMultiLineRowAccess.can_edit,
             KpiMultiLineRowAccess.can_delete,
+            KpiMultiLineRowAccess.can_add,
             User.id,
             User.full_name,
             User.username,
@@ -1065,13 +1104,14 @@ async def get_row_access_by_entry(
     )
     by_row: dict[int, list[dict]] = {}
     for r in result.all():
-        ri, can_edit, can_delete, uid, full_name, username = r
+        ri, can_edit, can_delete, can_add, uid, full_name, username = r
         by_row.setdefault(ri, []).append({
             "user_id": uid,
             "full_name": full_name,
             "username": username or "",
             "can_edit": can_edit,
             "can_delete": can_delete,
+            "can_add": can_add,
         })
     out = []
     for row_index in range(total_rows):
