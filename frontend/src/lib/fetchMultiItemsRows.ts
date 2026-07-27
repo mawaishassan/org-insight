@@ -58,8 +58,29 @@ export async function fetchMultiLineRowsForEntry(opts: {
   entryId: number;
   fieldId: number;
   filters?: MultiItemsFilterPayloadV2 | null;
+  countOnly?: boolean;
 }): Promise<Record<string, unknown>[]> {
-  const { token, organizationId, entryId, fieldId, filters } = opts;
+  const { token, organizationId, entryId, fieldId, filters, countOnly } = opts;
+
+  if (countOnly) {
+    const params = new URLSearchParams({
+      entry_id: String(entryId),
+      field_id: String(fieldId),
+      organization_id: String(organizationId),
+      page: "1",
+      page_size: "1",
+    });
+    if (filters) {
+      params.set("filters", JSON.stringify(filters));
+    }
+    try {
+      const res = await api<MultiItemsRowsResponse>(`/entries/multi-items/rows?${params.toString()}`, { token });
+      const total = typeof res?.total === "number" ? res.total : 0;
+      return Array(total).fill({});
+    } catch {
+      return [];
+    }
+  }
 
   const hasStructuredFilters =
     filters != null &&
