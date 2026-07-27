@@ -55,6 +55,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [categories, setCategories] = useState<CategoryRow[]>([]);
   const [orgTags, setOrgTags] = useState<OrgTagRow[]>([]);
   const [selectedOrgName, setSelectedOrgName] = useState<string | null>(null);
+  const [hasKpiRights, setHasKpiRights] = useState<boolean>(true);
   /** For routes outside /dashboard/organizations/[id] that still have org context (e.g. kpis/[id]/fields?organization_id=3). */
   const [breadcrumbTail, setBreadcrumbTail] = useState<{ orgId: number; orgName: string | null; segments: { label: string; href: string }[] } | null>(null);
   /** Ignore stale breadcrumb API responses when pathname/query changes quickly (avoids clearing tail or showing wrong year). */
@@ -98,17 +99,39 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   useEffect(() => {
     const token = getAccessToken();
     if (!token) {
-      router.push("/login");
+      const currentPath = pathname + (searchParams.toString() ? `?${searchParams.toString()}` : "");
+      router.push(`/login?redirect=${encodeURIComponent(currentPath)}`);
       return;
     }
     api<CurrentUser>("/auth/me", { token })
       .then(setUser)
       .catch(() => {
         clearTokens();
-        router.push("/login");
+        const currentPath = pathname + (searchParams.toString() ? `?${searchParams.toString()}` : "");
+        router.push(`/login?redirect=${encodeURIComponent(currentPath)}`);
       })
       .finally(() => setLoading(false));
-  }, [router]);
+  }, [router, pathname, searchParams]);
+
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token || !orgId || !user) return;
+    const role = user.role as UserRole;
+    if (role === "SUPER_ADMIN" || role === "ORG_ADMIN") {
+      setHasKpiRights(true);
+      return;
+    }
+    api<Array<{ id: number }>>(
+      `/entries/available-kpis?organization_id=${orgId}&limit=1`,
+      { token }
+    )
+      .then((available) => {
+        setHasKpiRights(Array.isArray(available) && available.length > 0);
+      })
+      .catch(() => {
+        setHasKpiRights(false);
+      });
+  }, [orgId, user]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -497,7 +520,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const breadcrumbs: { label: string; href: string }[] = [];
   if (breadcrumbTail) {
-    breadcrumbs.push({ label: "Home", href: isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries" });
+    if (hasKpiRights || isSuperAdmin) {
+      breadcrumbs.push({ label: "Home", href: isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries" });
+    }
     if (breadcrumbTail.orgId > 0 && breadcrumbTail.orgName) {
       breadcrumbs.push({
         label: breadcrumbTail.orgName,
@@ -523,12 +548,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       }
     }
   } else {
-    breadcrumbs.push({ label: "Home", href: "/dashboard/entries" });
+    if (hasKpiRights) {
+      breadcrumbs.push({ label: "Home", href: "/dashboard/entries" });
+    }
     if (pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users") {
       breadcrumbs.push({ label: "Users", href: "/dashboard/users" });
     }
     if (pathname === "/dashboard/dashboards") {
-      breadcrumbs.push({ label: "Dashboards", href: dashboardsHref });
+      if (hasKpiRights) {
+        breadcrumbs.push({ label: "Dashboards", href: dashboardsHref });
+      }
     } else if (pathname.startsWith("/dashboard/dashboards/")) {
       // Tail should normally handle this; keep a safe fallback.
       breadcrumbs.push({ label: "Dashboards", href: dashboardsHref });
@@ -550,17 +579,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       >
         <nav style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.95rem", flexWrap: "wrap" }} aria-label="Breadcrumb">
           {breadcrumbs.length === 0 ? (
-            <Link
-              href={isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries"}
-              style={{
-                fontWeight: 700,
-                fontSize: "1rem",
-                color: (isSuperAdmin ? pathname === "/dashboard/organizations" : pathname === "/dashboard/entries") ? "var(--accent)" : "var(--text)",
-                textDecoration: "none",
-              }}
-            >
-              Home
-            </Link>
+            hasKpiRights ? (
+              <Link
+                href={isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries"}
+                style={{
+                  fontWeight: 700,
+                  fontSize: "1rem",
+                  color: (isSuperAdmin ? pathname === "/dashboard/organizations" : pathname === "/dashboard/entries") ? "var(--accent)" : "var(--text)",
+                  textDecoration: "none",
+                }}
+              >
+                Home
+              </Link>
+            ) : null
           ) : (
             breadcrumbs.map((crumb, i) => {
               const isLast = i === breadcrumbs.length - 1;

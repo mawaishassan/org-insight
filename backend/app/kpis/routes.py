@@ -516,8 +516,15 @@ async def list_kpi_assignments_by_role_route(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
     pairs = await list_kpi_role_assignments(db, kpi_id, org_id)
     return [
-        {"id": r.id, "name": r.name, "description": getattr(r, "description", None), "permission": perm}
-        for r, perm in pairs
+        {
+            "id": r.id,
+            "name": r.name,
+            "description": getattr(r, "description", None),
+            "permission": perm,
+            "allow_add_row": allow_add_row,
+            "allow_bulk_upload": allow_bulk_upload,
+        }
+        for r, perm, allow_add_row, allow_bulk_upload in pairs
     ]
 
 
@@ -529,9 +536,12 @@ async def replace_kpi_assignments_by_role_route(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Replace all role assignments for this KPI (each with permission: data_entry or view)."""
+    """Replace all role assignments for this KPI (each with permission, allow_add_row, allow_bulk_upload)."""
     org_id = _org_id(current_user, organization_id)
-    assignments = [(a.role_id, a.permission) for a in body.assignments]
+    assignments = [
+        (a.role_id, a.permission, getattr(a, "allow_add_row", True), getattr(a, "allow_bulk_upload", True))
+        for a in body.assignments
+    ]
     ok = await replace_kpi_role_assignments(db, kpi_id, assignments, org_id)
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI or role not found")
@@ -680,7 +690,7 @@ async def get_kpi_row_access_route(
     if not can_view:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this KPI")
     items = await get_row_access_for_user(db, user_id, entry_id, field_id)
-    return [{"row_index": i["row_index"], "can_edit": i["can_edit"], "can_delete": i["can_delete"]} for i in items]
+    return [{"row_index": i["row_index"], "can_edit": i["can_edit"], "can_delete": i["can_delete"], "can_add": i["can_add"]} for i in items]
 
 
 @router.put("/{kpi_id}/row-access", status_code=status.HTTP_200_OK)
@@ -693,7 +703,7 @@ async def replace_kpi_row_access_route(
 ):
     """Replace record-level access for a user on an entry+field (multi_line_items)."""
     org_id = _org_id(current_user, organization_id)
-    rows = [(r.row_index, r.can_edit, r.can_delete) for r in body.rows]
+    rows = [(r.row_index, r.can_edit, r.can_delete, r.can_add) for r in body.rows]
     ok = await replace_row_access(db, body.user_id, body.entry_id, body.field_id, org_id, rows)
     if not ok:
         raise HTTPException(
@@ -1248,23 +1258,18 @@ async def upload_kpi_files(
 async def download_kpi_file(
     kpi_id: int,
     file_id: int,
-    token: str | None = Query(None),
+    download: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ):
     """Stream file content. Auth: Org Admin or user with view/data_entry for this KPI."""
-    token_str = None
-    if credentials:
-        token_str = credentials.credentials
-    elif token:
-        token_str = token
-
-    if not token_str:
+    if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    token_str = credentials.credentials
 
     from app.core.security import decode_token
     from sqlalchemy.orm import noload, load_only
@@ -1353,16 +1358,112 @@ async def download_kpi_file(
 
     if not kf:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    # Tenant boundary enforcement: Non-Super Admins can only access files belonging to their organization
+    if current_user.role.value != "SUPER_ADMIN" and kf.organization_id != current_user.organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No access to this file"
+        )
+
+    # Secure permission validation for Multi-Line Item rows if row-level access control is enabled
+    is_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+    if not is_admin:
+        from app.core.models import KpiMultiLineCell, KpiMultiLineRow, KPIField, KpiMultiLineRowAccess, KPIFieldValue
+        from sqlalchemy import or_, cast, String
+        from sqlalchemy.orm import selectinload
+
+        # Resolve all file IDs sharing the same stored_path (covers copied/cloned drafts)
+        stored_path_res = await db.execute(
+            select(KpiFile.id).where(KpiFile.stored_path == kf.stored_path)
+        )
+        related_file_ids = stored_path_res.scalars().all()
+
+        # Build list of clauses to find any cells referencing any of these file URLs
+        clauses = []
+        for rid in related_file_ids:
+            ref_pattern = f"/files/{rid}/"
+            clauses.append(KpiMultiLineCell.value_text.like(f"%{ref_pattern}%"))
+            clauses.append(cast(KpiMultiLineCell.value_json, String).like(f"%{ref_pattern}%"))
+
+        cell_stmt = (
+            select(KpiMultiLineCell)
+            .join(KpiMultiLineRow, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+            .where(or_(*clauses))
+            .options(selectinload(KpiMultiLineCell.row))
+        )
+        cell_res = await db.execute(cell_stmt)
+        cells = cell_res.scalars().all()
+
+        if cells:
+            has_row_access = False
+            for cell in cells:
+                field_res = await db.execute(select(KPIField).where(KPIField.id == cell.row.field_id))
+                field = field_res.scalar_one_or_none()
+                if field and getattr(field, "row_level_user_access_enabled", False):
+                    row_access_stmt = select(KpiMultiLineRowAccess).where(
+                        KpiMultiLineRowAccess.user_id == current_user.id,
+                        KpiMultiLineRowAccess.entry_id == cell.row.entry_id,
+                        KpiMultiLineRowAccess.field_id == cell.row.field_id,
+                        KpiMultiLineRowAccess.row_index == cell.row.row_index,
+                    )
+                    row_access_res = await db.execute(row_access_stmt)
+                    if row_access_res.scalar_one_or_none() is not None:
+                        has_row_access = True
+                        break
+                else:
+                    has_row_access = True
+                    break
+            
+            if not has_row_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN, 
+                    detail="No access to this multi-line row attachment"
+                )
+        else:
+            # If no cells reference it, check if row-level access control is enabled for the KPI
+            fields_res = await db.execute(
+                select(KPIField).where(
+                    KPIField.kpi_id == kpi_id,
+                    KPIField.row_level_user_access_enabled == True
+                )
+            )
+            row_level_fields = fields_res.scalars().all()
+            if row_level_fields:
+                # Check if it is referenced in any scalar field value
+                val_clauses = []
+                for rid in related_file_ids:
+                    ref_pattern = f"/files/{rid}/"
+                    val_clauses.append(KPIFieldValue.value_text.like(f"%{ref_pattern}%"))
+                    val_clauses.append(cast(KPIFieldValue.value_json, String).like(f"%{ref_pattern}%"))
+                
+                val_stmt = select(KPIFieldValue).where(or_(*val_clauses))
+                val_res = await db.execute(val_stmt)
+                is_scalar_file = len(val_res.scalars().all()) > 0
+                
+                if not is_scalar_file:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN, 
+                        detail="No access to this multi-line row attachment"
+                    )
         
     try:
         data = await storage_get_file_stream(db, kf.organization_id, kf.stored_path)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found in storage")
         
+    import mimetypes
+    c_type = kf.content_type
+    if not c_type or c_type in ("application/octet-stream", "binary/octet-stream"):
+        guessed, _ = mimetypes.guess_type(kf.original_filename)
+        if guessed:
+            c_type = guessed
+
+    disposition = "attachment" if download else "inline"
     return StreamingResponse(
         iter([data]),
-        media_type=kf.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'inline; filename="{kf.original_filename}"'},
+        media_type=c_type or "application/octet-stream",
+        headers={"Content-Disposition": f'{disposition}; filename="{kf.original_filename}"'},
     )
 
 

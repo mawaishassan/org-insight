@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
@@ -21,6 +22,7 @@ function qs(params: Record<string, string | number | undefined>) {
 }
 
 export default function DashboardsPage() {
+  const router = useRouter();
   const [list, setList] = useState<DashboardRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -62,10 +64,16 @@ export default function DashboardsPage() {
     const token = getAccessToken();
     if (!token) return;
     api<DashboardRow[]>("/dashboards", { token })
-      .then(setList)
+      .then((dashboards) => {
+        setList(dashboards);
+        if (userRole !== "SUPER_ADMIN" && dashboards.length === 1) {
+          const orgQuery = organizationId ? `?organization_id=${organizationId}` : "";
+          router.replace(`/dashboard/dashboards/${dashboards[0].id}${orgQuery}`);
+        }
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
-  }, []);
+  }, [userRole, organizationId, router]);
 
   useEffect(() => {
     if (!addModalOpen || userRole !== "SUPER_ADMIN" || organizationId != null) return;

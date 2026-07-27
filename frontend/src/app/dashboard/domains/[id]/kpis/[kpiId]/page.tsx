@@ -320,9 +320,9 @@ export default function DomainKpiDetailPage() {
   /** When editing: list of { user_id, permission } for PUT assignments (legacy user assignments) */
   const [editAssignments, setEditAssignments] = useState<{ user_id: number; permission: string }[]>([]);
   /** Role assignments at KPI level (from GET assignments-by-role). */
-  const [assignedRoles, setAssignedRoles] = useState<Array<{ id: number; name: string; description?: string | null; permission: string }>>([]);
-  /** When editing: list of { role_id, permission } for PUT assignments-by-role. */
-  const [editRoleAssignments, setEditRoleAssignments] = useState<{ role_id: number; permission: string }[]>([]);
+  const [assignedRoles, setAssignedRoles] = useState<Array<{ id: number; name: string; description?: string | null; permission: string; allow_add_row: boolean; allow_bulk_upload: boolean }>>([]);
+  /** When editing: list of { role_id, permission, allow_add_row, allow_bulk_upload } for PUT assignments-by-role. */
+  const [editRoleAssignments, setEditRoleAssignments] = useState<{ role_id: number; permission: string; allow_add_row: boolean; allow_bulk_upload: boolean }[]>([]);
   /** Saving flag for KPI-level role assignments when edited inline. */
   const [savingRoleAssignments, setSavingRoleAssignments] = useState(false);
   const [uploadingFieldId, setUploadingFieldId] = useState<number | null>(null);
@@ -981,8 +981,8 @@ export default function DomainKpiDetailPage() {
             }))
           : []
       );
-      setAssignedRoles(Array.isArray(roleAssignmentsList) ? roleAssignmentsList.map((r) => ({ ...r, permission: r.permission || "data_entry" })) : []);
-      setEditRoleAssignments(Array.isArray(roleAssignmentsList) ? roleAssignmentsList.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })) : []);
+      setAssignedRoles(Array.isArray(roleAssignmentsList) ? roleAssignmentsList.map((r: any) => ({ ...r, permission: r.permission || "data_entry", allow_add_row: r.allow_add_row !== false, allow_bulk_upload: r.allow_bulk_upload !== false })) : []);
+      setEditRoleAssignments(Array.isArray(roleAssignmentsList) ? roleAssignmentsList.map((r: any) => ({ role_id: r.id, permission: r.permission || "data_entry", allow_add_row: r.allow_add_row !== false, allow_bulk_upload: r.allow_bulk_upload !== false })) : []);
       setOrgUsers(Array.isArray(usersList) ? usersList : []);
       setKpiApiInfo(apiInfo ?? null);
 
@@ -1319,7 +1319,7 @@ export default function DomainKpiDetailPage() {
     setFormValues(buildFormValuesFromEntry(entry, multiLineRowsByFieldId));
     setEditAssignments(assignedUsers.map((u) => ({ user_id: u.id, permission: u.permission || "data_entry" })));
     setIsEditing(true);
-    setEditRoleAssignments(assignedRoles.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })));
+    setEditRoleAssignments(assignedRoles.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry", allow_add_row: r.allow_add_row !== false, allow_bulk_upload: r.allow_bulk_upload !== false })));
     setIsDirty(false);
     setSaveError(null);
   };
@@ -1348,10 +1348,19 @@ export default function DomainKpiDetailPage() {
   // Keep role assignment editor state in sync outside global edit mode.
   useEffect(() => {
     if (isEditing) return;
-    setEditRoleAssignments(assignedRoles.map((r) => ({ role_id: r.id, permission: r.permission || "data_entry" })));
+    setEditRoleAssignments(
+      assignedRoles.map((r) => ({
+        role_id: r.id,
+        permission: r.permission || "data_entry",
+        allow_add_row: r.allow_add_row !== false,
+        allow_bulk_upload: r.allow_bulk_upload !== false,
+      }))
+    );
   }, [assignedRoles, isEditing]);
 
-  const saveRoleAssignments = async (next: { role_id: number; permission: string }[]) => {
+  const saveRoleAssignments = async (
+    next: { role_id: number; permission: string; allow_add_row: boolean; allow_bulk_upload: boolean }[]
+  ) => {
     if (!token || effectiveOrgId == null || !kpiId) return;
     setSavingRoleAssignments(true);
     try {
@@ -1362,6 +1371,8 @@ export default function DomainKpiDetailPage() {
           assignments: next.map((a) => ({
             role_id: a.role_id,
             permission: a.permission || "data_entry",
+            allow_add_row: a.allow_add_row !== false,
+            allow_bulk_upload: a.allow_bulk_upload !== false,
           })),
         }),
         token,
@@ -1375,6 +1386,8 @@ export default function DomainKpiDetailPage() {
             name: role?.name ?? `Role #${a.role_id}`,
             description: role?.description ?? null,
             permission: a.permission || "data_entry",
+            allow_add_row: a.allow_add_row !== false,
+            allow_bulk_upload: a.allow_bulk_upload !== false,
           };
         }),
       );
@@ -1387,10 +1400,14 @@ export default function DomainKpiDetailPage() {
   };
 
   const updateRoleAssignments = (
-    updater: (prev: { role_id: number; permission: string }[]) => {
+    updater: (
+      prev: { role_id: number; permission: string; allow_add_row: boolean; allow_bulk_upload: boolean }[]
+    ) => {
       role_id: number;
       permission: string;
-    }[],
+      allow_add_row: boolean;
+      allow_bulk_upload: boolean;
+    }[]
   ) => {
     setEditRoleAssignments((prev) => {
       const next = updater(prev);
@@ -1844,6 +1861,36 @@ export default function DomainKpiDetailPage() {
                             <option value="data_entry">Edit</option>
                             <option value="view">View</option>
                           </select>
+                          {a.permission === "data_entry" && (
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", fontSize: "0.75rem" }}>
+                              <label style={{ display: "inline-flex", alignItems: "center", gap: "0.1rem", margin: 0, cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={a.allow_add_row !== false}
+                                  onChange={(e) => {
+                                    const checked = e.target.checked;
+                                    updateRoleAssignments((prev) =>
+                                      prev.map((x) => (x.role_id === a.role_id ? { ...x, allow_add_row: checked } : x))
+                                    );
+                                  }}
+                                />
+                                Add
+                              </label>
+                              <label style={{ display: "inline-flex", alignItems: "center", gap: "0.1rem", margin: 0, cursor: "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={a.allow_bulk_upload !== false}
+                                  onChange={(e) => {
+                                    const checked = e.target.checked;
+                                    updateRoleAssignments((prev) =>
+                                      prev.map((x) => (x.role_id === a.role_id ? { ...x, allow_bulk_upload: checked } : x))
+                                    );
+                                  }}
+                                />
+                                Bulk
+                              </label>
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={() =>
@@ -1868,7 +1915,7 @@ export default function DomainKpiDetailPage() {
                             const roleId = Number(v);
                             updateRoleAssignments((prev) => [
                               ...prev,
-                              { role_id: roleId, permission: "data_entry" },
+                              { role_id: roleId, permission: "data_entry", allow_add_row: true, allow_bulk_upload: true },
                             ]);
                             e.target.value = "";
                           }
@@ -2478,7 +2525,7 @@ export default function DomainKpiDetailPage() {
                           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                             <thead>
                               <tr>
-                                <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 48 }}>#</th>
+                                <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 64 }}>Sr No</th>
                                 <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)" }}>Item</th>
                                 <th style={{ textAlign: "right", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 160 }}>Actions</th>
                               </tr>
@@ -2843,7 +2890,6 @@ export default function DomainKpiDetailPage() {
                     [
                       { id: "kpi_rights", label: "KPI level rights" },
                       { id: "row_level_enable", label: "Enable row level rights" },
-                      { id: "add_row_rights", label: "Add new row rights" },
                       { id: "grant_revoke_all", label: "Grant / revoke all rows" },
                       { id: "scalar_field_rights", label: "Scalar field level rights" },
                       { id: "multi_field_rights", label: "Multi field level rights" },
@@ -2927,7 +2973,7 @@ export default function DomainKpiDetailPage() {
                 >
                   KPI role access
                 </h3>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
                   {editRoleAssignments.map((a) => {
                     const role = orgRoles.find((r) => r.id === a.role_id);
                     const name = role ? role.name : `Role #${a.role_id}`;
@@ -2937,10 +2983,10 @@ export default function DomainKpiDetailPage() {
                         style={{
                           display: "inline-flex",
                           alignItems: "center",
-                          gap: "0.25rem",
-                          padding: "0.15rem 0.4rem",
+                          gap: "0.4rem",
+                          padding: "0.25rem 0.5rem",
                           background: "var(--border)",
-                          borderRadius: 4,
+                          borderRadius: 6,
                           fontSize: "0.85rem",
                         }}
                       >
@@ -2965,6 +3011,38 @@ export default function DomainKpiDetailPage() {
                           <option value="data_entry">Edit</option>
                           <option value="view">View</option>
                         </select>
+                        {a.permission === "data_entry" && (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", marginLeft: "0.25rem", marginRight: "0.25rem" }}>
+                            <label style={{ display: "inline-flex", alignItems: "center", gap: "0.15rem", fontSize: "0.8rem", cursor: "pointer", margin: 0 }}>
+                              <input
+                                type="checkbox"
+                                checked={a.allow_add_row !== false}
+                                disabled={savingRoleAssignments}
+                                onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  updateRoleAssignments((prev) =>
+                                    prev.map((x) => (x.role_id === a.role_id ? { ...x, allow_add_row: checked } : x))
+                                  );
+                                }}
+                              />
+                              Add Row
+                            </label>
+                            <label style={{ display: "inline-flex", alignItems: "center", gap: "0.15rem", fontSize: "0.8rem", cursor: "pointer", margin: 0 }}>
+                              <input
+                                type="checkbox"
+                                checked={a.allow_bulk_upload !== false}
+                                disabled={savingRoleAssignments}
+                                onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  updateRoleAssignments((prev) =>
+                                    prev.map((x) => (x.role_id === a.role_id ? { ...x, allow_bulk_upload: checked } : x))
+                                  );
+                                }}
+                              />
+                              Bulk Upload
+                            </label>
+                          </span>
+                        )}
                         <button
                           type="button"
                           disabled={savingRoleAssignments}
@@ -2985,7 +3063,7 @@ export default function DomainKpiDetailPage() {
                         const v = e.target.value;
                         if (v) {
                           const roleId = Number(v);
-                          updateRoleAssignments((prev) => [...prev, { role_id: roleId, permission: "data_entry" }]);
+                          updateRoleAssignments((prev) => [...prev, { role_id: roleId, permission: "data_entry", allow_add_row: true, allow_bulk_upload: true }]);
                           e.target.value = "";
                         }
                       }}
@@ -3422,133 +3500,7 @@ export default function DomainKpiDetailPage() {
                       </div>
                       )}
 
-                      {/* Add-row permission panel (separate from edit/delete) */}
-                      {securitySection === "add_row_rights" && (
-                      <div
-                        style={{
-                          marginTop: "0.6rem",
-                          padding: "0.6rem",
-                          border: "1px dashed var(--border)",
-                          borderRadius: 8,
-                          background: "var(--surface)",
-                        }}
-                      >
-                        <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
-                          Add Row permission (who can create new rows)
-                        </div>
-                        <div
-                          style={{
-                            display: "grid",
-                            gridTemplateColumns: "1fr auto",
-                            gap: "0.5rem",
-                            alignItems: "end",
-                          }}
-                        >
-                          <div>
-                            <label
-                              style={{
-                                display: "block",
-                                fontSize: "0.75rem",
-                                color: "var(--muted)",
-                                marginBottom: "0.25rem",
-                              }}
-                            >
-                              User
-                            </label>
-                            <select
-                              value={addRowAddUserIdByField[f.id] ?? ""}
-                              onChange={(e) =>
-                                setAddRowAddUserIdByField((prev) => ({
-                                  ...prev,
-                                  [f.id]: e.target.value ? Number(e.target.value) : "",
-                                }))
-                              }
-                              style={{
-                                width: "100%",
-                                padding: "0.4rem 0.6rem",
-                                borderRadius: 6,
-                                border: "1px solid var(--border)",
-                                fontSize: "0.8rem",
-                              }}
-                            >
-                              <option value="">Select user</option>
-                              {orgUsers.map((u) => (
-                                <option key={u.id} value={u.id}>
-                                  {u.full_name || u.username}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            disabled={addRowSavingFieldId === f.id || !addRowAddUserIdByField[f.id]}
-                            onClick={async () => {
-                              const nextId = Number(addRowAddUserIdByField[f.id]);
-                              if (!nextId) return;
-                              const current = addRowUsersByField[f.id] ?? [];
-                              const next = Array.from(new Set([...current.map((x) => x.id), nextId]));
-                              await setAddRowUsers(f.id, next);
-                              setAddRowAddUserIdByField((prev) => ({ ...prev, [f.id]: "" }));
-                            }}
-                          >
-                            {addRowSavingFieldId === f.id ? "Saving..." : "Grant Add Row"}
-                          </button>
-                        </div>
-                        <div style={{ marginTop: "0.6rem" }}>
-                          <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: "0.35rem" }}>
-                            Users with Add Row
-                          </div>
-                          {addRowLoadingFieldId === f.id ? (
-                            <p style={{ margin: 0, color: "var(--muted)", fontSize: "0.8rem" }}>Loading...</p>
-                          ) : (addRowUsersByField[f.id] || []).length === 0 ? (
-                            <p style={{ margin: 0, color: "var(--muted)", fontSize: "0.8rem" }}>
-                              No users currently have Add Row permission for this field.
-                            </p>
-                          ) : (
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                              {(addRowUsersByField[f.id] || []).map((u) => (
-                                <span
-                                  key={u.id}
-                                  style={{
-                                    display: "inline-flex",
-                                    alignItems: "center",
-                                    gap: "0.35rem",
-                                    padding: "0.2rem 0.45rem",
-                                    borderRadius: 12,
-                                    background: "var(--bg-subtle)",
-                                    fontSize: "0.8rem",
-                                  }}
-                                >
-                                  {(u.full_name || u.username)}
-                                  <button
-                                    type="button"
-                                    onClick={async () => {
-                                      const current = addRowUsersByField[f.id] ?? [];
-                                      const next = current.filter((x) => x.id !== u.id).map((x) => x.id);
-                                      await setAddRowUsers(f.id, next);
-                                    }}
-                                    style={{
-                                      border: "none",
-                                      background: "transparent",
-                                      cursor: "pointer",
-                                      color: "var(--danger, #c00)",
-                                      fontSize: "0.9rem",
-                                    }}
-                                    title="Remove Add Row"
-                                  >
-                                    ×
-                                  </button>
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                        <div style={{ marginTop: "0.35rem", fontSize: "0.75rem", color: "var(--muted)" }}>
-                          Note: Org Admin can always add rows.
-                        </div>
-                      </div>
-                      )}
+
                       {securitySection === "grant_revoke_all" && (f as FieldDef).row_level_user_access_enabled && (
                         <div
                           style={{

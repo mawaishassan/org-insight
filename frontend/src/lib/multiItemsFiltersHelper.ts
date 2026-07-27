@@ -13,6 +13,7 @@ export type FieldSummary = {
   name: string;
   field_type: string;
   full_page_multi_items?: boolean;
+  row_level_user_access_enabled?: boolean;
   sub_fields?: SubField[];
   config?: Record<string, unknown> | null;
 };

@@ -124,7 +124,7 @@ function MixedListCellEditor({
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
           <thead>
             <tr>
-              <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 48 }}>#</th>
+              <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 64 }}>Sr No</th>
               <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)" }}>Item</th>
               <th style={{ textAlign: "right", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 160 }}>Actions</th>
             </tr>
@@ -287,7 +287,7 @@ function MultiReferenceListEditor({
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
           <thead>
             <tr>
-              <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 48 }}>#</th>
+              <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 64 }}>Sr No</th>
               <th style={{ textAlign: "left", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)" }}>Value</th>
               <th style={{ textAlign: "right", padding: "0.45rem 0.4rem", borderBottom: "1px solid var(--border)", width: 160 }}>Actions</th>
             </tr>
@@ -471,6 +471,7 @@ interface FieldSummary {
   name: string;
   field_type: string;
   full_page_multi_items?: boolean;
+  row_level_user_access_enabled?: boolean;
   sub_fields?: SubField[];
 }
 
@@ -517,6 +518,9 @@ export default function MultiItemRowDetail() {
   const [activeSectionTab, setActiveSectionTab] = useState<string>("");
   const [activeMixedListTabByGroup, setActiveMixedListTabByGroup] = useState<Record<string, string>>({});
   const [activeListLikeTabByGroup, setActiveListLikeTabByGroup] = useState<Record<string, string>>({});
+  const [rowCanEdit, setRowCanEdit] = useState<boolean>(true);
+  const [rowCanDelete, setRowCanDelete] = useState<boolean>(true);
+  const [canAddRow, setCanAddRow] = useState<boolean>(false);
 
   const effectiveOrgId = useMemo(
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
@@ -560,7 +564,7 @@ export default function MultiItemRowDetail() {
     }
     if (!window.confirm("Delete this row?")) return;
     try {
-      await api(
+      const res = await api<{ warning?: string | null }>(
         `/entries/multi-items/rows/${rowIndex}?${new URLSearchParams({
           entry_id: String(entryId),
           field_id: String(fieldId),
@@ -568,6 +572,9 @@ export default function MultiItemRowDetail() {
         }).toString()}`,
         { method: "DELETE", token }
       );
+      if (res?.warning) {
+        window.alert(res.warning);
+      }
       toast.success("Row deleted");
       backToList();
     } catch (e) {
@@ -652,6 +659,19 @@ export default function MultiItemRowDetail() {
       if (loadId !== rowPageContextLoadGenRef.current) return;
       setEntryId(forPeriod.id);
 
+      const pageContext = await api<{ can_add_row: boolean }>(
+        `/entries/multi-items/page-context?${new URLSearchParams({
+          kpi_id: String(kpiId),
+          year: String(year),
+          period_key: periodKey || "",
+          field_id: String(fieldId),
+          organization_id: String(effectiveOrgId),
+        }).toString()}`,
+        { token }
+      ).catch(() => null);
+      if (loadId !== rowPageContextLoadGenRef.current) return;
+      setCanAddRow(pageContext?.can_add_row === true);
+
       if (!isNew && rowIndex != null) {
         // Fetch the specific row's page with a server-allowed page_size (<= 200)
         const pageSizeForFetch = 200;
@@ -664,12 +684,14 @@ export default function MultiItemRowDetail() {
           page_size: String(pageSizeForFetch),
         });
         const res = await api<{
-          rows: MultiItemsRow[];
+          rows: (MultiItemsRow & { can_edit?: boolean; can_delete?: boolean })[];
         }>(`/entries/multi-items/rows?${params.toString()}`, { token });
         if (loadId !== rowPageContextLoadGenRef.current) return;
         const found = res.rows.find((r) => r.index === rowIndex);
         if (found) {
           setEditData(found.data || {});
+          setRowCanEdit(found.can_edit !== false);
+          setRowCanDelete(found.can_delete !== false);
         } else {
           setError("Row not found");
         }
@@ -696,6 +718,7 @@ export default function MultiItemRowDetail() {
   }, [token, effectiveOrgId, kpiId, year, fieldId, rowIndex, isNew, periodKey]);
 
   const subFields = field?.sub_fields ?? [];
+  const isRowEditable = rowCanEdit && (isNew ? canAddRow : true);
 
   const isSubFieldVisible = useCallback((sf: any, currentData: Record<string, any>): boolean => {
     return evaluateSubFieldVisible(sf, subFields as any, currentData);
@@ -1107,24 +1130,26 @@ export default function MultiItemRowDetail() {
                         Cancel
                       </button>
                     )}
-                    <button type="button" className="btn btn-primary" disabled={saving || !entryId} onClick={handleSave}>
+                    <button type="button" className="btn btn-primary" disabled={saving || !entryId || !isRowEditable} onClick={handleSave}>
                       {saving ? "Saving..." : "Save"}
                     </button>
                   </>
                 ) : (
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() => {
-                      const next = new URLSearchParams(searchParams.toString());
-                      next.set("mode", "edit");
-                      router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${next.toString()}`);
-                    }}
-                  >
-                    Edit
-                  </button>
+                  isRowEditable && (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => {
+                        const next = new URLSearchParams(searchParams.toString());
+                        next.set("mode", "edit");
+                        router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${next.toString()}`);
+                      }}
+                    >
+                      Edit
+                    </button>
+                  )
                 )}
-                {!isNew && (
+                {!isNew && rowCanDelete && (
                   <button type="button" className="btn" onClick={handleDelete} style={{ color: "var(--error)" }} disabled={saving}>
                     Delete
                   </button>
@@ -1266,7 +1291,7 @@ export default function MultiItemRowDetail() {
                             {compactFields.map((sf) => {
                 const key = sf.key;
                 const val = editData[key];
-                const canEdit = sf.can_edit !== false && sf.field_type !== "formula";
+                const canEdit = sf.can_edit !== false && sf.field_type !== "formula" && isRowEditable;
                 const displayVal =
                   sf.field_type === "boolean"
                     ? Boolean(val) ? "Yes" : "No"
@@ -1278,7 +1303,7 @@ export default function MultiItemRowDetail() {
                             return arr.length > 0 ? arr.map((x) => String(x)).join("; ") : "—";
                           })()
                       : val != null && String(val).trim() !== "" ? String(val) : "—";
-                if (!canEdit) {
+                if (!canEdit && sf.field_type !== "attachment") {
                   return (
                     <div key={key} className="form-group">
                       <label>
@@ -1413,6 +1438,7 @@ export default function MultiItemRowDetail() {
                       <AttachmentFieldControl
                         value={val}
                         uploadSuccessAlert={false}
+                        attachDisabled={!canEdit}
                         onUploaded={async (downloadUrl, filename) => {
                           const cell = makeAttachmentCellValue(downloadUrl, filename);
                           if (entryId && fieldId) {
@@ -1521,7 +1547,7 @@ export default function MultiItemRowDetail() {
                                       required={false}
                                       items={Array.isArray(val) ? (val as MixedAtom[]) : []}
                                       onChange={(next) => handleChangeCell(key, next)}
-                                      disabled={sf.can_edit === false}
+                                      disabled={sf.can_edit === false || !isRowEditable}
                                     />
                                   </div>
                                 );
@@ -1554,7 +1580,7 @@ export default function MultiItemRowDetail() {
                                     items={arr}
                                     options={options}
                                     onChange={(next) => handleChangeCell(key, next)}
-                                    disabled={sf.can_edit === false}
+                                    disabled={sf.can_edit === false || !isRowEditable}
                                   />
                                 </div>
                               );

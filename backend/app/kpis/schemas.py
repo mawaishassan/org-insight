@@ -48,6 +48,8 @@ class KpiRoleAssignmentItem(BaseModel):
 
     role_id: int = Field(..., description="Organization role ID (same org as KPI)")
     permission: str = Field(default="data_entry", description="data_entry (can edit) or view (read-only)")
+    allow_add_row: bool = Field(default=True, description="Allow adding new rows")
+    allow_bulk_upload: bool = Field(default=True, description="Allow bulk uploading rows")
 
 
 class KpiReplaceRoleAssignmentsBody(BaseModel):
@@ -100,6 +102,7 @@ class KpiRowAccessItem(BaseModel):
     row_index: int = Field(..., ge=0, description="Zero-based row index in multi_line_items value_json")
     can_edit: bool = Field(True, description="User can edit this row")
     can_delete: bool = Field(True, description="User can delete this row")
+    can_add: bool = Field(True, description="User can add new rows")
 
 
 class KPIReplaceRowAccessBody(BaseModel):

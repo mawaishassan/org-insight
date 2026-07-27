@@ -171,6 +171,7 @@ class OrganizationOdooConfig(Base):
     )
     login_url = Column(String(2048), nullable=False)
     data_fetch_url = Column(String(2048), nullable=False)
+    attachment_url_template = Column(String(2048), nullable=True)
     odoo_db = Column(String(255), nullable=True)
     username = Column(String(255), nullable=False)
     password = Column(String(512), nullable=False)
@@ -303,21 +304,21 @@ class User(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     organization = relationship("Organization", back_populates="users")
-    kpi_assignments = relationship("KPIAssignment", back_populates="user", lazy="selectin")
-    kpi_field_access = relationship("KpiFieldAccess", back_populates="user", lazy="selectin")
+    kpi_assignments = relationship("KPIAssignment", back_populates="user", lazy="selectin", cascade="all, delete-orphan")
+    kpi_field_access = relationship("KpiFieldAccess", back_populates="user", lazy="selectin", cascade="all, delete-orphan")
     user_organization_roles = relationship(
-        "UserOrganizationRole", back_populates="user", lazy="selectin"
+        "UserOrganizationRole", back_populates="user", lazy="selectin", cascade="all, delete-orphan"
     )
     kpi_multi_line_row_access = relationship(
-        "KpiMultiLineRowAccess", back_populates="user", lazy="selectin"
+        "KpiMultiLineRowAccess", back_populates="user", lazy="selectin", cascade="all, delete-orphan"
     )
     kpi_entries = relationship("KPIEntry", back_populates="user", lazy="selectin", foreign_keys="[KPIEntry.user_id]")
     kpi_files = relationship("KpiFile", back_populates="uploaded_by", lazy="selectin")
     report_access_permissions = relationship(
-        "ReportAccessPermission", back_populates="user", lazy="selectin"
+        "ReportAccessPermission", back_populates="user", lazy="selectin", cascade="all, delete-orphan"
     )
     dashboard_access_permissions = relationship(
-        "DashboardAccessPermission", back_populates="user", lazy="selectin"
+        "DashboardAccessPermission", back_populates="user", lazy="selectin", cascade="all, delete-orphan"
     )
     export_api_tokens = relationship("ExportAPIToken", back_populates="created_by", lazy="selectin")
 
@@ -648,6 +649,8 @@ class KpiRoleAssignment(Base):
     assignment_type = Column(
         String(20), nullable=False, default=KPIAssignmentType.data_entry.value, server_default="data_entry"
     )
+    allow_add_row = Column(Boolean, default=True, nullable=False, server_default="1")
+    allow_bulk_upload = Column(Boolean, default=True, nullable=False, server_default="1")
     created_at = Column(DateTime, default=utc_now)
 
     __table_args__ = (UniqueConstraint("kpi_id", "organization_role_id", name="uq_kpi_role"),)
@@ -746,6 +749,7 @@ class KpiMultiLineRowAccess(Base):
     row_index = Column(Integer, nullable=False)
     can_edit = Column(Boolean, default=True, nullable=False)
     can_delete = Column(Boolean, default=True, nullable=False)
+    can_add = Column(Boolean, default=True, nullable=False, server_default="1")
     created_at = Column(DateTime, default=utc_now)
 
     __table_args__ = (

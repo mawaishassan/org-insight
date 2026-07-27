@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { deleteKpiStoredFileByUrl, getApiUrl, openKpiStoredFileInNewTab, postFormDataWithUploadProgress } from "@/lib/api";
-import { getAttachmentDisplayName, getAttachmentUrl } from "@/lib/attachmentCellValue";
+import { getAttachmentDisplayName, getAttachmentUrl, parseAttachmentList } from "@/lib/attachmentCellValue";
 
 function BinIcon({ size = 18 }: { size?: number }) {
   return (
@@ -60,6 +60,7 @@ export function AttachmentFieldControl({
   attachDisabled,
   uploadSuccessAlert = true,
 }: AttachmentFieldControlProps) {
+  const attachmentList = parseAttachmentList(value);
   const urlNow = getAttachmentUrl(value);
   const displayName = getAttachmentDisplayName(value);
 
@@ -193,7 +194,15 @@ export function AttachmentFieldControl({
     );
   }
 
-  if (!urlNow) {
+  if (attachmentList.length === 0 && !urlNow) {
+    if (attachDisabled) {
+      const fontSize = compact ? "0.82rem" : "0.95rem";
+      return (
+        <div style={{ color: "var(--muted)", fontStyle: "italic", fontSize }}>
+          No file uploaded
+        </div>
+      );
+    }
     return (
       <div
         style={{
@@ -243,95 +252,101 @@ export function AttachmentFieldControl({
     );
   }
 
-
   const fontSize = compact ? "0.82rem" : "0.95rem";
   const iconSize = compact ? 15 : 18;
 
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "0.35rem",
-        minWidth: 0,
-      }}
-    >
-      <button
-        type="button"
-        aria-label="Remove attachment"
-        title="Remove attachment"
-        disabled={uploadState !== "idle"}
-        onClick={async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (!window.confirm("Remove this file? If it was uploaded here, it will be deleted from storage.")) {
-            return;
-          }
-          if (!token) {
-            onNotAuthenticated?.();
-            return;
-          }
-          try {
-            await deleteKpiStoredFileByUrl(urlNow, token);
-          } catch {
-            onError?.("Could not delete file from storage. The link was removed.");
-          }
-          onClear();
-        }}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "0.15rem",
-          border: "none",
-          background: "transparent",
-          color: "var(--muted, #666)",
-          cursor: uploadState === "idle" ? "pointer" : "not-allowed",
-          opacity: uploadState === "idle" ? 1 : 0.5,
-          borderRadius: 4,
-          flexShrink: 0,
-        }}
-      >
-        <BinIcon size={iconSize} />
-      </button>
-      <button
-        type="button"
-        disabled={uploadState !== "idle"}
-        onClick={async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (!token) {
-            onNotAuthenticated?.();
-            return;
-          }
-          try {
-            await openKpiStoredFileInNewTab(value, token);
-          } catch (err) {
-            onError?.(err instanceof Error ? err.message : "Could not open file");
-          }
-        }}
-        title={urlNow}
-        style={{
-          background: "none",
-          border: "none",
-          padding: 0,
-          margin: 0,
-          font: "inherit",
-          fontSize,
-          fontWeight: 600,
-          color: "var(--accent)",
-          cursor: uploadState === "idle" ? "pointer" : "not-allowed",
-          opacity: uploadState === "idle" ? 1 : 0.7,
-          textAlign: "left",
-          textDecoration: "underline",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-          minWidth: 0,
-        }}
-      >
-        {displayName}
-      </button>
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+      {(attachmentList.length > 0 ? attachmentList : [{ url: urlNow, filename: displayName }]).map((att, idx) => (
+        <div
+          key={idx}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.35rem",
+            minWidth: 0,
+          }}
+        >
+          {!attachDisabled && (
+            <button
+              type="button"
+              aria-label="Remove attachment"
+              title="Remove attachment"
+              disabled={uploadState !== "idle" || attachDisabled}
+              onClick={async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!window.confirm("Remove this file? If it was uploaded here, it will be deleted from storage.")) {
+                  return;
+                }
+                if (!token) {
+                  onNotAuthenticated?.();
+                  return;
+                }
+                try {
+                  await deleteKpiStoredFileByUrl(att.url, token);
+                } catch {
+                  onError?.("Could not delete file from storage. The link was removed.");
+                }
+                onClear();
+              }}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "0.15rem",
+                border: "none",
+                background: "transparent",
+                color: "var(--muted, #666)",
+                cursor: uploadState === "idle" ? "pointer" : "not-allowed",
+                opacity: uploadState === "idle" ? 1 : 0.5,
+                borderRadius: 4,
+                flexShrink: 0,
+              }}
+            >
+              <BinIcon size={iconSize} />
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={uploadState !== "idle"}
+            onClick={async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!token) {
+                onNotAuthenticated?.();
+                return;
+              }
+              try {
+                await openKpiStoredFileInNewTab(att, token);
+              } catch (err) {
+                onError?.(err instanceof Error ? err.message : "Could not open file");
+              }
+            }}
+            title={att.url}
+            style={{
+              background: "none",
+              border: "none",
+              padding: 0,
+              margin: 0,
+              font: "inherit",
+              fontSize,
+              fontWeight: 600,
+              color: "var(--accent)",
+              cursor: uploadState === "idle" ? "pointer" : "not-allowed",
+              opacity: uploadState === "idle" ? 1 : 0.7,
+              textAlign: "left",
+              textDecoration: "underline",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              minWidth: 0,
+            }}
+          >
+            {att.filename?.trim() || "Attached file"}
+          </button>
+        </div>
+      ))}
     </div>
   );
 }

@@ -5,6 +5,13 @@ import { useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 
+interface DashboardRow {
+  id: number;
+  organization_id: number;
+  name: string;
+  description: string | null;
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const [msg, setMsg] = useState<string>("Redirecting…");
@@ -40,8 +47,15 @@ export default function DashboardPage() {
           return;
         }
 
-        // No KPI rights: land on dashboard home (list), not a specific dashboard.
-        router.replace(`/dashboard/dashboards?organization_id=${orgId}`);
+        // No KPI rights: fetch dashboards list to see how many they have access to.
+        const dashboards = await api<DashboardRow[]>("/dashboards", { token }).catch(() => []);
+        if (dashboards.length === 1) {
+          // If only right on a single dashboard, go directly to that dashboard view page
+          router.replace(`/dashboard/dashboards/${dashboards[0].id}?organization_id=${orgId}`);
+        } else {
+          // If multiple (or 0) dashboards, go to the list page
+          router.replace(`/dashboard/dashboards?organization_id=${orgId}`);
+        }
       } catch {
         router.replace("/dashboard/no-access");
       }

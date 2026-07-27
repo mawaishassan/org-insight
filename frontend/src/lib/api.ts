@@ -119,9 +119,19 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
   const url = inner ? getApiUrl(inner) : null;
 
   if (url) {
-    const previewUrl = `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
-    window.open(previewUrl, "_blank", "noopener,noreferrer");
-    return;
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error("Failed to load file");
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      window.open(blobUrl, "_blank", "noopener,noreferrer");
+      return;
+    } catch (err) {
+      console.error(err);
+      throw new Error("Failed to open attachment");
+    }
   }
 
   if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
@@ -131,8 +141,19 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
 
   const rel = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
   const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const previewUrl = `${origin}${rel}${rel.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
-  window.open(previewUrl, "_blank", "noopener,noreferrer");
+  try {
+    const fetchUrl = `${origin}${rel}`;
+    const res = await fetch(fetchUrl, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error("Failed to load file");
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    window.open(blobUrl, "_blank", "noopener,noreferrer");
+  } catch (err) {
+    const previewUrl = `${origin}${rel}${rel.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+    window.open(previewUrl, "_blank", "noopener,noreferrer");
+  }
 }
 
 export async function api<T>(

@@ -38,6 +38,15 @@ export default function LoginPage() {
       setTokens(res.access_token, res.refresh_token);
       const me = await api<{ role: string; organization_id: number | null }>("/auth/me", { token: res.access_token });
       toast.success("Logged in successfully");
+      
+      const searchParams = new URLSearchParams(window.location.search);
+      const redirectTo = searchParams.get("redirect");
+      if (redirectTo) {
+        router.push(redirectTo);
+        router.refresh();
+        return;
+      }
+
       if (me.role === "SUPER_ADMIN") {
         router.push("/dashboard/organizations");
         router.refresh();

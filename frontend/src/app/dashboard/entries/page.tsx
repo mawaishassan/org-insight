@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { KpiCardsGrid } from "@/components/KpiCardsGrid";
@@ -36,6 +36,7 @@ interface OrgTagRow {
 }
 
 export default function EntriesPage() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const yearParam = searchParams.get("year");
   const year = yearParam ? Number(yearParam) : currentYear;
@@ -74,6 +75,26 @@ export default function EntriesPage() {
       })
       .finally(() => setLoading(false));
   }, [token]);
+
+  useEffect(() => {
+    if (!token || !organizationId || isOrgAdmin) return;
+    api<Array<{ id: number }>>(
+      `/entries/available-kpis?organization_id=${organizationId}&limit=1`,
+      { token }
+    )
+      .then(async (available) => {
+        const hasKpiRights = Array.isArray(available) && available.length > 0;
+        if (!hasKpiRights) {
+          const dashboards = await api<Array<{ id: number }>>("/dashboards", { token }).catch(() => []);
+          if (dashboards.length === 1) {
+            router.replace(`/dashboard/dashboards/${dashboards[0].id}?organization_id=${organizationId}`);
+          } else {
+            router.replace(`/dashboard/dashboards?organization_id=${organizationId}`);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [token, organizationId, isOrgAdmin, router]);
 
   useEffect(() => {
     if (!token || !organizationId || !canFetchKpis || !hasKpiFilters) {

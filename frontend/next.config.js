@@ -1,6 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  experimental: {
+    workerThreads: false,
+    cpus: 1,
+  },
   async rewrites() {
     // Proxy browser `/api/*` to FastAPI. Use the same port as your uvicorn (start.bat uses 8080).
     // Set NEXT_PUBLIC_BACKEND_URL or NEXT_PUBLIC_API_URL if the backend is not on the default.

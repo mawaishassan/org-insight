@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import re
@@ -369,3 +370,270 @@ def apply_odoo_sub_field_mappings(
                 mapped[k] = v
         out.append(mapped)
     return out
+
+
+import logging
+import mimetypes
+import urllib.parse
+import uuid
+
+logger = logging.getLogger(__name__)
+
+
+def extract_odoo_attachment_ids(raw_val: Any) -> list[str | int]:
+    """Extract list of attachment IDs from any representation Odoo returns."""
+    if raw_val is None or raw_val == "":
+        return []
+
+    ids: list[str | int] = []
+
+    def _collect(v: Any) -> None:
+        if v is None or v == "":
+            return
+        if isinstance(v, (int, float)):
+            if isinstance(v, float) and v.is_integer():
+                v = int(v)
+            ids.append(v)
+            return
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return
+            if s.startswith("[") or s.startswith("{"):
+                try:
+                    parsed = json.loads(s)
+                    _collect(parsed)
+                    return
+                except Exception:
+                    pass
+            if "," in s:
+                for part in s.split(","):
+                    _collect(part.strip())
+                return
+            if s.isdigit():
+                ids.append(int(s))
+            else:
+                ids.append(s)
+            return
+        if isinstance(v, dict):
+            if "id" in v and v["id"] is not None:
+                _collect(v["id"])
+            return
+        if isinstance(v, (list, tuple)):
+            if len(v) == 3 and v[0] in (6, "6") and isinstance(v[2], (list, tuple)):
+                _collect(v[2])
+                return
+            if len(v) == 2 and v[0] in (4, "4"):
+                _collect(v[1])
+                return
+            for item in v:
+                _collect(item)
+
+    _collect(raw_val)
+    seen: set[str | int] = set()
+    result: list[str | int] = []
+    for x in ids:
+        if x not in seen:
+            seen.add(x)
+            result.append(x)
+    return result
+
+
+def _extract_filename_from_headers(headers: httpx.Headers, default_id: Any) -> str:
+    """Extract filename from HTTP Content-Disposition response header or fallback based on Content-Type."""
+    cd = headers.get("content-disposition", "")
+    filename = None
+    if cd:
+        match_star = re.search(r"filename\*\s*=\s*(?:[^\']*\')*([^;]+)", cd, re.IGNORECASE)
+        if match_star:
+            filename = urllib.parse.unquote(match_star.group(1).strip("\"'"))
+        else:
+            match = re.search(r'filename\s*=\s*"?([^";]+)"?', cd, re.IGNORECASE)
+            if match:
+                filename = match.group(1).strip()
+
+    if not filename:
+        ct = headers.get("content-type", "").split(";")[0].strip()
+        ext = mimetypes.guess_extension(ct) if ct else None
+        if not ext:
+            if ct == "application/pdf":
+                ext = ".pdf"
+            elif ct in ("image/png", "image/jpeg"):
+                ext = f".{ct.split('/')[1]}"
+            else:
+                ext = ".bin"
+        filename = f"attachment_{default_id}{ext}"
+
+    name = re.sub(r"[^\w.\- ]", "_", filename).strip() or "file"
+    return name[:200]
+
+
+async def download_and_store_odoo_attachments(
+    db: Any,
+    *,
+    org_id: int,
+    kpi_id: int,
+    entry_id: int,
+    year: int,
+    user_id: int | None,
+    attachment_url_template: str,
+    session_id: str,
+    raw_attachment_val: Any,
+) -> tuple[Any, list[str]]:
+    """
+    Download attachment files from Odoo using attachment_url_template, create KpiFile records,
+    and return (converted_cell_value, error_messages).
+    """
+    from app.core.models import KpiFile
+    from app.storage.service import upload_file as storage_upload_file
+
+    att_ids = extract_odoo_attachment_ids(raw_attachment_val)
+    if not att_ids:
+        return None, []
+
+    downloaded_objects: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        for att_id in att_ids:
+            target_url = (
+                attachment_url_template.replace("{ATTACHMENT_ID}", str(att_id))
+                .replace("{attachment_id}", str(att_id))
+                .replace("__ATTACHMENT_ID__", str(att_id))
+                .replace("{SESSION_ID}", session_id)
+                .replace("{session_id}", session_id)
+                .replace("__SESSION_ID__", session_id)
+            )
+
+            try:
+                resp = await client.get(target_url, cookies={"session_id": session_id})
+                if resp.status_code < 200 or resp.status_code >= 300:
+                    msg = f"Failed to download attachment ID {att_id}: HTTP {resp.status_code}"
+                    logger.error("Odoo attachment download error: %s (URL: %s)", msg, target_url)
+                    errors.append(msg)
+                    continue
+
+                content = resp.content
+                if not content:
+                    msg = f"Failed to download attachment ID {att_id}: File content is empty"
+                    logger.error("Odoo attachment download error: %s (URL: %s)", msg, target_url)
+                    errors.append(msg)
+                    continue
+
+                original_filename = _extract_filename_from_headers(resp.headers, att_id)
+                content_type = resp.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+
+                base_name = re.sub(r"[^\w.\- ]", "_", original_filename).strip() or "file"
+                unique = f"{base_name[:100]}_{uuid.uuid4().hex[:8]}"
+                relative_path = f"org_{org_id}/kpi_{kpi_id}/year_{year}/{unique}"
+
+                stored_path = await storage_upload_file(db, org_id, relative_path, content, content_type)
+
+                kf = KpiFile(
+                    kpi_id=kpi_id,
+                    organization_id=org_id,
+                    year=year,
+                    entry_id=entry_id,
+                    original_filename=original_filename[:512],
+                    stored_path=stored_path,
+                    content_type=content_type[:255] if content_type else None,
+                    size=len(content),
+                    uploaded_by_user_id=user_id,
+                )
+                db.add(kf)
+                await db.flush()
+
+                download_url = f"/api/kpis/{kpi_id}/files/{kf.id}/download"
+                downloaded_objects.append({"url": download_url, "filename": kf.original_filename})
+
+            except Exception as e:
+                msg = f"Failed to download attachment ID {att_id}: {e!s}"
+                logger.error("Odoo attachment download exception: %s (URL: %s)", msg, target_url, exc_info=True)
+                errors.append(msg)
+                continue
+
+    if not downloaded_objects:
+        return None, errors
+
+    if len(downloaded_objects) == 1:
+        return downloaded_objects[0], errors
+
+    return downloaded_objects, errors
+
+
+async def store_pre_downloaded_odoo_attachments(
+    db: Any,
+    *,
+    org_id: int,
+    kpi_id: int,
+    entry_id: int,
+    year: int,
+    user_id: int | None,
+    raw_attachment_val: Any,
+    downloaded_data: dict[str | int, tuple[bytes, dict[str, str]]],
+) -> tuple[Any, list[str]]:
+    """
+    Store pre-downloaded attachment files into KpiFile records and storage sequentially.
+    """
+    from app.core.models import KpiFile
+    from app.storage.service import upload_file as storage_upload_file
+    import uuid
+
+    att_ids = extract_odoo_attachment_ids(raw_attachment_val)
+    if not att_ids:
+        return None, []
+
+    stored_objects: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for att_id in att_ids:
+        if att_id not in downloaded_data:
+            # If download failed during concurrent phase, report it
+            errors.append(f"Attachment ID {att_id} content was not downloaded")
+            continue
+
+        content, headers_dict = downloaded_data[att_id]
+        headers = httpx.Headers(headers_dict)
+        try:
+            if not content:
+                errors.append(f"Attachment ID {att_id} has empty content")
+                continue
+
+            original_filename = _extract_filename_from_headers(headers, att_id)
+            content_type = headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+
+            base_name = re.sub(r"[^\w.\- ]", "_", original_filename).strip() or "file"
+            unique = f"{base_name[:100]}_{uuid.uuid4().hex[:8]}"
+            relative_path = f"org_{org_id}/kpi_{kpi_id}/year_{year}/{unique}"
+
+            stored_path = await storage_upload_file(db, org_id, relative_path, content, content_type)
+
+            kf = KpiFile(
+                kpi_id=kpi_id,
+                organization_id=org_id,
+                year=year,
+                entry_id=entry_id,
+                original_filename=original_filename[:512],
+                stored_path=stored_path,
+                content_type=content_type[:255] if content_type else None,
+                size=len(content),
+                uploaded_by_user_id=user_id,
+            )
+            db.add(kf)
+            await db.flush()
+
+            download_url = f"/api/kpis/{kpi_id}/files/{kf.id}/download"
+            stored_objects.append({"url": download_url, "filename": kf.original_filename})
+
+        except Exception as e:
+            msg = f"Failed to store attachment ID {att_id}: {e!s}"
+            logger.error("Odoo attachment store exception: %s", msg, exc_info=True)
+            errors.append(msg)
+
+    if not stored_objects:
+        return None, errors
+
+    if len(stored_objects) == 1:
+        return stored_objects[0], errors
+
+    return stored_objects, errors
