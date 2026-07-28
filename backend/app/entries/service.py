@@ -2332,7 +2332,7 @@ async def submit_entry(
         detail = f"The KPI cannot be submitted because the following required fields are missing:\n\n{errors_str}"
         raise HTTPException(status_code=400, detail=detail)
 
-    # 2. Load or create the published entry
+    # 2. Check if a published entry already exists
     pub_res = await db.execute(
         select(KPIEntry).where(
             KPIEntry.organization_id == org_id,
@@ -2344,45 +2344,32 @@ async def submit_entry(
     )
     pub_entry = pub_res.scalar_one_or_none()
     
-    if not pub_entry:
-        pub_entry = KPIEntry(
-            organization_id=org_id,
-            kpi_id=draft_entry.kpi_id,
-            year=draft_entry.year,
-            period_key=draft_entry.period_key,
-            is_draft=False,
-        )
-        db.add(pub_entry)
+    if pub_entry:
+        # Delete old published entry atomically to avoid conflicts
+        await db.execute(delete(KPIFieldValue).where(KPIFieldValue.entry_id == pub_entry.id))
+        await db.execute(delete(KpiMultiLineRowAccess).where(KpiMultiLineRowAccess.entry_id == pub_entry.id))
+        await db.execute(delete(KpiFile).where(KpiFile.entry_id == pub_entry.id))
+        await db.execute(delete(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == pub_entry.id))
+        await db.execute(delete(KPIEntry).where(KPIEntry.id == pub_entry.id))
         await db.flush()
         
-    # 3. Clear existing values on the published entry atomically
-    await db.execute(delete(KPIFieldValue).where(KPIFieldValue.entry_id == pub_entry.id))
-    await db.execute(delete(KpiMultiLineRowAccess).where(KpiMultiLineRowAccess.entry_id == pub_entry.id))
-    await db.execute(delete(KpiFile).where(KpiFile.entry_id == pub_entry.id))
-    await db.execute(delete(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == pub_entry.id))
-    await db.flush()
+    # 3. Rename the draft to be the published entry (preserving its ID!)
+    draft_entry.is_draft = False
     
-    # 4. Copy all values from draft to published entry
-    await _copy_entry_values(db, draft_entry.id, pub_entry.id)
-    
-    # 5. Update submission metadata
+    # 4. Update submission metadata
     now = datetime.utcnow()
-    pub_entry.submitted_at = now
-    pub_entry.submitted_by_user_id = user_id
-    pub_entry.last_modified_at = now
-    pub_entry.last_modified_by_user_id = user_id
-    pub_entry.user_id = user_id
-    pub_entry.updated_at = now
+    draft_entry.submitted_at = now
+    draft_entry.submitted_by_user_id = user_id
+    draft_entry.last_modified_at = now
+    draft_entry.last_modified_by_user_id = user_id
+    draft_entry.user_id = user_id
+    draft_entry.updated_at = now
     await db.flush()
     
     # Recalculate and propagate formulas for the newly published entry
-    await propagate_formula_recalculations(db, pub_entry.id, org_id)
-
-    # 6. Delete draft entry
-    await db.execute(delete(KPIEntry).where(KPIEntry.id == draft_entry.id))
-    await db.flush()
+    await propagate_formula_recalculations(db, draft_entry.id, org_id)
     
-    return pub_entry
+    return draft_entry
 
 
 async def lock_entry(
@@ -2523,10 +2510,38 @@ async def list_entries(
 
     # Non-admin: filter by KPI assignment
     if not is_org_admin and not as_admin:
+        from app.core.models import KpiRoleAssignment, UserOrganizationRole, KpiFieldAccessByRole
+
+        # 1. Get role-based KPI assignments
+        role_kpis_res = await db.execute(
+            select(KpiRoleAssignment.kpi_id)
+            .join(
+                UserOrganizationRole,
+                UserOrganizationRole.organization_role_id == KpiRoleAssignment.organization_role_id,
+            )
+            .where(UserOrganizationRole.user_id == user_id)
+        )
+        assigned_kpis = set(role_kpis_res.scalars().all())
+
+        # 2. Get direct user KPI assignments
         assign_res = await db.execute(
             select(KPIAssignment.kpi_id).where(KPIAssignment.user_id == user_id)
         )
-        assigned_kpis = set(assign_res.scalars().all())
+        assigned_kpis.update(assign_res.scalars().all())
+
+        # 3. Get KPIs where user has field-level role assignments
+        user_roles_stmt = select(UserOrganizationRole.organization_role_id).where(
+            UserOrganizationRole.user_id == user_id
+        )
+        user_role_ids = (await db.execute(user_roles_stmt)).scalars().all()
+        if user_role_ids:
+            field_role_kpis_res = await db.execute(
+                select(KpiFieldAccessByRole.kpi_id).where(
+                    KpiFieldAccessByRole.organization_role_id.in_(user_role_ids)
+                )
+            )
+            assigned_kpis.update(field_role_kpis_res.scalars().all())
+
         filtered_entries = [e for e in filtered_entries if e.kpi_id in assigned_kpis]
 
     return filtered_entries
@@ -3331,3 +3346,55 @@ async def recompute_mli_formula_subfields(
             {"entry_id": entry_id},
         )
         await db.flush()
+
+
+async def get_active_entry_for_period(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    kpi_id: int,
+    year: int,
+    period_key: str,
+) -> tuple[KPIEntry | None, bool]:
+    """
+    Resolve the active entry for a user.
+    - Admins: always published entry.
+    - Normal users:
+      - If they have a modified draft (is_modified_after_submission == True or submitted_at is None), return the draft.
+      - Else if a published entry exists, return the published entry.
+      - Else if an unmodified draft exists, return it.
+      - Else create a new entry (using get_or_create_entry).
+    """
+    from sqlalchemy.orm import selectinload
+    
+    pk = (period_key or "").strip()[:8]
+    is_admin = user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+    
+    entries_res = await db.execute(
+        select(KPIEntry)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == kpi_id,
+            KPIEntry.year == year,
+            KPIEntry.period_key == pk,
+        )
+        .options(selectinload(KPIEntry.field_values), selectinload(KPIEntry.user))
+    )
+    group = entries_res.scalars().all()
+    
+    my_draft = next((e for e in group if e.is_draft and e.user_id == user.id), None)
+    published = next((e for e in group if not e.is_draft), None)
+    
+    if is_admin:
+        if published:
+            return published, False
+    else:
+        if my_draft and (my_draft.is_modified_after_submission or my_draft.submitted_at is None):
+            return my_draft, False
+        if published:
+            return published, False
+        if my_draft:
+            return my_draft, False
+            
+    # Fallback to get_or_create_entry if neither exists or admin needs creation
+    return await get_or_create_entry(db, user.id, org_id, kpi_id, year, period_key=pk)

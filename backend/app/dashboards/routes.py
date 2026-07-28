@@ -478,17 +478,33 @@ async def sync_dashboard_odoo_data(
             if not can_edit:
                 errors.append(f"Not allowed to edit KPI {field.kpi_id} ({yr} {period_key})")
                 continue
-            entry = KPIEntry(
-                organization_id=org_id,
-                kpi_id=field.kpi_id,
-                user_id=current_user.id,
-                year=yr,
-                period_key=pk,
-                is_draft=False,
-                is_modified_after_submission=False,
+            # Look up if there is a draft entry we can rename to preserve ID
+            draft_result = await db.execute(
+                select(KPIEntry).where(
+                    KPIEntry.organization_id == org_id,
+                    KPIEntry.kpi_id == field.kpi_id,
+                    KPIEntry.year == yr,
+                    KPIEntry.period_key == pk,
+                    KPIEntry.is_draft == True,
+                )
             )
-            db.add(entry)
-            await db.flush()
+            draft_entry = draft_result.scalars().first()
+            if draft_entry:
+                entry = draft_entry
+                entry.is_draft = False
+                await db.flush()
+            else:
+                entry = KPIEntry(
+                    organization_id=org_id,
+                    kpi_id=field.kpi_id,
+                    user_id=current_user.id,
+                    year=yr,
+                    period_key=pk,
+                    is_draft=False,
+                    is_modified_after_submission=False,
+                )
+                db.add(entry)
+                await db.flush()
 
         if entry.is_locked:
             errors.append(f"Entry for KPI {field.kpi_id} ({yr} {period_key}) is locked and cannot be updated.")
