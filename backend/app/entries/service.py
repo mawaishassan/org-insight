@@ -811,9 +811,13 @@ async def _copy_entry_values(db: AsyncSession, src_id: int, dest_id: int) -> Non
     )
 
     # Disable trigger before inserting cells to avoid O(N^2) updates on rows search_text
-    await db.execute(
-        text("ALTER TABLE kpi_multi_line_cells DISABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
-    )
+    from app.core.config import get_settings
+    settings = get_settings()
+    is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
+    if not is_sqlite:
+        await db.execute(
+            text("ALTER TABLE kpi_multi_line_cells DISABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
+        )
 
     try:
         # 3. Copy MLI cells
@@ -832,9 +836,10 @@ async def _copy_entry_values(db: AsyncSession, src_id: int, dest_id: int) -> Non
         )
     finally:
         # Re-enable trigger
-        await db.execute(
-            text("ALTER TABLE kpi_multi_line_cells ENABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
-        )
+        if not is_sqlite:
+            await db.execute(
+                text("ALTER TABLE kpi_multi_line_cells ENABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
+            )
 
     # 4. Copy row access records
     await db.execute(
@@ -865,15 +870,27 @@ async def _copy_entry_values(db: AsyncSession, src_id: int, dest_id: int) -> Non
     await db.flush()
 
 
-def mark_entry_modified(entry: KPIEntry, user_id: int) -> None:
+async def mark_entry_modified(db: AsyncSession, entry: KPIEntry, user_id: int) -> None:
     entry.last_modified_at = datetime.utcnow()
     entry.last_modified_by_user_id = user_id
     entry.user_id = user_id
     entry.updated_at = datetime.utcnow()
     
     if entry.is_draft:
-        if entry.submitted_at is not None:
-            entry.is_modified_after_submission = True
+        entry.is_modified_after_submission = True
+    else:
+        # It's a published entry being modified.
+        # Delete all unmodified draft entries for this KPI/year/period so that they are re-created from the new published version on next load.
+        await db.execute(
+            delete(KPIEntry).where(
+                KPIEntry.organization_id == entry.organization_id,
+                KPIEntry.kpi_id == entry.kpi_id,
+                KPIEntry.year == entry.year,
+                KPIEntry.period_key == entry.period_key,
+                KPIEntry.is_draft == True,
+                KPIEntry.is_modified_after_submission == False,
+            )
+        )
 
 
 async def get_or_create_entry(
@@ -882,11 +899,53 @@ async def get_or_create_entry(
     """Get existing entry or create new one (one per organization per KPI per year per period_key). Returns (entry, created)."""
     pk = (period_key or "").strip()[:8]
     
+    # Check role
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    is_org_admin = (getattr(user.role, "value", user.role) == "ORG_ADMIN") if user else False
+    
     # Check edit access
     can_edit = await user_can_edit_kpi(db, user_id, kpi_id, org_id)
     
-    if can_edit:
-        # User is editor: load or create a shared draft for the period group
+    if can_edit and is_org_admin:
+        # Organizational Admin: direct load or create published version
+        pub_result = await db.execute(
+            select(KPIEntry).where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == kpi_id,
+                KPIEntry.year == year,
+                KPIEntry.period_key == pk,
+                KPIEntry.is_draft == False,
+            )
+        )
+        pub_entry = pub_result.scalar_one_or_none()
+        if pub_entry:
+            return pub_entry, False
+            
+        # Verify KPI belongs to org
+        kpi_org = await _resolve_org_and_kpi(db, kpi_id)
+        if kpi_org != org_id:
+            return None, False
+            
+        # Create published version directly
+        entry = KPIEntry(
+            organization_id=org_id,
+            kpi_id=kpi_id,
+            user_id=user_id,
+            year=year,
+            period_key=pk,
+            is_draft=False,
+            is_modified_after_submission=False,
+        )
+        db.add(entry)
+        await db.flush()
+        
+        # Copy carry-forward from previous period
+        await _copy_carry_forward_from_previous(db, org_id, kpi_id, entry, year, pk)
+        return entry, True
+        
+    elif can_edit:
+        # User is editor: load or create a private draft for the user
         result = await db.execute(
             select(KPIEntry).where(
                 KPIEntry.organization_id == org_id,
@@ -894,6 +953,7 @@ async def get_or_create_entry(
                 KPIEntry.year == year,
                 KPIEntry.period_key == pk,
                 KPIEntry.is_draft == True,
+                KPIEntry.user_id == user_id,
             )
         )
         entry = result.scalar_one_or_none()
@@ -1525,9 +1585,10 @@ async def user_can_export_multi_line_field(
 
 
 async def _load_other_kpi_values(
-    db: AsyncSession, year: int, org_id: int, exclude_kpi_id: int, period_key: str | None = None, is_draft: bool | None = None
+    db: AsyncSession, year: int, org_id: int, exclude_kpi_id: int, period_key: str | None = None, is_draft: bool | None = None, owner_user_id: int | None = None
 ) -> OtherKpiValues:
     """Load numeric field values from org's entries for other KPIs (same org, same year)."""
+    from sqlalchemy import or_, and_
     out: OtherKpiValues = {}
     q = (
         select(KPIEntry)
@@ -1537,10 +1598,30 @@ async def _load_other_kpi_values(
             KPIEntry.kpi_id != exclude_kpi_id,
         )
     )
-    if period_key is not None:
-        q = q.where(KPIEntry.period_key == period_key)
+    if is_draft == False:
+        q = q.where(KPIEntry.is_draft == False)
+    elif is_draft == True:
+        if owner_user_id is not None:
+            q = q.where(
+                or_(
+                    KPIEntry.is_draft == False,
+                    and_(KPIEntry.is_draft == True, KPIEntry.user_id == owner_user_id)
+                )
+            )
+        else:
+            q = q.where(KPIEntry.is_draft == False)
+    else:
+        if owner_user_id is not None:
+            q = q.where(
+                or_(
+                    KPIEntry.is_draft == False,
+                    and_(KPIEntry.is_draft == True, KPIEntry.user_id == owner_user_id)
+                )
+            )
+        else:
+            q = q.where(KPIEntry.is_draft == False)
+
     q = q.options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
-    
     res = await db.execute(q)
     entries = list(res.scalars().all())
     
@@ -1551,20 +1632,37 @@ async def _load_other_kpi_values(
         
     for kid, entries_list in kpi_entries.items():
         selected_entry = None
-        if is_draft is not None:
-            selected_entry = next((e for e in entries_list if e.is_draft == is_draft), None)
+        if period_key is not None:
+            selected_entry = next((e for e in entries_list if e.period_key == period_key), None)
         if selected_entry is None:
-            selected_entry = next((e for e in entries_list if e.is_draft), entries_list[0])
+            selected_entry = next((e for e in entries_list if e.period_key in ("", None)), None)
+        if selected_entry is None:
+            selected_entry = entries_list[0]
             
-        for fv in selected_entry.field_values or []:
-            if not fv.field or fv.value_number is None:
-                continue
-            if fv.field.field_type not in (FieldType.number, FieldType.formula):
-                continue
-            try:
-                out[(kid, fv.field.key)] = float(fv.value_number)
-            except (TypeError, ValueError):
-                pass
+        matching_period_entries = [e for e in entries_list if e.period_key == selected_entry.period_key]
+        final_entry = None
+        if is_draft == False:
+            final_entry = next((e for e in matching_period_entries if not e.is_draft), None)
+        elif is_draft == True:
+            if owner_user_id is not None:
+                final_entry = next((e for e in matching_period_entries if e.is_draft and e.user_id == owner_user_id), None)
+            if final_entry is None:
+                final_entry = next((e for e in matching_period_entries if not e.is_draft), None)
+        else:
+            final_entry = next((e for e in matching_period_entries if not e.is_draft), None)
+            if final_entry is None:
+                final_entry = matching_period_entries[0] if matching_period_entries else None
+                
+        if final_entry:
+            for fv in final_entry.field_values or []:
+                if not fv.field or fv.value_number is None:
+                    continue
+                if fv.field.field_type not in (FieldType.number, FieldType.formula):
+                    continue
+                try:
+                    out[(kid, fv.field.key)] = float(fv.value_number)
+                except (TypeError, ValueError):
+                    pass
     return out
 
 
@@ -1829,7 +1927,7 @@ async def save_entry_values(
 
     # Other KPIs' numeric values for KPI_FIELD(kpi_id, field_key) in formulas
     other_kpi_values = await _load_other_kpi_values(
-        db, entry.year, org_id, kpi_id, period_key=entry.period_key, is_draft=entry.is_draft
+        db, entry.year, org_id, kpi_id, period_key=entry.period_key, is_draft=entry.is_draft, owner_user_id=entry.user_id
     )
 
     # Formula fields
@@ -1858,7 +1956,8 @@ async def save_entry_values(
         if computed is not None:
             value_by_key[f.key] = computed
 
-    mark_entry_modified(entry, user_id)
+    await mark_entry_modified(db, entry, user_id)
+    await propagate_formula_recalculations(db, entry_id=entry_id, org_id=org_id)
     await db.flush()
     return entry
 
@@ -1931,7 +2030,7 @@ async def recompute_formula_fields_for_entry(
             multi_line_items_data[f.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=f)
 
     other_kpi_values = await _load_other_kpi_values(
-        db, entry.year, org_id, entry.kpi_id, period_key=entry.period_key, is_draft=entry.is_draft
+        db, entry.year, org_id, entry.kpi_id, period_key=entry.period_key, is_draft=entry.is_draft, owner_user_id=entry.user_id
     )
 
     # Compute + persist
@@ -1956,6 +2055,82 @@ async def recompute_formula_fields_for_entry(
     entry.updated_at = datetime.utcnow()
     await db.flush()
     return True
+
+
+async def propagate_formula_recalculations(db: AsyncSession, entry_id: int, org_id: int) -> None:
+    """Recursively propagate formula recalculations to all dependent KPI entries."""
+    import re
+    from sqlalchemy import or_, and_
+    
+    queue = [entry_id]
+    visited = {entry_id}
+    
+    # Fetch all KPIs in the organization once to build dependency references
+    kpis_res = await db.execute(
+        select(KPI)
+        .where(KPI.organization_id == org_id)
+        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+    )
+    all_kpis = list(kpis_res.scalars().all())
+    
+    while queue:
+        curr_entry_id = queue.pop(0)
+        curr_entry = await db.get(KPIEntry, curr_entry_id)
+        if not curr_entry:
+            continue
+            
+        curr_kpi_id = curr_entry.kpi_id
+        year = curr_entry.year
+        period_key = curr_entry.period_key
+        is_draft = curr_entry.is_draft
+        user_id = curr_entry.user_id
+        
+        # Recalculate the formulas on the current entry
+        await recompute_formula_fields_for_entry(db, entry_id=curr_entry_id, org_id=org_id)
+        
+        # Find which KPIs depend on curr_kpi_id
+        dependent_kpis = []
+        for k in all_kpis:
+            if k.id == curr_kpi_id:
+                continue
+            depends = False
+            for f in (k.fields or []):
+                if f.field_type == FieldType.formula and f.formula_expression:
+                    pattern = rf"\b(KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE)\s*\(\s*{curr_kpi_id}\s*,"
+                    if re.search(pattern, f.formula_expression):
+                        depends = True
+                        break
+                for sf in (f.sub_fields or []):
+                    if sf.field_type == FieldType.formula:
+                        cfg = sf.config or {}
+                        expr = cfg.get("formula_expression") if isinstance(cfg, dict) else None
+                        if expr:
+                            pattern = rf"\b(KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE)\s*\(\s*{curr_kpi_id}\s*,"
+                            if re.search(pattern, expr):
+                                depends = True
+                                break
+                if depends:
+                    break
+            if depends:
+                dependent_kpis.append(k)
+                
+        # Queue matching entries of dependent KPIs
+        for dk in dependent_kpis:
+            q = select(KPIEntry).where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == dk.id,
+                KPIEntry.year == year,
+                KPIEntry.period_key == period_key,
+                KPIEntry.is_draft == is_draft,
+            )
+            if is_draft:
+                q = q.where(KPIEntry.user_id == user_id)
+                
+            dep_entry_res = await db.execute(q)
+            dep_entry = dep_entry_res.scalar_one_or_none()
+            if dep_entry and dep_entry.id not in visited:
+                visited.add(dep_entry.id)
+                queue.append(dep_entry.id)
 
 
 async def recompute_formula_fields_for_kpi(
@@ -2016,7 +2191,7 @@ async def recompute_formula_fields_for_kpi(
                     pass
 
         other_kpi_values = await _load_other_kpi_values(
-            db, entry.year, org_id, kpi_id, period_key=entry.period_key, is_draft=entry.is_draft
+            db, entry.year, org_id, kpi_id, period_key=entry.period_key, is_draft=entry.is_draft, owner_user_id=entry.user_id
         )
         for f in formula_fields:
             computed = evaluate_formula(
@@ -2180,17 +2355,11 @@ async def submit_entry(
         db.add(pub_entry)
         await db.flush()
         
-    # 3. Clear existing values on the published entry
+    # 3. Clear existing values on the published entry atomically
     await db.execute(delete(KPIFieldValue).where(KPIFieldValue.entry_id == pub_entry.id))
     await db.execute(delete(KpiMultiLineRowAccess).where(KpiMultiLineRowAccess.entry_id == pub_entry.id))
     await db.execute(delete(KpiFile).where(KpiFile.entry_id == pub_entry.id))
-    
-    existing_rows = await db.execute(
-        select(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == pub_entry.id)
-    )
-    for r in list(existing_rows.scalars().all()):
-        await db.delete(r)
-        
+    await db.execute(delete(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == pub_entry.id))
     await db.flush()
     
     # 4. Copy all values from draft to published entry
@@ -2204,14 +2373,16 @@ async def submit_entry(
     pub_entry.last_modified_by_user_id = user_id
     pub_entry.user_id = user_id
     pub_entry.updated_at = now
-    
-    draft_entry.submitted_at = now
-    draft_entry.submitted_by_user_id = user_id
-    draft_entry.is_modified_after_submission = False
-    draft_entry.updated_at = now
-    
     await db.flush()
-    return draft_entry
+    
+    # Recalculate and propagate formulas for the newly published entry
+    await propagate_formula_recalculations(db, pub_entry.id, org_id)
+
+    # 6. Delete draft entry
+    await db.execute(delete(KPIEntry).where(KPIEntry.id == draft_entry.id))
+    await db.flush()
+    
+    return pub_entry
 
 
 async def lock_entry(
@@ -2297,6 +2468,13 @@ async def list_entries(
     as_admin: bool = False,
 ) -> list[KPIEntry]:
     """List entries for org (per KPI per year per period_key). Prioritize the user's private draft if it exists."""
+    from sqlalchemy import or_, and_
+    
+    # Check role
+    user_res = await db.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    is_org_admin = (getattr(user.role, "value", user.role) == "ORG_ADMIN") if user else False
+    
     q = select(KPIEntry).where(KPIEntry.organization_id == org_id)
     if kpi_id is not None:
         q = q.where(KPIEntry.kpi_id == kpi_id)
@@ -2304,6 +2482,16 @@ async def list_entries(
         q = q.where(KPIEntry.year == year)
     if period_key is not None:
         q = q.where(KPIEntry.period_key == (period_key.strip()[:8] if period_key else ""))
+
+    if is_org_admin:
+        q = q.where(KPIEntry.is_draft == False)
+    else:
+        q = q.where(
+            or_(
+                KPIEntry.is_draft == False,
+                and_(KPIEntry.is_draft == True, KPIEntry.user_id == user_id)
+            )
+        )
 
     q = q.options(selectinload(KPIEntry.field_values), selectinload(KPIEntry.user))
     result = await db.execute(q)
@@ -2317,21 +2505,24 @@ async def list_entries(
 
     filtered_entries: list[KPIEntry] = []
     for key, group in grouped.items():
-        # Find the shared draft entry for this period group
-        my_draft = next((e for e in group if e.is_draft), None)
-        if my_draft:
+        # Find the user's private draft entry for this period group
+        my_draft = next((e for e in group if e.is_draft and e.user_id == user_id), None)
+        # If draft exists and has unsubmitted changes, use draft.
+        # Otherwise, fallback to the published version so it renders as green / submitted.
+        if my_draft and (my_draft.is_modified_after_submission or my_draft.submitted_at is None):
             filtered_entries.append(my_draft)
         else:
-            # Fallback to the published entry
             published = next((e for e in group if not e.is_draft), None)
             if published:
                 filtered_entries.append(published)
+            elif my_draft:
+                filtered_entries.append(my_draft)
 
     # Sort descending
     filtered_entries.sort(key=lambda e: (e.year, e.period_key, e.kpi_id), reverse=True)
 
     # Non-admin: filter by KPI assignment
-    if not as_admin:
+    if not is_org_admin and not as_admin:
         assign_res = await db.execute(
             select(KPIAssignment.kpi_id).where(KPIAssignment.user_id == user_id)
         )
@@ -2529,11 +2720,12 @@ def _period_display(period_key: str) -> str:
 
 
 async def _get_entries_for_overview(
-    db: AsyncSession, org_id: int, kpi_ids: list[int], year: int
+    db: AsyncSession, org_id: int, kpi_ids: list[int], year: int, user_id: int, is_org_admin: bool
 ) -> list[KPIEntry]:
-    """Load all entries for org, kpi_ids, year with field_values and user."""
+    """Load all entries for org, kpi_ids, year with field_values and user, respecting draft filtering."""
     if not kpi_ids:
         return []
+    from sqlalchemy import or_, and_
     q = (
         select(KPIEntry)
         .where(
@@ -2541,10 +2733,20 @@ async def _get_entries_for_overview(
             KPIEntry.kpi_id.in_(kpi_ids),
             KPIEntry.year == year,
         )
-        .options(
-            selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field),
-            selectinload(KPIEntry.user),
+    )
+    if is_org_admin:
+        q = q.where(KPIEntry.is_draft == False)
+    else:
+        q = q.where(
+            or_(
+                KPIEntry.is_draft == False,
+                and_(KPIEntry.is_draft == True, KPIEntry.user_id == user_id)
+            )
         )
+        
+    q = q.options(
+        selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field),
+        selectinload(KPIEntry.user),
     )
     res = await db.execute(q)
     return list(res.unique().scalars().all())
@@ -2600,15 +2802,29 @@ async def list_entries_overview(
             })
     user_res = await db.execute(select(User).where(User.id == user_id))
     current_user_obj = user_res.scalar_one_or_none()
+    is_org_admin = (getattr(current_user_obj.role, "value", current_user_obj.role) == "ORG_ADMIN") if current_user_obj else False
     if current_user_obj and current_user_obj.role.value in ("ORG_ADMIN", "SUPER_ADMIN"):
         for kid in kpi_ids:
             current_user_permission_by_kpi[kid] = "data_entry"
 
-    all_entries = await _get_entries_for_overview(db, org_id, kpi_ids, year)
+    all_entries = await _get_entries_for_overview(db, org_id, kpi_ids, year, user_id, is_org_admin)
     entry_by_kpi_period: dict[tuple[int, str], KPIEntry] = {}
+    from collections import defaultdict
+    grouped_entries = defaultdict(list)
     for e in all_entries:
         pk = getattr(e, "period_key", "") or ""
-        entry_by_kpi_period[(e.kpi_id, pk)] = e
+        grouped_entries[(e.kpi_id, pk)].append(e)
+        
+    for key, group in grouped_entries.items():
+        my_draft = next((e for e in group if e.is_draft and e.user_id == user_id), None)
+        if my_draft and (my_draft.is_modified_after_submission or my_draft.submitted_at is None):
+            entry_by_kpi_period[key] = my_draft
+        else:
+            published = next((e for e in group if not e.is_draft), None)
+            if published:
+                entry_by_kpi_period[key] = published
+            elif my_draft:
+                entry_by_kpi_period[key] = my_draft
 
     tag_names_by_kpi: dict[int, list[str]] = {kid: [] for kid in kpi_ids}
     if kpi_ids:
@@ -2765,7 +2981,8 @@ def extract_cross_kpi_mli_references(expression: str) -> set[tuple[int, str]]:
             func_name = node.func.id
             if func_name in (
                 "SUM_KPI_ITEMS", "AVG_KPI_ITEMS", "COUNT_KPI_ITEMS", "MIN_KPI_ITEMS", "MAX_KPI_ITEMS",
-                "SUM_KPI_ITEMS_WHERE", "AVG_KPI_ITEMS_WHERE", "COUNT_KPI_ITEMS_WHERE", "MIN_KPI_ITEMS_WHERE", "MAX_KPI_ITEMS_WHERE"
+                "SUM_KPI_ITEMS_WHERE", "AVG_KPI_ITEMS_WHERE", "COUNT_KPI_ITEMS_WHERE", "MIN_KPI_ITEMS_WHERE", "MAX_KPI_ITEMS_WHERE",
+                "KPI_FIELD"
             ):
                 if len(node.args) >= 2:
                     kpi_id = None
@@ -2783,7 +3000,12 @@ def extract_cross_kpi_mli_references(expression: str) -> set[tuple[int, str]]:
                         field_key = arg1.s
                         
                     if isinstance(kpi_id, int) and isinstance(field_key, str):
-                        refs.add((kpi_id, field_key))
+                        if func_name == "KPI_FIELD":
+                            if "." in field_key:
+                                mli_key = field_key.split(".", 1)[0]
+                                refs.add((kpi_id, mli_key))
+                        else:
+                            refs.add((kpi_id, field_key))
     return refs
 
 
@@ -2794,8 +3016,10 @@ async def _load_other_kpi_multi_line_data(
     refs: set[tuple[int, str]],
     period_key: str | None = None,
     is_draft: bool | None = None,
+    owner_user_id: int | None = None,
 ) -> dict[tuple[int, str], list[dict[str, Any]]]:
     """Batch-load multi-line item rows for the referenced other KPIs and fields."""
+    from sqlalchemy import or_, and_
     out = {}
     if not refs:
         return out
@@ -2811,17 +3035,58 @@ async def _load_other_kpi_multi_line_data(
             KPIEntry.year == year,
             KPIEntry.organization_id == org_id,
         )
-        if period_key is not None:
-            q = q.where(KPIEntry.period_key == period_key)
+        if is_draft == False:
+            q = q.where(KPIEntry.is_draft == False)
+        elif is_draft == True:
+            if owner_user_id is not None:
+                q = q.where(
+                    or_(
+                        KPIEntry.is_draft == False,
+                        and_(KPIEntry.is_draft == True, KPIEntry.user_id == owner_user_id)
+                    )
+                )
+            else:
+                q = q.where(KPIEntry.is_draft == False)
+        else:
+            if owner_user_id is not None:
+                q = q.where(
+                    or_(
+                        KPIEntry.is_draft == False,
+                        and_(KPIEntry.is_draft == True, KPIEntry.user_id == owner_user_id)
+                    )
+                )
+            else:
+                q = q.where(KPIEntry.is_draft == False)
             
         entry_res = await db.execute(q)
         entries = list(entry_res.scalars().all())
         
+        if not entries:
+            for fk in field_keys:
+                out[(kpi_id, fk)] = []
+            continue
+
+        selected_entry = None
+        if period_key is not None:
+            selected_entry = next((e for e in entries if e.period_key == period_key), None)
+        if selected_entry is None:
+            selected_entry = next((e for e in entries if e.period_key in ("", None)), None)
+        if selected_entry is None:
+            selected_entry = entries[0]
+
+        matching_period_entries = [e for e in entries if e.period_key == selected_entry.period_key]
         entry = None
-        if is_draft is not None:
-            entry = next((e for e in entries if e.is_draft == is_draft), None)
-        if entry is None:
-            entry = next((e for e in entries if e.is_draft), entries[0] if entries else None)
+        if is_draft == False:
+            entry = next((e for e in matching_period_entries if not e.is_draft), None)
+        elif is_draft == True:
+            if owner_user_id is not None:
+                entry = next((e for e in matching_period_entries if e.is_draft and e.user_id == owner_user_id), None)
+            if entry is None:
+                entry = next((e for e in matching_period_entries if not e.is_draft), None)
+        else:
+            entry = next((e for e in matching_period_entries if not e.is_draft), None)
+            if entry is None:
+                entry = matching_period_entries[0] if matching_period_entries else None
             
         if not entry:
             for fk in field_keys:
@@ -2916,7 +3181,7 @@ async def recompute_mli_formula_subfields(
 
     # Load scalar values of other KPIs for cross-KPI scalar refs
     other_kpi_values = await _load_other_kpi_values(
-        db, entry.year, org_id, entry.kpi_id, period_key=entry.period_key, is_draft=entry.is_draft
+        db, entry.year, org_id, entry.kpi_id, period_key=entry.period_key, is_draft=entry.is_draft, owner_user_id=entry.user_id
     )
 
     # Load all MLI field rows in the current entry so formulas can reference other MLI fields in the same entry
@@ -2930,89 +3195,139 @@ async def recompute_mli_formula_subfields(
         multi_line_items_data[mf.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=mf)
 
     # 2. Iterate through each MLI field and compute formula subfields
-    for f in mli_fields:
-        sub_fields = list(f.sub_fields or [])
-        formula_subs = [sf for sf in sub_fields if sf.field_type == FieldType.formula]
-        if not formula_subs:
-            continue
+    from app.core.config import get_settings
+    from sqlalchemy import text
+    settings = get_settings()
+    is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
 
-        # Extract cross-KPI multi-line dependencies
-        refs = set()
-        for sf in formula_subs:
-            cfg = sf.config or {}
-            if hasattr(cfg, "get"):
-                expr = cfg.get("formula_expression")
-            elif isinstance(cfg, dict):
-                expr = cfg.get("formula_expression")
-            else:
-                expr = None
-            if expr:
-                refs.update(extract_cross_kpi_mli_references(expr))
-
-        other_kpi_mli_data = await _load_other_kpi_multi_line_data(
-            db, entry.year, org_id, refs, period_key=entry.period_key, is_draft=entry.is_draft
+    if not is_sqlite:
+        await db.execute(
+            text("ALTER TABLE kpi_multi_line_cells DISABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
         )
-        sorted_subs = _topological_sort_subfields(sub_fields)
 
-        rows_res = await db.execute(
-            select(KpiMultiLineRow)
-            .where(KpiMultiLineRow.entry_id == entry.id, KpiMultiLineRow.field_id == f.id)
-            .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
-        )
-        rows_orm = list(rows_res.scalars().all())
+    try:
+        for f in mli_fields:
+            sub_fields = list(f.sub_fields or [])
+            formula_subs = [sf for sf in sub_fields if sf.field_type == FieldType.formula]
+            if not formula_subs:
+                continue
 
-        for r in rows_orm:
-            # Construct working row data from existing cells
-            working_row: dict[str, Any] = {}
-            cells_by_sub_id: dict[int, KpiMultiLineCell] = {}
-            for cell in getattr(r, "cells", None) or []:
-                sf = getattr(cell, "sub_field", None)
-                if sf:
-                    working_row[sf.key] = _ml_cell_raw(cell)
-                    cells_by_sub_id[sf.id] = cell
-            # Compute formula subfields in topological order
-            for sf in sorted_subs:
-                sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
-                if sf_type_s == "formula":
-                    cfg = sf.config or {}
-                    if hasattr(cfg, "get"):
-                        expr = cfg.get("formula_expression")
-                    elif isinstance(cfg, dict):
-                        expr = cfg.get("formula_expression")
-                    else:
-                        expr = None
-                    if not expr:
-                        computed = None
-                    else:
-                        computed = evaluate_formula(
-                            expr,
-                            value_by_key,
-                            multi_line_items_data,
-                            other_kpi_values,
-                            current_row=working_row,
-                            other_kpi_multi_line_data=other_kpi_mli_data,
-                        )
+            # Extract cross-KPI multi-line dependencies
+            refs = set()
+            for sf in formula_subs:
+                cfg = sf.config or {}
+                if hasattr(cfg, "get"):
+                    expr = cfg.get("formula_expression")
+                elif isinstance(cfg, dict):
+                    expr = cfg.get("formula_expression")
+                else:
+                    expr = None
+                if expr:
+                    refs.update(extract_cross_kpi_mli_references(expr))
 
-                    # Update working_row
-                    working_row[sf.key] = computed
+            other_kpi_mli_data = await _load_other_kpi_multi_line_data(
+                db, entry.year, org_id, refs, period_key=entry.period_key, is_draft=entry.is_draft, owner_user_id=entry.user_id
+            )
+            sorted_subs = _topological_sort_subfields(sub_fields)
 
-                    # Persist cell value
-                    cell = cells_by_sub_id.get(sf.id)
-                    if cell is None:
-                        cell = KpiMultiLineCell(row_id=r.id, sub_field_id=sf.id)
-                        db.add(cell)
+            rows_res = await db.execute(
+                select(KpiMultiLineRow)
+                .where(KpiMultiLineRow.entry_id == entry.id, KpiMultiLineRow.field_id == f.id)
+                .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
+            )
+            rows_orm = list(rows_res.scalars().all())
+
+            for r in rows_orm:
+                # Construct working row data from existing cells
+                working_row: dict[str, Any] = {}
+                cells_by_sub_id: dict[int, KpiMultiLineCell] = {}
+                for cell in getattr(r, "cells", None) or []:
+                    sf = getattr(cell, "sub_field", None)
+                    if sf:
+                        working_row[sf.key] = _ml_cell_raw(cell)
                         cells_by_sub_id[sf.id] = cell
+                # Compute formula subfields in topological order
+                for sf in sorted_subs:
+                    sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
+                    if sf_type_s == "formula":
+                        cfg = sf.config or {}
+                        if hasattr(cfg, "get"):
+                            expr = cfg.get("formula_expression")
+                        elif isinstance(cfg, dict):
+                            expr = cfg.get("formula_expression")
+                        else:
+                            expr = None
+                        if not expr:
+                            computed = None
+                        else:
+                            computed = evaluate_formula(
+                                expr,
+                                value_by_key,
+                                multi_line_items_data,
+                                other_kpi_values,
+                                current_row=working_row,
+                                other_kpi_multi_line_data=other_kpi_mli_data,
+                            )
 
-                    cell.value_text = None
-                    cell.value_number = None
-                    cell.value_json = None
-                    cell.value_boolean = None
-                    cell.value_date = None
+                        # Update working_row
+                        working_row[sf.key] = computed
 
-                    if computed is not None:
-                        try:
-                            cell.value_number = float(computed)
-                        except (TypeError, ValueError):
-                            cell.value_text = str(computed)
+                        # Persist cell value
+                        cell = cells_by_sub_id.get(sf.id)
+                        if cell is None:
+                            cell = KpiMultiLineCell(row_id=r.id, sub_field_id=sf.id)
+                            db.add(cell)
+                            cells_by_sub_id[sf.id] = cell
 
-    await db.flush()
+                        cell.value_text = None
+                        cell.value_number = None
+                        cell.value_json = None
+                        cell.value_boolean = None
+                        cell.value_date = None
+
+                        if computed is not None:
+                            try:
+                                cell.value_number = float(computed)
+                            except (TypeError, ValueError):
+                                cell.value_text = str(computed)
+        await db.flush()
+    finally:
+        if not is_sqlite:
+            await db.execute(
+                text("ALTER TABLE kpi_multi_line_cells ENABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
+            )
+
+    # Bulk refresh search_text for the parent rows in PostgreSQL
+    if not is_sqlite and mli_fields:
+        await db.execute(
+            text(
+                """
+                UPDATE kpi_multi_line_rows r
+                SET search_text = src.t
+                FROM (
+                  SELECT
+                    c.row_id,
+                    lower(
+                      string_agg(
+                        coalesce(
+                          c.value_text,
+                          c.value_json::text,
+                          c.value_number::text,
+                          c.value_boolean::text,
+                          c.value_date::text,
+                          ''
+                        ),
+                        ' '
+                      )
+                    ) AS t
+                  FROM kpi_multi_line_cells c
+                  JOIN kpi_multi_line_rows r2 ON c.row_id = r2.id
+                  WHERE r2.entry_id = :entry_id
+                  GROUP BY c.row_id
+                ) AS src
+                WHERE src.row_id = r.id AND r.entry_id = :entry_id
+                """
+            ),
+            {"entry_id": entry_id},
+        )
+        await db.flush()

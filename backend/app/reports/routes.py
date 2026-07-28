@@ -385,7 +385,7 @@ async def evaluate_snippet(
         sub_field_group_fn=body.sub_field_group_fn,
         entry_index=body.entry_index,
         expression=body.expression,
-        include_drafts=current_user.role.value in ("SUPER_ADMIN", "ORG_ADMIN"),
+        include_drafts=False,
     )
     return {"value": value}
 
@@ -404,7 +404,7 @@ async def preview_report(
     can = await user_can_access_report(db, current_user.id, template_id, "view")
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
-    include_drafts = current_user.role.value in ("SUPER_ADMIN", "ORG_ADMIN")
+    include_drafts = False
     try:
         # If designer sends an empty template, render from saved body_blocks/body_template instead.
         # This ensures block-driven features (e.g. multi-line row filters) are included in preview.

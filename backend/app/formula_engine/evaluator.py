@@ -83,9 +83,43 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
     if cell is None:
         return op_norm == "neq"
 
+    # If filter_value is a list/tuple/set, compare using membership (in/not in)
+    if isinstance(filter_value, (list, tuple, set)):
+        cell_val = cell
+        if isinstance(cell, dict) and "value" in cell:
+            cell_val = cell["value"]
+        elif isinstance(cell, dict) and "id" in cell:
+            cell_val = cell["id"]
+
+        c_num = _to_num(cell_val)
+        if c_num is not None:
+            num_list = []
+            for item in filter_value:
+                it_val = item["value"] if isinstance(item, dict) and "value" in item else item
+                it_num = _to_num(it_val)
+                if it_num is not None:
+                    num_list.append(it_num)
+            if op_norm in ("eq", "contains"):
+                return c_num in num_list
+            if op_norm in ("neq", "not_contains"):
+                return c_num not in num_list
+
+        c_str = str(cell_val).strip()
+        str_list = []
+        for item in filter_value:
+            it_val = item["value"] if isinstance(item, dict) and "value" in item else (item["label"] if isinstance(item, dict) and "label" in item else item)
+            if it_val is not None:
+                str_list.append(str(it_val).strip())
+        if op_norm in ("eq", "contains"):
+            return c_str in str_list
+        if op_norm in ("neq", "not_contains"):
+            return c_str not in str_list
+        return False
+
     # Try numeric comparison first
     n = _to_num(cell)
     fv_num = _to_num(filter_value)
+    
     if n is not None and fv_num is not None and op_norm in {"eq", "neq", "gt", "gte", "lt", "lte"}:
         if op_norm == "eq":
             return n == fv_num
@@ -486,8 +520,21 @@ def _make_evaluator(
         vals = _items_values_where_multi(data, field_key, value_sub_key, where_args, 0)
         return max(vals) if vals else 0.0
 
-    def kpi_field(kpi_id: int, field_key: str) -> float:
-        """Return numeric value of a field from another KPI (same user, same year, same org). Missing => 0."""
+    def kpi_field(kpi_id: int, field_key: str) -> Any:
+        """Return numeric value or list of subfield values of a field from another KPI (same user, same year, same org). Missing => 0."""
+        if "." in field_key:
+            mli_key, sub_key = field_key.split(".", 1)
+            rows = _other_kpi_rows(kpi_id, mli_key)
+            vals = []
+            for r in rows:
+                if isinstance(r, dict):
+                    v = r.get(sub_key)
+                    v_num = _to_num(v)
+                    if v_num is not None:
+                        vals.append(v_num)
+                    elif v is not None:
+                        vals.append(v)
+            return vals
         return ref_values.get((kpi_id, field_key), 0.0)
 
     def _safe_sum(*a: Any) -> float:
