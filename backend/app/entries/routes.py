@@ -3163,34 +3163,32 @@ async def sync_multi_items_from_odoo(
     if not can_edit:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this field")
 
-    # Load or create the published entry for this period group
-    pub_entry_res = await db.execute(
-        select(KPIEntry).where(
-            KPIEntry.organization_id == org_id,
-            KPIEntry.kpi_id == provided_entry.kpi_id,
-            KPIEntry.year == provided_entry.year,
-            KPIEntry.period_key == provided_entry.period_key,
-            KPIEntry.is_draft == False,
+    # Load or create the published entry for this period group (preserving the provided entry ID if draft)
+    if provided_entry.is_draft:
+        pub_entry_res = await db.execute(
+            select(KPIEntry).where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == provided_entry.kpi_id,
+                KPIEntry.year == provided_entry.year,
+                KPIEntry.period_key == provided_entry.period_key,
+                KPIEntry.is_draft == False,
+            )
         )
-    )
-    entry = pub_entry_res.scalar_one_or_none()
-    if not entry:
-        entry = KPIEntry(
-            organization_id=org_id,
-            kpi_id=provided_entry.kpi_id,
-            user_id=current_user.id,
-            year=provided_entry.year,
-            period_key=provided_entry.period_key,
-            is_draft=False,
-            is_modified_after_submission=False,
-        )
-        db.add(entry)
-        await db.flush()
-        if provided_entry.is_draft:
-            # Copy other existing fields to the new published entry
-            from app.entries.service import _copy_entry_values
-            await _copy_entry_values(db, provided_entry.id, entry.id)
+        pub_entry = pub_entry_res.scalar_one_or_none()
+        if pub_entry:
+            # Delete old published entry atomically to avoid conflicts
+            from app.core.models import KPIFieldValue, KpiMultiLineRowAccess, KpiFile, KpiMultiLineRow
+            await db.execute(delete(KPIFieldValue).where(KPIFieldValue.entry_id == pub_entry.id))
+            await db.execute(delete(KpiMultiLineRowAccess).where(KpiMultiLineRowAccess.entry_id == pub_entry.id))
+            await db.execute(delete(KpiFile).where(KpiFile.entry_id == pub_entry.id))
+            await db.execute(delete(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == pub_entry.id))
+            await db.execute(delete(KPIEntry).where(KPIEntry.id == pub_entry.id))
             await db.flush()
+        
+        provided_entry.is_draft = False
+        await db.flush()
+        
+    entry = provided_entry
 
     cfg = getattr(field, "config", None) or {}
     channel = (cfg.get("multi_items_import_channel") or "").strip().lower()
@@ -3959,7 +3957,8 @@ async def get_multi_items_page_context(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
 
     pk = (period_key or "").strip()[:8]
-    entry, created = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=pk)
+    from app.entries.service import get_active_entry_for_period
+    entry, created = await get_active_entry_for_period(db, current_user, org_id, kpi_id, year, period_key=pk)
     if not entry:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
     if created:
@@ -5201,7 +5200,8 @@ async def get_or_create_entry_for_period(
     if not can_view:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
     pk = (period_key or "").strip()[:8]
-    entry, created = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=pk)
+    from app.entries.service import get_active_entry_for_period
+    entry, created = await get_active_entry_for_period(db, current_user, org_id, kpi_id, year, period_key=pk)
     if not entry:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
     if created:
@@ -5228,7 +5228,8 @@ async def get_or_create_entry_for_period_id(
     if not can_view:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
     pk = (period_key or "").strip()[:8]
-    entry, created = await get_or_create_entry(db, current_user.id, org_id, kpi_id, year, period_key=pk)
+    from app.entries.service import get_active_entry_for_period
+    entry, created = await get_active_entry_for_period(db, current_user, org_id, kpi_id, year, period_key=pk)
     if not entry:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KPI not in organization")
     if created:
