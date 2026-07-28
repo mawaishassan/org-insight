@@ -71,6 +71,7 @@ from app.entries.service import (
     get_user_row_edit_map,
     save_entry_values,
     recompute_formula_fields_for_entry,
+    propagate_formula_recalculations,
     submit_entry,
     mark_entry_modified,
     lock_entry,
@@ -258,6 +259,7 @@ async def _replace_multi_line_rows_from_dicts(
 ) -> None:
     """Replace relational multi-line rows/cells using bulk Core INSERT (fast path for large imports)."""
     from app.core.config import get_settings
+    from sqlalchemy import text
 
     settings = get_settings()
     # SQLite default max host parameters per statement is often 999 — keep chunks small.
@@ -280,19 +282,19 @@ async def _replace_multi_line_rows_from_dicts(
         return
 
     ts = utc_now()
-    await db.execute(
-        insert(KpiMultiLineRow),
-        [
-            {
-                "entry_id": entry_id,
-                "field_id": field.id,
-                "row_index": idx,
-                "created_at": ts,
-                "updated_at": ts,
-            }
-            for idx in range(len(rows_list))
-        ],
-    )
+    row_data = [
+        {
+            "entry_id": entry_id,
+            "field_id": field.id,
+            "row_index": idx,
+            "created_at": ts,
+            "updated_at": ts,
+        }
+        for idx in range(len(rows_list))
+    ]
+    row_chunk = 100 if "sqlite" in settings.DATABASE_URL.lower() else 2000
+    for i in range(0, len(row_data), row_chunk):
+        await db.execute(insert(KpiMultiLineRow), row_data[i : i + row_chunk])
     await db.flush()
 
     res_ids = await db.execute(
@@ -330,9 +332,58 @@ async def _replace_multi_line_rows_from_dicts(
             m["updated_at"] = cell_ts
             cell_rows.append(m)
 
-    for i in range(0, len(cell_rows), cell_chunk):
-        await db.execute(insert(KpiMultiLineCell), cell_rows[i : i + cell_chunk])
-    await db.flush()
+    # Disable trigger before inserting cells to avoid O(N^2) updates on rows search_text
+    is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
+    if not is_sqlite:
+        await db.execute(
+            text("ALTER TABLE kpi_multi_line_cells DISABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
+        )
+
+    try:
+        for i in range(0, len(cell_rows), cell_chunk):
+            await db.execute(insert(KpiMultiLineCell), cell_rows[i : i + cell_chunk])
+        await db.flush()
+    finally:
+        # Re-enable trigger
+        if not is_sqlite:
+            await db.execute(
+                text("ALTER TABLE kpi_multi_line_cells ENABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
+            )
+
+    # Bulk refresh search_text for the parent rows in PostgreSQL
+    if not is_sqlite and cell_rows:
+        await db.execute(
+            text(
+                """
+                UPDATE kpi_multi_line_rows r
+                SET search_text = src.t
+                FROM (
+                  SELECT
+                    c.row_id,
+                    lower(
+                      string_agg(
+                        coalesce(
+                          c.value_text,
+                          c.value_json::text,
+                          c.value_number::text,
+                          c.value_boolean::text,
+                          c.value_date::text,
+                          ''
+                        ),
+                        ' '
+                      )
+                    ) AS t
+                  FROM kpi_multi_line_cells c
+                  JOIN kpi_multi_line_rows r2 ON c.row_id = r2.id
+                  WHERE r2.entry_id = :entry_id AND r2.field_id = :field_id
+                  GROUP BY c.row_id
+                ) AS src
+                WHERE src.row_id = r.id AND r.entry_id = :entry_id AND r.field_id = :field_id
+                """
+            ),
+            {"entry_id": entry_id, "field_id": field.id},
+        )
+        await db.flush()
 
 
 def _entry_to_response(entry):
@@ -1315,9 +1366,9 @@ async def upload_multi_items_excel(
             )
             new_rows = merged
             rows_overridden = 0
-    mark_entry_modified(entry, current_user.id)
+    await mark_entry_modified(db, entry, current_user.id)
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
-    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     logger.info(
         "END multi-items upload: entry_id=%s field_id=%s org_id=%s mode=%s added=%s updated=%s overridden=%s",
@@ -2290,8 +2341,8 @@ async def add_multi_items_row(
             continue
         _add_cell(sub, v)
 
-    mark_entry_modified(entry, current_user.id)
-    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await mark_entry_modified(db, entry, current_user.id)
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     return MultiItemsRow(index=new_index, data=normalized_row)
 
@@ -2440,8 +2491,8 @@ async def update_multi_items_row(
                 existing_cells[sub_id] = cell
             _set_cell_value(cell, sf, next_val)
 
-    mark_entry_modified(entry, current_user.id)
-    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await mark_entry_modified(db, entry, current_user.id)
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     # Return row in legacy dict shape
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
@@ -2548,8 +2599,8 @@ async def update_multi_items_row_cell(
         else:
             cell.value_text = str(raw_val)
 
-    mark_entry_modified(entry, current_user.id)
-    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await mark_entry_modified(db, entry, current_user.id)
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
     data = rows[0][1] if rows else {}
@@ -2788,8 +2839,8 @@ async def delete_multi_items_row(
         field_id=field.id,
         deleted_indices={row_index},
     )
-    mark_entry_modified(entry, current_user.id)
-    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await mark_entry_modified(db, entry, current_user.id)
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     return {"warning": warning_msg}
 
@@ -2847,8 +2898,8 @@ async def bulk_delete_multi_items_rows(
         field_id=field.id,
         deleted_indices=index_set,
     )
-    mark_entry_modified(entry, current_user.id)
-    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await mark_entry_modified(db, entry, current_user.id)
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     return {"warning": warning_msg}
 
@@ -2981,8 +3032,8 @@ async def sync_multi_items_from_api(
         rows_added = len(item_dicts)
 
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
-    mark_entry_modified(entry, current_user.id)
-    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await mark_entry_modified(db, entry, current_user.id)
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     out: dict = {
         "entry_id": entry.id,
@@ -3095,23 +3146,51 @@ async def sync_multi_items_from_odoo(
     from app.entries.service import user_can_add_row_multi_line_field, user_can_edit_multi_line_field
 
     org_id = _org_id(current_user, organization_id)
-    entry_res = await db.execute(
-        select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
-    )
-    entry = entry_res.scalar_one_or_none()
-    if not entry or entry.is_locked:
+    provided_entry = await db.get(KPIEntry, entry_id)
+    if not provided_entry or provided_entry.organization_id != org_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    if provided_entry.is_locked:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
 
     field = await _load_multi_items_field(db, org_id, field_id)
-    if not field or field.kpi_id != entry.kpi_id:
+    if not field or field.kpi_id != provided_entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-line field not found")
 
     can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
     if not can_add:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to add rows to this field")
-    can_edit = await user_can_edit_multi_line_field(db, current_user.id, entry.kpi_id, field)
+    can_edit = await user_can_edit_multi_line_field(db, current_user.id, provided_entry.kpi_id, field)
     if not can_edit:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to edit this field")
+
+    # Load or create the published entry for this period group
+    pub_entry_res = await db.execute(
+        select(KPIEntry).where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == provided_entry.kpi_id,
+            KPIEntry.year == provided_entry.year,
+            KPIEntry.period_key == provided_entry.period_key,
+            KPIEntry.is_draft == False,
+        )
+    )
+    entry = pub_entry_res.scalar_one_or_none()
+    if not entry:
+        entry = KPIEntry(
+            organization_id=org_id,
+            kpi_id=provided_entry.kpi_id,
+            user_id=current_user.id,
+            year=provided_entry.year,
+            period_key=provided_entry.period_key,
+            is_draft=False,
+            is_modified_after_submission=False,
+        )
+        db.add(entry)
+        await db.flush()
+        if provided_entry.is_draft:
+            # Copy other existing fields to the new published entry
+            from app.entries.service import _copy_entry_values
+            await _copy_entry_values(db, provided_entry.id, entry.id)
+            await db.flush()
 
     cfg = getattr(field, "config", None) or {}
     channel = (cfg.get("multi_items_import_channel") or "").strip().lower()
@@ -3260,8 +3339,18 @@ async def sync_multi_items_from_odoo(
         rows_added = len(item_dicts)
 
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
-    mark_entry_modified(entry, current_user.id)
-    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await mark_entry_modified(db, entry, current_user.id)
+    await db.execute(
+        delete(KPIEntry).where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == entry.kpi_id,
+            KPIEntry.year == entry.year,
+            KPIEntry.period_key == entry.period_key,
+            KPIEntry.is_draft == True,
+        )
+    )
+    await db.flush()
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
     out: dict = {"entry_id": entry.id, "field_id": field.id, "rows_imported": len(item_dicts)}
     if effective_mode == "upsert":
@@ -3373,9 +3462,9 @@ async def import_multi_items_from_year(
         rows_added = len(incoming_items)
         rows_overridden = prev_count
 
-    mark_entry_modified(entry, current_user.id)
+    await mark_entry_modified(db, entry, current_user.id)
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
-    await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
 
     out: dict = {
@@ -4310,7 +4399,8 @@ async def export_entry_excel(
         KPIEntry.is_draft == True,
     ).options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
     entry_res = await db.execute(entry_stmt)
-    entry = entry_res.scalar_one_or_none()
+    entries = entry_res.scalars().all()
+    entry = next((e for e in entries if e.user_id == current_user.id), entries[0] if entries else None)
     
     if not entry:
         entry_stmt = select(KPIEntry).where(

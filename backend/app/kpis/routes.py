@@ -1679,26 +1679,14 @@ async def generate_kpi_report_route(
         KPIEntry.kpi_id == kpi_id,
         KPIEntry.year == body.year,
         KPIEntry.period_key == body.period_key,
-        KPIEntry.is_draft == True,
-        KPIEntry.user_id == current_user.id
+        KPIEntry.is_draft == False
     )
     entry_res = await db.execute(entry_stmt)
     entry = entry_res.scalar_one_or_none()
-    
-    if not entry:
-        entry_stmt = select(KPIEntry).where(
-            KPIEntry.organization_id == org_id,
-            KPIEntry.kpi_id == kpi_id,
-            KPIEntry.year == body.year,
-            KPIEntry.period_key == body.period_key,
-            KPIEntry.is_draft == False
-        )
-        entry_res = await db.execute(entry_stmt)
-        entry = entry_res.scalar_one_or_none()
     if not entry:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"No KPI entry found for year {body.year} and period '{body.period_key}'"
+            detail=f"No published KPI entry found for year {body.year} and period '{body.period_key}'"
         )
         
     # Create job
@@ -1848,42 +1836,16 @@ async def download_kpi_report_pdf_route(
     import re
     import json
 
-    # Look for draft entry of the downloading user first
+    # Look for published entry only
     entry_stmt = select(KPIEntry).where(
         KPIEntry.kpi_id == kpi_id,
         KPIEntry.organization_id == org_id,
         KPIEntry.year == job.year,
         KPIEntry.period_key == job.period_key,
-        KPIEntry.is_draft == True,
-        KPIEntry.user_id == current_user.id
+        KPIEntry.is_draft == False
     )
     entry_res = await db.execute(entry_stmt)
     entry = entry_res.scalar_one_or_none()
-    
-    # Fallback to job creator's draft entry
-    if not entry and job.user_id != current_user.id:
-        entry_stmt = select(KPIEntry).where(
-            KPIEntry.kpi_id == kpi_id,
-            KPIEntry.organization_id == org_id,
-            KPIEntry.year == job.year,
-            KPIEntry.period_key == job.period_key,
-            KPIEntry.is_draft == True,
-            KPIEntry.user_id == job.user_id
-        )
-        entry_res = await db.execute(entry_stmt)
-        entry = entry_res.scalar_one_or_none()
-    
-    # Fallback to non-draft entry
-    if not entry:
-        entry_stmt = select(KPIEntry).where(
-            KPIEntry.kpi_id == kpi_id,
-            KPIEntry.organization_id == org_id,
-            KPIEntry.year == job.year,
-            KPIEntry.period_key == job.period_key,
-            KPIEntry.is_draft == False
-        )
-        entry_res = await db.execute(entry_stmt)
-        entry = entry_res.scalar_one_or_none()
 
     referenced_files = []
     if entry:

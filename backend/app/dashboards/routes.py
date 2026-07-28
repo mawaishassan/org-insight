@@ -350,6 +350,8 @@ async def sync_dashboard_odoo_data(
         mark_entry_modified,
         recompute_formula_fields_for_entry,
         _copy_entry_values,
+        get_or_create_entry,
+        propagate_formula_recalculations,
     )
     from app.core.models import KPIEntry, FieldType, KPIFieldValue, KpiMultiLineRowAccess, KpiFile, KpiMultiLineRow
     from app.entries.routes import _replace_multi_line_rows_from_dicts
@@ -458,25 +460,32 @@ async def sync_dashboard_odoo_data(
 
     for field, yr, period_key, org_odoo, kpi_odoo in syncable_fields:
         pk = period_key[:8]
-        # 1. Look up or create the draft entry (original KPI entry)
-        entry_res = await db.execute(
+        # 1. Look up or create the published entry
+        from sqlalchemy import select
+        from app.entries.service import user_can_edit_kpi
+        pub_result = await db.execute(
             select(KPIEntry).where(
                 KPIEntry.organization_id == org_id,
                 KPIEntry.kpi_id == field.kpi_id,
                 KPIEntry.year == yr,
                 KPIEntry.period_key == pk,
-                KPIEntry.is_draft == True,
+                KPIEntry.is_draft == False,
             )
         )
-        entry = entry_res.scalar_one_or_none()
+        entry = pub_result.scalar_one_or_none()
         if not entry:
+            can_edit = await user_can_edit_kpi(db, current_user.id, field.kpi_id, org_id)
+            if not can_edit:
+                errors.append(f"Not allowed to edit KPI {field.kpi_id} ({yr} {period_key})")
+                continue
             entry = KPIEntry(
                 organization_id=org_id,
                 kpi_id=field.kpi_id,
+                user_id=current_user.id,
                 year=yr,
                 period_key=pk,
-                is_draft=True,
-                user_id=current_user.id,
+                is_draft=False,
+                is_modified_after_submission=False,
             )
             db.add(entry)
             await db.flush()
@@ -591,58 +600,18 @@ async def sync_dashboard_odoo_data(
                                 errors.extend(att_errs)
 
             await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=item_dicts)
-            mark_entry_modified(entry, current_user.id)
-            await recompute_formula_fields_for_entry(db, entry_id=entry.id, org_id=org_id)
-            
-            # 2. Replicate / publish the updated draft values to the published entry
-            pub_res = await db.execute(
-                select(KPIEntry).where(
+            await mark_entry_modified(db, entry, current_user.id)
+            await db.execute(
+                delete(KPIEntry).where(
                     KPIEntry.organization_id == org_id,
-                    KPIEntry.kpi_id == field.kpi_id,
-                    KPIEntry.year == yr,
-                    KPIEntry.period_key == pk,
-                    KPIEntry.is_draft == False,
+                    KPIEntry.kpi_id == entry.kpi_id,
+                    KPIEntry.year == entry.year,
+                    KPIEntry.period_key == entry.period_key,
+                    KPIEntry.is_draft == True,
                 )
             )
-            pub_entry = pub_res.scalar_one_or_none()
-            if not pub_entry:
-                pub_entry = KPIEntry(
-                    organization_id=org_id,
-                    kpi_id=field.kpi_id,
-                    year=yr,
-                    period_key=pk,
-                    is_draft=False,
-                )
-                db.add(pub_entry)
-                await db.flush()
-
-            # Clear existing values on the published entry
-            await db.execute(delete(KPIFieldValue).where(KPIFieldValue.entry_id == pub_entry.id))
-            await db.execute(delete(KpiMultiLineRowAccess).where(KpiMultiLineRowAccess.entry_id == pub_entry.id))
-            await db.execute(delete(KpiFile).where(KpiFile.entry_id == pub_entry.id))
-            
-            existing_rows = await db.execute(
-                select(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == pub_entry.id)
-            )
-            for r in list(existing_rows.scalars().all()):
-                await db.delete(r)
             await db.flush()
-
-            # Copy all values from the draft entry to the published entry
-            await _copy_entry_values(db, entry.id, pub_entry.id)
-
-            # Update submission metadata
-            now = datetime.utcnow()
-            pub_entry.submitted_at = now
-            pub_entry.submitted_by_user_id = current_user.id
-            pub_entry.last_modified_at = now
-            pub_entry.last_modified_by_user_id = current_user.id
-            pub_entry.user_id = current_user.id
-            pub_entry.updated_at = now
-
-            entry.submitted_at = now
-            entry.submitted_by_user_id = current_user.id
-            entry.is_modified_after_submission = False
+            await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
             await db.flush()
 
             synced_count += 1

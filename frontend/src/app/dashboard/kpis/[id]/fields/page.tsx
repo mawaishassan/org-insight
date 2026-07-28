@@ -5226,6 +5226,17 @@ function FormulaBuilder({
   const [refOtherKpiId, setRefOtherKpiId] = useState<number | "">("");
 
   const token = getAccessToken();
+  const [userRole, setUserRole] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!token) return;
+    api<{ role: string | { value?: string } }>("/auth/me", { token })
+      .then((me) => {
+        const r = me.role;
+        setUserRole(typeof r === "string" ? r : r?.value ?? null);
+      })
+      .catch(() => setUserRole(null));
+  }, [token]);
 
   const currentMliFieldKey = useMemo(() => {
     if (!currentMliSubFields || currentMliSubFields.length === 0) return null;
@@ -5652,7 +5663,7 @@ function FormulaBuilder({
                               checked={c.compareType === "other_scalar"}
                               onChange={() => setRow({ compareType: "other_scalar", value: "" })}
                             />
-                            Other KPI Scalar
+                            {userRole === "SUPER_ADMIN" ? "Other KPI Field/Subfield" : "Other KPI Scalar"}
                           </label>
                         </>
                       )}
@@ -5708,11 +5719,24 @@ function FormulaBuilder({
                     (() => {
                       const parseKpiFieldCall = (val: string) => {
                         const match = /^KPI_FIELD\((\d+),\s*["']([^"']*)["']\)$/.exec(val);
-                        return match ? { kpiId: Number(match[1]), fieldKey: match[2] } : { kpiId: "", fieldKey: "" };
+                        if (!match) return { kpiId: "", fieldKey: "", subKey: "" };
+                        const kpiId = Number(match[1]);
+                        const fullKey = match[2];
+                        if (fullKey.includes(".")) {
+                          const parts = fullKey.split(".");
+                          return { kpiId, fieldKey: parts[0], subKey: parts[1] };
+                        }
+                        return { kpiId, fieldKey: fullKey, subKey: "" };
                       };
                       const parsed = parseKpiFieldCall(c.value);
                       const activeOtherKpi = parsed.kpiId ? otherKpis.find((k) => k.id === parsed.kpiId) : null;
-                      const otherFields = activeOtherKpi?.fields?.filter((f) => f.field_type !== "multi_line_items") ?? [];
+                      
+                      const isSuper = userRole === "SUPER_ADMIN";
+                      const otherFields = activeOtherKpi?.fields?.filter((f) => isSuper || f.field_type !== "multi_line_items") ?? [];
+                      const selectedField = otherFields.find((f) => f.key === parsed.fieldKey);
+                      const isMli = selectedField?.field_type === "multi_line_items";
+                      const otherSubFields = selectedField?.sub_fields ?? [];
+
                       return (
                         <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", width: "100%", boxSizing: "border-box" }}>
                           <select
@@ -5732,7 +5756,12 @@ function FormulaBuilder({
                             value={parsed.fieldKey}
                             onChange={(e) => {
                               const fk = e.target.value;
-                              setRow({ value: parsed.kpiId ? `KPI_FIELD(${parsed.kpiId}, "${fk}")` : "" });
+                              const f = otherFields.find((x) => x.key === fk);
+                              if (f?.field_type === "multi_line_items") {
+                                setRow({ value: parsed.kpiId ? `KPI_FIELD(${parsed.kpiId}, "${fk}.")` : "" });
+                              } else {
+                                setRow({ value: parsed.kpiId ? `KPI_FIELD(${parsed.kpiId}, "${fk}")` : "" });
+                              }
                             }}
                             disabled={!parsed.kpiId}
                             style={{ flex: "1 1 120px", minWidth: "100px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
@@ -5742,6 +5771,22 @@ function FormulaBuilder({
                               <option key={f.key} value={f.key}>{f.name} ({f.key})</option>
                             ))}
                           </select>
+                          {isSuper && isMli && (
+                            <select
+                              value={parsed.subKey}
+                              onChange={(e) => {
+                                const sk = e.target.value;
+                                setRow({ value: parsed.kpiId ? `KPI_FIELD(${parsed.kpiId}, "${parsed.fieldKey}.${sk}")` : "" });
+                              }}
+                              disabled={!parsed.fieldKey}
+                              style={{ flex: "1 1 120px", minWidth: "100px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                            >
+                              <option value="">— Select Sub-field —</option>
+                              {otherSubFields.map((sf) => (
+                                <option key={sf.key} value={sf.key}>{sf.name} ({sf.key})</option>
+                              ))}
+                            </select>
+                          )}
                         </div>
                       );
                     })()

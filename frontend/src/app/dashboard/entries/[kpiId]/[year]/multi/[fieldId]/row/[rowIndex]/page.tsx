@@ -884,7 +884,7 @@ export default function MultiItemRowDetail() {
       } catch (e) {
         // Silently ignore aborts or errors
       }
-    }, 250);
+    }, 750);
 
     return () => {
       clearTimeout(timeout);
