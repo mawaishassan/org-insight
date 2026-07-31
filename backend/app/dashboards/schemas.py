@@ -42,3 +42,22 @@ class DashboardResponse(BaseModel):
 class DashboardDetailResponse(DashboardResponse):
     layout: dict | list | None = None
 
+
+class DashboardLabelCustomizationResponse(BaseModel):
+    id: int
+    organization_id: int
+    dashboard_id: int
+    widget_id: str | None = None
+    original_label: str
+    customized_label: str
+
+    class Config:
+        from_attributes = True
+
+
+class DashboardLabelCustomizationUpsert(BaseModel):
+    widget_id: str | None = None
+    original_label: str = Field(..., min_length=1)
+    customized_label: str = Field(..., min_length=1)
+
+

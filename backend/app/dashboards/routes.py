@@ -1,12 +1,12 @@
 """Dashboard API routes."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.auth.dependencies import get_current_user, require_org_admin
-from app.core.models import User, Dashboard
+from app.auth.dependencies import get_current_user, require_org_admin, require_super_admin
+from app.core.models import User, Dashboard, DashboardLabelCustomization
 from app.dashboards.schemas import (
     DashboardCreate,
     DashboardUpdate,
@@ -14,6 +14,8 @@ from app.dashboards.schemas import (
     DashboardDetailResponse,
     DashboardAccessAssign,
     DashboardAssignmentResponse,
+    DashboardLabelCustomizationResponse,
+    DashboardLabelCustomizationUpsert,
 )
 from app.dashboards.service import (
     list_all_dashboards,
@@ -644,5 +646,109 @@ async def sync_dashboard_odoo_data(
         "total_imported_rows": total_imported,
         "errors": errors,
     }
+
+
+@router.get("/{dashboard_id}/label-customizations", response_model=list[DashboardLabelCustomizationResponse])
+async def list_dashboard_label_customizations(
+    dashboard_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get all label customizations for a dashboard."""
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    # Check view permission
+    can = await user_can_access_dashboard(db, current_user.id, dashboard_id, "view")
+    if not can:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+    res = await db.execute(
+        select(DashboardLabelCustomization).where(
+            DashboardLabelCustomization.dashboard_id == dashboard_id,
+            DashboardLabelCustomization.organization_id == org_id,
+        )
+    )
+    return [DashboardLabelCustomizationResponse.model_validate(c) for c in res.scalars().all()]
+
+
+@router.post("/{dashboard_id}/label-customizations", response_model=DashboardLabelCustomizationResponse)
+async def upsert_dashboard_label_customization(
+    dashboard_id: int,
+    body: DashboardLabelCustomizationUpsert,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Create or update a label customization for a dashboard (Super Admin only)."""
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    # Verify dashboard exists
+    d = await get_dashboard(db, dashboard_id, org_id)
+    if not d:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
+
+    # Look for existing customization
+    stmt = select(DashboardLabelCustomization).where(
+        DashboardLabelCustomization.dashboard_id == dashboard_id,
+        DashboardLabelCustomization.original_label == body.original_label,
+    )
+    if body.widget_id:
+        stmt = stmt.where(DashboardLabelCustomization.widget_id == body.widget_id)
+    else:
+        stmt = stmt.where(DashboardLabelCustomization.widget_id.is_(None))
+    
+    existing = (await db.execute(stmt)).scalar_one_or_none()
+    
+    if existing:
+        existing.customized_label = body.customized_label
+        cust = existing
+    else:
+        cust = DashboardLabelCustomization(
+            organization_id=org_id,
+            dashboard_id=dashboard_id,
+            widget_id=body.widget_id,
+            original_label=body.original_label,
+            customized_label=body.customized_label,
+        )
+        db.add(cust)
+    
+    await db.flush()
+    await db.commit()
+    await db.refresh(cust)
+    return DashboardLabelCustomizationResponse.model_validate(cust)
+
+
+@router.delete("/{dashboard_id}/label-customizations", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_dashboard_label_customization(
+    dashboard_id: int,
+    original_label: str = Query(...),
+    widget_id: str | None = Query(None),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Delete a label customization for a dashboard (Super Admin only)."""
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    # Verify dashboard exists
+    d = await get_dashboard(db, dashboard_id, org_id)
+    if not d:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
+
+    stmt = select(DashboardLabelCustomization).where(
+        DashboardLabelCustomization.dashboard_id == dashboard_id,
+        DashboardLabelCustomization.original_label == original_label,
+    )
+    if widget_id:
+        stmt = stmt.where(DashboardLabelCustomization.widget_id == widget_id)
+    else:
+        stmt = stmt.where(DashboardLabelCustomization.widget_id.is_(None))
+        
+    existing = (await db.execute(stmt)).scalar_one_or_none()
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customization not found")
+        
+    await db.delete(existing)
+    await db.flush()
+    await db.commit()
+
 
 

@@ -1164,3 +1164,30 @@ class KpiReportJob(Base):
     organization = relationship("Organization")
     kpi = relationship("KPI")
     user = relationship("User")
+
+
+class DashboardLabelCustomization(Base):
+    """Customized display labels for dashboard widgets (UI only)."""
+
+    __tablename__ = "dashboard_label_customizations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    dashboard_id = Column(
+        Integer, ForeignKey("dashboards.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    widget_id = Column(String(255), nullable=True, index=True)  # NULL means global dashboard level customization
+    original_label = Column(String(255), nullable=False)
+    customized_label = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("dashboard_id", "widget_id", "original_label", name="uq_dashboard_widget_label"),
+    )
+
+    dashboard = relationship("Dashboard")
+    organization = relationship("Organization")
+
