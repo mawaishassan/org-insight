@@ -1191,3 +1191,17 @@ class DashboardLabelCustomization(Base):
     dashboard = relationship("Dashboard")
     organization = relationship("Organization")
 
+
+class CaptchaChallenge(Base):
+    """Model to store generated CAPTCHA challenges."""
+
+    __tablename__ = "captcha_challenges"
+
+    id = Column(String(36), primary_key=True, index=True)
+    question = Column(String(255), nullable=False)
+    answer = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+    expires_at = Column(DateTime, nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
+
+

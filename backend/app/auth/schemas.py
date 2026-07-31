@@ -10,6 +10,9 @@ class LoginRequest(BaseModel):
 
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
+    captcha_id: str = Field(..., min_length=1)
+    captcha_answer: str = Field(..., min_length=1)
+
 
 
 class TokenResponse(BaseModel):

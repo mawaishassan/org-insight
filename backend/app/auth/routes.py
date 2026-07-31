@@ -1,6 +1,6 @@
 """Auth API routes."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -14,16 +14,36 @@ from app.auth.service import (
 )
 from app.auth.dependencies import get_current_user, require_super_admin
 from app.core.models import User
+from app.auth.captcha import create_captcha_challenge, verify_and_consume_captcha
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+@router.get("/captcha")
+async def get_captcha(db: AsyncSession = Depends(get_db)):
+    """Generate and return a new math verification challenge."""
+    return await create_captcha_challenge(db)
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
+    request: Request,
     body: LoginRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Login with username and password; returns JWT tokens."""
+    """Login with username, password, and verification challenge; returns JWT tokens."""
+    remote_ip = request.client.host if request.client else "unknown"
+    
+    # 1. Verify and consume verification challenge
+    await verify_and_consume_captcha(
+        db=db,
+        captcha_id=body.captcha_id,
+        user_answer=body.captcha_answer,
+        username=body.username,
+        remote_ip=remote_ip
+    )
+
+    # 2. Proceed with user credentials authentication
     user = await authenticate_user(db, body.username, body.password)
     if not user:
         raise HTTPException(
@@ -36,6 +56,7 @@ async def login(
         refresh_token=refresh,
         expires_in=expires_in,
     )
+
 
 
 @router.post("/refresh", response_model=TokenResponse)
