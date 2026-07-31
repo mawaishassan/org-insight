@@ -5,6 +5,8 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { fetchAllMultiItemsRows, getKpiFieldsWithSubs, type KpiFieldWithSubs } from "@/lib/fetchMultiItemsRows";
+import { CustomLabel } from "./CustomLabel";
+import { useDashboardCustomization } from "./DashboardCustomizationContext";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
 import {
@@ -469,7 +471,7 @@ function WidgetSettingsShell({
   return (
     <WidgetViewerMenuSetterContext.Provider value={setViewerMenu}>
       <WidgetHeaderAddonSetterContext.Provider value={setHeaderAddon}>
-        <div className="card" style={{ padding: "1rem", position: "relative" }}>
+        <div className="card" style={{ padding: "1rem", position: "relative", height: "100%", display: "flex", flexDirection: "column" }}>
           {showHeader ? (
             <div
               style={{
@@ -642,7 +644,7 @@ function WidgetSettingsShell({
               </div>
             </div>
           ) : null}
-        {children}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>{children}</div>
       </div>
       </WidgetHeaderAddonSetterContext.Provider>
     </WidgetViewerMenuSetterContext.Provider>
@@ -1504,6 +1506,7 @@ function KpiBarChartWidgetInner({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
+  const { getDisplayLabel, registerWidgetLabels } = useDashboardCustomization();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const [viewerYear, setViewerYear] = useState<number>(widget.year);
@@ -1903,8 +1906,8 @@ function KpiBarChartWidgetInner({
     const { h, s, l } = rgbToHsl(base);
     const t = total <= 1 ? 0 : Math.min(1, Math.max(0, idx / (total - 1)));
     // Make a +/- 26% lightness ramp around the base, clamped for readability.
-    const lo = Math.max(12, Math.min(88, l - 26));
-    const hi = Math.max(12, Math.min(88, l + 26));
+    const lo = Math.max(15, Math.min(70, l - 20));
+    const hi = Math.max(15, Math.min(70, l + 20));
     const ll = lo + (hi - lo) * t;
     return `hsl(${Math.round(h)}, ${Math.round(Math.max(18, Math.min(92, s)))}%, ${Math.round(ll)}%)`;
   };
@@ -2275,6 +2278,17 @@ function KpiBarChartWidgetInner({
     JSON.stringify(numeric.map((b) => b.key))
   ]);
 
+  // Register labels for customization
+  useEffect(() => {
+    if (mode === "multi_line_items") {
+      const labels = groups.map((g) => g.label);
+      registerWidgetLabels(widget.id, labels);
+    } else {
+      const labels = bars.map((b) => b.key);
+      registerWidgetLabels(widget.id, labels);
+    }
+  }, [mode, groups, bars, widget.id, registerWidgetLabels]);
+
   return (
     <>
       {loading ? (
@@ -2319,41 +2333,162 @@ function KpiBarChartWidgetInner({
 
           {visibleGroups.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>No grouped data available for this multi-line field.</p>
-          ) : chartType === "pie" ? (
-            <div style={{ width: "100%", maxWidth: 720 }}>
-              <svg
-                viewBox="0 0 640 300"
-                role="img"
-                aria-label="Pie chart"
-                style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
-                onMouseLeave={() => {
-                  setHoverPieKey(null);
-                  setHoverPiePt(null);
-                }}
-                onTouchEnd={() => {
-                  setHoverPieKey(null);
-                  setHoverPiePt(null);
-                }}
-              >
-                <rect x="0" y="0" width="640" height="300" fill="var(--bg)" rx="6" />
-                {(() => {
-                  const total = visibleGroups.reduce((s, g) => s + g.value, 0) || 1;
-                  const cx = 210;
-                  const cy = 150;
-                  const r = 110;
-                  let a = -Math.PI / 2;
-                  return (
-                    <>
-                      {(() => {
-                        const slices = visibleGroups.slice(0, 12);
-                        return slices.map((g, i) => {
+          ) :chartType === "pie" ? (
+            <div style={{ display: "flex", gap: "1.5rem", alignItems: "center", flexWrap: "wrap", width: "100%", padding: "0.25rem" }}>
+              <div style={{ width: 250, height: 250, flexShrink: 0, margin: "0 auto" }}>
+                <svg
+                  viewBox="0 0 300 300"
+                  role="img"
+                  aria-label="Pie chart"
+                  style={{ width: "100%", height: "100%", display: "block", touchAction: "none" }}
+                  onMouseLeave={() => {
+                    setHoverPieKey(null);
+                    setHoverPiePt(null);
+                  }}
+                  onTouchEnd={() => {
+                    setHoverPieKey(null);
+                    setHoverPiePt(null);
+                  }}
+                  onMouseMove={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const clientX = e.clientX - rect.left;
+                    const clientY = e.clientY - rect.top;
+                    const localX = (clientX / rect.width) * 300;
+                    const localY = (clientY / rect.height) * 300;
+                    const cx = 150;
+                    const cy = 150;
+                    const r = 120;
+                    const dx = localX - cx;
+                    const dy = localY - cy;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    
+                    const topN = 8;
+                    let pieGroups: Array<{ label: string; value: number; isOther?: boolean }> = [];
+                    if (visibleGroups.length <= topN + 1) {
+                      pieGroups = visibleGroups;
+                    } else {
+                      const top = visibleGroups.slice(0, topN);
+                      const tail = visibleGroups.slice(topN);
+                      const tailSum = tail.reduce((sum, g) => sum + g.value, 0);
+                      pieGroups = [
+                        ...top,
+                        { label: "Other", value: tailSum, isOther: true }
+                      ];
+                    }
+
+                    const total = pieGroups.reduce((s, g) => s + g.value, 0) || 1;
+                    if (dist <= r && dist > 5) {
+                      let angle = Math.atan2(dy, dx);
+                      let normalizedAngle = angle - (-Math.PI / 2);
+                      if (normalizedAngle < 0) {
+                        normalizedAngle += Math.PI * 2;
+                      }
+                      let currentAngleSum = 0;
+                      for (let i = 0; i < pieGroups.length; i++) {
+                        const g = pieGroups[i];
+                        const frac = g.value / total;
+                        const sweep = frac * Math.PI * 2;
+                        if (normalizedAngle >= currentAngleSum && normalizedAngle < currentAngleSum + sweep) {
+                          setHoverPieKey(g.label);
+                          const mid = -Math.PI / 2 + currentAngleSum + sweep / 2;
+                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
+                          setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                          break;
+                        }
+                        currentAngleSum += sweep;
+                      }
+                    } else {
+                      setHoverPieKey(null);
+                      setHoverPiePt(null);
+                    }
+                  }}
+                  onTouchMove={(e) => {
+                    if (e.touches.length === 0) return;
+                    const touch = e.touches[0];
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const clientX = touch.clientX - rect.left;
+                    const clientY = touch.clientY - rect.top;
+                    const localX = (clientX / rect.width) * 300;
+                    const localY = (clientY / rect.height) * 300;
+                    const cx = 150;
+                    const cy = 150;
+                    const r = 120;
+                    const dx = localX - cx;
+                    const dy = localY - cy;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    
+                    const topN = 8;
+                    let pieGroups: Array<{ label: string; value: number; isOther?: boolean }> = [];
+                    if (visibleGroups.length <= topN + 1) {
+                      pieGroups = visibleGroups;
+                    } else {
+                      const top = visibleGroups.slice(0, topN);
+                      const tail = visibleGroups.slice(topN);
+                      const tailSum = tail.reduce((sum, g) => sum + g.value, 0);
+                      pieGroups = [
+                        ...top,
+                        { label: "Other", value: tailSum, isOther: true }
+                      ];
+                    }
+
+                    const total = pieGroups.reduce((s, g) => s + g.value, 0) || 1;
+                    if (dist <= r && dist > 5) {
+                      let angle = Math.atan2(dy, dx);
+                      let normalizedAngle = angle - (-Math.PI / 2);
+                      if (normalizedAngle < 0) {
+                        normalizedAngle += Math.PI * 2;
+                      }
+                      let currentAngleSum = 0;
+                      for (let i = 0; i < pieGroups.length; i++) {
+                        const g = pieGroups[i];
+                        const frac = g.value / total;
+                        const sweep = frac * Math.PI * 2;
+                        if (normalizedAngle >= currentAngleSum && normalizedAngle < currentAngleSum + sweep) {
+                          setHoverPieKey(g.label);
+                          const mid = -Math.PI / 2 + currentAngleSum + sweep / 2;
+                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
+                          setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
+                          break;
+                        }
+                        currentAngleSum += sweep;
+                      }
+                    } else {
+                      setHoverPieKey(null);
+                      setHoverPiePt(null);
+                    }
+                  }}
+                >
+                  <rect x="0" y="0" width="300" height="300" fill="var(--bg)" rx="6" />
+                  {(() => {
+                    const topN = 8;
+                    let pieGroups: Array<{ label: string; value: number; isOther?: boolean }> = [];
+                    if (visibleGroups.length <= topN + 1) {
+                      pieGroups = visibleGroups;
+                    } else {
+                      const top = visibleGroups.slice(0, topN);
+                      const tail = visibleGroups.slice(topN);
+                      const tailSum = tail.reduce((sum, g) => sum + g.value, 0);
+                      pieGroups = [
+                        ...top,
+                        { label: "Other", value: tailSum, isOther: true }
+                      ];
+                    }
+
+                    const total = pieGroups.reduce((s, g) => s + g.value, 0) || 1;
+                    const cx = 150;
+                    const cy = 150;
+                    const r = 120;
+                    let a = -Math.PI / 2;
+                    return (
+                      <>
+                        {pieGroups.map((g, i) => {
                           const frac = g.value / total;
                           const next = a + frac * Math.PI * 2;
                           const d = pieArcPath(cx, cy, r, a, next);
                           const mid = (a + next) / 2;
                           const p = polarToCartesian(cx, cy, r * 0.72, mid);
                           a = next;
-                          const fill = colorForIndex(i, slices.length);
+                          const fill = g.isOther ? "#a1a1aa" : colorForIndex(i, pieGroups.length);
                           return (
                             <path
                               key={g.label}
@@ -2361,93 +2496,101 @@ function KpiBarChartWidgetInner({
                               fill={fill}
                               stroke="var(--surface)"
                               strokeWidth="1"
-                              onMouseEnter={() => {
-                                setHoverPieKey(g.label);
-                                setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                              }}
-                              onMouseMove={() => {
-                                setHoverPieKey(g.label);
-                                setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                              }}
-                              onTouchStart={() => {
-                                setHoverPieKey(g.label);
-                                setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                              }}
-                              onTouchMove={() => {
-                                setHoverPieKey(g.label);
-                                setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                              }}
+                              style={{ transition: "opacity 0.15s ease", cursor: "pointer" }}
+                              opacity={hoverPieKey === null || hoverPieKey === g.label ? 1.0 : 0.65}
                             />
                           );
-                        });
-                      })()}
-                      {hoverPiePt && hoverPieKey ? (
-                        <g>
-                          <circle cx={hoverPiePt.x} cy={hoverPiePt.y} r={4} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
-                          {(() => {
-                            const label = `${hoverPiePt.label}: ${hoverPiePt.value.toLocaleString()}`;
-                            const padX = 8;
-                            const boxW = Math.min(320, 12 + label.length * 6.2);
-                            const boxH = 26;
-                            const x = Math.min(640 - boxW - 8, Math.max(8, hoverPiePt.x + 12));
-                            const y = Math.min(300 - boxH - 8, Math.max(8, hoverPiePt.y - boxH - 10));
-                            return (
-                              <g>
-                                <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
-                                <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
-                                  {label}
-                                </text>
-                              </g>
-                            );
-                          })()}
-                        </g>
-                      ) : null}
-                      <text x="420" y="34" fontSize="12" fill="var(--muted)">
-                        Top groups
-                      </text>
-                      {(() => {
-                        const legend = visibleGroups.slice(0, 8);
-                        return legend.map((g, i) => (
-                          <g key={g.label}>
-                            <rect x="420" y={52 + i * 26} width="10" height="10" fill={colorForIndex(i, legend.length)} />
-                            <text x="436" y={61 + i * 26} fontSize="11" fill="var(--text)">
-                              {g.label.length > 22 ? `${g.label.slice(0, 20)}…` : g.label} ({g.value.toLocaleString()})
-                            </text>
+                        })}
+                        {hoverPiePt && hoverPieKey ? (
+                          <g>
+                            <circle cx={hoverPiePt.x} cy={hoverPiePt.y} r={4} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
+                            {(() => {
+                              const label = hoverPiePt.label === "Other"
+                                ? `Other: ${hoverPiePt.value.toLocaleString()}`
+                                : `${getDisplayLabel(hoverPiePt.label, widget.id)}: ${hoverPiePt.value.toLocaleString()}`;
+                              const padX = 8;
+                              const boxW = Math.min(220, 12 + label.length * 6.2);
+                              const boxH = 26;
+                              const x = Math.min(300 - boxW - 8, Math.max(8, hoverPiePt.x + 12));
+                              const y = Math.min(300 - boxH - 8, Math.max(8, hoverPiePt.y - boxH - 10));
+                              return (
+                                <g>
+                                  <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                                  <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                                    {label}
+                                  </text>
+                                </g>
+                              );
+                            })()}
                           </g>
-                        ));
-                      })()}
-                    </>
-                  );
-                })()}
-              </svg>
+                        ) : null}
+                      </>
+                    );
+                  })()}
+                </svg>
+              </div>
+              <div style={{ flex: 1, minWidth: 220, maxHeight: 200, overflowY: "auto", scrollbarWidth: "thin", paddingRight: "0.5rem" }}>
+                <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.5rem" }}>
+                  All Groups ({visibleGroups.length})
+                </div>
+                <div style={{ display: "grid", gap: "0.45rem" }}>
+                  {visibleGroups.map((g, i) => (
+                    <div key={g.label} style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <div style={{ width: 10, height: 10, borderRadius: "2px", background: colorForIndex(i, visibleGroups.length), flexShrink: 0 }} />
+                      <div style={{ fontSize: "0.85rem", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        <CustomLabel value={g.label} widgetId={widget.id} />
+                        <span style={{ color: "var(--muted)", marginLeft: "0.25rem" }}>({g.value.toLocaleString()})</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           ) : (
-            <div style={{ width: "100%", maxWidth: 720 }}>
+            <div style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 720 }}>
+
               <svg
-                viewBox="0 0 640 260"
+
+                viewBox={`0 0 ${widget.full_width ? 1280 : 640} 300`}
+
                 role="img"
+
                 aria-label="Bar chart"
+
                 style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+
                 onMouseLeave={() => {
+
                   setHoverBarKey(null);
+
                   setHoverBarPt(null);
+
                 }}
+
                 onTouchEnd={() => {
+
                   setHoverBarKey(null);
+
                   setHoverBarPt(null);
+
                 }}
+
               >
-                <rect x="0" y="0" width="640" height="260" fill="var(--bg)" rx="6" />
+
+                <rect x="0" y="0" width={widget.full_width ? 1280 : 640} height="300" fill="var(--bg)" rx="6" />
+
                 {(() => {
-                  const W = 640;
-                  const H = 260;
+
+                  const W = widget.full_width ? 1280 : 640;
+
+                  const H = 300;
                   const left = 40;
                   const right = 16;
                   const top = 16;
                   const bottom = 58;
                   const innerW = W - left - right;
                   const innerH = H - top - bottom;
-                  const data = visibleGroups.slice(0, 12);
+                  const data = visibleGroups;
                   const n = data.length;
                   const gap = 8;
                   const barW = n > 0 ? Math.max(10, (innerW - gap * (n - 1)) / n) : 10;
@@ -2466,29 +2609,71 @@ function KpiBarChartWidgetInner({
                         return (
                           <g key={b.label}>
                             <rect
+
                               x={x}
+
                               y={y}
+
                               width={barW}
+
                               height={h}
+
                               fill={fill}
-                              opacity={0.85}
+
+                              opacity={hoverBarKey === b.label ? 1.0 : 0.85}
+
+                              style={{ transition: "opacity 0.15s ease" }}
+
                               rx={2}
+
+                            />
+
+                            <rect
+
+                              x={x}
+
+                              y={top}
+
+                              width={barW}
+
+                              height={innerH}
+
+                              fill="transparent"
+
+                              style={{ cursor: "pointer" }}
+
                               onMouseEnter={() => {
+
                                 setHoverBarKey(b.label);
+
                                 setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
+
                               }}
+
                               onMouseMove={() => {
+
                                 setHoverBarKey(b.label);
+
                                 setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
+
                               }}
+
                               onTouchStart={() => {
+
                                 setHoverBarKey(b.label);
+
                                 setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
+
                               }}
+
                               onTouchMove={() => {
+
                                 setHoverBarKey(b.label);
+
                                 setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
+
                               }}
+
                             />
                             {(i === minIdx || i === maxIdx) && h > 0 ? (
                               <text
@@ -2502,9 +2687,19 @@ function KpiBarChartWidgetInner({
                                 {b.value.toLocaleString()}
                               </text>
                             ) : null}
-                            <text x={x + barW / 2} y={H - 10} fontSize="9" fill="var(--muted)" textAnchor="middle">
-                              {b.label.length > 12 ? `${b.label.slice(0, 10)}…` : b.label}
-                            </text>
+                            <CustomLabel
+                              value={b.label}
+                              widgetId={widget.id}
+                              isSvg={true}
+                              truncateLength={12}
+                              svgProps={{
+                                x: x + barW / 2,
+                                y: H - 10,
+                                fontSize: "9",
+                                fill: "var(--muted)",
+                                textAnchor: "middle",
+                              }}
+                            />
                           </g>
                         );
                       })}
@@ -2512,7 +2707,7 @@ function KpiBarChartWidgetInner({
                         <g>
                           <line x1={hoverBarPt.x} y1={top} x2={hoverBarPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
                           {(() => {
-                            const label = `${hoverBarPt.label}: ${hoverBarPt.value.toLocaleString()}`;
+                            const label = `${getDisplayLabel(hoverBarPt.label, widget.id)}: ${hoverBarPt.value.toLocaleString()}`;
                             const padX = 8;
                             const boxW = Math.min(300, 12 + label.length * 6.2);
                             const boxH = 26;
@@ -2540,105 +2735,223 @@ function KpiBarChartWidgetInner({
       ) : visibleNumeric.length === 0 ? (
         <p style={{ color: "var(--muted)", margin: 0 }}>No numeric data for the selected fields.</p>
       ) : (
-        <div style={{ width: "100%", maxWidth: 720 }}>
+        <div style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 720 }}>
           {chartType === "pie" ? (
-            <svg
-              viewBox="0 0 640 300"
-              role="img"
-              aria-label="Pie chart"
-              style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
-              onMouseLeave={() => {
-                setHoverPieKey(null);
-                setHoverPiePt(null);
-              }}
-              onTouchEnd={() => {
-                setHoverPieKey(null);
-                setHoverPiePt(null);
-              }}
-            >
-              <rect x="0" y="0" width="640" height="300" fill="var(--bg)" rx="6" />
-              {(() => {
-                const data = visibleNumeric.slice(0, 12);
-                const total = data.reduce((s, b) => s + b.value, 0) || 1;
-                const cx = 210;
-                const cy = 150;
-                const r = 110;
-                let a = -Math.PI / 2;
-                return (
-                  <>
-                    {data.map((b, i) => {
-                      const frac = b.value / total;
-                      const next = a + frac * Math.PI * 2;
-                      const d = pieArcPath(cx, cy, r, a, next);
-                      const mid = (a + next) / 2;
-                      const p = polarToCartesian(cx, cy, r * 0.72, mid);
-                      a = next;
-                      const fill = colorForIndex(i, data.length);
-                      return (
-                        <path
-                          key={b.key}
-                          d={d}
-                          fill={fill}
-                          stroke="var(--surface)"
-                          strokeWidth="1"
-                          onMouseEnter={() => {
-                            setHoverPieKey(b.key);
-                            setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
-                          }}
-                          onMouseMove={() => {
-                            setHoverPieKey(b.key);
-                            setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
-                          }}
-                          onTouchStart={() => {
-                            setHoverPieKey(b.key);
-                            setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
-                          }}
-                          onTouchMove={() => {
-                            setHoverPieKey(b.key);
-                            setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
-                          }}
-                        />
-                      );
-                    })}
-                    {hoverPiePt && hoverPieKey ? (
-                      <g>
-                        <circle cx={hoverPiePt.x} cy={hoverPiePt.y} r={4} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
-                        {(() => {
-                          const label = `${hoverPiePt.label}: ${hoverPiePt.value.toLocaleString()}`;
-                          const padX = 8;
-                          const boxW = Math.min(320, 12 + label.length * 6.2);
-                          const boxH = 26;
-                          const x = Math.min(640 - boxW - 8, Math.max(8, hoverPiePt.x + 12));
-                          const y = Math.min(300 - boxH - 8, Math.max(8, hoverPiePt.y - boxH - 10));
+            <div style={{ display: "flex", gap: "1.5rem", alignItems: "center", flexWrap: "wrap", width: "100%", padding: "0.25rem" }}>
+              <div style={{ width: 250, height: 250, flexShrink: 0, margin: "0 auto" }}>
+                <svg
+                  viewBox="0 0 300 300"
+                  role="img"
+                  aria-label="Pie chart"
+                  style={{ width: "100%", height: "100%", display: "block", touchAction: "none" }}
+                  onMouseLeave={() => {
+                    setHoverPieKey(null);
+                    setHoverPiePt(null);
+                  }}
+                  onTouchEnd={() => {
+                    setHoverPieKey(null);
+                    setHoverPiePt(null);
+                  }}
+                  onMouseMove={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const clientX = e.clientX - rect.left;
+                    const clientY = e.clientY - rect.top;
+                    const localX = (clientX / rect.width) * 300;
+                    const localY = (clientY / rect.height) * 300;
+                    const cx = 150;
+                    const cy = 150;
+                    const r = 120;
+                    const dx = localX - cx;
+                    const dy = localY - cy;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    
+                    const topN = 8;
+                    let pieNumeric: Array<{ key: string; value: number; isOther?: boolean }> = [];
+                    if (visibleNumeric.length <= topN + 1) {
+                      pieNumeric = visibleNumeric;
+                    } else {
+                      const top = visibleNumeric.slice(0, topN);
+                      const tail = visibleNumeric.slice(topN);
+                      const tailSum = tail.reduce((sum, b) => sum + b.value, 0);
+                      pieNumeric = [
+                        ...top,
+                        { key: "Other", value: tailSum, isOther: true }
+                      ];
+                    }
+
+                    const total = pieNumeric.reduce((s, b) => s + b.value, 0) || 1;
+                    if (dist <= r && dist > 5) {
+                      let angle = Math.atan2(dy, dx);
+                      let normalizedAngle = angle - (-Math.PI / 2);
+                      if (normalizedAngle < 0) {
+                        normalizedAngle += Math.PI * 2;
+                      }
+                      let currentAngleSum = 0;
+                      for (let i = 0; i < pieNumeric.length; i++) {
+                        const b = pieNumeric[i];
+                        const frac = b.value / total;
+                        const sweep = frac * Math.PI * 2;
+                        if (normalizedAngle >= currentAngleSum && normalizedAngle < currentAngleSum + sweep) {
+                          setHoverPieKey(b.key);
+                          const mid = -Math.PI / 2 + currentAngleSum + sweep / 2;
+                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
+                          setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
+                          break;
+                        }
+                        currentAngleSum += sweep;
+                      }
+                    } else {
+                      setHoverPieKey(null);
+                      setHoverPiePt(null);
+                    }
+                  }}
+                  onTouchMove={(e) => {
+                    if (e.touches.length === 0) return;
+                    const touch = e.touches[0];
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const clientX = touch.clientX - rect.left;
+                    const clientY = touch.clientY - rect.top;
+                    const localX = (clientX / rect.width) * 300;
+                    const localY = (clientY / rect.height) * 300;
+                    const cx = 150;
+                    const cy = 150;
+                    const r = 120;
+                    const dx = localX - cx;
+                    const dy = localY - cy;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    
+                    const topN = 8;
+                    let pieNumeric: Array<{ key: string; value: number; isOther?: boolean }> = [];
+                    if (visibleNumeric.length <= topN + 1) {
+                      pieNumeric = visibleNumeric;
+                    } else {
+                      const top = visibleNumeric.slice(0, topN);
+                      const tail = visibleNumeric.slice(topN);
+                      const tailSum = tail.reduce((sum, b) => sum + b.value, 0);
+                      pieNumeric = [
+                        ...top,
+                        { key: "Other", value: tailSum, isOther: true }
+                      ];
+                    }
+
+                    const total = pieNumeric.reduce((s, b) => s + b.value, 0) || 1;
+                    if (dist <= r && dist > 5) {
+                      let angle = Math.atan2(dy, dx);
+                      let normalizedAngle = angle - (-Math.PI / 2);
+                      if (normalizedAngle < 0) {
+                        normalizedAngle += Math.PI * 2;
+                      }
+                      let currentAngleSum = 0;
+                      for (let i = 0; i < pieNumeric.length; i++) {
+                        const b = pieNumeric[i];
+                        const frac = b.value / total;
+                        const sweep = frac * Math.PI * 2;
+                        if (normalizedAngle >= currentAngleSum && normalizedAngle < currentAngleSum + sweep) {
+                          setHoverPieKey(b.key);
+                          const mid = -Math.PI / 2 + currentAngleSum + sweep / 2;
+                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
+                          setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
+                          break;
+                        }
+                        currentAngleSum += sweep;
+                      }
+                    } else {
+                      setHoverPieKey(null);
+                      setHoverPiePt(null);
+                    }
+                  }}
+                >
+                  <rect x="0" y="0" width="300" height="300" fill="var(--bg)" rx="6" />
+                  {(() => {
+                    const topN = 8;
+                    let pieNumeric: Array<{ key: string; value: number; isOther?: boolean }> = [];
+                    if (visibleNumeric.length <= topN + 1) {
+                      pieNumeric = visibleNumeric;
+                    } else {
+                      const top = visibleNumeric.slice(0, topN);
+                      const tail = visibleNumeric.slice(topN);
+                      const tailSum = tail.reduce((sum, b) => sum + b.value, 0);
+                      pieNumeric = [
+                        ...top,
+                        { key: "Other", value: tailSum, isOther: true }
+                      ];
+                    }
+
+                    const total = pieNumeric.reduce((s, b) => s + b.value, 0) || 1;
+                    const cx = 150;
+                    const cy = 150;
+                    const r = 120;
+                    let a = -Math.PI / 2;
+                    return (
+                      <>
+                        {pieNumeric.map((b, i) => {
+                          const frac = b.value / total;
+                          const next = a + frac * Math.PI * 2;
+                          const d = pieArcPath(cx, cy, r, a, next);
+                          const mid = (a + next) / 2;
+                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
+                          a = next;
+                          const fill = b.isOther ? "#a1a1aa" : colorForIndex(i, pieNumeric.length);
                           return (
-                            <g>
-                              <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
-                              <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
-                                {label}
-                              </text>
-                            </g>
+                            <path
+                              key={b.key}
+                              d={d}
+                              fill={fill}
+                              stroke="var(--surface)"
+                              strokeWidth="1"
+                              style={{ transition: "opacity 0.15s ease", cursor: "pointer" }}
+                              opacity={hoverPieKey === null || hoverPieKey === b.key ? 1.0 : 0.65}
+                            />
                           );
-                        })()}
-                      </g>
-                    ) : null}
-                    <text x="420" y="34" fontSize="12" fill="var(--muted)">
-                      Top fields
-                    </text>
-                    {data.slice(0, 8).map((b, i) => (
-                      <g key={b.key}>
-                        <rect x="420" y={52 + i * 26} width="10" height="10" fill={colorForIndex(i, Math.min(8, data.length))} />
-                        <text x="436" y={61 + i * 26} fontSize="11" fill="var(--text)">
-                          {b.key.length > 22 ? `${b.key.slice(0, 20)}…` : b.key} ({b.value.toLocaleString()})
-                        </text>
-                      </g>
-                    ))}
-                  </>
-                );
-              })()}
-            </svg>
+                        })}
+                        {hoverPiePt && hoverPieKey ? (
+                          <g>
+                            <circle cx={hoverPiePt.x} cy={hoverPiePt.y} r={4} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
+                            {(() => {
+                              const label = hoverPiePt.label === "Other"
+                                ? `Other: ${hoverPiePt.value.toLocaleString()}`
+                                : `${getDisplayLabel(hoverPiePt.label, widget.id)}: ${hoverPiePt.value.toLocaleString()}`;
+                              const padX = 8;
+                              const boxW = Math.min(220, 12 + label.length * 6.2);
+                              const boxH = 26;
+                              const x = Math.min(300 - boxW - 8, Math.max(8, hoverPiePt.x + 12));
+                              const y = Math.min(300 - boxH - 8, Math.max(8, hoverPiePt.y - boxH - 10));
+                              return (
+                                <g>
+                                  <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
+                                  <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
+                                    {label}
+                                  </text>
+                                </g>
+                              );
+                            })()}
+                          </g>
+                        ) : null}
+                      </>
+                    );
+                  })()}
+                </svg>
+              </div>
+              <div style={{ flex: 1, minWidth: 220, maxHeight: 200, overflowY: "auto", scrollbarWidth: "thin", paddingRight: "0.5rem" }}>
+                <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.5rem" }}>
+                  All Fields ({visibleNumeric.length})
+                </div>
+                <div style={{ display: "grid", gap: "0.45rem" }}>
+                  {visibleNumeric.map((b, i) => (
+                    <div key={b.key} style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <div style={{ width: 10, height: 10, borderRadius: "2px", background: colorForIndex(i, visibleNumeric.length), flexShrink: 0 }} />
+                      <div style={{ fontSize: "0.85rem", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        <CustomLabel value={b.key} widgetId={widget.id} />
+                        <span style={{ color: "var(--muted)", marginLeft: "0.25rem" }}>({b.value.toLocaleString()})</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
           ) : (
             <svg
-              viewBox="0 0 640 260"
+              viewBox={`0 0 ${widget.full_width ? 1280 : 640} 300`}
               role="img"
               aria-label="Bar chart"
               style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
@@ -2651,14 +2964,14 @@ function KpiBarChartWidgetInner({
                 setHoverBarPt(null);
               }}
             >
-              <rect x="0" y="0" width="640" height="260" fill="var(--bg)" rx="6" />
+              <rect x="0" y="0" width={widget.full_width ? 1280 : 640} height="300" fill="var(--bg)" rx="6" />
               {(() => {
-                const W = 640;
-                const H = 260;
+                const W = widget.full_width ? 1280 : 640;
+                const H = 300;
                 const left = 40;
                 const right = 16;
                 const top = 16;
-                const bottom = 52;
+                const bottom = 58;
                 const innerW = W - left - right;
                 const innerH = H - top - bottom;
                 const n = visibleNumeric.length;
@@ -2679,29 +2992,71 @@ function KpiBarChartWidgetInner({
                       return (
                         <g key={b.key}>
                           <rect
+
                             x={x}
+
                             y={y}
+
                             width={barW}
+
                             height={h}
+
                             fill={fill}
-                            opacity={0.85}
+
+                            opacity={hoverBarKey === b.key ? 1.0 : 0.85}
+
+                            style={{ transition: "opacity 0.15s ease" }}
+
                             rx={2}
+
+                          />
+
+                          <rect
+
+                            x={x}
+
+                            y={top}
+
+                            width={barW}
+
+                            height={innerH}
+
+                            fill="transparent"
+
+                            style={{ cursor: "pointer" }}
+
                             onMouseEnter={() => {
+
                               setHoverBarKey(b.key);
+
                               setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
+
                             }}
+
                             onMouseMove={() => {
+
                               setHoverBarKey(b.key);
+
                               setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
+
                             }}
+
                             onTouchStart={() => {
+
                               setHoverBarKey(b.key);
+
                               setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
+
                             }}
+
                             onTouchMove={() => {
+
                               setHoverBarKey(b.key);
+
                               setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
+
                             }}
+
                           />
                           {(i === minIdx || i === maxIdx) && h > 0 ? (
                             <text
@@ -2715,9 +3070,19 @@ function KpiBarChartWidgetInner({
                               {b.value.toLocaleString()}
                             </text>
                           ) : null}
-                          <text x={x + barW / 2} y={H - 8} fontSize="9" fill="var(--muted)" textAnchor="middle">
-                            {b.key.length > 14 ? `${b.key.slice(0, 12)}…` : b.key}
-                          </text>
+                          <CustomLabel
+                            value={b.key}
+                            widgetId={widget.id}
+                            isSvg={true}
+                            truncateLength={14}
+                            svgProps={{
+                              x: x + barW / 2,
+                              y: H - 8,
+                              fontSize: "9",
+                              fill: "var(--muted)",
+                              textAnchor: "middle",
+                            }}
+                          />
                         </g>
                       );
                     })}
@@ -2725,7 +3090,7 @@ function KpiBarChartWidgetInner({
                       <g>
                         <line x1={hoverBarPt.x} y1={top} x2={hoverBarPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
                         {(() => {
-                          const label = `${hoverBarPt.label}: ${hoverBarPt.value.toLocaleString()}`;
+                          const label = `${getDisplayLabel(hoverBarPt.label, widget.id)}: ${hoverBarPt.value.toLocaleString()}`;
                           const padX = 8;
                           const boxW = Math.min(300, 12 + label.length * 6.2);
                           const boxH = 26;
@@ -2810,6 +3175,7 @@ function KpiTrendWidgetInner({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
+  const { getDisplayLabel, registerWidgetLabels } = useDashboardCustomization();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const mode = widget.mode || "multi_line_items";
@@ -3540,8 +3906,8 @@ function KpiTrendWidgetInner({
     };
     const { h, s, l } = rgbToHsl(base);
     const t = total <= 1 ? 0 : Math.min(1, Math.max(0, idx / (total - 1)));
-    const lo = Math.max(12, Math.min(88, l - 26));
-    const hi = Math.max(12, Math.min(88, l + 26));
+    const lo = Math.max(15, Math.min(70, l - 20));
+    const hi = Math.max(15, Math.min(70, l + 20));
     const ll = lo + (hi - lo) * t;
     return `hsl(${Math.round(h)}, ${Math.round(Math.max(18, Math.min(92, s)))}%, ${Math.round(ll)}%)`;
   };
@@ -3570,9 +3936,17 @@ function KpiTrendWidgetInner({
           dirMul * ((union.get(a) ?? 0) - (union.get(b) ?? 0)) ||
           dirMul * a.localeCompare(b)
         );
-      })
-      .slice(0, 12);
+      });
   }, [mode, JSON.stringify(years), JSON.stringify(seriesByYear), sortBy, sortDir]);
+
+  // Register labels for customization
+  useEffect(() => {
+    if (mode === "multi_line_items") {
+      registerWidgetLabels(widget.id, categories);
+    } else {
+      registerWidgetLabels(widget.id, widget.field_keys || []);
+    }
+  }, [mode, categories, widget.field_keys, widget.id, registerWidgetLabels]);
 
   return (
     <>
@@ -3621,18 +3995,18 @@ function KpiTrendWidgetInner({
           {categories.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>No grouped data available.</p>
           ) : viewerView === "bar" ? (
-            <div style={{ width: "100%", maxWidth: 840 }}>
+            <div style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 840 }}>
               <svg
-                viewBox="0 0 720 320"
+                viewBox={`0 0 ${widget.full_width ? 1280 : 720} 320`}
                 role="img"
                 aria-label="Trend bars"
                 style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
                 onMouseLeave={() => setHoverTrendPt(null)}
                 onTouchEnd={() => setHoverTrendPt(null)}
               >
-                <rect x="0" y="0" width="720" height="320" fill="var(--bg)" rx="6" />
+                <rect x="0" y="0" width={widget.full_width ? 1280 : 720} height="320" fill="var(--bg)" rx="6" />
                 {(() => {
-                  const W = 720;
+                  const W = widget.full_width ? 1280 : 720;
                   const H = 320;
                   const left = 44;
                   const right = 16;
@@ -3669,25 +4043,72 @@ function KpiTrendWidgetInner({
                               const x = catX + j * (barW + barGap);
                               const yy = top + innerH - h;
                               return (
-                                <rect
-                                  key={`${c}:${y}`}
-                                  x={x}
-                                  y={yy}
-                                  width={barW}
-                                  height={h}
-                                  fill={yearColors[y]}
-                                  opacity={0.9}
-                                  rx={2}
-                                  onMouseEnter={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
-                                  onMouseMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
-                                  onTouchStart={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
-                                  onTouchMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
-                                />
+                                <>
+
+                                  <rect
+
+                                    key={`${c}:${y}`}
+
+                                    x={x}
+
+                                    y={yy}
+
+                                    width={barW}
+
+                                    height={h}
+
+                                    fill={yearColors[y]}
+
+                                    opacity={hoverTrendPt && hoverTrendPt.label === c && hoverTrendPt.series === String(y) ? 1.0 : 0.9}
+
+                                    style={{ transition: "opacity 0.15s ease" }}
+
+                                    rx={2}
+
+                                  />
+
+                                  <rect
+
+                                    key={`${c}:${y}:hover`}
+
+                                    x={x}
+
+                                    y={top}
+
+                                    width={barW}
+
+                                    height={innerH}
+
+                                    fill="transparent"
+
+                                    style={{ cursor: "pointer" }}
+
+                                    onMouseEnter={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
+
+                                    onMouseMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
+
+                                    onTouchStart={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
+
+                                    onTouchMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
+
+                                  />
+
+                                </>
                               );
                             })}
-                            <text x={catX + catW / 2} y={H - 56} fontSize="9" fill="var(--muted)" textAnchor="middle">
-                              {c.length > 14 ? `${c.slice(0, 12)}…` : c}
-                            </text>
+                            <CustomLabel
+                              value={c}
+                              widgetId={widget.id}
+                              isSvg={true}
+                              truncateLength={14}
+                              svgProps={{
+                                x: catX + catW / 2,
+                                y: H - 56,
+                                fontSize: "9",
+                                fill: "var(--muted)",
+                                textAnchor: "middle",
+                              }}
+                            />
                           </g>
                         );
                       })}
@@ -3695,7 +4116,7 @@ function KpiTrendWidgetInner({
                         <g>
                           <line x1={hoverTrendPt.x} y1={top} x2={hoverTrendPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
                           {(() => {
-                            const label = `${hoverTrendPt.series} · ${hoverTrendPt.label}: ${hoverTrendPt.value.toLocaleString()}`;
+                            const label = `${hoverTrendPt.series} · ${getDisplayLabel(hoverTrendPt.label, widget.id)}: ${hoverTrendPt.value.toLocaleString()}`;
                             const padX = 8;
                             const boxW = Math.min(360, 12 + label.length * 6.2);
                             const boxH = 26;
@@ -3729,18 +4150,18 @@ function KpiTrendWidgetInner({
               </svg>
             </div>
           ) : (
-            <div style={{ width: "100%", maxWidth: 840 }}>
+            <div style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 840 }}>
               <svg
-                viewBox="0 0 720 320"
+                viewBox={`0 0 ${widget.full_width ? 1280 : 720} 320`}
                 role="img"
                 aria-label="Trend lines"
                 style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
                 onMouseLeave={() => setHoverTrendPt(null)}
                 onTouchEnd={() => setHoverTrendPt(null)}
               >
-                <rect x="0" y="0" width="720" height="320" fill="var(--bg)" rx="6" />
+                <rect x="0" y="0" width={widget.full_width ? 1280 : 720} height="320" fill="var(--bg)" rx="6" />
                 {(() => {
-                  const W = 720;
+                  const W = widget.full_width ? 1280 : 720;
                   const H = 320;
                   const left = 52;
                   const right = 16;
@@ -3806,7 +4227,7 @@ function KpiTrendWidgetInner({
                           <line x1={hoverTrendPt.x} y1={top} x2={hoverTrendPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
                           <circle cx={hoverTrendPt.x} cy={hoverTrendPt.y} r={6} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
                           {(() => {
-                            const label = `${hoverTrendPt.series} · ${hoverTrendPt.label}: ${hoverTrendPt.value.toLocaleString()}`;
+                            const label = `${hoverTrendPt.series} · ${getDisplayLabel(hoverTrendPt.label, widget.id)}: ${hoverTrendPt.value.toLocaleString()}`;
                             const padX = 8;
                             const boxW = Math.min(380, 12 + label.length * 6.2);
                             const boxH = 26;
@@ -3843,18 +4264,18 @@ function KpiTrendWidgetInner({
         </div>
       ) : (
         <div style={{ display: "grid", gap: "0.75rem" }}>
-          <div style={{ width: "100%", maxWidth: 840 }}>
+          <div style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 840 }}>
             <svg
-              viewBox="0 0 720 320"
+              viewBox={`0 0 ${widget.full_width ? 1280 : 720} 320`}
               role="img"
               aria-label="Field trend"
               style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
               onMouseLeave={() => setHoverTrendPt(null)}
               onTouchEnd={() => setHoverTrendPt(null)}
             >
-              <rect x="0" y="0" width="720" height="320" fill="var(--bg)" rx="6" />
+              <rect x="0" y="0" width={widget.full_width ? 1280 : 720} height="320" fill="var(--bg)" rx="6" />
               {(() => {
-                const W = 720;
+                const W = widget.full_width ? 1280 : 720;
                 const H = 320;
                 const left = 44;
                 const right = 16;
@@ -3903,25 +4324,72 @@ function KpiTrendWidgetInner({
                             const x = catX + j * (barW + barGap);
                             const yy = top + innerH - h;
                             return (
-                              <rect
-                                key={`${k}:${y}`}
-                                x={x}
-                                y={yy}
-                                width={barW}
-                                height={h}
-                                fill={yearColors[y]}
-                                opacity={0.9}
-                                rx={2}
-                                onMouseEnter={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
-                                onMouseMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
-                                onTouchStart={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
-                                onTouchMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
-                              />
+                              <>
+
+                                <rect
+
+                                  key={`${k}:${y}`}
+
+                                  x={x}
+
+                                  y={yy}
+
+                                  width={barW}
+
+                                  height={h}
+
+                                  fill={yearColors[y]}
+
+                                  opacity={hoverTrendPt && hoverTrendPt.label === k && hoverTrendPt.series === String(y) ? 1.0 : 0.9}
+
+                                  style={{ transition: "opacity 0.15s ease" }}
+
+                                  rx={2}
+
+                                />
+
+                                <rect
+
+                                  key={`${k}:${y}:hover`}
+
+                                  x={x}
+
+                                  y={top}
+
+                                  width={barW}
+
+                                  height={innerH}
+
+                                  fill="transparent"
+
+                                  style={{ cursor: "pointer" }}
+
+                                  onMouseEnter={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
+
+                                  onMouseMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
+
+                                  onTouchStart={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
+
+                                  onTouchMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
+
+                                />
+
+                              </>
                             );
                           })}
-                          <text x={catX + catW / 2} y={H - 56} fontSize="9" fill="var(--muted)" textAnchor="middle">
-                            {k.length > 14 ? `${k.slice(0, 12)}…` : k}
-                          </text>
+                          <CustomLabel
+                            value={k}
+                            widgetId={widget.id}
+                            isSvg={true}
+                            truncateLength={14}
+                            svgProps={{
+                              x: catX + catW / 2,
+                              y: H - 56,
+                              fontSize: "9",
+                              fill: "var(--muted)",
+                              textAnchor: "middle",
+                            }}
+                          />
                         </g>
                       );
                     })}

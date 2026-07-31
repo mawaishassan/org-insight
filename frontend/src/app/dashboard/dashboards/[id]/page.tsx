@@ -7,6 +7,7 @@ import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer, type Widget } from "./widgets";
 import { DASHBOARD_GRID_COLUMNS, widgetGridColumnStyle } from "./layoutGrid";
+import { DashboardCustomizationProvider, useDashboardCustomization } from "./DashboardCustomizationContext";
 
 interface DashboardDetail {
   id: number;
@@ -100,7 +101,69 @@ export default function DashboardViewPage() {
   if (!dashboard) return null;
 
   return (
+    <DashboardCustomizationProvider dashboardId={id} organizationId={dashboard.organization_id}>
+      <DashboardViewContent
+        dashboard={dashboard}
+        syncInfo={syncInfo}
+        syncing={syncing}
+        handleSync={handleSync}
+        widgets={widgets}
+        refreshCount={refreshCount}
+      />
+    </DashboardCustomizationProvider>
+  );
+}
+
+function DashboardViewContent({
+  dashboard,
+  syncInfo,
+  syncing,
+  handleSync,
+  widgets,
+  refreshCount,
+}: {
+  dashboard: DashboardDetail;
+  syncInfo: { has_odoo_graphs: boolean } | null;
+  syncing: boolean;
+  handleSync: () => void;
+  widgets: Widget[];
+  refreshCount: number;
+}) {
+  const { isOrgAdmin, openGlobalModal } = useDashboardCustomization();
+
+  return (
     <div style={{ display: "grid", gap: "1rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 600 }}>{dashboard.name}</h2>
+          {dashboard.description && (
+            <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.9rem", color: "var(--muted)" }}>
+              {dashboard.description}
+            </p>
+          )}
+        </div>
+        {isOrgAdmin && (
+          <button
+            type="button"
+            className="btn"
+            onClick={openGlobalModal}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "0.5rem",
+              padding: "0.5rem 1rem",
+              fontSize: "0.875rem",
+              height: 38,
+            }}
+          >
+            <svg style={{ width: 16, height: 16 }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+            Customize Labels
+          </button>
+        )}
+      </div>
+
       {syncInfo?.has_odoo_graphs && (
         <div
           style={{
