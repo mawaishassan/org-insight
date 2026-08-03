@@ -96,6 +96,52 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const isDashboardWidgetFull = !!dashboardWidgetFullMatch;
   const dashboardWidgetFullDashboardId = dashboardWidgetFullMatch ? Number(dashboardWidgetFullMatch[1]) : null;
 
+  const restoredRef = useRef<Record<number, boolean>>({});
+
+  useEffect(() => {
+    if (!onEntries) {
+      restoredRef.current = {};
+      return;
+    }
+    if (selectedOrgId == null) return;
+
+    const next = new URLSearchParams(searchParams.toString());
+    const hasAnyFilterInUrl = ["q", "domain_id", "category_id", "status", "tag_id"].some((key) => next.has(key));
+
+    if (!restoredRef.current[selectedOrgId]) {
+      restoredRef.current[selectedOrgId] = true;
+      if (!hasAnyFilterInUrl) {
+        const stored = localStorage.getItem(`entries_filters_org_${selectedOrgId}`);
+        if (stored) {
+          try {
+            const filterState = JSON.parse(stored);
+            let changed = false;
+            Object.entries(filterState).forEach(([k, v]) => {
+              if (v !== undefined && v !== null && v !== "") {
+                if (!next.has(k)) {
+                  next.set(k, String(v));
+                  changed = true;
+                }
+              }
+            });
+            if (changed) {
+              router.replace(`/dashboard/entries?${next.toString()}`);
+            }
+          } catch (e) {
+            console.error("Error parsing stored filters", e);
+          }
+        }
+      }
+    } else {
+      const filterState: Record<string, string> = {};
+      ["q", "domain_id", "category_id", "status", "tag_id", "year"].forEach((key) => {
+        const val = next.get(key);
+        if (val) filterState[key] = val;
+      });
+      localStorage.setItem(`entries_filters_org_${selectedOrgId}`, JSON.stringify(filterState));
+    }
+  }, [pathname, selectedOrgId, searchParams, onEntries, router]);
+
   useEffect(() => {
     const token = getAccessToken();
     if (!token) {
@@ -494,11 +540,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       : user.organization_id != null
         ? `/dashboard/entries?organization_id=${user.organization_id}`
         : "/dashboard/entries";
+  const customReportsHref =
+    selectedOrgId != null
+      ? `/dashboard/custom-reports?organization_id=${selectedOrgId}`
+      : user.organization_id != null
+        ? `/dashboard/custom-reports?organization_id=${user.organization_id}`
+        : "/dashboard/custom-reports";
 
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
     { href: kpisHref, label: "KPIs", show: role === "ORG_ADMIN" || role === "SUPER_ADMIN" },
     { href: dashboardsHref, label: "Dashboards", show: true },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
+    { href: customReportsHref, label: "Custom Reports", show: isSuperAdmin },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },
   ].filter((x) => x.show);
 
@@ -790,6 +843,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     onClick={() => setMenuOpen(false)}
                   >
                     Reports
+                  </Link>
+                  <Link
+                    href={`/dashboard/custom-reports?organization_id=${selectedOrgId}`}
+                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Custom Reports
                   </Link>
                   <Link
                     href={dashboardsHref}

@@ -647,6 +647,7 @@ export default function KpiReportBuilder() {
                     setSourceKpiFieldsById={setSourceKpiFieldsById}
                     refFilterOptions={refFilterOptions}
                     setRefFilterOptions={setRefFilterOptions}
+                    fieldId={f.id}
                     onApply={(draft) => {
                       const payload = filterDraftToPayload(draft, f.sub_fields || []);
                       setMultiLineConfig((prev) => ({
