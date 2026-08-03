@@ -31,6 +31,8 @@ interface MultiItemsAdvancedFiltersPanelProps {
   onApply: (draft: MultiFilterConditionRow[]) => void;
   onClose: () => void;
   showCloseButton?: boolean;
+  entryId?: number | null;
+  fieldId?: number | null;
 }
 
 export default function MultiItemsAdvancedFiltersPanel({
@@ -46,6 +48,8 @@ export default function MultiItemsAdvancedFiltersPanel({
   onApply,
   onClose,
   showCloseButton = true,
+  entryId = null,
+  fieldId = null,
 }: MultiItemsAdvancedFiltersPanelProps) {
   // Load source KPI fields as needed
   React.useEffect(() => {
@@ -112,6 +116,39 @@ export default function MultiItemsAdvancedFiltersPanel({
         .catch(() => setRefFilterOptions((prev) => ({ ...prev, [term.cacheKey]: [] })));
     });
   }, [token, effectiveOrgId, filterDraft, subFields, refFilterOptions, setRefFilterOptions, sourceKpiFieldsById]);
+
+  // Load column unique values as needed
+  const [colUniqueValues, setColUniqueValues] = React.useState<Record<string, { value: string; count: number }[]>>({});
+  const [manualRows, setManualRows] = React.useState<Record<number, boolean>>({});
+
+  React.useEffect(() => {
+    if (!token || effectiveOrgId == null || !fieldId) return;
+    filterDraft.forEach((row) => {
+      const fieldKey = row.field;
+      if (!fieldKey) return;
+      if (colUniqueValues[fieldKey] !== undefined) return;
+
+      // Optimistically set to empty list (marked as loading) to avoid multiple simultaneous requests
+      setColUniqueValues((prev) => ({ ...prev, [fieldKey]: [] }));
+
+      const params = new URLSearchParams({
+        field_id: String(fieldId),
+        sub_field_key: fieldKey,
+        organization_id: String(effectiveOrgId),
+      });
+      if (entryId != null) {
+        params.set("entry_id", String(entryId));
+      }
+
+      api<{ values: { value: string; count: number }[] }>(`/entries/multi-items/column-unique-values?${params.toString()}`, { token })
+        .then((r) => {
+          setColUniqueValues((prev) => ({ ...prev, [fieldKey]: r.values ?? [] }));
+        })
+        .catch(() => {
+          setColUniqueValues((prev) => ({ ...prev, [fieldKey]: [] }));
+        });
+    });
+  }, [token, effectiveOrgId, entryId, fieldId, filterDraft, colUniqueValues]);
 
   const setRow = (idx: number, patch: Partial<MultiFilterConditionRow>) => {
     setFilterDraft((prev) => prev.map((x, i) => (i === idx ? { ...x, ...patch } : x)));
@@ -324,135 +361,249 @@ export default function MultiItemsAdvancedFiltersPanel({
                   <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
                     Select a field first
                   </span>
-                ) : ftCond === "boolean" ? (
-                  <select
-                    value={c.value === "true" || c.value === "false" ? c.value : ""}
-                    onChange={(e) => setRow(idx, { value: e.target.value })}
-                    style={{ minWidth: "140px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                  >
-                    <option value="">—</option>
-                    <option value="true">Yes</option>
-                    <option value="false">No</option>
-                  </select>
-                ) : ftCond === "number" ? (
-                  <input
-                    type="number"
-                    step="any"
-                    value={c.value}
-                    onChange={(e) => setRow(idx, { value: e.target.value })}
-                    style={{ width: "100%", maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                    placeholder="Number"
-                  />
-                ) : ftCond === "date" ? (
-                  <input
-                    type="date"
-                    value={c.value.length >= 10 ? c.value.slice(0, 10) : c.value}
-                    onChange={(e) => setRow(idx, { value: e.target.value })}
-                    style={{ maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                  />
-                ) : ftCond === "reference" && sourceKpiIdForRef ? (
-                  termKey ? (
-                    refOptions.length > 0 ? (
-                      !c.value || refOptions.includes(c.value) ? (
-                        <select
-                          value={refOptions.includes(c.value) ? c.value : ""}
-                          onChange={(e) => setRow(idx, { value: e.target.value })}
-                          style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                        >
-                          <option value="">— Select value —</option>
-                          {refOptions.map((v) => (
-                            <option key={v} value={v}>{truncateLabel(v, 72)}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          type="text"
-                          value={c.value}
-                          onChange={(e) => setRow(idx, { value: e.target.value })}
-                          style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                          placeholder="Custom value"
-                        />
-                      )
-                    ) : (
-                      <input
-                        type="text"
-                        value={c.value}
-                        onChange={(e) => setRow(idx, { value: e.target.value })}
-                        style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                        placeholder="Loading values… or type manually"
-                      />
-                    )
-                  ) : (
-                    <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
-                      Choose linked columns until a non-reference field is selected; values load for that field.
-                    </span>
-                  )
-                ) : ftCond === "multi_reference" && sourceKpiIdForRef ? (
-                  termKey ? (
-                    showMultiRefPick ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", minWidth: "200px", maxWidth: "420px" }}>
-                        <select
-                          multiple
-                          size={Math.min(8, Math.max(3, refOptions.length))}
-                          value={c.multiValues ?? []}
-                          onChange={(e) => {
-                            const sel = Array.from(e.target.selectedOptions, (o) => o.value);
-                            setRow(idx, { multiValues: sel, value: sel[0] ?? "" });
-                          }}
-                          style={{ width: "100%", padding: "0.25rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                        >
-                          {refOptions.map((v) => (
-                            <option key={v} value={v}>{truncateLabel(v, 80)}</option>
-                          ))}
-                        </select>
-                        <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
-                          {c.op === "eq" ? "Any selected value matches (OR)." : "None of the selected values (AND)."} Use Ctrl/Cmd or Shift for multiple.
-                        </span>
+                                ) : (() => {
+                  const uniqueVals = colUniqueValues[c.field];
+                  const hasUniqueVals = uniqueVals && uniqueVals.length > 0;
+                  const isManual = manualRows[idx];
+
+                  if (hasUniqueVals && !isManual) {
+                    if (ftCond === "multi_reference" && (c.op === "eq" || c.op === "neq")) {
+                      return (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", minWidth: "200px", maxWidth: "420px" }}>
+                          <select
+                            multiple
+                            size={Math.min(8, Math.max(3, uniqueVals.length))}
+                            value={c.multiValues ?? []}
+                            onChange={(e) => {
+                              const sel = Array.from(e.target.selectedOptions, (o) => o.value);
+                              setRow(idx, { multiValues: sel, value: sel[0] ?? "" });
+                            }}
+                            style={{ width: "100%", padding: "0.25rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                          >
+                            {uniqueVals.map((item) => (
+                              <option key={item.value} value={item.value}>{`${truncateLabel(item.value, 80)} [${item.count}]`}</option>
+                            ))}
+                          </select>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "0.25rem" }}>
+                            <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
+                              {c.op === "eq" ? "Any selected value matches (OR)." : "None of the selected values (AND)."} Use Ctrl/Cmd or Shift for multiple.
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setManualRows((prev) => ({ ...prev, [idx]: true }))}
+                              style={{
+                                fontSize: "0.75rem",
+                                color: "var(--primary)",
+                                border: "none",
+                                background: "none",
+                                cursor: "pointer",
+                                padding: 0,
+                                textDecoration: "underline"
+                              }}
+                            >
+                              Type manually
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    const isValInUnique = !c.value || uniqueVals.some((x) => x.value === c.value);
+                    if (isValInUnique) {
+                      return (
+                        <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                          <select
+                            value={uniqueVals.some((x) => x.value === c.value) ? c.value : ""}
+                            onChange={(e) => setRow(idx, { value: e.target.value })}
+                            style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                          >
+                            <option value="">— Select value —</option>
+                            {uniqueVals.map((item) => (
+                              <option key={item.value} value={item.value}>
+                                {`${item.value === "true" ? "Yes" : item.value === "false" ? "No" : truncateLabel(item.value, 72)} [${item.count}]`}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => setManualRows((prev) => ({ ...prev, [idx]: true }))}
+                            style={{ padding: "0.35rem 0.5rem", fontSize: "0.85rem", height: "34px", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                            title="Type manually"
+                          >
+                            ✏️
+                          </button>
+                        </div>
+                      );
+                    }
+                  }
+
+                  return (
+                    <div style={{ display: "flex", gap: "0.35rem", alignItems: "center", width: "100%", maxWidth: "420px" }}>
+                      <div style={{ flex: 1 }}>
+                        {(() => {
+                          if (ftCond === "boolean") {
+                            return (
+                              <select
+                                value={c.value === "true" || c.value === "false" ? c.value : ""}
+                                onChange={(e) => setRow(idx, { value: e.target.value })}
+                                style={{ width: "100%", minWidth: "140px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                              >
+                                <option value="">—</option>
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                              </select>
+                            );
+                          }
+                          if (ftCond === "number") {
+                            return (
+                              <input
+                                type="number"
+                                step="any"
+                                value={c.value}
+                                onChange={(e) => setRow(idx, { value: e.target.value })}
+                                style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                placeholder="Number"
+                              />
+                            );
+                          }
+                          if (ftCond === "date") {
+                            return (
+                              <input
+                                type="date"
+                                value={c.value.length >= 10 ? c.value.slice(0, 10) : c.value}
+                                onChange={(e) => setRow(idx, { value: e.target.value })}
+                                style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                              />
+                            );
+                          }
+                          if (ftCond === "reference" && sourceKpiIdForRef) {
+                            return termKey ? (
+                              refOptions.length > 0 ? (
+                                !c.value || refOptions.includes(c.value) ? (
+                                  <select
+                                    value={refOptions.includes(c.value) ? c.value : ""}
+                                    onChange={(e) => setRow(idx, { value: e.target.value })}
+                                    style={{ width: "100%", minWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                  >
+                                    <option value="">— Select value —</option>
+                                    {refOptions.map((v) => (
+                                      <option key={v} value={v}>{truncateLabel(v, 72)}</option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <input
+                                    type="text"
+                                    value={c.value}
+                                    onChange={(e) => setRow(idx, { value: e.target.value })}
+                                    style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                    placeholder="Custom value"
+                                  />
+                                )
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={c.value}
+                                  onChange={(e) => setRow(idx, { value: e.target.value })}
+                                  style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                  placeholder="Loading values… or type manually"
+                                />
+                              )
+                            ) : (
+                              <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
+                                Choose linked columns until a non-reference field is selected; values load for that field.
+                              </span>
+                            );
+                          }
+                          if (ftCond === "multi_reference" && sourceKpiIdForRef) {
+                            return termKey ? (
+                              showMultiRefPick ? (
+                                <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", width: "100%" }}>
+                                  <select
+                                    multiple
+                                    size={Math.min(8, Math.max(3, refOptions.length))}
+                                    value={c.multiValues ?? []}
+                                    onChange={(e) => {
+                                      const sel = Array.from(e.target.selectedOptions, (o) => o.value);
+                                      setRow(idx, { multiValues: sel, value: sel[0] ?? "" });
+                                    }}
+                                    style={{ width: "100%", padding: "0.25rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                  >
+                                    {refOptions.map((v) => (
+                                      <option key={v} value={v}>{truncateLabel(v, 80)}</option>
+                                    ))}
+                                  </select>
+                                  <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
+                                    {c.op === "eq" ? "Any selected value matches (OR)." : "None of the selected values (AND)."} Use Ctrl/Cmd or Shift for multiple.
+                                  </span>
+                                </div>
+                              ) : refOptions.length > 0 ? (
+                                !c.value || refOptions.includes(c.value) ? (
+                                  <select
+                                    value={refOptions.includes(c.value) ? c.value : ""}
+                                    onChange={(e) => setRow(idx, { value: e.target.value })}
+                                    style={{ width: "100%", minWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                  >
+                                    <option value="">— Select value —</option>
+                                    {refOptions.map((v) => (
+                                      <option key={v} value={v}>{truncateLabel(v, 72)}</option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <input
+                                    type="text"
+                                    value={c.value}
+                                    onChange={(e) => setRow(idx, { value: e.target.value })}
+                                    style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                    placeholder="Custom value"
+                                  />
+                                )
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={c.value}
+                                  onChange={(e) => setRow(idx, { value: e.target.value })}
+                                  style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                  placeholder="Type a value"
+                                />
+                              )
+                            ) : (
+                              <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
+                                Choose linked columns until a non-reference field is selected; values load for that field.
+                              </span>
+                            );
+                          }
+
+                          return (
+                            <input
+                              type="text"
+                              value={c.value}
+                              onChange={(e) => setRow(idx, { value: e.target.value })}
+                              style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                              placeholder="Value"
+                            />
+                          );
+                        })()}
                       </div>
-                    ) : refOptions.length > 0 ? (
-                      !c.value || refOptions.includes(c.value) ? (
-                        <select
-                          value={refOptions.includes(c.value) ? c.value : ""}
-                          onChange={(e) => setRow(idx, { value: e.target.value })}
-                          style={{ minWidth: "200px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                      {hasUniqueVals && (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => {
+                            setManualRows((prev) => ({ ...prev, [idx]: false }));
+                            if (c.value && !uniqueVals.some((x) => x.value === c.value)) {
+                              setRow(idx, { value: "" });
+                            }
+                          }}
+                          style={{ padding: "0.35rem 0.5rem", fontSize: "0.85rem", height: "34px", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                          title="Select from list"
                         >
-                          <option value="">— Select value —</option>
-                          {refOptions.map((v) => (
-                            <option key={v} value={v}>{truncateLabel(v, 72)}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          type="text"
-                          value={c.value}
-                          onChange={(e) => setRow(idx, { value: e.target.value })}
-                          style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                          placeholder="Custom value"
-                        />
-                      )
-                    ) : (
-                      <input
-                        type="text"
-                        value={c.value}
-                        onChange={(e) => setRow(idx, { value: e.target.value })}
-                        style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                        placeholder="Type a value"
-                      />
-                    )
-                  ) : (
-                    <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
-                      Choose linked columns until a non-reference field is selected; values load for that field.
-                    </span>
-                  )
-                ) : (
-                  <input
-                    type="text"
-                    value={c.value}
-                    onChange={(e) => setRow(idx, { value: e.target.value })}
-                    style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                    placeholder="Value"
-                  />
-                )}
+                          📋
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               {filterDraft.length > 1 && (
                 <button
