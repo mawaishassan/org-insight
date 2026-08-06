@@ -6,12 +6,31 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
+import {
+  SubField,
+  FieldSummary,
+  MultiFilterConditionRow,
+  emptyMultiFilterRow,
+  payloadToFilterDraft,
+  filterDraftToPayload,
+  removeConditionFromPayload,
+} from "@/lib/multiItemsFiltersHelper";
+import MultiItemsAdvancedFiltersPanel from "@/components/MultiItemsAdvancedFiltersPanel";
 
-interface KPIField {
+interface KPISubField {
   id: number;
   key: string;
   name: string;
   field_type: string;
+}
+
+interface KPIField {
+  id: number;
+  kpi_id: number;
+  key: string;
+  name: string;
+  field_type: string;
+  sub_fields?: KPISubField[];
 }
 
 interface KPI {
@@ -28,6 +47,10 @@ interface CustomReportField {
   field_type: string;
   sort_order: number;
   kpi_id: number;
+  config?: {
+    selected_columns?: string[] | null;
+    filters?: { conditions: any[]; _version: number } | null;
+  } | null;
 }
 
 interface CustomReportSection {
@@ -75,6 +98,98 @@ export default function CustomReportDesignPage() {
   const [dragOverSectionIdx, setDragOverSectionIdx] = useState<number | null>(null);
   const [dragOverFieldLoc, setDragOverFieldLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
 
+  const hasUnsavedChanges = useMemo(() => {
+    if (!report) return false;
+    return JSON.stringify(sections.map(s => ({
+      kpi_id: s.kpi_id,
+      custom_header: s.custom_header,
+      sort_order: s.sort_order,
+      fields: s.fields.map(f => ({
+        kpi_field_id: f.kpi_field_id,
+        sort_order: f.sort_order,
+        config: f.config || null,
+      })),
+    }))) !== JSON.stringify(report.sections.map(s => ({
+      kpi_id: s.kpi_id,
+      custom_header: s.custom_header,
+      sort_order: s.sort_order,
+      fields: s.fields.map(f => ({
+        kpi_field_id: f.kpi_field_id,
+        sort_order: f.sort_order,
+        config: f.config || null,
+      })),
+    })));
+  }, [report, sections]);
+
+  // Column Selection & Reordering + Row Filtering States for MLIs
+  const [editingFieldLoc, setEditingFieldLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
+  const [editingFieldConfig, setEditingFieldConfig] = useState<{
+    selected_columns: string[];
+    filters: { conditions: any[]; _version: number };
+  } | null>(null);
+
+  const [openFilterFieldKey, setOpenFilterFieldKey] = useState<boolean>(false);
+  const [filterDraft, setFilterDraft] = useState<MultiFilterConditionRow[]>([emptyMultiFilterRow()]);
+  const [sourceKpiFieldsById, setSourceKpiFieldsById] = useState<Record<number, FieldSummary[]>>({});
+  const [refFilterOptions, setRefFilterOptions] = useState<Record<string, string[]>>({});
+
+  const handleMoveSectionUp = (idx: number) => {
+    if (idx === 0) return;
+    setSections((prev) => {
+      const next = [...prev];
+      const temp = next[idx];
+      next[idx] = next[idx - 1];
+      next[idx - 1] = temp;
+      return next.map((s, sIdx) => ({ ...s, sort_order: sIdx }));
+    });
+  };
+
+  const handleMoveSectionDown = (idx: number) => {
+    if (idx === sections.length - 1) return;
+    setSections((prev) => {
+      const next = [...prev];
+      const temp = next[idx];
+      next[idx] = next[idx + 1];
+      next[idx + 1] = temp;
+      return next.map((s, sIdx) => ({ ...s, sort_order: sIdx }));
+    });
+  };
+
+  const handleMoveFieldUp = (secIdx: number, fIdx: number) => {
+    if (fIdx === 0) return;
+    setSections((prev) => {
+      return prev.map((s, sIdx) => {
+        if (sIdx !== secIdx) return s;
+        const fields = [...s.fields];
+        const temp = fields[fIdx];
+        fields[fIdx] = fields[fIdx - 1];
+        fields[fIdx - 1] = temp;
+        return {
+          ...s,
+          fields: fields.map((f, idx) => ({ ...f, sort_order: idx })),
+        };
+      });
+    });
+  };
+
+  const handleMoveFieldDown = (secIdx: number, fIdx: number) => {
+    const sec = sections[secIdx];
+    if (fIdx === sec.fields.length - 1) return;
+    setSections((prev) => {
+      return prev.map((s, sIdx) => {
+        if (sIdx !== secIdx) return s;
+        const fields = [...s.fields];
+        const temp = fields[fIdx];
+        fields[fIdx] = fields[fIdx + 1];
+        fields[fIdx + 1] = temp;
+        return {
+          ...s,
+          fields: fields.map((f, idx) => ({ ...f, sort_order: idx })),
+        };
+      });
+    });
+  };
+
   // Fetch report details and KPIs list
   useEffect(() => {
     const token = getAccessToken();
@@ -84,25 +199,25 @@ export default function CustomReportDesignPage() {
     Promise.all([
       api<CustomReportDetail>(`/custom-reports/${id}/detail?organization_id=${orgId}`, { token }),
       api<any[]>(`/kpis?organization_id=${orgId}`, { token }),
+      api<KPIField[]>(`/fields?organization_id=${orgId}`, { token }),
     ])
-      .then(async ([detail, kpisData]) => {
+      .then(([detail, kpisData, allFields]) => {
         setReport(detail);
         setSections(detail.sections.sort((a, b) => a.sort_order - b.sort_order));
 
-        // Fetch fields for each organization KPI to construct full KPI options
-        const fullKpis: KPI[] = [];
-        for (const k of kpisData) {
-          try {
-            const fields = await api<KPIField[]>(`/fields?kpi_id=${k.id}&organization_id=${orgId}`, { token });
-            fullKpis.push({
-              id: k.id,
-              name: k.name,
-              fields: fields || [],
-            });
-          } catch (e) {
-            fullKpis.push({ id: k.id, name: k.name, fields: [] });
-          }
-        }
+        // Group fields by kpi_id in memory
+        const fieldsByKpi = (allFields || []).reduce((acc, f) => {
+          if (!acc[f.kpi_id]) acc[f.kpi_id] = [];
+          acc[f.kpi_id].push(f);
+          return acc;
+        }, {} as Record<number, KPIField[]>);
+
+        const fullKpis: KPI[] = kpisData.map((k) => ({
+          id: k.id,
+          name: k.name,
+          fields: fieldsByKpi[k.id] || [],
+        }));
+        
         setAllKpis(fullKpis);
         setError(null);
       })
@@ -118,7 +233,7 @@ export default function CustomReportDesignPage() {
     setPreviewLoading(true);
     try {
       const data = await api<{ rendered_html?: string }>(
-        `/custom-reports/${id}/generate?year=${yearVal}&organization_id=${orgId}`,
+        `/custom-reports/${id}/generate?year=${yearVal}&organization_id=${orgId}&preview=true`,
         { token }
       );
       setPreviewHtml(data.rendered_html || "<p>No content generated</p>");
@@ -299,6 +414,7 @@ export default function CustomReportDesignPage() {
           fields: s.fields.map((f) => ({
             kpi_field_id: f.kpi_field_id,
             sort_order: f.sort_order,
+            config: f.config || null,
           })),
         })),
       };
@@ -434,6 +550,26 @@ export default function CustomReportDesignPage() {
                         }}
                       >
                         <span style={{ fontSize: "1.1rem", color: "#94a3b8", cursor: "grab" }}>☰</span>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "2px", marginRight: "0.2rem" }}>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); handleMoveSectionUp(sIdx); }}
+                            disabled={sIdx === 0}
+                            style={{ border: "none", background: "none", color: sIdx === 0 ? "#cbd5e1" : "#64748b", cursor: sIdx === 0 ? "not-allowed" : "pointer", fontSize: "0.65rem", padding: 0, height: 10, display: "flex", alignItems: "center", justifyContent: "center" }}
+                            title="Move section up"
+                          >
+                            ▲
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); handleMoveSectionDown(sIdx); }}
+                            disabled={sIdx === sections.length - 1}
+                            style={{ border: "none", background: "none", color: sIdx === sections.length - 1 ? "#cbd5e1" : "#64748b", cursor: sIdx === sections.length - 1 ? "not-allowed" : "pointer", fontSize: "0.65rem", padding: 0, height: 10, display: "flex", alignItems: "center", justifyContent: "center" }}
+                            title="Move section down"
+                          >
+                            ▼
+                          </button>
+                        </div>
                         <span style={{ fontWeight: 600, color: "var(--muted)", fontSize: "0.9rem" }}>{sec.number}</span>
                         <input
                           value={sec.custom_header || ""}
@@ -512,7 +648,27 @@ export default function CustomReportDesignPage() {
                                   cursor: "grab"
                                 }}
                               >
-                                <span style={{ color: "#cbd5e1" }}>⁝⁝</span>
+                                 <span style={{ color: "#cbd5e1" }}>⁝⁝</span>
+                                <div style={{ display: "flex", flexDirection: "column", gap: "1px", marginRight: "0.2rem" }}>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); handleMoveFieldUp(sIdx, fIdx); }}
+                                    disabled={fIdx === 0}
+                                    style={{ border: "none", background: "none", color: fIdx === 0 ? "#cbd5e1" : "#64748b", cursor: fIdx === 0 ? "not-allowed" : "pointer", fontSize: "0.55rem", padding: 0, height: 8, display: "flex", alignItems: "center", justifyContent: "center" }}
+                                    title="Move field up"
+                                  >
+                                    ▲
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); handleMoveFieldDown(sIdx, fIdx); }}
+                                    disabled={fIdx === sec.fields.length - 1}
+                                    style={{ border: "none", background: "none", color: fIdx === sec.fields.length - 1 ? "#cbd5e1" : "#64748b", cursor: fIdx === sec.fields.length - 1 ? "not-allowed" : "pointer", fontSize: "0.55rem", padding: 0, height: 8, display: "flex", alignItems: "center", justifyContent: "center" }}
+                                    title="Move field down"
+                                  >
+                                    ▼
+                                  </button>
+                                </div>
                                 <span style={{ fontSize: "0.8rem", color: "var(--muted)", fontWeight: 500 }}>{f.number}</span>
                                 <span style={{ fontSize: "0.85rem", fontWeight: 500, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                   {f.field_name}
@@ -521,6 +677,38 @@ export default function CustomReportDesignPage() {
                                   <span style={{ fontSize: "0.7rem", padding: "0.1rem 0.3rem", borderRadius: 4, background: "#e2e8f0", color: "#64748b" }}>
                                     Moved
                                   </span>
+                                )}
+                                {f.field_type === "multi_line_items" && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const kpi = allKpis.find(k => k.id === f.kpi_id);
+                                      const kpiField = kpi?.fields.find(fld => fld.id === f.kpi_field_id);
+                                      const subFields = kpiField?.sub_fields || [];
+                                      setEditingFieldLoc({ secIdx: sIdx, fieldIdx: fIdx });
+                                      setEditingFieldConfig({
+                                        selected_columns: f.config?.selected_columns || subFields.map(sf => sf.key).slice(0, 5),
+                                        filters: (f.config?.filters || { conditions: [], _version: 2 }) as any
+                                      });
+                                      setFilterDraft(payloadToFilterDraft((f.config?.filters || { conditions: [], _version: 2 }) as any));
+                                      setOpenFilterFieldKey(false);
+                                    }}
+                                    style={{
+                                      fontSize: "0.75rem",
+                                      padding: "0.1rem 0.4rem",
+                                      borderRadius: 4,
+                                      background: f.config ? "#dbeafe" : "#f1f5f9",
+                                      color: f.config ? "#1e40af" : "#475569",
+                                      border: "1px solid " + (f.config ? "#bfdbfe" : "#cbd5e1"),
+                                      cursor: "pointer",
+                                      marginRight: "0.2rem",
+                                      fontWeight: 600
+                                    }}
+                                    title="Configure columns and row filters"
+                                  >
+                                    ⚙️ {f.config ? "Configured" : "Configure"}
+                                  </button>
                                 )}
                                 <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontStyle: "italic" }}>
                                   {f.field_type === "multi_line_items" ? "MLI" : "Scalar"}
@@ -561,6 +749,11 @@ export default function CustomReportDesignPage() {
           <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontWeight: 600, fontSize: "0.9rem", color: "var(--text)" }}>Live Preview</span>
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              {hasUnsavedChanges && (
+                <span style={{ fontSize: "0.75rem", color: "var(--error)", fontWeight: 600, marginRight: "0.5rem" }}>
+                  ⚠️ Unsaved changes (Save layout to update preview)
+                </span>
+              )}
               <label style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Year</label>
               <select
                 value={previewYear}
@@ -591,12 +784,292 @@ export default function CustomReportDesignPage() {
             )}
             <iframe
               title="Layout live preview"
-              srcDoc={`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:inherit;margin:1rem;color:#111;line-height:1.5;}</style></head><body>${previewHtml || "<p style='color: #64748b;'>Save layout to refresh preview content.</p>"}</body></html>`}
+              srcDoc={`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:inherit;margin:1rem;color:#111;line-height:1.5;}</style></head><body>${previewHtml || (previewLoading ? "<p style='color: #64748b;'>Loading live preview...</p>" : "<p style='color: #64748b;'>Save layout to refresh preview content.</p>")}</body></html>`}
               style={{ width: "100%", height: "100%", background: "white", border: "1px solid var(--border)", borderRadius: 6 }}
             />
           </div>
         </div>
       </div>
+
+      {/* Column Selection & Row Filter Modal */}
+      {editingFieldLoc && editingFieldConfig && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.5)",
+            padding: "1.5rem",
+          }}
+          onClick={() => setEditingFieldLoc(null)}
+        >
+          <div
+            className="card"
+            style={{ maxWidth: 720, width: "100%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 10px 40px rgba(0,0,0,0.15)", background: "var(--surface)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div style={{ borderBottom: "1px solid var(--border)", paddingBottom: "1rem", marginBottom: "1rem" }}>
+              <h3 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 600 }}>
+                Configure Columns & Filters: {
+                  sections[editingFieldLoc.secIdx].fields[editingFieldLoc.fieldIdx].field_name
+                }
+              </h3>
+              <p style={{ color: "var(--muted)", margin: "0.25rem 0 0 0", fontSize: "0.85rem" }}>
+                Select and order visible columns, and define filtering criteria for rows.
+              </p>
+            </div>
+
+            {/* Columns Selector & Ordering Section */}
+            {(() => {
+              const field = sections[editingFieldLoc.secIdx].fields[editingFieldLoc.fieldIdx];
+              const kpi = allKpis.find(k => k.id === field.kpi_id);
+              const kpiField = kpi?.fields.find(fld => fld.id === field.kpi_field_id);
+              const subFields = kpiField?.sub_fields || [];
+              const token = getAccessToken();
+
+              return (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>
+                    <div>
+                      <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+                        Select Columns
+                      </label>
+                      <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "0.5rem", maxHeight: 180, overflowY: "auto", background: "white" }}>
+                        {subFields.map(sf => {
+                          const isChecked = editingFieldConfig.selected_columns.includes(sf.key);
+                          return (
+                            <label key={sf.id} style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.8rem", padding: "0.2rem 0", cursor: "pointer" }}>
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => {
+                                  let nextCols = [...editingFieldConfig.selected_columns];
+                                  if (isChecked) {
+                                    nextCols = nextCols.filter(c => c !== sf.key);
+                                  } else {
+                                    if (nextCols.length >= 8) {
+                                      toast.error("Maximum of 8 columns can be selected. Please unselect another column first.");
+                                      return;
+                                    }
+                                    nextCols = [...nextCols, sf.key];
+                                  }
+                                  setEditingFieldConfig(prev => prev ? { ...prev, selected_columns: nextCols } : null);
+                                }}
+                              />
+                              {sf.name}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+                        Order Selected Columns
+                      </label>
+                      <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "0.5rem", maxHeight: 180, overflowY: "auto", background: "#f8fafc" }}>
+                        {editingFieldConfig.selected_columns.length === 0 ? (
+                          <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)", fontStyle: "italic" }}>No columns selected</p>
+                        ) : (
+                          editingFieldConfig.selected_columns.map((col, idx) => {
+                            const sf = subFields.find(s => s.key === col);
+                            return (
+                              <div
+                                key={col}
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  background: "white",
+                                  border: "1px solid var(--border)",
+                                  borderRadius: 4,
+                                  padding: "0.25rem 0.5rem",
+                                  marginBottom: "0.25rem",
+                                  fontSize: "0.8rem"
+                                }}
+                              >
+                                <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {sf?.name || col}
+                                </span>
+                                <div style={{ display: "flex", gap: "2px" }}>
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    disabled={idx === 0}
+                                    onClick={() => {
+                                      const nextCols = [...editingFieldConfig.selected_columns];
+                                      const temp = nextCols[idx];
+                                      nextCols[idx] = nextCols[idx - 1];
+                                      nextCols[idx - 1] = temp;
+                                      setEditingFieldConfig(prev => prev ? { ...prev, selected_columns: nextCols } : null);
+                                    }}
+                                    style={{ padding: "0 0.25rem", fontSize: "0.65rem", height: 18 }}
+                                  >
+                                    ▲
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    disabled={idx === editingFieldConfig.selected_columns.length - 1}
+                                    onClick={() => {
+                                      const nextCols = [...editingFieldConfig.selected_columns];
+                                      const temp = nextCols[idx];
+                                      nextCols[idx] = nextCols[idx + 1];
+                                      nextCols[idx + 1] = temp;
+                                      setEditingFieldConfig(prev => prev ? { ...prev, selected_columns: nextCols } : null);
+                                    }}
+                                    style={{ padding: "0 0.25rem", fontSize: "0.65rem", height: 18 }}
+                                  >
+                                    ▼
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Advanced Filters Builder Section */}
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem", marginBottom: "1.5rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                      <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Row Filters</label>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => setOpenFilterFieldKey(prev => !prev)}
+                        style={{ padding: "0.2rem 0.5rem", fontSize: "0.75rem" }}
+                      >
+                        {openFilterFieldKey ? "Hide Filter Builder ▲" : "Show Filter Builder ▼"}
+                      </button>
+                    </div>
+
+                    {openFilterFieldKey && token && (
+                      <div style={{ marginBottom: "1rem", border: "1px solid var(--border)", borderRadius: 6, padding: "0.5rem", background: "white" }}>
+                        <MultiItemsAdvancedFiltersPanel
+                          token={token}
+                          effectiveOrgId={orgId}
+                          subFields={subFields.map(sf => ({ ...sf, field_type: sf.field_type || null }))}
+                          filterDraft={filterDraft}
+                          setFilterDraft={setFilterDraft}
+                          sourceKpiFieldsById={sourceKpiFieldsById}
+                          setSourceKpiFieldsById={setSourceKpiFieldsById}
+                          refFilterOptions={refFilterOptions}
+                          setRefFilterOptions={setRefFilterOptions}
+                          fieldId={field.kpi_field_id}
+                          year={previewYear}
+                          onApply={(draft) => {
+                            const payload = filterDraftToPayload(draft, subFields.map(sf => ({ ...sf, field_type: sf.field_type || null })));
+                             setEditingFieldConfig(prev => {
+                               if (!prev) return null;
+                               return {
+                                 ...prev,
+                                 filters: (payload || { conditions: [], _version: 2 }) as any
+                               };
+                             });
+                            setOpenFilterFieldKey(false);
+                            toast.success("Applied filter constraints");
+                          }}
+                          onClose={() => setOpenFilterFieldKey(false)}
+                          showCloseButton={true}
+                        />
+                      </div>
+                    )}
+
+                    {/* Active Filters Display */}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
+                      {editingFieldConfig.filters.conditions.length === 0 ? (
+                        <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontStyle: "italic" }}>No active filters (all rows will be shown)</span>
+                      ) : (
+                        editingFieldConfig.filters.conditions.map((cond, condIdx) => {
+                          const sub = subFields.find(s => s.key === cond.field);
+                          return (
+                            <div
+                              key={condIdx}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                background: "#f1f5f9",
+                                border: "1px solid #cbd5e1",
+                                borderRadius: "16px",
+                                padding: "0.1rem 0.5rem",
+                                fontSize: "0.75rem",
+                                gap: "0.25rem",
+                                color: "#334155"
+                              }}
+                            >
+                              <span>
+                                {sub?.name || cond.field} {cond.op} {String(cond.value ?? cond.values?.join(", "))}
+                              </span>
+                              <button
+                                type="button"
+                                style={{ border: "none", background: "none", color: "var(--error)", cursor: "pointer", fontWeight: 700, padding: 0 }}
+                                onClick={() => {
+                                  const nextPayload = removeConditionFromPayload(editingFieldConfig.filters as any, condIdx);
+                                  setEditingFieldConfig(prev => {
+                                    if (!prev) return null;
+                                    return {
+                                      ...prev,
+                                      filters: (nextPayload || { conditions: [], _version: 2 }) as any
+                                    };
+                                  });
+                                  setFilterDraft(payloadToFilterDraft(nextPayload));
+                                }}
+                              >
+                                ×
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+
+            {/* Modal Actions */}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setEditingFieldLoc(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  setSections(prev => {
+                    const next = prev.map((s, sIdx) => {
+                      if (sIdx !== editingFieldLoc.secIdx) return s;
+                      const fields = s.fields.map((f, fIdx) => {
+                        if (fIdx !== editingFieldLoc.fieldIdx) return f;
+                        return {
+                          ...f,
+                          config: editingFieldConfig
+                        };
+                      });
+                      return { ...s, fields };
+                    });
+                    return next;
+                  });
+                  setEditingFieldLoc(null);
+                  toast.success("Applied settings (click Save Layout to persist changes)");
+                }}
+              >
+                Apply Settings
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

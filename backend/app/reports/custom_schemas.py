@@ -49,6 +49,7 @@ class CustomReportResponse(BaseModel):
 class CustomReportFieldLayout(BaseModel):
     kpi_field_id: int
     sort_order: int
+    config: dict | None = None
 
 
 class CustomReportSectionLayout(BaseModel):

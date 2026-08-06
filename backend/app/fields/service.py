@@ -185,14 +185,14 @@ async def get_field_with_subfields_only(
     return result.scalar_one_or_none()
 
 
-async def list_fields(db: AsyncSession, kpi_id: int, org_id: int) -> list[KPIField]:
-    """List fields for KPI (KPI must belong to org)."""
+async def list_fields(db: AsyncSession, kpi_id: int | None, org_id: int) -> list[KPIField]:
+    """List fields for KPI(s) (KPI must belong to org)."""
+    stmt = select(KPIField).join(KPIField.kpi).where(KPI.organization_id == org_id)
+    if kpi_id is not None:
+        stmt = stmt.where(KPIField.kpi_id == kpi_id)
+    stmt = stmt.order_by(KPIField.kpi_id, KPIField.sort_order, KPIField.id)
     result = await db.execute(
-        select(KPIField)
-        .join(KPIField.kpi)
-        .where(KPIField.kpi_id == kpi_id, KPI.organization_id == org_id)
-        .order_by(KPIField.sort_order, KPIField.id)
-        .options(selectinload(KPIField.options), selectinload(KPIField.sub_fields))
+        stmt.options(selectinload(KPIField.options), selectinload(KPIField.sub_fields))
     )
     return list(result.scalars().all())
 

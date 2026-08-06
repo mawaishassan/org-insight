@@ -1201,7 +1201,7 @@ class CaptchaChallenge(Base):
     question = Column(String(255), nullable=False)
     answer = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=utc_now)
-    expires_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
     attempts = Column(Integer, default=0, nullable=False)
 
 
@@ -1277,6 +1277,7 @@ class CustomReportField(Base):
         Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
     )
     sort_order = Column(Integer, default=0, nullable=False)
+    config = Column(JSON, nullable=True)  # For MLI column selection/filters: {"visible_sub_fields": [...], "filters": [...]}
 
     custom_report = relationship("CustomReport")
     section = relationship("CustomReportSection", back_populates="fields")

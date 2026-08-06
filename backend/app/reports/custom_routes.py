@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import uuid
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +26,11 @@ from app.reports.custom_service import (
     unassign_custom_report,
     list_custom_report_assignments,
     generate_custom_report_data,
-    render_custom_report_html
+    render_custom_report_html,
+    CUSTOM_REPORT_CACHE,
+    REPORT_TASKS,
+    run_background_generation_task,
+    stream_custom_report_data
 )
 
 router = APIRouter(prefix="/custom-reports", tags=["custom-reports"])
@@ -51,7 +56,7 @@ async def check_custom_report_access(db: AsyncSession, user: User, custom_report
         return False
 
     if user.role.value == "ORG_ADMIN":
-        if action in ("view", "assign", "generate"):
+        if action in ("view", "assign", "generate", "print", "export"):
             return True
         return False
 
@@ -164,9 +169,10 @@ async def get_report_details(
                 "kpi_field_id": f.kpi_field_id,
                 "field_key": f.kpi_field.key,
                 "field_name": f.kpi_field.name,
-                "field_type": f.kpi_field.field_type,
+                "field_type": f.kpi_field.field_type.value if hasattr(f.kpi_field.field_type, "value") else str(f.kpi_field.field_type),
                 "sort_order": f.sort_order,
-                "kpi_id": f.kpi_field.kpi_id
+                "kpi_id": f.kpi_field.kpi_id,
+                "config": f.config
             })
         sections_data.append({
             "id": sec.id,
@@ -272,24 +278,105 @@ async def generate_report(
     id: int,
     year: int | None = Query(None),
     organization_id: int | None = Query(None),
+    preview: bool = Query(True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Generate custom report data."""
+    """Generate custom report data (with optional preview capping and cache support)."""
     org_id = _org_id(current_user, organization_id)
     if not await check_custom_report_access(db, current_user, id, "generate"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
-    data = await generate_custom_report_data(db, id, org_id, year=year, include_drafts=False)
+    cache_key = (id, org_id, year or "current", "preview" if preview else "full")
+    cached = CUSTOM_REPORT_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    data = await generate_custom_report_data(
+        db, id, org_id, year=year, include_drafts=False, preview=preview
+    )
     if not data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
 
     # Render HTML and attach
-    html = await render_custom_report_html(db, id, org_id, year=year, include_drafts=False, report_data=data)
+    html = await render_custom_report_html(
+        db, id, org_id, year=year, include_drafts=False, report_data=data
+    )
     if html is not None:
         data["rendered_html"] = html
 
+    CUSTOM_REPORT_CACHE.set(cache_key, data)
     return data
+
+
+@router.get("/{id}/generate-stream")
+async def generate_report_stream(
+    id: int,
+    year: int | None = Query(None),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Stream custom report data in NDJSON format for progressive loading."""
+    org_id = _org_id(current_user, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "generate"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+    from fastapi.responses import StreamingResponse
+    import json
+    import logging
+    logger = logging.getLogger(__name__)
+
+    async def event_generator():
+        from app.core.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as stream_db:
+            try:
+                async for chunk in stream_custom_report_data(stream_db, id, org_id, year):
+                    yield json.dumps(chunk) + "\n"
+            except Exception as e:
+                logger.exception("Error during custom report streaming")
+                yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+
+
+@router.post("/{id}/generate-async")
+async def generate_report_async(
+    id: int,
+    background_tasks: BackgroundTasks,
+    year: int | None = Query(None),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Start custom report generation in background (non-blocking)."""
+    org_id = _org_id(current_user, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "generate"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+    task_id = str(uuid.uuid4())
+    background_tasks.add_task(run_background_generation_task, task_id, id, org_id, year)
+    
+    return {"task_id": task_id, "status": "processing", "progress": 0}
+
+
+@router.get("/tasks/{task_id}")
+async def get_report_task_status(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the status of a background report generation task."""
+    task = REPORT_TASKS.get(task_id)
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    return {
+        "task_id": task_id,
+        "status": task["status"],
+        "progress": task["progress"],
+        "error": task["error"],
+        "result": task["result"] if task["status"] == "completed" else None
+    }
 
 
 @router.get("/{id}/users", response_model=list[CustomReportAssignmentResponse])
@@ -377,3 +464,37 @@ async def unassign_user_route(
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
     await db.commit()
+
+
+@router.get("/{id}/export")
+async def export_custom_report(
+    id: int,
+    year: int = Query(...),
+    format: str = Query("pdf"), # "pdf" | "docx" | "xlsx"
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Export custom report as PDF, DOCX, or XLSX."""
+    org_id = _org_id(current_user, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "export"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+    from app.reports.custom_service import export_custom_report_file
+    try:
+        file_bytes, filename, content_type = await export_custom_report_file(
+            db, id, org_id, year, format
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export report: {str(e)}"
+        )
+
+    from fastapi.responses import StreamingResponse
+    import io
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )

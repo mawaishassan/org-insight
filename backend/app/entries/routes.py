@@ -1409,6 +1409,8 @@ async def get_column_unique_values(
     sub_field_key: str = Query(...),
     entry_id: int | None = Query(None),
     organization_id: int | None = Query(None),
+    year: int | None = Query(None),
+    include_drafts: bool = Query(True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1465,8 +1467,54 @@ async def get_column_unique_values(
     if entry is not None:
         q = q.where(KpiMultiLineRow.entry_id == entry.id)
     else:
-        subq = select(KPIEntry.id).where(KPIEntry.organization_id == org_id, KPIEntry.kpi_id == field.kpi_id)
-        q = q.where(KpiMultiLineRow.entry_id.in_(subq))
+        # Load time dimension mapping to find correct entry
+        org = await db.get(Organization, org_id)
+        org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
+        kpi_td_raw = getattr(field.kpi, "time_dimension", None) if hasattr(field, "kpi") and field.kpi else None
+        kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
+        effective_td = effective_kpi_time_dimension(kpi_td, org_td)
+
+        from app.reports.custom_service import period_key_sort_order
+        entry_filters = [
+            KPIEntry.organization_id == org_id,
+            KPIEntry.kpi_id == field.kpi_id
+        ]
+        if year is not None:
+            entry_filters.append(KPIEntry.year == year)
+        if not include_drafts:
+            entry_filters.append(KPIEntry.is_draft == False)
+            
+        entries_res = await db.execute(
+            select(KPIEntry).where(*entry_filters)
+        )
+        all_entries = list(entries_res.scalars().all())
+        
+        resolved_entry_ids = []
+        if year is not None:
+            entries_sorted = sorted(
+                all_entries,
+                key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td)
+            )
+            if entries_sorted:
+                resolved_entry_ids = [entries_sorted[-1].id]
+        else:
+            # Group by year, find latest for each year
+            from collections import defaultdict
+            by_year = defaultdict(list)
+            for e in all_entries:
+                by_year[e.year].append(e)
+            for yr_val, yr_entries in by_year.items():
+                entries_sorted = sorted(
+                    yr_entries,
+                    key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td)
+                )
+                if entries_sorted:
+                    resolved_entry_ids.append(entries_sorted[-1].id)
+                    
+        if resolved_entry_ids:
+            q = q.where(KpiMultiLineRow.entry_id.in_(resolved_entry_ids))
+        else:
+            q = q.where(KpiMultiLineRow.entry_id.in_([e.id for e in all_entries]))
 
     field_row_access_enabled = bool(getattr(field, "row_level_user_access_enabled", False))
     if field_row_access_enabled and not is_org_admin:

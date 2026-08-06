@@ -32,11 +32,12 @@ async def create_captcha_challenge(db: AsyncSession) -> dict:
     Also cleans up expired challenges.
     """
     now = datetime.utcnow()
-    # Organic cleanup of expired challenges
-    try:
-        await db.execute(delete(CaptchaChallenge).where(CaptchaChallenge.expires_at < now))
-    except Exception as e:
-        logger.warning(f"Error cleaning up expired CAPTCHAs: {e}")
+    # Organic cleanup of expired challenges (probabilistically 5% of the time to avoid blocking/slowing down every request)
+    if random.random() < 0.05:
+        try:
+            await db.execute(delete(CaptchaChallenge).where(CaptchaChallenge.expires_at < now))
+        except Exception as e:
+            logger.warning(f"Error cleaning up expired CAPTCHAs: {e}")
 
     question, answer = generate_random_challenge()
     challenge_id = str(uuid.uuid4())

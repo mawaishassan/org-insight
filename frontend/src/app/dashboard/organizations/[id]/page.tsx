@@ -408,6 +408,7 @@ export default function OrganizationDetailPage() {
     tagCount: number;
     reportCount: number;
     dashboardCount: number;
+    customReportCount: number;
   } | null>(null);
 
   useEffect(() => {
@@ -422,8 +423,9 @@ export default function OrganizationDetailPage() {
       api<OrgTagRow[]>(`/organizations/${orgId}/tags`, { token }),
       api<{ id: number }[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token }),
       api<{ id: number }[]>(`/dashboards?${qs({ organization_id: orgId })}`, { token }),
+      api<{ id: number }[]>(`/custom-reports?${qs({ organization_id: orgId })}`, { token }),
     ])
-      .then(([domainsList, kpisList, tagsList, reportsList, dashboardsList]) => {
+      .then(([domainsList, kpisList, tagsList, reportsList, dashboardsList, customReportsList]) => {
         const categoryCount = domainsList.reduce((s, d) => s + (d.summary?.category_count ?? 0), 0);
         const kpiManual = kpisList.filter((k) => (k.entry_mode ?? "manual") === "manual").length;
         const kpiApi = kpisList.filter((k) => k.entry_mode === "api").length;
@@ -436,6 +438,7 @@ export default function OrganizationDetailPage() {
           tagCount: tagsList.length,
           reportCount: reportsList.length,
           dashboardCount: dashboardsList.length,
+          customReportCount: customReportsList.length,
         });
       })
       .catch(() => setOverviewSummary(null));
@@ -648,6 +651,7 @@ function OrganizationOverviewCards({
     tagCount: number;
     reportCount: number;
     dashboardCount: number;
+    customReportCount: number;
   } | null;
   updateUrl: (tab: TabId, sub?: SettingsSubId) => void;
   userRole: UserRole | null;
@@ -718,6 +722,24 @@ function OrganizationOverviewCards({
               "Charts, tables, and shared views",
             ],
             href: `/dashboard/dashboards?organization_id=${orgId}`,
+          },
+          {
+            id: "custom-reports",
+            title: "Custom Reports",
+            icon: (
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6" />
+                <path d="M16 13H8" />
+                <path d="M16 17H8" />
+                <circle cx="10" cy="9" r="1" />
+              </svg>
+            ),
+            lines: [
+              `${summary.customReportCount} custom report template${summary.customReportCount !== 1 ? "s" : ""}`,
+              "Design layouts and assign to organization users",
+            ],
+            href: `/dashboard/custom-reports?organization_id=${orgId}`,
           },
         ]
       : []),

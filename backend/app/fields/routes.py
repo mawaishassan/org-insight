@@ -68,7 +68,7 @@ async def get_reference_allowed_values(
 
 @router.get("", response_model=list[KPIFieldResponse])
 async def list_kpi_fields(
-    kpi_id: int = Query(...),
+    kpi_id: int | None = Query(None),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
