@@ -1452,8 +1452,6 @@ export default function FullPageMultiItems() {
           setSourceKpiFieldsById={setSourceKpiFieldsById}
           refFilterOptions={refFilterOptions}
           setRefFilterOptions={setRefFilterOptions}
-          entryId={entryId}
-          fieldId={fieldId}
           onApply={(draft) => {
             const payload = filterDraftToPayload(draft, subFields);
             setAppliedFilter(payload);

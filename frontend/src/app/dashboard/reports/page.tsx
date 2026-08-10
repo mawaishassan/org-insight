@@ -22,7 +22,6 @@ function qs(params: Record<string, string | number | undefined>) {
 
 export default function ReportsPage() {
   const [list, setList] = useState<TemplateRow[]>([]);
-  const [customList, setCustomList] = useState<TemplateRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
@@ -93,6 +92,7 @@ export default function ReportsPage() {
       setDeletingId(null);
     }
   };
+
   useEffect(() => {
     const token = getAccessToken();
     if (!token) return;
@@ -100,11 +100,8 @@ export default function ReportsPage() {
       .then(setList)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
-
-    api<TemplateRow[]>("/custom-reports", { token })
-      .then(setCustomList)
-      .catch(() => {});
   }, []);
+
   useEffect(() => {
     const token = getAccessToken();
     if (!token) return;
@@ -246,41 +243,6 @@ export default function ReportsPage() {
         </ul>
         )}
       </div>
-
-      <div className="card" style={{ marginTop: "1.5rem" }}>
-        <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "0.5rem" }}>Custom Reports</h2>
-        <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
-          {canManageAssignments
-            ? "View and assign custom report templates built by Super Admins."
-            : "Custom reports assigned to you."}
-        </p>
-
-        {customList.length === 0 ? (
-          <p style={{ color: "var(--muted)", margin: 0 }}>No custom reports available.</p>
-        ) : (
-          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {customList.map((t) => (
-              <li key={t.id} style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                <div style={{ flex: "1 1 auto" }}>
-                  <Link href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontWeight: 500 }}>
-                    {t.name}
-                  </Link>
-                  {t.description && <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.1rem 0 0 0" }}>{t.description}</p>}
-                </div>
-                <Link className="btn btn-primary" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                  View print report
-                </Link>
-                {canManageAssignments && (
-                  <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                    Assign users
-                  </Link>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
 
       {addModalOpen && (
         <div

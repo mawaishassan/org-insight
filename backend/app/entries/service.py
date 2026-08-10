@@ -202,11 +202,6 @@ async def replace_multi_line_items_rows(db: AsyncSession, *, entry_id: int, fiel
         c = KpiMultiLineCell(row_id=row_id, sub_field_id=int(getattr(sub, "id")))
         ft = getattr(sub, "field_type", None)
         ft_s = ft.value if hasattr(ft, "value") else str(ft)
-
-        # Odoo API returns boolean False for empty fields. Normalize to None for non-boolean fields.
-        if ft_s != "boolean" and raw_val in (False, "False", "false"):
-            raw_val = None
-
         if raw_val is None:
             pass
         elif ft_s == "number":

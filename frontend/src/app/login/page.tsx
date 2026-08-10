@@ -62,7 +62,7 @@ export default function LoginPage() {
       setTokens(res.access_token, res.refresh_token);
       const me = await api<{ role: string; organization_id: number | null }>("/auth/me", { token: res.access_token });
       toast.success("Logged in successfully");
-
+      
       const searchParams = new URLSearchParams(window.location.search);
       const redirectTo = searchParams.get("redirect");
       if (redirectTo) {
@@ -115,7 +115,7 @@ export default function LoginPage() {
             <input id="username" {...register("username")} autoComplete="username" />
             {errors.username && <p className="form-error">{errors.username.message}</p>}
           </div>
-
+          
           <div className="form-group">
             <label htmlFor="password">Password</label>
             <input id="password" type="password" {...register("password")} autoComplete="current-password" />
@@ -159,7 +159,7 @@ export default function LoginPage() {
                 <span>Refresh</span>
               </button>
             </label>
-
+            
             <div
               style={{
                 display: "flex",
@@ -200,7 +200,7 @@ export default function LoginPage() {
           </div>
 
           {error && <p className="form-error" style={{ marginBottom: "1rem" }}>{error}</p>}
-
+          
           <button type="submit" className="btn btn-primary" style={{ width: "100%" }} disabled={isSubmitting}>
             {isSubmitting ? "Signing in…" : "Sign in"}
           </button>

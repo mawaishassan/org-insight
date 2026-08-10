@@ -169,22 +169,6 @@ export function KpiCardsGrid({
   }, [token, organizationId, year]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !organizationId) return;
-    let timeoutId: NodeJS.Timeout;
-    const handleScroll = () => {
-      clearTimeout(timeoutId);
-      timeoutId = setTimeout(() => {
-        sessionStorage.setItem(`entries_scroll_org_${organizationId}`, String(window.scrollY));
-      }, 100);
-    };
-    window.addEventListener("scroll", handleScroll);
-    return () => {
-      window.removeEventListener("scroll", handleScroll);
-      clearTimeout(timeoutId);
-    };
-  }, [organizationId]);
-
-  useEffect(() => {
     if (!token || !organizationId || !domainId || kpisOverride !== undefined) return;
     setLoadingKpis(true);
     const query = `?${qs({ organization_id: organizationId, domain_id: domainId })}`;
@@ -260,20 +244,6 @@ export function KpiCardsGrid({
       loadingFallback ||
       (!!domainId && !kpisOverride && loadingKpis));
   const error = parentError;
-
-  useEffect(() => {
-    if (loading || !organizationId) return;
-    const saved = sessionStorage.getItem(`entries_scroll_org_${organizationId}`);
-    if (saved) {
-      const y = Number(saved);
-      if (y > 0) {
-        const timer = setTimeout(() => {
-          window.scrollTo(0, y);
-        }, 100);
-        return () => clearTimeout(timer);
-      }
-    }
-  }, [loading, organizationId]);
 
   const detailHref = (kpiId: number) =>
     domainId != null

@@ -6,7 +6,6 @@ conditional group functions: SUM_ITEMS_WHERE(...), COUNT_ITEMS_WHERE(field_key, 
 and cross-KPI refs: KPI_FIELD(kpi_id, "field_key") for numeric fields from the same user's entry for another KPI (same org, same year).
 """
 
-import datetime
 import re
 from typing import Any
 
@@ -47,29 +46,6 @@ def _to_num(x: Any) -> float | None:
             return float(x.strip())
         except ValueError:
             return None
-    return None
-
-
-def _to_date(x: Any) -> datetime.date | None:
-    """Coerce value to date for date comparison; return None if not a valid date/datetime."""
-    if x is None:
-        return None
-    if isinstance(x, datetime.date):
-        if isinstance(x, datetime.datetime):
-            return x.date()
-        return x
-    if isinstance(x, str):
-        s = x.strip()
-        if len(s) >= 10:
-            try:
-                return datetime.date.fromisoformat(s[:10])
-            except ValueError:
-                pass
-            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"):
-                try:
-                    return datetime.datetime.strptime(s, fmt).date()
-                except ValueError:
-                    continue
     return None
 
 
@@ -128,21 +104,6 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
             if op_norm in ("neq", "not_contains"):
                 return c_num not in num_list
 
-        # Check date membership
-        c_dt = _to_date(cell_val)
-        if c_dt is not None:
-            date_list = []
-            for item in filter_value:
-                it_val = item["value"] if isinstance(item, dict) and "value" in item else (item["label"] if isinstance(item, dict) and "label" in item else item)
-                it_dt = _to_date(it_val)
-                if it_dt is not None:
-                    date_list.append(it_dt)
-            if date_list:
-                if op_norm in ("eq", "contains"):
-                    return c_dt in date_list
-                if op_norm in ("neq", "not_contains"):
-                    return c_dt not in date_list
-
         c_str = str(cell_val).strip()
         str_list = []
         for item in filter_value:
@@ -172,24 +133,6 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
             return n < fv_num
         if op_norm == "lte":
             return n <= fv_num
-        return False
-
-    # Try date comparison
-    c_date = _to_date(cell)
-    fv_date = _to_date(filter_value)
-    if c_date is not None and fv_date is not None and op_norm in {"eq", "neq", "gt", "gte", "lt", "lte"}:
-        if op_norm == "eq":
-            return c_date == fv_date
-        if op_norm == "neq":
-            return c_date != fv_date
-        if op_norm == "gt":
-            return c_date > fv_date
-        if op_norm == "gte":
-            return c_date >= fv_date
-        if op_norm == "lt":
-            return c_date < fv_date
-        if op_norm == "lte":
-            return c_date <= fv_date
         return False
 
     # Fallback to string comparison for text operators.
