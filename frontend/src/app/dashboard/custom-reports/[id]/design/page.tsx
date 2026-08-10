@@ -262,41 +262,15 @@ export default function CustomReportDesignPage() {
       .finally(() => setLoading(false));
   }, [id, orgId]);
 
-  // Load live preview from draft layout (in-memory, without saving to database)
-  const fetchPreview = async (yearVal: number, sectionsDraft = sections) => {
+  const fetchPreview = async (yearVal: number) => {
     const token = getAccessToken();
     if (!token || !id) return;
 
     setPreviewLoading(true);
     try {
-      const payload = {
-        sections: sectionsDraft.map((s) => ({
-          kpi_id: s.kpi_id,
-          custom_header: s.custom_header,
-          sort_order: s.sort_order,
-          fields: s.fields.map((f) => ({
-            kpi_field_id: f.kpi_field_id,
-            sort_order: f.sort_order,
-            config: f.config || null,
-          })),
-        })),
-        attachments: attachments.map((a) => ({
-          kpi_id: a.kpi_id,
-          kpi_field_id: a.kpi_field_id,
-          title: a.title,
-          selected_columns: a.selected_columns || [],
-          filters: a.filters || null,
-          sort_order: a.sort_order,
-        })),
-      };
-
       const data = await api<{ rendered_html?: string }>(
-        `/custom-reports/${id}/preview?year=${yearVal}&organization_id=${orgId}`,
-        {
-          method: "POST",
-          token,
-          body: JSON.stringify(payload),
-        }
+        `/custom-reports/${id}/generate?year=${yearVal}&organization_id=${orgId}&preview=true`,
+        { token }
       );
       setPreviewHtml(data.rendered_html || "<p>No content generated</p>");
     } catch (e) {
@@ -306,16 +280,11 @@ export default function CustomReportDesignPage() {
     }
   };
 
-  // Debounced preview sync on layout/year change
   useEffect(() => {
-    if (!id || !orgId || loading) return;
-
-    const delayDebounceFn = setTimeout(() => {
-      fetchPreview(previewYear, sections);
-    }, 500);
-
-    return () => clearTimeout(delayDebounceFn);
-  }, [sections, attachments, previewYear, loading, id, orgId]);
+    if (id && orgId && !loading) {
+      fetchPreview(previewYear);
+    }
+  }, [id, orgId, loading, previewYear]);
 
   // Search filter
   const filteredKpis = useMemo(() => {
