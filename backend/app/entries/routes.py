@@ -1026,6 +1026,16 @@ class MultiItemsListResponse(BaseModel):
     sub_fields: list[dict]
 
 
+class ColumnUniqueValueItem(BaseModel):
+    value: str
+    count: int
+
+
+class ColumnUniqueValuesResponse(BaseModel):
+    values: list[ColumnUniqueValueItem]
+
+
+
 class MultiItemsPageContextSubField(BaseModel):
     id: int | None = None
     key: str
@@ -1393,6 +1403,147 @@ async def upload_multi_items_excel(
     }
 
 
+@router.get("/multi-items/column-unique-values", response_model=ColumnUniqueValuesResponse)
+async def get_column_unique_values(
+    field_id: int = Query(...),
+    sub_field_key: str = Query(...),
+    entry_id: int | None = Query(None),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retrieve all unique values from a specific subfield (column) in a multi-line items grid, respecting row-level access."""
+    org_id = _org_id(current_user, organization_id)
+    
+    entry = None
+    if entry_id is not None:
+        entry_res = await db.execute(
+            select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
+        )
+        entry = entry_res.scalar_one_or_none()
+        if not entry:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    if entry is not None and field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not associated with this entry's KPI")
+
+    is_org_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN")
+    if not is_org_admin:
+        kpi_id = entry.kpi_id if entry is not None else field.kpi_id
+        can_view = await user_can_view_kpi(db, current_user.id, kpi_id, org_id)
+        if not can_view:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    sf = next((s for s in (getattr(field, "sub_fields", None) or []) if getattr(s, "key", None) == sub_field_key), None)
+    if sf is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sub-field not found")
+
+    sf_id = getattr(sf, "id", None)
+    if sf_id is None:
+        return ColumnUniqueValuesResponse(values=[])
+
+    q = (
+        select(
+            KpiMultiLineCell.value_text,
+            KpiMultiLineCell.value_number,
+            KpiMultiLineCell.value_boolean,
+            KpiMultiLineCell.value_date,
+            KpiMultiLineCell.value_json,
+        )
+        .select_from(KpiMultiLineRow)
+        .join(KpiMultiLineCell, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+        .where(
+            KpiMultiLineRow.field_id == field.id,
+            KpiMultiLineCell.sub_field_id == int(sf_id),
+        )
+    )
+
+    if entry is not None:
+        q = q.where(KpiMultiLineRow.entry_id == entry.id)
+    else:
+        subq = select(KPIEntry.id).where(KPIEntry.organization_id == org_id, KPIEntry.kpi_id == field.kpi_id)
+        q = q.where(KpiMultiLineRow.entry_id.in_(subq))
+
+    field_row_access_enabled = bool(getattr(field, "row_level_user_access_enabled", False))
+    if field_row_access_enabled and not is_org_admin:
+        q = q.join(
+            KpiMultiLineRowAccess,
+            and_(
+                KpiMultiLineRowAccess.entry_id == KpiMultiLineRow.entry_id,
+                KpiMultiLineRowAccess.field_id == KpiMultiLineRow.field_id,
+                KpiMultiLineRowAccess.row_index == KpiMultiLineRow.row_index,
+            ),
+        ).where(KpiMultiLineRowAccess.user_id == current_user.id)
+
+    res = await db.execute(q)
+    rows_data = res.all()
+
+    from app.entries.reference_filter_resolve import _extract_ref_labels
+    from collections import Counter
+    values_counter = Counter()
+    ft = getattr(sf, "field_type", None)
+    ft_s = ft.value if hasattr(ft, "value") else str(ft or "")
+
+    for vt, vn, vb, vd, vj in rows_data:
+        raw = None
+        if vj is not None:
+            raw = vj
+        elif vt is not None:
+            raw = vt
+        elif vn is not None:
+            raw = vn
+        elif vb is not None:
+            raw = vb
+        elif vd is not None:
+            raw = vd.isoformat() if hasattr(vd, "isoformat") else str(vd)
+
+        if raw is None:
+            continue
+
+        if ft_s in ("reference", "multi_reference"):
+            labels = _extract_ref_labels(raw)
+            for lab in labels:
+                s = str(lab).strip()
+                if s:
+                    values_counter[s] += 1
+        else:
+            if isinstance(raw, (list, dict)):
+                labels = _extract_ref_labels(raw)
+                for lab in labels:
+                    s = str(lab).strip()
+                    if s:
+                        values_counter[s] += 1
+            else:
+                s = str(raw).strip()
+                if ft_s == "boolean":
+                    if isinstance(raw, bool):
+                        s = "true" if raw else "false"
+                    else:
+                        s = str(raw).strip().lower()
+                        if s in ("true", "yes", "1"):
+                            s = "true"
+                        elif s in ("false", "no", "0"):
+                            s = "false"
+                if s:
+                    values_counter[s] += 1
+
+    def sort_key(item: tuple[str, int]):
+        v = item[0]
+        try:
+            return (0, float(v))
+        except (ValueError, TypeError):
+            return (1, v.lower())
+
+    sorted_items = sorted(values_counter.items(), key=sort_key)
+    return ColumnUniqueValuesResponse(
+        values=[ColumnUniqueValueItem(value=v, count=c) for v, c in sorted_items]
+    )
+
+
 @router.get("/multi-items/rows", response_model=MultiItemsListResponse)
 async def list_multi_items_rows(
     entry_id: int = Query(...),
@@ -1575,23 +1726,44 @@ async def list_multi_items_rows(
                     else:
                         return None
             elif ft == "date":
-                dt = _try_parse_iso_datetime(value)
-                if dt is None:
+                # Date values are stored as ISO strings in value_text.
+                def clean_date_str(x: Any) -> str | None:
+                    if not x:
+                        return None
+                    if isinstance(x, (datetime, date)):
+                        return x.strftime("%Y-%m-%d")
+                    s = str(x).strip()
+                    if len(s) >= 10:
+                        return s[:10]
                     return None
-                if op == "eq":
-                    clause_part = cell.value_date == dt
-                elif op == "neq":
-                    clause_part = (cell.value_date.is_(None)) | (cell.value_date != dt)
-                elif op == "gt":
-                    clause_part = cell.value_date > dt
-                elif op == "gte":
-                    clause_part = cell.value_date >= dt
-                elif op == "lt":
-                    clause_part = cell.value_date < dt
-                elif op == "lte":
-                    clause_part = cell.value_date <= dt
+
+                if use_values and op in ("eq", "neq"):
+                    dts = [clean_date_str(x) for x in values]
+                    dts = [d for d in dts if d is not None]
+                    if not dts:
+                        return None
+                    if op == "eq":
+                        clause_part = cell.value_text.in_(dts)
+                    else:
+                        clause_part = (cell.value_text.is_(None)) | (~cell.value_text.in_(dts))
                 else:
-                    return None
+                    dt_str = clean_date_str(value)
+                    if dt_str is None:
+                        return None
+                    if op == "eq":
+                        clause_part = cell.value_text == dt_str
+                    elif op == "neq":
+                        clause_part = (cell.value_text.is_(None)) | (cell.value_text != dt_str)
+                    elif op == "gt":
+                        clause_part = cell.value_text > dt_str
+                    elif op == "gte":
+                        clause_part = cell.value_text >= dt_str
+                    elif op == "lt":
+                        clause_part = cell.value_text < dt_str
+                    elif op == "lte":
+                        clause_part = cell.value_text <= dt_str
+                    else:
+                        return None
             elif ft == "boolean":
                 if isinstance(value, bool):
                     b = value
@@ -2299,6 +2471,11 @@ async def add_multi_items_row(
         c = KpiMultiLineCell(row_id=mlr.id, sub_field_id=int(getattr(sub, "id")))
         ft = getattr(sub, "field_type", None)
         ft_s = ft.value if hasattr(ft, "value") else str(ft)
+        
+        # Odoo API returns boolean False for empty fields. Normalize to None for non-boolean fields.
+        if ft_s != "boolean" and raw_val in (False, "False", "false"):
+            raw_val = None
+
         if raw_val is None:
             pass
         elif ft_s == "number":
@@ -2396,6 +2573,11 @@ async def update_multi_items_row(
         cell.value_date = None
         ft = getattr(sub, "field_type", None)
         ft_s = ft.value if hasattr(ft, "value") else str(ft)
+
+        # Odoo API returns boolean False for empty fields. Normalize to None for non-boolean fields.
+        if ft_s != "boolean" and raw_val in (False, "False", "false"):
+            raw_val = None
+
         if raw_val is None:
             return
         if ft_s == "number":
@@ -2568,6 +2750,11 @@ async def update_multi_items_row_cell(
     cell.value_date = None
     ft = getattr(sub, "field_type", None)
     ft_s = ft.value if hasattr(ft, "value") else str(ft)
+
+    # Odoo API returns boolean False for empty fields. Normalize to None for non-boolean fields.
+    if ft_s != "boolean" and raw_val in (False, "False", "false"):
+        raw_val = None
+
     if raw_val is None:
         pass
     elif ft_s == "number":

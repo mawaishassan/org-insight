@@ -291,6 +291,67 @@ export default function KPIsPage() {
     if (effectiveOrgId != null && !canEdit) loadOrgUsers();
   }, [effectiveOrgId, canEdit]);
 
+  // Load stored filters on mount/organization load
+  useEffect(() => {
+    if (effectiveOrgId == null) return;
+    const stored = localStorage.getItem(`kpis_config_filters_org_${effectiveOrgId}`);
+    if (stored) {
+      try {
+        const filters = JSON.parse(stored);
+        if (filters.domainId !== undefined) setFilterDomainId(filters.domainId);
+        if (filters.categoryId !== undefined) setFilterCategoryId(filters.categoryId);
+        if (filters.tagId !== undefined) setFilterTagId(filters.tagId);
+        if (filters.name !== undefined) setFilterName(filters.name);
+      } catch (e) {
+        console.error("Error parsing stored config filters", e);
+      }
+    }
+  }, [effectiveOrgId]);
+
+  // Save filters on change
+  useEffect(() => {
+    if (effectiveOrgId == null) return;
+    const filters = {
+      domainId: filterDomainId,
+      categoryId: filterCategoryId,
+      tagId: filterTagId,
+      name: filterName,
+    };
+    localStorage.setItem(`kpis_config_filters_org_${effectiveOrgId}`, JSON.stringify(filters));
+  }, [effectiveOrgId, filterDomainId, filterCategoryId, filterTagId, filterName]);
+
+  // Scroll listener to save position
+  useEffect(() => {
+    if (typeof window === "undefined" || !effectiveOrgId) return;
+    let timeoutId: NodeJS.Timeout;
+    const handleScroll = () => {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        sessionStorage.setItem(`kpis_config_scroll_org_${effectiveOrgId}`, String(window.scrollY));
+      }, 100);
+    };
+    window.addEventListener("scroll", handleScroll);
+    return () => {
+      window.removeEventListener("scroll", handleScroll);
+      clearTimeout(timeoutId);
+    };
+  }, [effectiveOrgId]);
+
+  // Scroll restorer on load complete
+  useEffect(() => {
+    if (loading || !effectiveOrgId) return;
+    const saved = sessionStorage.getItem(`kpis_config_scroll_org_${effectiveOrgId}`);
+    if (saved) {
+      const y = Number(saved);
+      if (y > 0) {
+        const timer = setTimeout(() => {
+          window.scrollTo(0, y);
+        }, 100);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [loading, effectiveOrgId]);
+
   useEffect(() => {
     loadList();
   }, [organizationId, effectiveOrgId, filterDomainId, filterCategoryId, filterTagId, filterName]);
