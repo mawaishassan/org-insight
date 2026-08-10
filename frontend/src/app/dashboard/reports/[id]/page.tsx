@@ -36,7 +36,7 @@ export default function ReportViewPage() {
     if (!id || !token) return;
     setLoading(true);
     setError(null);
-    const url = `/reports/templates/${id}/generate?format=json&year=${reportYear}&_t=${Date.now()}`;
+    const url = `/reports/templates/${id}/generate?format=json&year=${reportYear}`;
     api<ReportData>(url, { token, cache: "no-store" })
       .then(setData)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load report"))
@@ -61,7 +61,7 @@ export default function ReportViewPage() {
       }
       return;
     }
-    const url = `/reports/templates/${id}/generate?format=json&year=${reportYear}&_t=${Date.now()}`;
+    const url = `/reports/templates/${id}/generate?format=json&year=${reportYear}`;
     api<ReportData>(url, { token, cache: "no-store" })
       .then(run)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load report"))

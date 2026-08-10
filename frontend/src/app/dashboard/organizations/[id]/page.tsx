@@ -4320,7 +4320,7 @@ function ReportsSection({
   const openReportPrint = (templateId: number, year: number) => {
     setPrintLoadingId(templateId);
     setError(null);
-    const url = `/reports/templates/${templateId}/generate?format=json&year=${year}&_t=${Date.now()}`;
+    const url = `/reports/templates/${templateId}/generate?format=json&year=${year}`;
     api<ReportData>(url, { token, cache: "no-store" })
       .then((data) => {
         const doc = buildReportPrintDocument(data);

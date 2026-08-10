@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
@@ -61,13 +61,7 @@ export default function CustomReportViewPage() {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<number[]>([]);
 
-  // Background Task States
-  const [asyncModalOpen, setAsyncModalOpen] = useState(false);
-  const [asyncProgress, setAsyncProgress] = useState(0);
-  const [asyncStatusText, setAsyncStatusText] = useState("Initializing background task...");
 
-  // Abort controller reference for active streaming
-  const activeStreamController = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!token) {
@@ -79,154 +73,24 @@ export default function CustomReportViewPage() {
       .catch(() => setUserRole(null));
   }, [token, router]);
 
-  // Load streaming report data
-  const startStreamingReport = async (yearVal: number) => {
+  useEffect(() => {
     if (!id || !token || !orgId) return;
-
-    // Abort previous stream if active
-    if (activeStreamController.current) {
-      activeStreamController.current.abort();
-    }
-
-    const controller = new AbortController();
-    activeStreamController.current = controller;
-
     setLoading(true);
     setError(null);
-    setSections([]);
-    setAttachments([]);
-    setMetadata(null);
-
-    try {
-      const url = getApiUrl(`/custom-reports/${id}/generate-stream?year=${yearVal}&organization_id=${orgId}&include_attachments=true`);
-      const response = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        },
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        throw new Error(`Server returned ${response.status}: Failed to stream report`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("NDJSON Streaming is not supported by the browser");
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let chunk;
-          try {
-            chunk = JSON.parse(line);
-          } catch {
-            continue; // Skip invalid JSON chunks
-          }
-
-          if (chunk.type === "metadata") {
-            setMetadata({
-              name: chunk.custom_report_name,
-              description: chunk.custom_report_description,
-              year: chunk.year,
-            });
-          } else if (chunk.type === "structure") {
-            setSections(chunk.sections);
-          } else if (chunk.type === "table_meta") {
-            setSections((prev) =>
-              prev.map((sec) => ({
-                ...sec,
-                fields: sec.fields.map((f) => {
-                  if (f.id === chunk.field_id) {
-                    return { ...f, total_count: chunk.total_count, value_items: [], loading: true };
-                  }
-                  return f;
-                }),
-              }))
-            );
-          } else if (chunk.type === "table_rows") {
-            setSections((prev) =>
-              prev.map((sec) => ({
-                ...sec,
-                fields: sec.fields.map((f) => {
-                  if (f.id === chunk.field_id) {
-                    const currentRows = f.value_items || [];
-                    return {
-                      ...f,
-                      value_items: [...currentRows, ...chunk.value_items],
-                      loading: !chunk.done,
-                    };
-                  }
-                  return f;
-                }),
-              }))
-            );
-          } else if (chunk.type === "attachments") {
-            setAttachments(chunk.attachments || []);
-          } else if (chunk.type === "attachment_meta") {
-            setAttachments((prev) => [
-              ...prev,
-              {
-                id: chunk.attachment_id,
-                title: chunk.title,
-                kpi_name: chunk.kpi_name,
-                field_name: chunk.field_name,
-                sub_fields: chunk.sub_fields,
-                value_items: [],
-                total_count: chunk.total_count,
-                loading: true,
-              }
-            ]);
-          } else if (chunk.type === "attachment_rows") {
-            setAttachments((prev) =>
-              prev.map((att) => {
-                if (att.id === chunk.attachment_id) {
-                  return {
-                    ...att,
-                    value_items: [...(att.value_items || []), ...(chunk.value_items || [])],
-                    loading: !chunk.done,
-                  };
-                }
-                return att;
-              })
-            );
-          } else if (chunk.type === "done") {
-            setLoading(false);
-          } else if (chunk.type === "error") {
-            setError(chunk.message);
-            setLoading(false);
-          }
-        }
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        return; // Quiet ignore aborted fetch
-      }
-      setError(err instanceof Error ? err.message : "Failed to load report stream");
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    startStreamingReport(reportYear);
-
-    return () => {
-      if (activeStreamController.current) {
-        activeStreamController.current.abort();
-      }
-    };
-  }, [id, reportYear, orgId, token]);
+    const url = `/custom-reports/${id}/generate?year=${reportYear}&organization_id=${orgId}`;
+    api<any>(url, { token, cache: "no-store" })
+      .then((res) => {
+        setMetadata({
+          name: res.custom_report_name || res.template_name || "Custom Report",
+          description: res.custom_report_description || null,
+          year: res.year || reportYear,
+        });
+        setSections(res.sections || []);
+        setAttachments(res.attachments || []);
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load custom report"))
+      .finally(() => setLoading(false));
+  }, [id, reportYear, token, orgId]);
 
   const handleExport = async (format: "pdf" | "docx" | "xlsx") => {
     if (!token) return;
@@ -313,67 +177,6 @@ export default function CustomReportViewPage() {
     }
   };
 
-  // Background Async Generation
-  const handleGenerateAsync = async () => {
-    if (!token) return;
-    setAsyncModalOpen(true);
-    setAsyncProgress(0);
-    setAsyncStatusText("Requesting background generation...");
-    try {
-      const initRes = await api<{ task_id: string }>(
-        `/custom-reports/${id}/generate-async?year=${reportYear}&organization_id=${orgId}`,
-        { method: "POST", token }
-      );
-
-      const taskId = initRes.task_id;
-      setAsyncStatusText("Processing report layout (0%)...");
-
-      const poll = setInterval(async () => {
-        try {
-          const statusRes = await api<{ status: string; progress: number; error?: string; result?: any }>(
-            `/custom-reports/tasks/${taskId}`,
-            { token }
-          );
-
-          if (statusRes.status === "processing") {
-            setAsyncProgress(statusRes.progress);
-            setAsyncStatusText(`Generating sections (${statusRes.progress}%)...`);
-          } else if (statusRes.status === "completed") {
-            clearInterval(poll);
-            setAsyncProgress(100);
-            setAsyncStatusText("Ready!");
-
-            const res = statusRes.result;
-            setMetadata({
-              name: res.custom_report_name,
-              description: res.custom_report_description,
-              year: res.year,
-            });
-            setSections(res.sections);
-            setAttachments(res.attachments || []);
-            setLoading(false);
-
-            setTimeout(() => {
-              setAsyncModalOpen(false);
-              toast.success("Background generation complete!");
-            }, 800);
-          } else if (statusRes.status === "failed") {
-            clearInterval(poll);
-            setAsyncModalOpen(false);
-            toast.error(statusRes.error || "Background task failed");
-          }
-        } catch {
-          clearInterval(poll);
-          setAsyncModalOpen(false);
-          toast.error("Status polling failed");
-        }
-      }, 1500);
-    } catch (err) {
-      setAsyncModalOpen(false);
-      toast.error(err instanceof Error ? err.message : "Async trigger failed");
-    }
-  };
-
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "1rem" }}>
       {/* Top Header Panel */}
@@ -415,15 +218,7 @@ export default function CustomReportViewPage() {
               </Link>
             )}
 
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={handleGenerateAsync}
-              disabled={loading || printLoading}
-              style={{ padding: "0.4rem 0.8rem", fontSize: "0.9rem", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer" }}
-            >
-              Run Background Gen
-            </button>
+
 
             <button
               type="button"
@@ -646,25 +441,7 @@ export default function CustomReportViewPage() {
         </div>
       )}
 
-      {/* Async Generation Progress Modal */}
-      {asyncModalOpen && (
-        <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0, 0, 0, 0.4)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }}>
-          <div className="card" style={{ width: "100%", maxWidth: "400px", padding: "2rem", background: "white", borderRadius: "12px", textAlign: "center", border: "1px solid var(--border)", boxShadow: "0 20px 25px -5px rgba(0,0,0,0.1)" }}>
-            <h3 style={{ margin: "0 0 0.5rem 0", fontSize: "1.25rem", color: "#1e3a8a", fontWeight: 700 }}>Background Report Generation</h3>
-            <p style={{ fontSize: "0.85rem", color: "#64748b", marginBottom: "1.5rem" }}>
-              Creating full datasets, compiling references, and resolving formula expressions...
-            </p>
 
-            <div style={{ width: "100%", height: 16, background: "#f1f5f9", borderRadius: 8, overflow: "hidden", marginBottom: "1rem", border: "1px solid #e2e8f0" }}>
-              <div style={{ height: "100%", background: "linear-gradient(90deg, #3b82f6 0%, #10b981 100%)", width: `${asyncProgress}%`, transition: "width 0.4s ease-out" }} />
-            </div>
-
-            <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#334155" }}>
-              {asyncStatusText}
-            </div>
-          </div>
-        </div>
-      )}
       
       {/* Global CSS transitions shim */}
       <style>{`

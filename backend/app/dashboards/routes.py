@@ -297,12 +297,11 @@ async def get_dashboard_odoo_sync_info(
         if not field:
             continue
 
+        kpi_odoo = await get_kpi_odoo_config(db, kpi_id)
         config = field.config or {}
         channel = (config.get("multi_items_import_channel") or "").strip().lower()
-        if channel != "odoo":
+        if not kpi_odoo and channel != "odoo":
             continue
-
-        kpi_odoo = await get_kpi_odoo_config(db, kpi_id)
         if not kpi_odoo:
             continue
 
@@ -420,22 +419,24 @@ async def sync_dashboard_odoo_data(
     seen_targets = set()
 
     for kpi_id, targets in kpi_targets.items():
-        kpi_fields = await list_kpi_field_definitions(db, kpi_id, org_id)
-        odoo_fields = [
-            f for f in kpi_fields
-            if f.field_type == FieldType.multi_line_items
-            and isinstance(f.config, dict)
-            and (f.config.get("multi_items_import_channel") or "").strip().lower() == "odoo"
-        ]
-        if not odoo_fields:
-            continue
-
         kpi_odoo = await get_kpi_odoo_config(db, kpi_id)
         if not kpi_odoo:
             continue
 
         org_odoo = await get_org_odoo_config(db, org_id)
         if not org_odoo:
+            continue
+
+        kpi_fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+        odoo_fields = [
+            f for f in kpi_fields
+            if f.field_type == FieldType.multi_line_items
+            and (
+                kpi_odoo is not None
+                or (isinstance(f.config, dict) and (f.config.get("multi_items_import_channel") or "").strip().lower() == "odoo")
+            )
+        ]
+        if not odoo_fields:
             continue
 
         for field in odoo_fields:
@@ -453,7 +454,7 @@ async def sync_dashboard_odoo_data(
     org_odoo = syncable_fields[0][3]
     try:
         session_id = await odoo_authenticate(org_odoo)
-    except ValueError as e:
+    except (ValueError, Exception) as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Odoo authentication failed: {e}")
 
     synced_count = 0
@@ -568,35 +569,37 @@ async def sync_dashboard_odoo_data(
                 
                 unique_att_ids = list(set(all_att_ids))
                 
-                # 2. Download all files in parallel
+                # 2. Download all files in parallel with shared client and strict 8s timeout
                 downloaded_data = {}
                 if unique_att_ids:
                     import httpx
                     import asyncio
                     
-                    async def fetch_one(att_id):
-                        target_url = (
-                            att_template.replace("{ATTACHMENT_ID}", str(att_id))
-                            .replace("{attachment_id}", str(att_id))
-                            .replace("__ATTACHMENT_ID__", str(att_id))
-                            .replace("{SESSION_ID}", session_id)
-                            .replace("{session_id}", session_id)
-                            .replace("__SESSION_ID__", session_id)
-                        )
-                        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-                            resp = await client.get(target_url, cookies={"session_id": session_id})
-                            if resp.status_code < 200 or resp.status_code >= 300:
-                                raise ValueError(f"HTTP {resp.status_code}")
-                            return att_id, resp.content, dict(resp.headers)
+                    sem = asyncio.Semaphore(8)
+                    async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                        async def fetch_one(att_id):
+                            async with sem:
+                                target_url = (
+                                    att_template.replace("{ATTACHMENT_ID}", str(att_id))
+                                    .replace("{attachment_id}", str(att_id))
+                                    .replace("__ATTACHMENT_ID__", str(att_id))
+                                    .replace("{SESSION_ID}", session_id)
+                                    .replace("{session_id}", session_id)
+                                    .replace("__SESSION_ID__", session_id)
+                                )
+                                resp = await client.get(target_url, cookies={"session_id": session_id})
+                                if resp.status_code < 200 or resp.status_code >= 300:
+                                    raise ValueError(f"HTTP {resp.status_code}")
+                                return att_id, resp.content, dict(resp.headers)
 
-                    tasks = [fetch_one(aid) for aid in unique_att_ids]
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for aid, res in zip(unique_att_ids, results):
-                        if isinstance(res, Exception):
-                            msg = f"Failed to download Odoo attachment ID {aid}: {res}"
-                            errors.append(msg)
-                        else:
-                            downloaded_data[aid] = (res[1], res[2])  # (content, headers)
+                        tasks = [fetch_one(aid) for aid in unique_att_ids]
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        for aid, res in zip(unique_att_ids, results):
+                            if isinstance(res, Exception):
+                                msg = f"Failed to download Odoo attachment ID {aid}: {res}"
+                                errors.append(msg)
+                            else:
+                                downloaded_data[aid] = (res[1], res[2])  # (content, headers)
 
                 # 3. Store downloaded attachments sequentially for DB safety
                 for row in item_dicts:

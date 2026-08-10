@@ -10,6 +10,7 @@ from app.core.models import (
     CustomReportSection,
     CustomReportField,
     CustomReportAssignment,
+    CustomReportAttachment,
     KPI,
     KPIField,
     KPIEntry,
@@ -23,7 +24,8 @@ from app.core.models import (
 from app.reports.custom_schemas import (
     CustomReportCreate,
     CustomReportUpdate,
-    CustomReportSectionLayout
+    CustomReportSectionLayout,
+    CustomReportAttachmentLayout
 )
 from app.formula_engine.evaluator import evaluate_formula
 from app.reports.service import (
@@ -151,15 +153,20 @@ async def duplicate_custom_report(db: AsyncSession, id: int, org_id: int) -> Cus
 
 
 async def save_custom_report_layout(
-    db: AsyncSession, id: int, org_id: int, sections: list[CustomReportSectionLayout]
+    db: AsyncSession,
+    id: int,
+    org_id: int,
+    sections: list[CustomReportSectionLayout],
+    attachments: list[CustomReportAttachmentLayout] | None = None
 ) -> bool:
     report = await get_custom_report(db, id, org_id)
     if not report:
         return False
 
-    # Delete all existing sections and fields
+    # Delete all existing sections, fields, and attachments
     await db.execute(delete(CustomReportSection).where(CustomReportSection.custom_report_id == id))
     await db.execute(delete(CustomReportField).where(CustomReportField.custom_report_id == id))
+    await db.execute(delete(CustomReportAttachment).where(CustomReportAttachment.custom_report_id == id))
     await db.flush()
 
     # Re-insert the new sections and fields
@@ -182,6 +189,20 @@ async def save_custom_report_layout(
                 config=field_data.config
             )
             db.add(f)
+
+    # Re-insert attachments if provided
+    if attachments:
+        for att_idx, att_data in enumerate(attachments):
+            att = CustomReportAttachment(
+                custom_report_id=id,
+                kpi_id=att_data.kpi_id,
+                kpi_field_id=att_data.kpi_field_id,
+                title=att_data.title,
+                selected_columns=att_data.selected_columns,
+                filters=att_data.filters,
+                sort_order=att_data.sort_order
+            )
+            db.add(att)
 
     await db.flush()
     CUSTOM_REPORT_CACHE.invalidate_report(id)
@@ -242,6 +263,7 @@ async def generate_custom_report_data(
     year: int | None = None,
     include_drafts: bool = False,
     preview: bool = False,
+    include_attachments: bool = True,
     on_progress=None
 ) -> dict | None:
     if on_progress:
@@ -252,8 +274,14 @@ async def generate_custom_report_data(
 
     yr = year if year is not None else datetime.date.today().year
 
-    # 1. Identify all referenced KPIs
+    # 1. Identify all referenced KPIs and Attachment fields
     referenced_kpi_ids = set()
+    attachment_kpi_field_ids = set()
+    if getattr(custom_report, "attachments", None):
+        for att in custom_report.attachments:
+            if att.kpi_field_id:
+                attachment_kpi_field_ids.add(att.kpi_field_id)
+
     for sec in custom_report.sections:
         referenced_kpi_ids.add(sec.kpi_id)
         for f in sec.fields:
@@ -347,7 +375,10 @@ async def generate_custom_report_data(
         ml_fields = [f for f in fields_to_include if f.field_type == FieldType.multi_line_items]
         ml_rows_by_field_id = {}
         for mf in ml_fields:
-            limit_val = 100 if preview else None
+            if mf.id in attachment_kpi_field_ids:
+                limit_val = 50
+            else:
+                limit_val = 100 if preview else 200
             ml_rows_by_field_id[mf.id] = await _load_multi_line_items_rows_batch(
                 db, entry_ids=entry_ids_sorted, field=mf, limit=limit_val
             )
@@ -548,11 +579,15 @@ async def generate_custom_report_data(
             "fields": fields_out,
         })
 
-    if on_progress:
-        on_progress(95)
-
-    if on_progress:
-        on_progress(100)
+    attachments_out = []
+    if getattr(custom_report, "attachments", None):
+        for att in custom_report.attachments:
+            attachments_out.append({
+                "id": att.id,
+                "title": att.title,
+                "kpi_name": att.kpi.name if att.kpi else "KPI",
+                "field_name": att.kpi_field.name if att.kpi_field else "Field",
+            })
 
     return {
         "custom_report_id": custom_report.id,
@@ -563,6 +598,7 @@ async def generate_custom_report_data(
         "organization_id": custom_report.organization_id,
         "year": yr,
         "sections": sections_out,
+        "attachments": attachments_out,
     }
 
 
@@ -1518,29 +1554,61 @@ async def export_custom_report_attachments(
             
         elif format == "pdf":
             from reportlab.lib import colors
-            from reportlab.lib.pagesizes import letter
-            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
             from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
             
             out_io = io.BytesIO()
-            pdf_doc = SimpleDocTemplate(out_io, pagesize=letter)
+            num_cols = len(sub_fields) if sub_fields else 1
+            
+            page_width = max(612, num_cols * 65)
+            pagesize = (page_width, 792)
+            col_width = max(35, (page_width - 54) / num_cols)
+            col_widths = [col_width] * num_cols
+
+            pdf_doc = SimpleDocTemplate(out_io, pagesize=pagesize, leftMargin=27, rightMargin=27, topMargin=27, bottomMargin=27)
             story = []
             styles = getSampleStyleSheet()
             
+            cell_header_style = ParagraphStyle(
+                "CellHeaderStyle",
+                parent=styles["Normal"],
+                fontName="Helvetica-Bold",
+                fontSize=7,
+                leading=8,
+                textColor=colors.whitesmoke,
+            )
+            cell_body_style = ParagraphStyle(
+                "CellBodyStyle",
+                parent=styles["Normal"],
+                fontName="Helvetica",
+                fontSize=7,
+                leading=8,
+                textColor=colors.HexColor("#1F2937"),
+            )
+
             story.append(Paragraph(att.title, styles["Heading1"]))
             story.append(Spacer(1, 12))
             
             if sub_fields and chunk_rows:
-                table_data = [[Paragraph(sf["name"], styles["Normal"]) for sf in sub_fields]]
-                for item in chunk_rows:
-                    row = [Paragraph(str(item.get(sf["key"], "")), styles["Normal"]) for sf in sub_fields]
+                pdf_rows = chunk_rows
+                if len(chunk_rows) > 3000:
+                    pdf_rows = chunk_rows[:3000]
+                    story.append(Paragraph(f"<i>Note: PDF attachment limited to first 3,000 rows of {len(chunk_rows)} total records. For full raw data, export as Excel (.xlsx).</i>", styles["Italic"]))
+                    story.append(Spacer(1, 8))
+
+                table_data = [[Paragraph(sf["name"], cell_header_style) for sf in sub_fields]]
+                for item in pdf_rows:
+                    row = [Paragraph(str(item.get(sf["key"], "") or ""), cell_body_style) for sf in sub_fields]
                     table_data.append(row)
                 
-                t = Table(table_data)
+                t = Table(table_data, colWidths=col_widths)
                 t.setStyle(TableStyle([
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey)
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 2),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
                 ]))
                 story.append(t)
             else:

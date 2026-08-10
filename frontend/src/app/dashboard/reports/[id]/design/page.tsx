@@ -1154,7 +1154,7 @@ export default function ReportDesignPage() {
     const yr = year ?? reportYear;
     setPrintError(null);
     setPrintLoading(true);
-    const url = `/reports/templates/${id}/generate?format=json&year=${yr}&_t=${Date.now()}`;
+    const url = `/reports/templates/${id}/generate?format=json&year=${yr}`;
     api<ReportData>(url, { token: t, cache: "no-store" })
       .then((reportData) => {
         const doc = buildReportPrintDocument(reportData);

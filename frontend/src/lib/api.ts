@@ -212,15 +212,12 @@ export async function api<T>(
 
   const cancelKey = `${method} ${path}`;
 
-  // Cancel outdated request to the same path
-  if (isGet) {
-    const prevController = activeControllers.get(cancelKey);
-    if (prevController) {
-      prevController.abort();
-    }
-    const controller = new AbortController();
-    activeControllers.set(cancelKey, controller);
+  let controller: AbortController | undefined = undefined;
+  if (isGet && !options.signal) {
+    controller = new AbortController();
     init.signal = controller.signal;
+  } else if (options.signal) {
+    init.signal = options.signal;
   }
 
   const headers: HeadersInit = {
@@ -242,7 +239,7 @@ export async function api<T>(
             clearTokens();
             window.location.href = "/login";
           });
-          return new Promise(() => {}) as Promise<T>;
+          throw new Error("Unauthorized: Session expired. Redirecting to login...");
         }
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         const message = Array.isArray(err.detail)
@@ -264,14 +261,17 @@ export async function api<T>(
       }
       return json;
     } catch (error: any) {
-      if (init.signal?.aborted || error.name === "AbortError" || error.message?.includes("aborted")) {
-        return new Promise(() => {}) as Promise<T>;
+      const isAborted =
+        Boolean(controller?.signal?.aborted) ||
+        Boolean(init.signal?.aborted) ||
+        Boolean(options.signal?.aborted) ||
+        error.name === "AbortError" ||
+        (typeof error.message === "string" && error.message.toLowerCase().includes("aborted"));
+
+      if (isAborted) {
+        throw new Error("Request cancelled or timed out.");
       }
       throw error;
-    } finally {
-      if (isGet && activeControllers.get(cancelKey)?.signal === init.signal) {
-        activeControllers.delete(cancelKey);
-      }
     }
   })();
 
