@@ -149,6 +149,8 @@ interface KpiRow {
   domain_tags?: DomainTagRef[];
   category_tags?: CategoryTagRef[];
   organization_tags?: OrganizationTagRef[];
+  is_joined?: boolean;
+  joined_config?: any;
 }
 
 interface KpiField {
@@ -207,6 +209,7 @@ const kpiCreateSchema = z.object({
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
+  is_joined: z.boolean().optional(),
 });
 
 const kpiUpdateSchema = z.object({
@@ -216,6 +219,7 @@ const kpiUpdateSchema = z.object({
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
+  is_joined: z.boolean().optional(),
 });
 
 const tagCreateSchema = z.object({
@@ -2260,6 +2264,7 @@ function KpisSection({
       entry_mode: "manual",
       api_endpoint_url: "",
       organization_tag_ids: [],
+      is_joined: false,
     },
   });
 
@@ -2275,6 +2280,7 @@ function KpisSection({
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
           organization_tag_ids: data.organization_tag_ids ?? [],
+          is_joined: !!data.is_joined,
         }),
         token,
       });
@@ -2285,6 +2291,7 @@ function KpisSection({
         entry_mode: "manual",
         api_endpoint_url: "",
         organization_tag_ids: [],
+        is_joined: false,
       });
       setShowCreate(false);
       loadList();
@@ -2306,6 +2313,7 @@ function KpisSection({
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
           organization_tag_ids: data.organization_tag_ids,
+          is_joined: !!data.is_joined,
         }),
         token,
       });
@@ -2505,6 +2513,19 @@ function KpisSection({
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", maxWidth: 560, borderCollapse: "collapse", fontSize: "0.9rem" }}>
                   <tbody>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ padding: "0.5rem 0.75rem 0.5rem 0", fontWeight: 500, width: 140 }}>Joined KPI</td>
+                      <td style={{ padding: "0.5rem 0" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontWeight: 600 }}>
+                          <input
+                            type="checkbox"
+                            {...createForm.register("is_joined")}
+                            style={{ cursor: "pointer" }}
+                          />
+                          Joined KPI (Virtual KPI)
+                        </label>
+                      </td>
+                    </tr>
                     <tr style={{ borderBottom: "1px solid var(--border)" }}>
                       <td style={{ padding: "0.5rem 0.75rem 0.5rem 0", fontWeight: 500, width: 140 }}>Entry mode</td>
                       <td style={{ padding: "0.5rem 0" }}>
@@ -2827,6 +2848,7 @@ function KpiEditForm({
       entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
       api_endpoint_url: kpi.api_endpoint_url ?? "",
       organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
+      is_joined: !!kpi.is_joined,
     },
   });
   const isApiMode = watch("entry_mode") === "api";
@@ -2890,6 +2912,16 @@ function KpiEditForm({
       <div className="form-group">
         <label>Sort order</label>
         <input type="number" min={0} {...register("sort_order")} />
+      </div>
+      <div className="form-group">
+        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontWeight: 600 }}>
+          <input
+            type="checkbox"
+            {...register("is_joined")}
+            style={{ cursor: "pointer" }}
+          />
+          Joined KPI (Virtual KPI)
+        </label>
       </div>
       <div className="form-group">
         <label>Entry mode</label>

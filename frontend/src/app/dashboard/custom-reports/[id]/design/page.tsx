@@ -55,7 +55,7 @@ interface CustomReportField {
 
 interface CustomReportSection {
   id?: number;
-  kpi_id: number;
+  kpi_id: number | null;
   kpi_name: string;
   custom_header: string | null;
   sort_order: number;
@@ -79,6 +79,10 @@ export default function CustomReportDesignPage() {
 
   const [report, setReport] = useState<CustomReportDetail | null>(null);
   const [sections, setSections] = useState<CustomReportSection[]>([]);
+  const [attachments, setAttachments] = useState<any[]>([]);
+  const [deleteConfirmIdx, setDeleteConfirmIdx] = useState<number | null>(null);
+  const [openSectionMenuIdx, setOpenSectionMenuIdx] = useState<number | null>(null);
+  const [openFieldMenuLoc, setOpenFieldMenuLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
   
   // KPI Search lists
   const [allKpis, setAllKpis] = useState<KPI[]>([]);
@@ -100,30 +104,62 @@ export default function CustomReportDesignPage() {
 
   const hasUnsavedChanges = useMemo(() => {
     if (!report) return false;
-    return JSON.stringify(sections.map(s => ({
-      kpi_id: s.kpi_id,
-      custom_header: s.custom_header,
-      sort_order: s.sort_order,
-      fields: s.fields.map(f => ({
-        kpi_field_id: f.kpi_field_id,
-        sort_order: f.sort_order,
-        config: f.config || null,
+    const currentLayout = {
+      sections: sections.map(s => ({
+        kpi_id: s.kpi_id,
+        custom_header: s.custom_header,
+        sort_order: s.sort_order,
+        fields: s.fields.map(f => ({
+          kpi_field_id: f.kpi_field_id,
+          sort_order: f.sort_order,
+          config: f.config || null,
+        })),
       })),
-    }))) !== JSON.stringify(report.sections.map(s => ({
-      kpi_id: s.kpi_id,
-      custom_header: s.custom_header,
-      sort_order: s.sort_order,
-      fields: s.fields.map(f => ({
-        kpi_field_id: f.kpi_field_id,
-        sort_order: f.sort_order,
-        config: f.config || null,
+      attachments: attachments.map(a => ({
+        kpi_id: a.kpi_id,
+        kpi_field_id: a.kpi_field_id,
+        title: a.title,
+        selected_columns: a.selected_columns || [],
+        filters: a.filters || null,
+        sort_order: a.sort_order,
+      }))
+    };
+    const reportLayout = {
+      sections: report.sections.map(s => ({
+        kpi_id: s.kpi_id,
+        custom_header: s.custom_header,
+        sort_order: s.sort_order,
+        fields: s.fields.map(f => ({
+          kpi_field_id: f.kpi_field_id,
+          sort_order: f.sort_order,
+          config: f.config || null,
+        })),
       })),
-    })));
-  }, [report, sections]);
+      attachments: (report as any).attachments?.map((a: any) => ({
+        kpi_id: a.kpi_id,
+        kpi_field_id: a.kpi_field_id,
+        title: a.title,
+        selected_columns: a.selected_columns || [],
+        filters: a.filters || null,
+        sort_order: a.sort_order,
+      })) || []
+    };
+    return JSON.stringify(currentLayout) !== JSON.stringify(reportLayout);
+  }, [report, sections, attachments]);
 
   // Column Selection & Reordering + Row Filtering States for MLIs
   const [editingFieldLoc, setEditingFieldLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
   const [editingFieldConfig, setEditingFieldConfig] = useState<{
+    selected_columns: string[];
+    filters: { conditions: any[]; _version: number };
+    custom_sub_field_labels?: Record<string, string>;
+  } | null>(null);
+
+  const [editingAttachmentIdx, setEditingAttachmentIdx] = useState<number | null>(null);
+  const [editingAttachmentConfig, setEditingAttachmentConfig] = useState<{
+    kpi_id: number;
+    kpi_field_id: number;
+    title: string;
     selected_columns: string[];
     filters: { conditions: any[]; _version: number };
   } | null>(null);
@@ -204,6 +240,7 @@ export default function CustomReportDesignPage() {
       .then(([detail, kpisData, allFields]) => {
         setReport(detail);
         setSections(detail.sections.sort((a, b) => a.sort_order - b.sort_order));
+        setAttachments((detail as any).attachments || []);
 
         // Group fields by kpi_id in memory
         const fieldsByKpi = (allFields || []).reduce((acc, f) => {
@@ -225,16 +262,41 @@ export default function CustomReportDesignPage() {
       .finally(() => setLoading(false));
   }, [id, orgId]);
 
-  // Load live preview
-  const fetchPreview = async (yearVal: number) => {
+  // Load live preview from draft layout (in-memory, without saving to database)
+  const fetchPreview = async (yearVal: number, sectionsDraft = sections) => {
     const token = getAccessToken();
     if (!token || !id) return;
 
     setPreviewLoading(true);
     try {
+      const payload = {
+        sections: sectionsDraft.map((s) => ({
+          kpi_id: s.kpi_id,
+          custom_header: s.custom_header,
+          sort_order: s.sort_order,
+          fields: s.fields.map((f) => ({
+            kpi_field_id: f.kpi_field_id,
+            sort_order: f.sort_order,
+            config: f.config || null,
+          })),
+        })),
+        attachments: attachments.map((a) => ({
+          kpi_id: a.kpi_id,
+          kpi_field_id: a.kpi_field_id,
+          title: a.title,
+          selected_columns: a.selected_columns || [],
+          filters: a.filters || null,
+          sort_order: a.sort_order,
+        })),
+      };
+
       const data = await api<{ rendered_html?: string }>(
-        `/custom-reports/${id}/generate?year=${yearVal}&organization_id=${orgId}&preview=true`,
-        { token }
+        `/custom-reports/${id}/preview?year=${yearVal}&organization_id=${orgId}`,
+        {
+          method: "POST",
+          token,
+          body: JSON.stringify(payload),
+        }
       );
       setPreviewHtml(data.rendered_html || "<p>No content generated</p>");
     } catch (e) {
@@ -244,11 +306,16 @@ export default function CustomReportDesignPage() {
     }
   };
 
+  // Debounced preview sync on layout/year change
   useEffect(() => {
-    if (id && orgId && !loading) {
-      fetchPreview(previewYear);
-    }
-  }, [id, orgId, loading, previewYear]);
+    if (!id || !orgId || loading) return;
+
+    const delayDebounceFn = setTimeout(() => {
+      fetchPreview(previewYear, sections);
+    }, 500);
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [sections, attachments, previewYear, loading, id, orgId]);
 
   // Search filter
   const filteredKpis = useMemo(() => {
@@ -289,11 +356,55 @@ export default function CustomReportDesignPage() {
 
   // Remove section
   const handleRemoveSection = (secIdx: number) => {
+    const sec = sections[secIdx];
+    if (sec && sec.fields.length > 0) {
+      setDeleteConfirmIdx(secIdx);
+    } else {
+      setSections((prev) => {
+        const next = prev.filter((_, idx) => idx !== secIdx);
+        return next.map((s, idx) => ({ ...s, sort_order: idx }));
+      });
+      toast.success("Section removed");
+    }
+  };
+
+  const confirmDeleteEverything = (secIdx: number) => {
     setSections((prev) => {
       const next = prev.filter((_, idx) => idx !== secIdx);
-      // Re-index sort order
       return next.map((s, idx) => ({ ...s, sort_order: idx }));
     });
+    setDeleteConfirmIdx(null);
+    toast.success("Heading and fields removed");
+  };
+
+  const confirmMergeFields = (secIdx: number) => {
+    setSections((prev) => {
+      if (prev.length <= 1) {
+        toast.error("No other section to merge fields into.");
+        return prev;
+      }
+
+      const currentSec = prev[secIdx];
+      const fieldsToMerge = currentSec.fields;
+      
+      const targetIdx = secIdx > 0 ? secIdx - 1 : secIdx + 1;
+      
+      const next = prev.map((s, idx) => {
+        if (idx === targetIdx) {
+          const mergedFields = [...s.fields, ...fieldsToMerge].map((f, fIdx) => ({
+            ...f,
+            sort_order: fIdx
+          }));
+          return { ...s, fields: mergedFields };
+        }
+        return s;
+      });
+
+      const filtered = next.filter((_, idx) => idx !== secIdx);
+      return filtered.map((s, idx) => ({ ...s, sort_order: idx }));
+    });
+    setDeleteConfirmIdx(null);
+    toast.success("Heading removed and fields merged");
   };
 
   // Remove field
@@ -318,6 +429,95 @@ export default function CustomReportDesignPage() {
         return { ...s, custom_header: val || null };
       });
     });
+  };
+
+  // Handle sub-heading (field) name edit
+  const handleFieldNameChange = (secIdx: number, fieldIdx: number, val: string) => {
+    setSections((prev) => {
+      return prev.map((s, sIdx) => {
+        if (sIdx !== secIdx) return s;
+        const fields = s.fields.map((f, fIdx) => {
+          if (fIdx !== fieldIdx) return f;
+          return {
+            ...f,
+            config: {
+              ...(f.config || {}),
+              custom_name: val || null
+            }
+          };
+        });
+        return { ...s, fields };
+      });
+    });
+  };
+
+  // Split section at field index to insert a new heading with dynamic renumbering
+  const handleSplitSection = (secIdx: number, fieldIdx: number) => {
+    setSections((prev) => {
+      const next = [];
+      for (let i = 0; i < prev.length; i++) {
+        if (i === secIdx) {
+          const currentSec = prev[i];
+          const splitFields = currentSec.fields.slice(fieldIdx);
+          
+          // Truncate original section fields
+          const firstSec = {
+            ...currentSec,
+            fields: currentSec.fields.slice(0, fieldIdx)
+          };
+          next.push(firstSec);
+
+          // Create new section split off from the original
+          const secondSec = {
+            kpi_id: currentSec.kpi_id,
+            kpi_name: currentSec.kpi_name,
+            custom_header: "New Heading",
+            sort_order: currentSec.sort_order + 1,
+            fields: splitFields.map((f, fIdx) => ({
+              ...f,
+              sort_order: fIdx
+            }))
+          };
+          next.push(secondSec);
+        } else {
+          next.push(prev[i]);
+        }
+      }
+      return next.map((s, idx) => ({ ...s, sort_order: idx }));
+    });
+    toast.success("Heading split created");
+  };
+
+  // Insert a new blank heading section (with no fields initially)
+  const handleInsertBlankSection = (insertAfterIdx: number | null) => {
+    setSections((prev) => {
+      // Inherit kpi_id from surrounding sections to satisfy non-null foreign key in DB
+      const defaultKpiId = prev.length > 0 
+        ? (insertAfterIdx !== null ? prev[insertAfterIdx].kpi_id : prev[prev.length - 1].kpi_id)
+        : (allKpis.length > 0 ? allKpis[0].id : 0);
+
+      const defaultKpiName = prev.length > 0 
+        ? (insertAfterIdx !== null ? prev[insertAfterIdx].kpi_name : prev[prev.length - 1].kpi_name)
+        : (allKpis.length > 0 ? allKpis[0].name : "Custom Heading");
+
+      const newSec = {
+        kpi_id: defaultKpiId,
+        kpi_name: defaultKpiName,
+        custom_header: "New Custom Heading",
+        sort_order: 0,
+        fields: []
+      };
+
+      let next = [...prev];
+      if (insertAfterIdx === null) {
+        next.push(newSec);
+      } else {
+        next.splice(insertAfterIdx + 1, 0, newSec);
+      }
+
+      return next.map((s, idx) => ({ ...s, sort_order: idx }));
+    });
+    toast.success("New custom heading inserted");
   };
 
   // Reordering calculations for display numbering
@@ -416,6 +616,14 @@ export default function CustomReportDesignPage() {
             sort_order: f.sort_order,
             config: f.config || null,
           })),
+        })),
+        attachments: attachments.map((a) => ({
+          kpi_id: a.kpi_id,
+          kpi_field_id: a.kpi_field_id,
+          title: a.title,
+          selected_columns: a.selected_columns || [],
+          filters: a.filters || null,
+          sort_order: a.sort_order,
         })),
       };
 
@@ -571,42 +779,131 @@ export default function CustomReportDesignPage() {
                           </button>
                         </div>
                         <span style={{ fontWeight: 600, color: "var(--muted)", fontSize: "0.9rem" }}>{sec.number}</span>
-                        <input
-                          value={sec.custom_header || ""}
-                          onChange={(e) => handleSectionHeaderChange(sIdx, e.target.value)}
-                          placeholder={sec.kpi_name}
-                          style={{
-                            flex: 1,
-                            padding: "0.2rem 0.4rem",
-                            fontSize: "0.9rem",
-                            fontWeight: 600,
-                            borderRadius: 4,
-                            border: "1px solid transparent",
-                            background: "transparent"
-                          }}
-                          onFocus={(e) => {
-                            e.currentTarget.style.border = "1px solid var(--border)";
-                            e.currentTarget.style.background = "white";
-                          }}
-                          onBlur={(e) => {
-                            e.currentTarget.style.border = "1px solid transparent";
-                            e.currentTarget.style.background = "transparent";
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveSection(sIdx)}
-                          style={{
-                            border: "none",
-                            background: "none",
-                            color: "var(--error)",
-                            cursor: "pointer",
-                            fontSize: "0.85rem",
-                            fontWeight: 500
-                          }}
-                        >
-                          Remove
-                        </button>
+                        <div style={{ display: "flex", alignItems: "center", flex: 1, position: "relative" }}>
+                          <input
+                            value={sec.custom_header || ""}
+                            onChange={(e) => handleSectionHeaderChange(sIdx, e.target.value)}
+                            placeholder={sec.kpi_name}
+                            style={{
+                              width: "100%",
+                              padding: "0.2rem 1.5rem 0.2rem 0.4rem",
+                              fontSize: "0.9rem",
+                              fontWeight: 600,
+                              borderRadius: 4,
+                              border: "1px solid transparent",
+                              background: "transparent",
+                              color: "var(--text)"
+                            }}
+                            onFocus={(e) => {
+                              e.currentTarget.style.border = "1px solid var(--border)";
+                              e.currentTarget.style.background = "white";
+                            }}
+                            onBlur={(e) => {
+                              e.currentTarget.style.border = "1px solid transparent";
+                              e.currentTarget.style.background = "transparent";
+                            }}
+                          />
+
+                        </div>
+                        <div style={{ position: "relative" }}>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenSectionMenuIdx(openSectionMenuIdx === sIdx ? null : sIdx);
+                            }}
+                            style={{
+                              border: "none",
+                              background: "none",
+                              color: "#64748b",
+                              cursor: "pointer",
+                              fontSize: "1.1rem",
+                              padding: "0.25rem 0.5rem",
+                              borderRadius: 4,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center"
+                            }}
+                            title="Section Actions"
+                          >
+                            ⋮
+                          </button>
+                          {openSectionMenuIdx === sIdx && (
+                            <>
+                              <div
+                                style={{
+                                  position: "fixed",
+                                  inset: 0,
+                                  zIndex: 40,
+                                  cursor: "default"
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenSectionMenuIdx(null);
+                                }}
+                              />
+                              <div
+                                style={{
+                                  position: "absolute",
+                                  right: 0,
+                                  top: "100%",
+                                  zIndex: 50,
+                                  background: "white",
+                                  border: "1px solid var(--border)",
+                                  borderRadius: 8,
+                                  boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)",
+                                  padding: "0.4rem 0",
+                                  minWidth: "160px",
+                                  display: "flex",
+                                  flexDirection: "column"
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleInsertBlankSection(sIdx);
+                                    setOpenSectionMenuIdx(null);
+                                  }}
+                                  style={{
+                                    border: "none",
+                                    background: "none",
+                                    padding: "0.5rem 1rem",
+                                    textAlign: "left",
+                                    fontSize: "0.85rem",
+                                    cursor: "pointer",
+                                    color: "var(--text)"
+                                  }}
+                                  onMouseEnter={(e) => (e.currentTarget.style.background = "#f1f5f9")}
+                                  onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                                >
+                                  + Insert Heading Below
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRemoveSection(sIdx);
+                                    setOpenSectionMenuIdx(null);
+                                  }}
+                                  style={{
+                                    border: "none",
+                                    background: "none",
+                                    padding: "0.5rem 1rem",
+                                    textAlign: "left",
+                                    fontSize: "0.85rem",
+                                    cursor: "pointer",
+                                    color: "var(--error)"
+                                  }}
+                                  onMouseEnter={(e) => (e.currentTarget.style.background = "#fff5f5")}
+                                  onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                                >
+                                  Remove Heading
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
                       </div>
 
                       {/* Section Fields (Drop Target for Fields) */}
@@ -670,67 +967,177 @@ export default function CustomReportDesignPage() {
                                   </button>
                                 </div>
                                 <span style={{ fontSize: "0.8rem", color: "var(--muted)", fontWeight: 500 }}>{f.number}</span>
-                                <span style={{ fontSize: "0.85rem", fontWeight: 500, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {f.field_name}
-                                </span>
+                                <div style={{ display: "flex", alignItems: "center", flex: 1, position: "relative" }}>
+                                  <input
+                                    value={(f.config as any)?.custom_name ?? f.field_name}
+                                    onChange={(e) => handleFieldNameChange(sIdx, fIdx, e.target.value)}
+                                    placeholder={f.field_name}
+                                    style={{
+                                      width: "100%",
+                                      padding: "0.15rem 1.3rem 0.15rem 0.3rem",
+                                      fontSize: "0.85rem",
+                                      fontWeight: 500,
+                                      borderRadius: 4,
+                                      border: "1px solid transparent",
+                                      background: "transparent",
+                                      color: "var(--text)",
+                                      minWidth: 0
+                                    }}
+                                    onFocus={(e) => {
+                                      e.currentTarget.style.border = "1px solid var(--border)";
+                                      e.currentTarget.style.background = "white";
+                                    }}
+                                    onBlur={(e) => {
+                                      e.currentTarget.style.border = "1px solid transparent";
+                                      e.currentTarget.style.background = "transparent";
+                                    }}
+                                  />
+
+                                </div>
                                 {f.kpi_id !== sec.kpi_id && (
                                   <span style={{ fontSize: "0.7rem", padding: "0.1rem 0.3rem", borderRadius: 4, background: "#e2e8f0", color: "#64748b" }}>
                                     Moved
                                   </span>
                                 )}
-                                {f.field_type === "multi_line_items" && (
+                                <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontStyle: "italic", marginRight: "0.5rem" }}>
+                                  {f.field_type === "multi_line_items" ? "MLI" : "Scalar"}
+                                </span>
+                                <div style={{ position: "relative" }}>
                                   <button
                                     type="button"
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      const kpi = allKpis.find(k => k.id === f.kpi_id);
-                                      const kpiField = kpi?.fields.find(fld => fld.id === f.kpi_field_id);
-                                      const subFields = kpiField?.sub_fields || [];
-                                      setEditingFieldLoc({ secIdx: sIdx, fieldIdx: fIdx });
-                                      setEditingFieldConfig({
-                                        selected_columns: f.config?.selected_columns || subFields.map(sf => sf.key).slice(0, 5),
-                                        filters: (f.config?.filters || { conditions: [], _version: 2 }) as any
-                                      });
-                                      setFilterDraft(payloadToFilterDraft((f.config?.filters || { conditions: [], _version: 2 }) as any));
-                                      setOpenFilterFieldKey(false);
+                                      setOpenFieldMenuLoc(
+                                        openFieldMenuLoc?.secIdx === sIdx && openFieldMenuLoc?.fieldIdx === fIdx
+                                          ? null
+                                          : { secIdx: sIdx, fieldIdx: fIdx }
+                                      );
                                     }}
                                     style={{
-                                      fontSize: "0.75rem",
-                                      padding: "0.1rem 0.4rem",
-                                      borderRadius: 4,
-                                      background: f.config ? "#dbeafe" : "#f1f5f9",
-                                      color: f.config ? "#1e40af" : "#475569",
-                                      border: "1px solid " + (f.config ? "#bfdbfe" : "#cbd5e1"),
+                                      border: "none",
+                                      background: "none",
+                                      color: "#64748b",
                                       cursor: "pointer",
-                                      marginRight: "0.2rem",
-                                      fontWeight: 600
+                                      fontSize: "1rem",
+                                      padding: "0.1rem 0.3rem",
+                                      borderRadius: 4,
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "center"
                                     }}
-                                    title="Configure columns and row filters"
+                                    title="Field Actions"
                                   >
-                                    ⚙️ {f.config ? "Configured" : "Configure"}
+                                    ⋮
                                   </button>
-                                )}
-                                <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontStyle: "italic" }}>
-                                  {f.field_type === "multi_line_items" ? "MLI" : "Scalar"}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleRemoveField(sIdx, fIdx);
-                                  }}
-                                  style={{
-                                    border: "none",
-                                    background: "none",
-                                    color: "#94a3b8",
-                                    cursor: "pointer",
-                                    fontSize: "0.9rem"
-                                  }}
-                                  onMouseEnter={(e) => (e.currentTarget.style.color = "var(--error)")}
-                                  onMouseLeave={(e) => (e.currentTarget.style.color = "#94a3b8")}
-                                >
-                                  ✕
-                                </button>
+                                  {openFieldMenuLoc?.secIdx === sIdx && openFieldMenuLoc?.fieldIdx === fIdx && (
+                                    <>
+                                      <div
+                                        style={{
+                                          position: "fixed",
+                                          inset: 0,
+                                          zIndex: 40,
+                                          cursor: "default"
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setOpenFieldMenuLoc(null);
+                                        }}
+                                      />
+                                      <div
+                                        style={{
+                                          position: "absolute",
+                                          right: 0,
+                                          top: "100%",
+                                          zIndex: 50,
+                                          background: "white",
+                                          border: "1px solid var(--border)",
+                                          borderRadius: 8,
+                                          boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)",
+                                          padding: "0.4rem 0",
+                                          minWidth: "180px",
+                                          display: "flex",
+                                          flexDirection: "column"
+                                        }}
+                                      >
+                                        {f.field_type === "multi_line_items" && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              const kpi = allKpis.find(k => k.id === f.kpi_id);
+                                              const kpiField = kpi?.fields.find(fld => fld.id === f.kpi_field_id);
+                                              const subFields = kpiField?.sub_fields || [];
+                                              setEditingFieldLoc({ secIdx: sIdx, fieldIdx: fIdx });
+                                              setEditingFieldConfig({
+                                                selected_columns: f.config?.selected_columns || subFields.map(sf => sf.key).slice(0, 5),
+                                                filters: (f.config?.filters || { conditions: [], _version: 2 }) as any
+                                              });
+                                              setFilterDraft(payloadToFilterDraft((f.config?.filters || { conditions: [], _version: 2 }) as any));
+                                              setOpenFilterFieldKey(false);
+                                              setOpenFieldMenuLoc(null);
+                                            }}
+                                            style={{
+                                              border: "none",
+                                              background: "none",
+                                              padding: "0.5rem 1rem",
+                                              textAlign: "left",
+                                              fontSize: "0.85rem",
+                                              cursor: "pointer",
+                                              color: f.config ? "var(--primary)" : "var(--text)",
+                                              fontWeight: f.config ? 600 : 400
+                                            }}
+                                            onMouseEnter={(e) => (e.currentTarget.style.background = "#f1f5f9")}
+                                            onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                                          >
+                                            ⚙️ {f.config ? "Configured" : "Configure Columns"}
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleSplitSection(sIdx, fIdx);
+                                            setOpenFieldMenuLoc(null);
+                                          }}
+                                          style={{
+                                            border: "none",
+                                            background: "none",
+                                            padding: "0.5rem 1rem",
+                                            textAlign: "left",
+                                            fontSize: "0.85rem",
+                                            cursor: "pointer",
+                                            color: "var(--text)"
+                                          }}
+                                          onMouseEnter={(e) => (e.currentTarget.style.background = "#f1f5f9")}
+                                          onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                                        >
+                                          + Split Section Here
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleRemoveField(sIdx, fIdx);
+                                            setOpenFieldMenuLoc(null);
+                                          }}
+                                          style={{
+                                            border: "none",
+                                            background: "none",
+                                            padding: "0.5rem 1rem",
+                                            textAlign: "left",
+                                            fontSize: "0.85rem",
+                                            cursor: "pointer",
+                                            color: "var(--error)"
+                                          }}
+                                          onMouseEnter={(e) => (e.currentTarget.style.background = "#fff5f5")}
+                                          onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                                        >
+                                          Remove Field
+                                        </button>
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
                               </div>
                             );
                           })
@@ -739,8 +1146,166 @@ export default function CustomReportDesignPage() {
                     </div>
                   );
                 })}
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => handleInsertBlankSection(null)}
+                  style={{
+                    width: "100%",
+                    padding: "0.6rem",
+                    border: "2px dashed var(--border)",
+                    background: "none",
+                    color: "var(--muted)",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    borderRadius: 8,
+                    textAlign: "center",
+                    marginTop: "1rem"
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = "var(--primary)";
+                    e.currentTarget.style.color = "var(--primary)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = "var(--border)";
+                    e.currentTarget.style.color = "var(--muted)";
+                  }}
+                >
+                  + Add New Heading at Bottom
+                </button>
               </div>
             )}
+
+            <div style={{ borderTop: "2px solid var(--border)", marginTop: "2rem", paddingTop: "1rem" }}>
+              <h3 style={{ margin: "0 0 0.75rem 0", fontSize: "0.95rem", fontWeight: 600, textTransform: "uppercase", color: "var(--muted)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>Report Attachments</span>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ padding: "0.2rem 0.5rem", fontSize: "0.75rem" }}
+                  onClick={() => {
+                    const newAtt = {
+                      kpi_id: 0,
+                      kpi_field_id: 0,
+                      title: "New Attachment",
+                      selected_columns: [],
+                      filters: { conditions: [], _version: 2 },
+                      sort_order: attachments.length
+                    };
+                    setAttachments(prev => [...prev, newAtt]);
+                    setEditingAttachmentIdx(attachments.length);
+                    setEditingAttachmentConfig(newAtt);
+                    setFilterDraft([emptyMultiFilterRow()]);
+                    setOpenFilterFieldKey(false);
+                  }}
+                >
+                  + Add Attachment
+                </button>
+              </h3>
+              {attachments.length === 0 ? (
+                <div style={{ padding: "1.5rem", textAlign: "center", border: "2px dashed var(--border)", borderRadius: 8, color: "var(--muted)", fontSize: "0.85rem" }}>
+                  No attachments configured.
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  {attachments.map((att, attIdx) => {
+                    const kpi = allKpis.find(k => k.id === att.kpi_id);
+                    const kfield = kpi?.fields.find(f => f.id === att.kpi_field_id);
+                    return (
+                      <div
+                        key={attIdx}
+                        style={{
+                          padding: "0.5rem 0.75rem",
+                          background: "white",
+                          border: "1px solid var(--border)",
+                          borderRadius: 6,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: "0.5rem"
+                        }}
+                      >
+                        <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+                          <span style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {att.title}
+                          </span>
+                          <span style={{ fontSize: "0.7rem", color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {kpi?.name || `KPI #${att.kpi_id}`} - {kfield?.name || `Field #${att.kpi_field_id}`}
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", gap: "0.25rem", alignItems: "center", flexShrink: 0 }}>
+                          <button
+                            type="button"
+                            disabled={attIdx === 0}
+                            onClick={() => {
+                              setAttachments(prev => {
+                                const next = [...prev];
+                                const temp = next[attIdx];
+                                next[attIdx] = next[attIdx - 1];
+                                next[attIdx - 1] = temp;
+                                return next.map((a, idx) => ({ ...a, sort_order: idx }));
+                              });
+                            }}
+                            style={{ border: "none", background: "none", fontSize: "0.75rem", cursor: attIdx === 0 ? "not-allowed" : "pointer", opacity: attIdx === 0 ? 0.3 : 1 }}
+                          >
+                            ▲
+                          </button>
+                          <button
+                            type="button"
+                            disabled={attIdx === attachments.length - 1}
+                            onClick={() => {
+                              setAttachments(prev => {
+                                const next = [...prev];
+                                const temp = next[attIdx];
+                                next[attIdx] = next[attIdx + 1];
+                                next[attIdx + 1] = temp;
+                                return next.map((a, idx) => ({ ...a, sort_order: idx }));
+                              });
+                            }}
+                            style={{ border: "none", background: "none", fontSize: "0.75rem", cursor: attIdx === attachments.length - 1 ? "not-allowed" : "pointer", opacity: attIdx === attachments.length - 1 ? 0.3 : 1 }}
+                          >
+                            ▼
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ padding: "0.15rem 0.35rem", fontSize: "0.7rem" }}
+                            onClick={() => {
+                              setEditingAttachmentIdx(attIdx);
+                              setEditingAttachmentConfig({
+                                kpi_id: att.kpi_id,
+                                kpi_field_id: att.kpi_field_id,
+                                title: att.title,
+                                selected_columns: att.selected_columns || [],
+                                filters: att.filters || { conditions: [], _version: 2 }
+                              });
+                              setFilterDraft(payloadToFilterDraft(att.filters || { conditions: [], _version: 2 }));
+                              setOpenFilterFieldKey(false);
+                            }}
+                          >
+                            ⚙️
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ padding: "0.15rem 0.35rem", fontSize: "0.7rem", color: "var(--error)" }}
+                            onClick={() => {
+                              setAttachments(prev => {
+                                const next = prev.filter((_, idx) => idx !== attIdx);
+                                return next.map((a, idx) => ({ ...a, sort_order: idx }));
+                              });
+                              toast.success("Attachment removed");
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -869,7 +1434,7 @@ export default function CustomReportDesignPage() {
 
                     <div>
                       <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>
-                        Order Selected Columns
+                        Order Selected Columns & Edit Labels
                       </label>
                       <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "0.5rem", maxHeight: 180, overflowY: "auto", background: "#f8fafc" }}>
                         {editingFieldConfig.selected_columns.length === 0 ? (
@@ -877,6 +1442,7 @@ export default function CustomReportDesignPage() {
                         ) : (
                           editingFieldConfig.selected_columns.map((col, idx) => {
                             const sf = subFields.find(s => s.key === col);
+                            const currentLabel = (editingFieldConfig as any).custom_sub_field_labels?.[col] ?? sf?.name ?? col;
                             return (
                               <div
                                 key={col}
@@ -889,12 +1455,30 @@ export default function CustomReportDesignPage() {
                                   borderRadius: 4,
                                   padding: "0.25rem 0.5rem",
                                   marginBottom: "0.25rem",
-                                  fontSize: "0.8rem"
+                                  fontSize: "0.8rem",
+                                  gap: "0.5rem"
                                 }}
                               >
-                                <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {sf?.name || col}
-                                </span>
+                                <input
+                                  type="text"
+                                  value={currentLabel}
+                                  onChange={(e) => {
+                                    const nextLabels = {
+                                      ...((editingFieldConfig as any).custom_sub_field_labels || {}),
+                                      [col]: e.target.value
+                                    };
+                                    setEditingFieldConfig(prev => prev ? { ...prev, custom_sub_field_labels: nextLabels } : null);
+                                  }}
+                                  style={{
+                                    flex: 1,
+                                    fontSize: "0.8rem",
+                                    padding: "0.1rem 0.3rem",
+                                    borderRadius: 4,
+                                    border: "1px solid var(--border)",
+                                    minWidth: 0
+                                  }}
+                                  placeholder={sf?.name || col}
+                                />
                                 <div style={{ display: "flex", gap: "2px" }}>
                                   <button
                                     type="button"
@@ -1065,6 +1649,440 @@ export default function CustomReportDesignPage() {
                 }}
               >
                 Apply Settings
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {editingAttachmentIdx !== null && editingAttachmentConfig && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.5)",
+            padding: "1.5rem",
+          }}
+          onClick={() => setEditingAttachmentIdx(null)}
+        >
+          <div
+            className="card"
+            style={{ maxWidth: 720, width: "100%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 10px 40px rgba(0,0,0,0.15)", background: "var(--surface)", padding: "1.5rem" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div style={{ borderBottom: "1px solid var(--border)", paddingBottom: "1rem", marginBottom: "1rem" }}>
+              <h3 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 600 }}>
+                Configure Attachment
+              </h3>
+              <p style={{ color: "var(--muted)", margin: "0.25rem 0 0 0", fontSize: "0.85rem" }}>
+                Select KPI, Multi-Line field, visible columns, and define filtering criteria.
+              </p>
+            </div>
+
+            {/* Title field */}
+            <div style={{ marginBottom: "1rem" }}>
+              <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.25rem" }}>
+                Attachment Title
+              </label>
+              <input
+                type="text"
+                value={editingAttachmentConfig.title}
+                onChange={(e) => setEditingAttachmentConfig({ ...editingAttachmentConfig, title: e.target.value })}
+                placeholder="Attachment Title"
+                style={{ width: "100%", padding: "0.4rem 0.6rem", fontSize: "0.85rem", borderRadius: 6, border: "1px solid var(--border)" }}
+              />
+            </div>
+
+            {/* KPI & Field selectors */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1rem" }}>
+              <div>
+                <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.25rem" }}>
+                  Select KPI
+                </label>
+                <select
+                  value={editingAttachmentConfig.kpi_id || ""}
+                  onChange={(e) => {
+                    const kid = Number(e.target.value);
+                    const kpi = allKpis.find(k => k.id === kid);
+                    const mliFields = kpi?.fields.filter(f => f.field_type === "multi_line_items") || [];
+                    const firstMli = mliFields[0];
+                    setEditingAttachmentConfig({
+                      ...editingAttachmentConfig,
+                      kpi_id: kid,
+                      kpi_field_id: firstMli ? firstMli.id : 0,
+                      selected_columns: firstMli?.sub_fields?.map(sf => sf.key).slice(0, 5) || []
+                    });
+                  }}
+                  style={{ width: "100%", padding: "0.4rem", fontSize: "0.85rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                >
+                  <option value="">-- Choose KPI --</option>
+                  {allKpis.map(k => (
+                    <option key={k.id} value={k.id}>{k.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.25rem" }}>
+                  Select Multi-Line Item Field
+                </label>
+                <select
+                  value={editingAttachmentConfig.kpi_field_id || ""}
+                  onChange={(e) => {
+                    const fid = Number(e.target.value);
+                    const kpi = allKpis.find(k => k.id === editingAttachmentConfig.kpi_id);
+                    const kfield = kpi?.fields.find(f => f.id === fid);
+                    setEditingAttachmentConfig({
+                      ...editingAttachmentConfig,
+                      kpi_field_id: fid,
+                      selected_columns: kfield?.sub_fields?.map(sf => sf.key).slice(0, 5) || []
+                    });
+                  }}
+                  disabled={!editingAttachmentConfig.kpi_id}
+                  style={{ width: "100%", padding: "0.4rem", fontSize: "0.85rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                >
+                  <option value="">-- Choose Field --</option>
+                  {allKpis.find(k => k.id === editingAttachmentConfig.kpi_id)?.fields
+                    .filter(f => f.field_type === "multi_line_items")
+                    .map(f => (
+                      <option key={f.id} value={f.id}>{f.name}</option>
+                    ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Columns & Filters configuration (shows only if KPI and Field are selected) */}
+            {(() => {
+              if (!editingAttachmentConfig.kpi_id || !editingAttachmentConfig.kpi_field_id) return null;
+              const kpi = allKpis.find(k => k.id === editingAttachmentConfig.kpi_id);
+              const kpiField = kpi?.fields.find(fld => fld.id === editingAttachmentConfig.kpi_field_id);
+              const subFields = kpiField?.sub_fields || [];
+              const token = getAccessToken();
+
+              return (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>
+                    <div>
+                      <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+                        Select Columns
+                      </label>
+                      <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "0.5rem", maxHeight: 180, overflowY: "auto", background: "white" }}>
+                        {subFields.map(sf => {
+                          const isChecked = editingAttachmentConfig.selected_columns.includes(sf.key);
+                          return (
+                            <label key={sf.id} style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.8rem", padding: "0.2rem 0", cursor: "pointer" }}>
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => {
+                                  let nextCols = [...editingAttachmentConfig.selected_columns];
+                                  if (isChecked) {
+                                    nextCols = nextCols.filter(c => c !== sf.key);
+                                  } else {
+                                    if (nextCols.length >= 8) {
+                                      toast.error("Maximum of 8 columns can be selected. Please unselect another column first.");
+                                      return;
+                                    }
+                                    nextCols = [...nextCols, sf.key];
+                                  }
+                                  setEditingAttachmentConfig({ ...editingAttachmentConfig, selected_columns: nextCols });
+                                }}
+                              />
+                              {sf.name}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+                        Order Selected Columns
+                      </label>
+                      <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "0.5rem", maxHeight: 180, overflowY: "auto", background: "#f8fafc" }}>
+                        {editingAttachmentConfig.selected_columns.length === 0 ? (
+                          <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)", fontStyle: "italic" }}>No columns selected</p>
+                        ) : (
+                          editingAttachmentConfig.selected_columns.map((col, idx) => {
+                            const sf = subFields.find(s => s.key === col);
+                            return (
+                              <div
+                                key={col}
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  background: "white",
+                                  border: "1px solid var(--border)",
+                                  borderRadius: 4,
+                                  padding: "0.25rem 0.5rem",
+                                  marginBottom: "0.25rem",
+                                  fontSize: "0.8rem"
+                                }}
+                              >
+                                <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {sf?.name || col}
+                                </span>
+                                <div style={{ display: "flex", gap: "2px" }}>
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    disabled={idx === 0}
+                                    onClick={() => {
+                                      const nextCols = [...editingAttachmentConfig.selected_columns];
+                                      const temp = nextCols[idx];
+                                      nextCols[idx] = nextCols[idx - 1];
+                                      nextCols[idx - 1] = temp;
+                                      setEditingAttachmentConfig({ ...editingAttachmentConfig, selected_columns: nextCols });
+                                    }}
+                                    style={{ padding: "0 0.25rem", fontSize: "0.65rem", height: 18 }}
+                                  >
+                                    ▲
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    disabled={idx === editingAttachmentConfig.selected_columns.length - 1}
+                                    onClick={() => {
+                                      const nextCols = [...editingAttachmentConfig.selected_columns];
+                                      const temp = nextCols[idx];
+                                      nextCols[idx] = nextCols[idx + 1];
+                                      nextCols[idx + 1] = temp;
+                                      setEditingAttachmentConfig({ ...editingAttachmentConfig, selected_columns: nextCols });
+                                    }}
+                                    style={{ padding: "0 0.25rem", fontSize: "0.65rem", height: 18 }}
+                                  >
+                                    ▼
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Filters section */}
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem", marginBottom: "1.5rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                      <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Row Filters</label>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => setOpenFilterFieldKey(prev => !prev)}
+                        style={{ padding: "0.2rem 0.5rem", fontSize: "0.75rem" }}
+                      >
+                        {openFilterFieldKey ? "Hide Filter Builder ▲" : "Show Filter Builder ▼"}
+                      </button>
+                    </div>
+
+                    {openFilterFieldKey && token && (
+                      <div style={{ marginBottom: "1rem", border: "1px solid var(--border)", borderRadius: 6, padding: "0.5rem", background: "white" }}>
+                        <MultiItemsAdvancedFiltersPanel
+                          token={token}
+                          effectiveOrgId={orgId}
+                          subFields={subFields.map(sf => ({ ...sf, field_type: sf.field_type || null }))}
+                          filterDraft={filterDraft}
+                          setFilterDraft={setFilterDraft}
+                          sourceKpiFieldsById={sourceKpiFieldsById}
+                          setSourceKpiFieldsById={setSourceKpiFieldsById}
+                          refFilterOptions={refFilterOptions}
+                          setRefFilterOptions={setRefFilterOptions}
+                          fieldId={editingAttachmentConfig.kpi_field_id}
+                          year={previewYear}
+                          onApply={(draft) => {
+                            const payload = filterDraftToPayload(draft, subFields.map(sf => ({ ...sf, field_type: sf.field_type || null })));
+                            setEditingAttachmentConfig({
+                              ...editingAttachmentConfig,
+                              filters: (payload || { conditions: [], _version: 2 }) as any
+                            });
+                            setOpenFilterFieldKey(false);
+                            toast.success("Applied filter constraints");
+                          }}
+                          onClose={() => setOpenFilterFieldKey(false)}
+                          showCloseButton={true}
+                        />
+                      </div>
+                    )}
+
+                    {/* Active Filters Display */}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
+                      {editingAttachmentConfig.filters.conditions.length === 0 ? (
+                        <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontStyle: "italic" }}>No active filters (all rows will be shown)</span>
+                      ) : (
+                        editingAttachmentConfig.filters.conditions.map((cond, condIdx) => {
+                          const sub = subFields.find(s => s.key === cond.field);
+                          return (
+                            <div
+                              key={condIdx}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                background: "#f1f5f9",
+                                border: "1px solid #cbd5e1",
+                                borderRadius: "16px",
+                                padding: "0.1rem 0.5rem",
+                                fontSize: "0.75rem",
+                                gap: "0.25rem",
+                                color: "#334155"
+                              }}
+                            >
+                              <span>
+                                {sub?.name || cond.field} {cond.op} {String(cond.value ?? cond.values?.join(", "))}
+                              </span>
+                              <button
+                                type="button"
+                                style={{ border: "none", background: "none", color: "var(--error)", cursor: "pointer", fontWeight: 700, padding: 0 }}
+                                onClick={() => {
+                                  const nextPayload = removeConditionFromPayload(editingAttachmentConfig.filters as any, condIdx);
+                                  setEditingAttachmentConfig({
+                                    ...editingAttachmentConfig,
+                                    filters: (nextPayload || { conditions: [], _version: 2 }) as any
+                                  });
+                                  setFilterDraft(payloadToFilterDraft(nextPayload));
+                                }}
+                              >
+                                ×
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+
+            {/* Modal Actions */}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setEditingAttachmentIdx(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  if (!editingAttachmentConfig.kpi_id || !editingAttachmentConfig.kpi_field_id) {
+                    toast.error("Please select a KPI and a Multi-Line field");
+                    return;
+                  }
+                  if (!editingAttachmentConfig.title.trim()) {
+                    toast.error("Please enter a title for the attachment");
+                    return;
+                  }
+                  setAttachments(prev => {
+                    const next = [...prev];
+                    const kpi = allKpis.find(k => k.id === editingAttachmentConfig.kpi_id);
+                    const kfield = kpi?.fields.find(f => f.id === editingAttachmentConfig.kpi_field_id);
+                    next[editingAttachmentIdx] = {
+                      ...next[editingAttachmentIdx],
+                      ...editingAttachmentConfig,
+                      kpi_name: kpi?.name || "",
+                      field_name: kfield?.name || ""
+                    };
+                    return next;
+                  });
+                  setEditingAttachmentIdx(null);
+                  toast.success("Applied attachment settings (click Save Layout to persist changes)");
+                }}
+              >
+                Apply Settings
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteConfirmIdx !== null && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.5)",
+            padding: "1.5rem",
+          }}
+          onClick={() => setDeleteConfirmIdx(null)}
+        >
+          <div
+            className="card"
+            style={{ maxWidth: 480, width: "100%", boxShadow: "0 10px 40px rgba(0,0,0,0.15)", background: "var(--surface)", padding: "1.5rem" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ margin: "0 0 0.5rem 0", fontSize: "1.25rem", fontWeight: 600 }}>
+              Delete Heading Section
+            </h3>
+            <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 1.5rem 0" }}>
+              This section contains <strong>{sections[deleteConfirmIdx]?.fields.length}</strong> fields. Please choose what to do with them:
+            </p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", marginBottom: "1.5rem" }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => confirmMergeFields(deleteConfirmIdx)}
+                disabled={sections.length <= 1}
+                style={{
+                  textAlign: "left",
+                  padding: "0.75rem 1rem",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "flex-start",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  gap: "0.2rem",
+                  background: sections.length <= 1 ? "#f1f5f9" : "white",
+                  cursor: sections.length <= 1 ? "not-allowed" : "pointer"
+                }}
+              >
+                <span style={{ fontWeight: 600, color: "var(--primary)" }}>Option A: Merge Fields (Recommended)</span>
+                <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                  Deletes this heading and moves all its fields into the adjacent section.
+                </span>
+              </button>
+
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => confirmDeleteEverything(deleteConfirmIdx)}
+                style={{
+                  textAlign: "left",
+                  padding: "0.75rem 1rem",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "flex-start",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  gap: "0.2rem",
+                  background: "white"
+                }}
+              >
+                <span style={{ fontWeight: 600, color: "var(--error)" }}>Option B: Delete Everything</span>
+                <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                  Permanently deletes this heading and all of its fields from the report.
+                </span>
+              </button>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setDeleteConfirmIdx(null)}
+              >
+                Cancel
               </button>
             </div>
           </div>

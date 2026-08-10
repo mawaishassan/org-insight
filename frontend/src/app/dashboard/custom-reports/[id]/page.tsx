@@ -52,12 +52,14 @@ export default function CustomReportViewPage() {
   const [reportYear, setReportYear] = useState(() => new Date().getFullYear());
   const [metadata, setMetadata] = useState<ReportMetadata | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
+  const [attachments, setAttachments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
   // Printing / Exporting loaders
   const [printLoading, setPrintLoading] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<number[]>([]);
 
   // Background Task States
   const [asyncModalOpen, setAsyncModalOpen] = useState(false);
@@ -92,10 +94,11 @@ export default function CustomReportViewPage() {
     setLoading(true);
     setError(null);
     setSections([]);
+    setAttachments([]);
     setMetadata(null);
 
     try {
-      const url = getApiUrl(`/custom-reports/${id}/generate-stream?year=${yearVal}&organization_id=${orgId}`);
+      const url = getApiUrl(`/custom-reports/${id}/generate-stream?year=${yearVal}&organization_id=${orgId}&include_attachments=true`);
       const response = await fetch(url, {
         headers: {
           Authorization: `Bearer ${token}`
@@ -169,6 +172,35 @@ export default function CustomReportViewPage() {
                 }),
               }))
             );
+          } else if (chunk.type === "attachments") {
+            setAttachments(chunk.attachments || []);
+          } else if (chunk.type === "attachment_meta") {
+            setAttachments((prev) => [
+              ...prev,
+              {
+                id: chunk.attachment_id,
+                title: chunk.title,
+                kpi_name: chunk.kpi_name,
+                field_name: chunk.field_name,
+                sub_fields: chunk.sub_fields,
+                value_items: [],
+                total_count: chunk.total_count,
+                loading: true,
+              }
+            ]);
+          } else if (chunk.type === "attachment_rows") {
+            setAttachments((prev) =>
+              prev.map((att) => {
+                if (att.id === chunk.attachment_id) {
+                  return {
+                    ...att,
+                    value_items: [...(att.value_items || []), ...(chunk.value_items || [])],
+                    loading: !chunk.done,
+                  };
+                }
+                return att;
+              })
+            );
           } else if (chunk.type === "done") {
             setLoading(false);
           } else if (chunk.type === "error") {
@@ -202,7 +234,10 @@ export default function CustomReportViewPage() {
     setExportModalOpen(false);
     const toastId = toast.loading(`Exporting as ${format.toUpperCase()}...`);
     try {
-      const url = getApiUrl(`/custom-reports/${id}/export?year=${reportYear}&format=${format}&organization_id=${orgId}`);
+      let url = getApiUrl(`/custom-reports/${id}/export?year=${reportYear}&format=${format}&organization_id=${orgId}`);
+      if (selectedAttachmentIds.length > 0) {
+        url += `&attachment_ids=${selectedAttachmentIds.join(",")}`;
+      }
       const res = await fetch(url, {
         headers: {
           Authorization: `Bearer ${token}`
@@ -315,6 +350,7 @@ export default function CustomReportViewPage() {
               year: res.year,
             });
             setSections(res.sections);
+            setAttachments(res.attachments || []);
             setLoading(false);
 
             setTimeout(() => {
@@ -503,6 +539,47 @@ export default function CustomReportViewPage() {
         </div>
       ))}
 
+      {/* Attachments Section */}
+      {attachments && attachments.length > 0 && (
+        <div style={{ background: "white", border: "1px solid var(--border)", borderRadius: 12, padding: "1.5rem", marginBottom: "1.5rem", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
+          <h2 style={{ fontSize: "1.2rem", fontWeight: 700, margin: "0 0 1rem 0", color: "#1e3a8a", borderBottom: "1.5px solid #eff6ff", paddingBottom: "0.5rem" }}>
+            Exportable Attachments
+          </h2>
+          <p style={{ fontSize: "0.9rem", color: "#64748b", marginBottom: "1rem" }}>
+            Select attachments below and click Export to download them.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+            {attachments.map((att, attIdx) => {
+              const isChecked = selectedAttachmentIds.includes(att.id);
+              return (
+                <label key={attIdx} style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem", cursor: "pointer", padding: "0.75rem", background: isChecked ? "#eff6ff" : "#f8fafc", border: `1px solid ${isChecked ? "#bfdbfe" : "#e2e8f0"}`, borderRadius: "8px", transition: "all 0.2s" }}>
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSelectedAttachmentIds(prev => [...prev, att.id]);
+                      } else {
+                        setSelectedAttachmentIds(prev => prev.filter(id => id !== att.id));
+                      }
+                    }}
+                    style={{ marginTop: "0.25rem", cursor: "pointer" }}
+                  />
+                  <div>
+                    <div style={{ fontSize: "0.95rem", fontWeight: 600, color: "#1e293b", marginBottom: "0.15rem" }}>
+                      📎 {att.title}
+                    </div>
+                    <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                      Source KPI: {att.kpi_name} — Field: {att.field_name}
+                    </div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Print / Export Modal */}
       {exportModalOpen && (
         <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0, 0, 0, 0.4)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }}>
@@ -512,9 +589,21 @@ export default function CustomReportViewPage() {
               <button type="button" onClick={() => setExportModalOpen(false)} style={{ border: "none", background: "transparent", fontSize: "1.25rem", cursor: "pointer", color: "#94a3b8" }}>&times;</button>
             </div>
             
-            <p style={{ fontSize: "0.9rem", color: "#64748b", marginBottom: "1.5rem" }}>
+            <p style={{ fontSize: "0.9rem", color: "#64748b", marginBottom: "1rem" }}>
               Select a format to print or download this report:
             </p>
+
+            <div style={{ marginBottom: "1rem" }}>
+              {selectedAttachmentIds.length > 0 ? (
+                <div style={{ padding: "0.75rem", background: "#f0fdf4", color: "#166534", borderRadius: "8px", fontSize: "0.9rem", border: "1px solid #bbf7d0" }}>
+                  <strong>Exporting Attachments:</strong> You have selected {selectedAttachmentIds.length} attachment(s). The export will contain <strong>only</strong> the selected attachments {selectedAttachmentIds.length > 1 ? "as a ZIP file" : ""}.
+                </div>
+              ) : (
+                <div style={{ padding: "0.75rem", background: "#f8fafc", color: "#475569", borderRadius: "8px", fontSize: "0.9rem", border: "1px solid var(--border)" }}>
+                  <strong>Exporting Main Report:</strong> You have not selected any attachments, so the main report will be exported.
+                </div>
+              )}
+            </div>
             
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
               <button

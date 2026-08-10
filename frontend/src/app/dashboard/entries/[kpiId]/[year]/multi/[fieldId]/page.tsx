@@ -269,6 +269,7 @@ export default function FullPageMultiItems() {
   const [kpiLevelCanEdit, setKpiLevelCanEdit] = useState<boolean>(false);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [canAddRow, setCanAddRow] = useState<boolean>(false);
+  const [isJoinedKpi, setIsJoinedKpi] = useState<boolean>(false);
   const [canExport, setCanExport] = useState<boolean>(false);
   const [rowAccessModal, setRowAccessModal] = useState<{ rowIndex: number; preview: string } | null>(null);
   const [rowAccessUsers, setRowAccessUsers] = useState<RowAccessUser[]>([]);
@@ -289,8 +290,8 @@ export default function FullPageMultiItems() {
 
   const isAdmin = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
   const isSuperAdmin = userRole === "SUPER_ADMIN";
-  const canManageRowAccess = isAdmin;
-  const canAddRowEffective = canAddRow || isAdmin;
+  const canManageRowAccess = isAdmin && !isJoinedKpi;
+  const canAddRowEffective = (canAddRow || isAdmin) && !isJoinedKpi;
   const canExportEffective = canExport || isAdmin;
 
   const effectiveOrgId = useMemo(
@@ -390,6 +391,7 @@ export default function FullPageMultiItems() {
         kpi_level_can_edit: boolean;
         can_add_row: boolean;
         can_export: boolean;
+        is_joined?: boolean;
       }>(
         `/entries/multi-items/page-context?${new URLSearchParams({
           kpi_id: String(kpiId),
@@ -412,6 +414,7 @@ export default function FullPageMultiItems() {
       setKpiLevelCanEdit(ctx?.kpi_level_can_edit === true);
       setCanAddRow(ctx?.can_add_row === true);
       setCanExport(ctx?.can_export === true);
+      setIsJoinedKpi(ctx?.is_joined === true);
     } catch (e) {
       if (loadId === multiPageContextLoadGenRef.current) {
         setError(e instanceof Error ? e.message : "Failed to load context");
@@ -2743,7 +2746,7 @@ export default function FullPageMultiItems() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
             <thead>
               <tr>
-                {canEditKpi && (
+                {canEditKpi && !isJoinedKpi && (
                   <th style={{ width: 32, padding: "0.4rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
                     <input
                       type="checkbox"
@@ -2820,7 +2823,7 @@ export default function FullPageMultiItems() {
                     >
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {sf.name}
-                        <span style={{ fontSize: "0.85rem", color: isActive ? "var(--accent, inherit)" : "var(--muted)" }}>
+                      <span style={{ fontSize: "0.85rem", color: isActive ? "var(--accent, inherit)" : "var(--muted)" }}>
                           {isActive ? (sortDir === "asc" ? " ↑" : " ↓") : " ⇅"}
                         </span>
                       </span>
@@ -2837,7 +2840,7 @@ export default function FullPageMultiItems() {
             <tbody>
               {rows.map((row) => (
                 <tr key={row.index}>
-                {canEditKpi && (
+                {canEditKpi && !isJoinedKpi && (
                   <td style={{ padding: "0.35rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
                       <input
                         type="checkbox"

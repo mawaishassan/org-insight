@@ -21,6 +21,7 @@ export function VirtualTable({
   totalCount,
 }: VirtualTableProps) {
   const [scrollTop, setScrollTop] = useState(0);
+  const headerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const totalRows = rows.length;
@@ -28,6 +29,9 @@ export function VirtualTable({
 
   const handleScroll = (e: UIEvent<HTMLDivElement>) => {
     setScrollTop(e.currentTarget.scrollTop);
+    if (headerRef.current) {
+      headerRef.current.scrollLeft = e.currentTarget.scrollLeft;
+    }
   };
 
   const visibleRowCount = Math.ceil(maxHeight / rowHeight);
@@ -43,9 +47,9 @@ export function VirtualTable({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", border: "1px solid var(--border)", borderRadius: 8, background: "white", overflow: "hidden", margin: "0.5rem 0" }}>
-      {/* Header Container (non-scrollable horizontally unless matching body) */}
-      <div style={{ overflowX: "auto" }}>
-        <div style={{ display: "flex", background: "#f8fafc", borderBottom: "2px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", minWidth: "100%" }}>
+      {/* Header Container (hidden scrollbar, synced via JS) */}
+      <div ref={headerRef} style={{ overflow: "hidden" }}>
+        <div style={{ display: "flex", background: "#f8fafc", borderBottom: "2px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", width: "max-content", minWidth: "100%" }}>
           <div style={{ width: 60, padding: "0.75rem 1rem", borderRight: "1px solid var(--border)", textAlign: "center", flexShrink: 0 }}>S.No</div>
           {columns.map((col) => (
             <div key={col.key} style={{ flex: 1, padding: "0.75rem 1rem", minWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -72,7 +76,7 @@ export function VirtualTable({
             No records found.
           </div>
         ) : (
-          <div style={{ height: totalHeight, width: "100%", position: "relative" }}>
+          <div style={{ height: totalHeight, width: "max-content", minWidth: "100%", position: "relative" }}>
             {visibleRows.map(({ row, index }) => (
               <div
                 key={index}
@@ -80,7 +84,7 @@ export function VirtualTable({
                   position: "absolute",
                   top: index * rowHeight,
                   left: 0,
-                  right: 0,
+                  width: "100%",
                   height: rowHeight,
                   display: "flex",
                   alignItems: "center",

@@ -196,6 +196,8 @@ interface KpiInfo {
   api_endpoint_url?: string | null;
   time_dimension?: string | null;
   carry_forward_data?: boolean;
+  is_joined?: boolean;
+  joined_config?: any;
   organization_tags?: OrgTagRef[];
   domain_tags?: DomainTagRef[];
   category_tags?: CategoryTagRef[];
@@ -237,6 +239,8 @@ const kpiUpdateSchema = z.object({
   time_dimension: z.string().optional(),
   carry_forward_data: z.boolean().optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
+  is_joined: z.boolean().optional(),
+  joined_config: z.any().optional(),
 });
 
 const TIME_DIMENSION_ORDER = ["yearly", "half_yearly", "quarterly", "monthly"] as const;
@@ -375,7 +379,7 @@ export default function KpiFieldsPage() {
       ? tabFromUrl
       : "details"
   );
-  const [settingsPanel, setSettingsPanel] = useState<"order" | "time_dimension" | "entry_mode" | "domain" | "tags" | "danger_zone" | null>(null);
+  const [settingsPanel, setSettingsPanel] = useState<"order" | "time_dimension" | "entry_mode" | "domain" | "tags" | "danger_zone" | "joined_mapping" | null>(null);
   const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
   const [keyTouched, setKeyTouched] = useState(false);
   /** For super admin without org in URL: org resolved from KPI by id so create/update field works. */
@@ -484,6 +488,8 @@ export default function KpiFieldsPage() {
       time_dimension: "",
       carry_forward_data: false,
       organization_tag_ids: [],
+      is_joined: false,
+      joined_config: null,
     },
   });
 
@@ -498,9 +504,11 @@ export default function KpiFieldsPage() {
         time_dimension: kpi.time_dimension ?? "",
         carry_forward_data: kpi.carry_forward_data ?? false,
         organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
+        is_joined: kpi.is_joined ?? false,
+        joined_config: kpi.joined_config ?? null,
       });
     }
-  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.carry_forward_data, kpi?.organization_tags, orgIdFromUrl]);
+  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.carry_forward_data, kpi?.organization_tags, kpi?.is_joined, kpi?.joined_config, orgIdFromUrl]);
 
   useEffect(() => {
     if (!token) return;
@@ -1551,6 +1559,8 @@ export default function KpiFieldsPage() {
           time_dimension: data.time_dimension && data.time_dimension.trim() ? data.time_dimension.trim() : null,
           carry_forward_data: data.carry_forward_data,
           organization_tag_ids: data.organization_tag_ids ?? [],
+          is_joined: !!data.is_joined,
+          joined_config: data.joined_config,
         }),
       });
       setKpi(updated);
@@ -1852,6 +1862,7 @@ export default function KpiFieldsPage() {
                   { id: "order" as const, label: "Order" },
                   { id: "time_dimension" as const, label: "Time dimension" },
                   { id: "entry_mode" as const, label: "Entry mode" },
+                  ...(kpi?.is_joined ? [{ id: "joined_mapping" as const, label: "Joined KPI mapping" }] : []),
                   { id: "domain" as const, label: "Domain" },
                   { id: "tags" as const, label: "Tags" },
                   { id: "danger_zone" as const, label: "Danger zone" },
@@ -2271,6 +2282,14 @@ export default function KpiFieldsPage() {
                       </button>
                     </div>
                   </div>
+                )}
+                {settingsPanel === "joined_mapping" && kpi && (
+                  <JoinedKpiConfigPanel
+                    kpi={kpi}
+                    orgId={orgIdFromUrl}
+                    token={token || ""}
+                    onUpdateKpi={(updated) => setKpi(updated)}
+                  />
                 )}
                 {!settingsPanel && (
                   <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Select a setting from the left.</p>
@@ -6360,5 +6379,522 @@ function FieldEditForm({
         <button type="button" className="btn" onClick={onCancel}>Cancel</button>
       </div>
     </form>
+  );
+}
+
+interface JoinedKpiConfigPanelProps {
+  kpi: KpiInfo;
+  orgId: number | null;
+  token: string;
+  onUpdateKpi: (updated: KpiInfo) => void;
+}
+
+function JoinedKpiConfigPanel({
+  kpi,
+  orgId,
+  token,
+  onUpdateKpi
+}: JoinedKpiConfigPanelProps) {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [kpisList, setKpisList] = useState<any[]>([]);
+  const [kpiFieldsMap, setKpiFieldsMap] = useState<Record<number, any[]>>({});
+
+  const [config, setConfig] = useState<any>(() => {
+    const init = kpi.joined_config || {};
+    return {
+      mappings: (init.mappings ?? []).map((m: any) => ({ ...m, collapsed: m.collapsed ?? true }))
+    };
+  });
+
+  useEffect(() => {
+    if (!token) return;
+    const q = orgId != null ? `?organization_id=${orgId}` : "";
+    setLoading(true);
+    api<any[]>(`/kpis${q}`, { token })
+      .then((data) => {
+        setKpisList(data.filter((k: any) => k.id !== kpi.id));
+      })
+      .catch((e) => console.error("Failed to load KPIs", e))
+      .finally(() => setLoading(false));
+  }, [token, orgId, kpi.id]);
+
+  const fetchKpiFields = async (kId: number) => {
+    if (!kId || kpiFieldsMap[kId]) return;
+    try {
+      const q = orgId != null ? `&organization_id=${orgId}` : "";
+      const data = await api<any[]>(`/fields?kpi_id=${kId}${q}`, { token });
+      setKpiFieldsMap(prev => ({
+        ...prev,
+        [kId]: data ?? []
+      }));
+    } catch (e) {
+      console.error("Failed to load KPI fields", e);
+    }
+  };
+
+  useEffect(() => {
+    if (config.mappings) {
+      config.mappings.forEach((m: any) => {
+        if (m.primary_kpi_id) fetchKpiFields(m.primary_kpi_id);
+        (m.joins ?? []).forEach((s: any) => {
+          if (s.kpi_id) fetchKpiFields(s.kpi_id);
+        });
+        if (m.source_kpi_id) fetchKpiFields(m.source_kpi_id);
+      });
+    }
+  }, [config.mappings]);
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (saving) return;
+
+    for (const m of config.mappings) {
+      if (!m.joined_field_key || !/^[a-z0-9_]+$/.test(m.joined_field_key)) {
+        toast.error("Joined field key must contain only lowercase letters, numbers, and underscores.");
+        return;
+      }
+      if (!m.joined_field_name) {
+        toast.error("Joined field name is required.");
+        return;
+      }
+      if (m.field_type === "multi_line_items") {
+        if (!m.primary_kpi_id || !m.primary_field_key) {
+          toast.error(`Please select Primary Source KPI and Primary MLI Field for "${m.joined_field_name}".`);
+          return;
+        }
+        if (m.primary_sub_field_keys && m.primary_sub_field_keys.length === 0) {
+          toast.error(`At least one primary column must be selected for "${m.joined_field_name}".`);
+          return;
+        }
+        for (const join of (m.joins ?? [])) {
+          if (!join.kpi_id || !join.source_field_key) {
+            toast.error(`Please select Join KPI and Join source field for all joins in "${m.joined_field_name}".`);
+            return;
+          }
+        }
+      } else {
+        if (!m.source_kpi_id || !m.source_field_key) {
+          toast.error(`Please select a source KPI and source field for scalar field "${m.joined_field_name}".`);
+          return;
+        }
+      }
+    }
+
+    setSaving(true);
+    try {
+      const q = orgId != null ? `?organization_id=${orgId}` : "";
+      const updated = await api<any>(`/kpis/${kpi.id}${q}`, {
+        method: "PATCH",
+        token,
+        body: JSON.stringify({
+          joined_config: config
+        })
+      });
+      onUpdateKpi(updated);
+      setConfig((prev: any) => ({
+        ...prev,
+        mappings: (prev.mappings || []).map((m: any) => ({ ...m, collapsed: true }))
+      }));
+      toast.success("Joined KPI configuration saved and fields synchronized.");
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save Joined KPI configuration.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addMapping = () => {
+    setConfig((prev: any) => ({
+      ...prev,
+      mappings: [
+        ...prev.mappings,
+        {
+          joined_field_key: "",
+          joined_field_name: "",
+          field_type: "multi_line_items",
+          primary_kpi_id: "",
+          primary_field_key: "",
+          joins: [],
+          collapsed: false
+        }
+      ]
+    }));
+  };
+
+  const removeMapping = (idx: number) => {
+    setConfig((prev: any) => ({
+      ...prev,
+      mappings: prev.mappings.filter((_: any, i: number) => i !== idx)
+    }));
+  };
+
+  const updateMapping = (idx: number, updates: any) => {
+    setConfig((prev: any) => ({
+      ...prev,
+      mappings: prev.mappings.map((m: any, i: number) => i === idx ? { ...m, ...updates } : m)
+    }));
+  };
+
+  if (loading) {
+    return <p style={{ color: "var(--muted)" }}>Loading other KPIs...</p>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1rem", color: "var(--text)" }}>
+      <h3 style={{ fontSize: "1rem", fontWeight: 600, margin: 0 }}>Joined KPI Mapping</h3>
+      <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: 0 }}>
+        Configure how this Virtual KPI combines other source KPIs dynamically in-memory.
+      </p>
+
+      <form onSubmit={handleSave} style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+        {config.mappings.map((m: any, mIdx: number) => {
+          const pkpiName = m.primary_kpi_id ? kpisList.find((k) => k.id === m.primary_kpi_id)?.name : null;
+          const pfieldObj = (kpiFieldsMap[m.primary_kpi_id] ?? []).find((f: any) => f.key === m.primary_field_key);
+          const pfieldName = pfieldObj?.name || m.primary_field_key;
+          const isCollapsed = m.collapsed ?? false;
+
+          return (
+          <div key={mIdx} className="card" style={{ border: "1px solid var(--border)", borderRadius: "8px", padding: "1rem", position: "relative", background: "var(--bg)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isCollapsed ? 0 : "1rem" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <h4 style={{ fontSize: "1rem", fontWeight: 700, margin: 0 }}>
+                    {m.joined_field_name || "New Joined Multi-Line-Item"}
+                  </h4>
+                  {m.joined_field_key && (
+                    <span style={{ fontSize: "0.8rem", color: "var(--muted)", background: "rgba(0,0,0,0.06)", padding: "0.15rem 0.45rem", borderRadius: "4px", fontFamily: "monospace" }}>
+                      {m.joined_field_key}
+                    </span>
+                  )}
+                </div>
+                {isCollapsed && (
+                  <div style={{ fontSize: "0.85rem", color: "var(--muted)", display: "flex", gap: "1.25rem", flexWrap: "wrap", marginTop: "0.25rem" }}>
+                    <span><strong>Primary Source:</strong> {pkpiName ? `${pkpiName} (${pfieldName})` : "Not configured"}</span>
+                    <span><strong>Joins:</strong> {(m.joins ?? []).length} joined KPI(s)</span>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-secondary"
+                  onClick={() => updateMapping(mIdx, { collapsed: !isCollapsed })}
+                  style={{ fontSize: "0.85rem" }}
+                >
+                  {isCollapsed ? "Edit / Expand" : "Collapse"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => removeMapping(mIdx)}
+                  style={{ color: "var(--error)", border: "none", background: "transparent", cursor: "pointer", fontSize: "0.85rem" }}
+                >
+                  Remove Field
+                </button>
+              </div>
+            </div>
+
+            {!isCollapsed && (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1rem" }}>
+                  <div className="form-group">
+                    <label style={{ fontWeight: 600, fontSize: "0.85rem" }}>Joined Field Name *</label>
+                    <input
+                      type="text"
+                      value={m.joined_field_name}
+                      onChange={(e) => {
+                        const nameVal = e.target.value;
+                        const prevSlug = m.joined_field_name ? m.joined_field_name.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "") : "";
+                        const shouldAutoSlug = !m.joined_field_key || m.joined_field_key === prevSlug;
+                        const keyVal = shouldAutoSlug 
+                          ? nameVal.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "") 
+                          : m.joined_field_key;
+                        updateMapping(mIdx, { 
+                          joined_field_name: nameVal, 
+                          joined_field_key: keyVal 
+                        });
+                      }}
+                      placeholder="e.g. Total Sales"
+                      style={{ width: "100%", padding: "0.4rem" }}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label style={{ fontWeight: 600, fontSize: "0.85rem" }}>Joined Field Key *</label>
+                    <input
+                      type="text"
+                      value={m.joined_field_key}
+                      onChange={(e) => updateMapping(mIdx, { joined_field_key: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "") })}
+                      placeholder="e.g. total_sales"
+                      style={{ width: "100%", padding: "0.4rem" }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ borderTop: "1px dashed var(--border)", paddingTop: "1rem", marginTop: "1rem" }}>
+                  <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: "0 0 0.5rem 0" }}>Primary Source Table</h4>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1rem" }}>
+                    <div className="form-group">
+                      <label style={{ fontSize: "0.8rem", fontWeight: 600 }}>Primary Source KPI</label>
+                      <select
+                        value={m.primary_kpi_id || ""}
+                        onChange={(e) => {
+                          const kId = Number(e.target.value);
+                          updateMapping(mIdx, { primary_kpi_id: kId, primary_field_key: "", joins: [] });
+                          if (kId) fetchKpiFields(kId);
+                        }}
+                        style={{ width: "100%", padding: "0.35rem" }}
+                      >
+                        <option value="">-- Select KPI --</option>
+                        {kpisList.map((k) => (
+                          <option key={k.id} value={k.id}>{k.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label style={{ fontSize: "0.8rem", fontWeight: 600 }}>Primary MLI Field</label>
+                      <select
+                        value={m.primary_field_key || ""}
+                        onChange={(e) => {
+                          const fKey = e.target.value;
+                          const allSubKeys = ((kpiFieldsMap[m.primary_kpi_id] ?? []).find((f: any) => f.key === fKey)?.sub_fields ?? []).map((sf: any) => sf.key);
+                          updateMapping(mIdx, { primary_field_key: fKey, primary_sub_field_keys: allSubKeys, joins: [] });
+                        }}
+                        style={{ width: "100%", padding: "0.35rem" }}
+                      >
+                        <option value="">-- Select MLI Field --</option>
+                        {(kpiFieldsMap[m.primary_kpi_id] ?? [])
+                          .filter((f: any) => f.field_type === "multi_line_items")
+                          .map((f: any) => (
+                            <option key={f.key} value={f.key}>{f.name}</option>
+                          ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {m.primary_kpi_id && m.primary_field_key && (
+                    <div style={{ marginTop: "0.5rem", marginBottom: "1rem" }}>
+                      <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Columns to Fetch (Primary Table):</label>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", padding: "0.5rem", border: "1px solid var(--border)", borderRadius: "4px", background: "var(--bg)" }}>
+                        {((kpiFieldsMap[m.primary_kpi_id] ?? []).find((f: any) => f.key === m.primary_field_key)?.sub_fields ?? []).map((sf: any) => {
+                          const availableSubFields = ((kpiFieldsMap[m.primary_kpi_id] ?? []).find((f: any) => f.key === m.primary_field_key)?.sub_fields ?? []);
+                          const allKeys = availableSubFields.map((s: any) => s.key);
+                          const currentKeys = m.primary_sub_field_keys !== undefined ? m.primary_sub_field_keys : allKeys;
+                          const isChecked = currentKeys.includes(sf.key);
+                          return (
+                            <label key={sf.key} style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.8rem", cursor: "pointer" }}>
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={(e) => {
+                                  let nextKeys = [...currentKeys];
+                                  if (e.target.checked) {
+                                    if (!nextKeys.includes(sf.key)) nextKeys.push(sf.key);
+                                  } else {
+                                    nextKeys = nextKeys.filter((k: string) => k !== sf.key);
+                                  }
+                                  updateMapping(mIdx, { primary_sub_field_keys: nextKeys });
+                                }}
+                              />
+                              {sf.name || sf.key}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "1.5rem 0 0.5rem 0" }}>
+                    <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0 }}>Joins</h4>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => {
+                        const nextJoins = [...(m.joins ?? []), { kpi_id: "", source_field_key: "", on_left_sub_field_key: "", on_right_sub_field_key: "", sub_field_keys: [], collapsed: false }];
+                        updateMapping(mIdx, { joins: nextJoins });
+                      }}
+                      style={{ fontSize: "0.85rem" }}
+                    >
+                      + Join another KPI
+                    </button>
+                  </div>
+
+                  {(!m.joins || m.joins.length === 0) ? (
+                    <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>No joins added.</div>
+                  ) : (
+                    <div style={{ display: "grid", gap: "0.75rem" }}>
+                      {(m.joins ?? []).map((join: any, joinIdx: number) => {
+                        const joinKpiId = join.kpi_id;
+                        const joinKpiName = joinKpiId ? kpisList.find((k) => k.id === joinKpiId)?.name : null;
+                        const title = joinKpiName ? `Join: ${joinKpiName}` : `Join #${joinIdx + 1}`;
+                        return (
+                        <div key={joinIdx} className="card" style={{ padding: "0.85rem" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", alignItems: "center" }}>
+                            <div style={{ fontWeight: 800, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={title}>
+                              {title}
+                            </div>
+                            <div style={{ display: "flex", gap: "0.35rem" }}>
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => {
+                                  const nextJoins = [...(m.joins ?? [])];
+                                  nextJoins[joinIdx] = { ...join, collapsed: !join.collapsed };
+                                  updateMapping(mIdx, { joins: nextJoins });
+                                }}
+                                style={{ fontSize: "0.85rem" }}
+                              >
+                                {join.collapsed ? "Expand" : "Collapse"}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => {
+                                  const nextJoins = m.joins.filter((_: any, i: number) => i !== joinIdx);
+                                  updateMapping(mIdx, { joins: nextJoins });
+                                }}
+                                style={{ fontSize: "0.85rem" }}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+
+                          {!join.collapsed ? (
+                            <div style={{ display: "grid", gap: "0.6rem", marginTop: "0.6rem" }}>
+                              <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                                <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join KPI</label>
+                                <select
+                                  value={join.kpi_id || ""}
+                                  onChange={(e) => {
+                                    const kId = Number(e.target.value);
+                                    const nextJoins = [...(m.joins ?? [])];
+                                    nextJoins[joinIdx] = { ...join, kpi_id: kId, source_field_key: "", on_left_sub_field_key: "", on_right_sub_field_key: "", sub_field_keys: [] };
+                                    updateMapping(mIdx, { joins: nextJoins });
+                                    if (kId) fetchKpiFields(kId);
+                                  }}
+                                  style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                >
+                                  <option value="">Select…</option>
+                                  {kpisList.map((k) => (
+                                    <option key={k.id} value={k.id}>{k.name} (#{k.id})</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                                <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join source</label>
+                                <select
+                                  value={join.source_field_key || ""}
+                                  onChange={(e) => {
+                                    const fKey = e.target.value;
+                                    const nextJoins = [...(m.joins ?? [])];
+                                    nextJoins[joinIdx] = { ...join, source_field_key: fKey, on_left_sub_field_key: "", on_right_sub_field_key: "", sub_field_keys: [] };
+                                    updateMapping(mIdx, { joins: nextJoins });
+                                  }}
+                                  style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                  disabled={!join.kpi_id}
+                                >
+                                  <option value="">Select…</option>
+                                  {(kpiFieldsMap[join.kpi_id] ?? [])
+                                    .filter((f: any) => f.field_type === "multi_line_items")
+                                    .map((f: any) => (
+                                      <option key={f.key} value={f.key}>{f.name} ({f.key})</option>
+                                    ))}
+                                </select>
+                              </div>
+
+                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.6rem" }}>
+                                <div style={{ display: "grid", gap: "0.25rem" }}>
+                                  <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join key (this table)</label>
+                                  <select
+                                    value={join.on_left_sub_field_key || ""}
+                                    onChange={(e) => {
+                                      const nextJoins = [...(m.joins ?? [])];
+                                      nextJoins[joinIdx] = { ...join, on_left_sub_field_key: e.target.value };
+                                      updateMapping(mIdx, { joins: nextJoins });
+                                    }}
+                                    style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                    disabled={!m.primary_field_key}
+                                  >
+                                    <option value="">Select…</option>
+                                    {((kpiFieldsMap[m.primary_kpi_id] ?? []).find((f: any) => f.key === m.primary_field_key)?.sub_fields ?? []).map((sf: any) => (
+                                      <option key={sf.key} value={sf.key}>{sf.name || sf.key} ({sf.key})</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div style={{ display: "grid", gap: "0.25rem" }}>
+                                  <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Join key (joined KPI)</label>
+                                  <select
+                                    value={join.on_right_sub_field_key || ""}
+                                    onChange={(e) => {
+                                      const nextJoins = [...(m.joins ?? [])];
+                                      nextJoins[joinIdx] = { ...join, on_right_sub_field_key: e.target.value };
+                                      updateMapping(mIdx, { joins: nextJoins });
+                                    }}
+                                    style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                                    disabled={!join.source_field_key}
+                                  >
+                                    <option value="">Select…</option>
+                                    {((kpiFieldsMap[join.kpi_id] ?? []).find((f: any) => f.key === join.source_field_key)?.sub_fields ?? []).map((ssf: any) => (
+                                      <option key={ssf.key} value={ssf.key}>{ssf.name || ssf.key} ({ssf.key})</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                              
+                              <div style={{ marginTop: "0.5rem" }}>
+                                <label style={{ fontSize: "0.8rem", fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>Columns to Fetch:</label>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", padding: "0.5rem", border: "1px solid var(--border)", borderRadius: "4px", background: "var(--bg)" }}>
+                                  {((kpiFieldsMap[join.kpi_id] ?? []).find((f: any) => f.key === join.source_field_key)?.sub_fields ?? []).map((ssf: any) => {
+                                    const isChecked = (join.sub_field_keys ?? []).includes(ssf.key);
+                                    return (
+                                      <label key={ssf.key} style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.8rem", cursor: "pointer" }}>
+                                        <input
+                                          type="checkbox"
+                                          checked={isChecked}
+                                          onChange={(e) => {
+                                            const nextJoins = [...(m.joins ?? [])];
+                                            const currentKeys = [...(join.sub_field_keys ?? [])];
+                                            if (e.target.checked) {
+                                              if (!currentKeys.includes(ssf.key)) currentKeys.push(ssf.key);
+                                            } else {
+                                              const idx = currentKeys.indexOf(ssf.key);
+                                              if (idx > -1) currentKeys.splice(idx, 1);
+                                            }
+                                            nextJoins[joinIdx] = { ...join, sub_field_keys: currentKeys };
+                                            updateMapping(mIdx, { joins: nextJoins });
+                                          }}
+                                        />
+                                        {ssf.name || ssf.key}
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+          );
+        })}
+
+        <button type="button" className="btn btn-secondary" onClick={addMapping} style={{ alignSelf: "start" }}>
+          + Add Joined Multi-Line-Item
+        </button>
+
+        <button type="submit" className="btn btn-primary" style={{ alignSelf: "start", marginTop: "1rem" }} disabled={saving}>
+          {saving ? "Saving Configuration..." : "Save Configuration"}
+        </button>
+      </form>
+    </div>
   );
 }

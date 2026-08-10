@@ -210,8 +210,7 @@ export async function api<T>(
     if (existing) return existing as Promise<T>;
   }
 
-  const basePath = path.split("?")[0];
-  const cancelKey = `${method} ${basePath}`;
+  const cancelKey = `${method} ${path}`;
 
   // Cancel outdated request to the same path
   if (isGet) {
@@ -264,12 +263,11 @@ export async function api<T>(
         responseCache.set(dedupeKey, { ts: Date.now(), data: json });
       }
       return json;
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        // Return a pending promise that never resolves or rejects to quietly ignore
+    } catch (error: any) {
+      if (init.signal?.aborted || error.name === "AbortError" || error.message?.includes("aborted")) {
         return new Promise(() => {}) as Promise<T>;
       }
-      throw err;
+      throw error;
     } finally {
       if (isGet && activeControllers.get(cancelKey)?.signal === init.signal) {
         activeControllers.delete(cancelKey);

@@ -59,6 +59,8 @@ interface KpiRow {
   sort_order: number;
   entry_mode?: string;
   api_endpoint_url?: string | null;
+  is_joined?: boolean;
+  joined_config?: any;
   domain_tags: DomainTagRef[];
   category_tags: CategoryTagRef[];
   organization_tags?: OrganizationTagRef[];
@@ -92,6 +94,7 @@ const createSchema = z.object({
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
+  is_joined: z.boolean().optional(),
 });
 
 const updateSchema = z.object({
@@ -100,6 +103,7 @@ const updateSchema = z.object({
   sort_order: z.coerce.number().int().min(0),
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
+  is_joined: z.boolean().optional(),
 });
 
 type CreateFormData = z.infer<typeof createSchema>;
@@ -364,6 +368,7 @@ export default function KPIsPage() {
       sort_order: 0,
       entry_mode: "manual",
       api_endpoint_url: "",
+      is_joined: false,
     },
   });
 
@@ -380,6 +385,7 @@ export default function KPIsPage() {
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
+          is_joined: !!data.is_joined,
         }),
         token,
       });
@@ -389,6 +395,7 @@ export default function KPIsPage() {
         sort_order: 0,
         entry_mode: "manual",
         api_endpoint_url: "",
+        is_joined: false,
       });
       setShowCreate(false);
       loadList();
@@ -412,6 +419,7 @@ export default function KPIsPage() {
           sort_order: data.sort_order,
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
+          is_joined: !!data.is_joined,
         }),
         token,
       });
@@ -551,6 +559,10 @@ export default function KPIsPage() {
             <div className="form-group">
               <label>Sort order</label>
               <input type="number" min={0} {...createForm.register("sort_order")} />
+            </div>
+            <div className="form-group" style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.5rem", marginBottom: "0.5rem" }}>
+              <input type="checkbox" id="create_is_joined" {...createForm.register("is_joined")} style={{ cursor: "pointer" }} />
+              <label htmlFor="create_is_joined" style={{ cursor: "pointer", fontWeight: 600 }}>Joined KPI (Virtual KPI)</label>
             </div>
             <div className="form-group">
               <label>Entry mode</label>
@@ -744,6 +756,7 @@ function KpiEditForm({
       sort_order: kpi.sort_order,
       entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
       api_endpoint_url: kpi.api_endpoint_url ?? "",
+      is_joined: !!kpi.is_joined,
     },
   });
   const isApiMode = watch("entry_mode") === "api";
@@ -809,6 +822,10 @@ function KpiEditForm({
       <div className="form-group">
         <label>Sort order</label>
         <input type="number" min={0} {...register("sort_order")} />
+      </div>
+      <div className="form-group" style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.5rem", marginBottom: "0.5rem" }}>
+        <input type="checkbox" id="edit_is_joined" {...register("is_joined")} style={{ cursor: "pointer" }} />
+        <label htmlFor="edit_is_joined" style={{ cursor: "pointer", fontWeight: 600 }}>Joined KPI (Virtual KPI)</label>
       </div>
       <div className="form-group">
         <label>Entry mode</label>
