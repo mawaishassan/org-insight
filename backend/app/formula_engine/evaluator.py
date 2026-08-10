@@ -283,13 +283,40 @@ def _rows_where(
     return [r for r in rows if isinstance(r, dict) and _row_matches(r, filter_sub_key, op, filter_value)]
 
 
-def _row_matches_conditions(row: dict[str, Any], conditions: list[tuple[str, str, Any]], links: list[str]) -> bool:
+def _is_condition_tuple(val: Any) -> bool:
+    if not isinstance(val, (list, tuple)):
+        return False
+    if len(val) < 3:
+        return False
+    op_candidates = {
+        "eq", "neq", "gt", "gte", "lt", "lte", "contains", "not_contains", "starts_with", "ends_with",
+        "op_eq", "op_neq", "op_gt", "op_gte", "op_lt", "op_lte", "op_contains", "op_not_contains", "op_starts_with", "op_ends_with"
+    }
+    op_val = str(val[1]).strip().lower()
+    if op_val in op_candidates:
+        return True
+    for item in val:
+        if isinstance(item, str):
+            item_lower = item.strip().lower()
+            if item_lower in ("and", "or", "op_and", "op_or"):
+                return True
+    return False
+
+
+def _row_matches_conditions(row: dict[str, Any], conditions: list[Any], links: list[str]) -> bool:
     """Evaluate multiple conditions with logical links (and/or), left-to-right."""
     if not conditions:
         return False
-    result = _row_matches(row, conditions[0][0], conditions[0][1], conditions[0][2])
+
+    def eval_cond(cond):
+        if isinstance(cond, tuple) and len(cond) == 2 and isinstance(cond[0], list) and isinstance(cond[1], list):
+            return _row_matches_conditions(row, cond[0], cond[1])
+        else:
+            return _row_matches(row, cond[0], cond[1], cond[2])
+
+    result = eval_cond(conditions[0])
     for i in range(1, len(conditions)):
-        next_res = _row_matches(row, conditions[i][0], conditions[i][1], conditions[i][2])
+        next_res = eval_cond(conditions[i])
         link = links[i - 1] if i - 1 < len(links) else "and"
         if link == "or":
             result = result or next_res
@@ -298,35 +325,52 @@ def _row_matches_conditions(row: dict[str, Any], conditions: list[tuple[str, str
     return result
 
 
-def _parse_where_args(args: tuple[Any, ...], start_idx: int) -> tuple[list[tuple[str, str, Any]], list[str]]:
+def _parse_where_args(args: tuple[Any, ...], start_idx: int) -> tuple[list[Any], list[str]]:
     """
     Parse WHERE arguments into:
-      conditions: [(filter_sub_key, op, value), ...]
+      conditions: [cond1, ...] where cond can be (filter_sub_key, op, value) or (nested_conditions, nested_links)
       links: ["and"|"or", ...] linking condition i to i+1
-
-    Supported shape:
-      <cond1_filter_sub_key>, <cond1_op>, <cond1_value>,
-      [<logic>, <condN_filter_sub_key>, <condN_op>, <condN_value>]*
     """
-    conditions: list[tuple[str, str, Any]] = []
+    conditions: list[Any] = []
     links: list[str] = []
 
     if len(args) < start_idx + 3:
+        if len(args) == start_idx + 1 and isinstance(args[start_idx], (list, tuple)):
+            nested_args = args[start_idx]
+            if len(nested_args) >= 3:
+                return _parse_where_args(tuple(nested_args), 0)
         return conditions, links
 
     i = start_idx
-    conditions.append((str(args[i]), str(args[i + 1]), args[i + 2]))
-    i += 3
+    first_arg = args[i]
+    if _is_condition_tuple(first_arg):
+        cond_val, links_val = _parse_where_args(tuple(first_arg), 0)
+        conditions.append((cond_val, links_val))
+        i += 1
+    else:
+        conditions.append((str(args[i]), str(args[i + 1]), args[i + 2]))
+        i += 3
 
-    while i + 3 < len(args):
+    while i < len(args):
         logic = str(args[i]).strip().lower()
         if logic.startswith("op_"):
             logic = logic.replace("op_", "", 1)
         if logic not in ("and", "or"):
             break
         links.append(logic)
-        conditions.append((str(args[i + 1]), str(args[i + 2]), args[i + 3]))
-        i += 4
+        i += 1
+        
+        if i >= len(args):
+            break
+            
+        next_arg = args[i]
+        if _is_condition_tuple(next_arg):
+            cond_val, links_val = _parse_where_args(tuple(next_arg), 0)
+            conditions.append((cond_val, links_val))
+            i += 1
+        else:
+            conditions.append((str(args[i]), str(args[i + 1]), args[i + 2]))
+            i += 3
 
     return conditions, links
 
@@ -393,6 +437,13 @@ def _make_evaluator(
     if SimpleEval is None:
         raise RuntimeError("simpleeval is required for formula evaluation. pip install simpleeval")
     s = SimpleEval()
+    import ast
+    def _eval_tuple(node):
+        return tuple(s._eval(elt) for elt in node.elts)
+    def _eval_list(node):
+        return [s._eval(elt) for elt in node.elts]
+    s.nodes[ast.Tuple] = _eval_tuple
+    s.nodes[ast.List] = _eval_list
     s.operators = {**s.operators}
     # Missing or None field values -> 0 so formulas don't fail when a referenced field has no value
     s.names = _SafeNames(dict(field_values))

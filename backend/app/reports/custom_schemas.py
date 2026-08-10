@@ -49,14 +49,26 @@ class CustomReportResponse(BaseModel):
 class CustomReportFieldLayout(BaseModel):
     kpi_field_id: int
     sort_order: int
+    config: dict | None = None
 
 
 class CustomReportSectionLayout(BaseModel):
-    kpi_id: int
+    kpi_id: int | None = None
     custom_header: str | None = None
     sort_order: int
     fields: list[CustomReportFieldLayout] = []
 
 
+class CustomReportAttachmentLayout(BaseModel):
+    kpi_id: int
+    kpi_field_id: int
+    title: str
+    selected_columns: list[str] = []
+    filters: dict | None = None
+    sort_order: int
+
+
 class CustomReportLayoutSave(BaseModel):
     sections: list[CustomReportSectionLayout]
+    attachments: list[CustomReportAttachmentLayout] = []
+

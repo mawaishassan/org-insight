@@ -17,6 +17,7 @@ from app.core.models import (
     ReportAccessPermission,
     KPI,
     KPIField,
+    KPIFieldSubField,
     KPIEntry,
     KPIFieldValue,
     KpiMultiLineRow,
@@ -139,50 +140,133 @@ def _kpi_multi_line_orm_row_to_dict(r: KpiMultiLineRow) -> dict:
 
 
 async def _load_multi_line_items_rows_batch(
-    db: AsyncSession, *, entry_ids: list[int], field: KPIField
+    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None
 ) -> dict[int, list[dict]]:
-    """Load multi-line rows for many entries in one query (report preview was N entries × M fields round-trips)."""
+    """Optimized direct load of multi-line rows and cells to handle large datasets efficiently without ORM eager load overhead."""
     if not entry_ids:
         return {}
-    res = await db.execute(
-        select(KpiMultiLineRow)
+        
+    from app.core.models import KPI
+    kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
+    kpi = kpi_res.scalar_one_or_none()
+        
+    if kpi and getattr(kpi, "is_joined", False):
+        from app.core.models import KPIEntry
+        from app.entries.load_joined import load_joined_multi_line_rows
+        out_batch = {}
+        for eid in entry_ids:
+            entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == eid))
+            entry = entry_res.scalar_one_or_none()
+            if not entry:
+                continue
+            combined_rows = await load_joined_multi_line_rows(
+                db,
+                joined_field=field,
+                organization_id=entry.organization_id,
+                year=entry.year,
+                period_key=entry.period_key,
+                current_user_id=current_user_id
+            )
+            start = offset if offset is not None else 0
+            end = (start + limit) if limit is not None else len(combined_rows)
+            out_batch[eid] = combined_rows[start:end]
+        return out_batch
+
+    # 1. Fetch all rows
+    stmt = (
+        select(KpiMultiLineRow.id, KpiMultiLineRow.entry_id, KpiMultiLineRow.row_index)
         .where(
             KpiMultiLineRow.entry_id.in_(entry_ids),
             KpiMultiLineRow.field_id == field.id,
         )
         .order_by(KpiMultiLineRow.entry_id, KpiMultiLineRow.row_index)
-        .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
     )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    if offset is not None:
+        stmt = stmt.offset(offset)
+    rows_res = await db.execute(stmt)
+    rows_list = rows_res.all()
+    if not rows_list:
+        return {}
+        
+    row_ids = [r[0] for r in rows_list]
     
+    # 2. Fetch all cells in chunks to avoid parameter limits
+    cells_list = []
+    chunk_size = 5000
+    for i in range(0, len(row_ids), chunk_size):
+        chunk_ids = row_ids[i:i+chunk_size]
+        cells_res = await db.execute(
+            select(
+                KpiMultiLineCell.row_id,
+                KpiMultiLineCell.value_text,
+                KpiMultiLineCell.value_number,
+                KpiMultiLineCell.value_boolean,
+                KpiMultiLineCell.value_date,
+                KpiMultiLineCell.value_json,
+                KPIFieldSubField.key
+            )
+            .join(KPIFieldSubField, KPIFieldSubField.id == KpiMultiLineCell.sub_field_id)
+            .where(KpiMultiLineCell.row_id.in_(chunk_ids))
+        )
+        cells_list.extend(cells_res.all())
+        
+    # 3. Reconstruct cells grouped by row_id
+    cells_by_row = defaultdict(dict)
+    for row_id, vt, vn, vb, vd, vj, sf_key in cells_list:
+        raw_val = None
+        if vj is not None:
+            raw_val = vj
+        elif vt is not None:
+            raw_val = vt
+        elif vn is not None:
+            raw_val = vn
+        elif vb is not None:
+            raw_val = vb
+        elif vd is not None:
+            try:
+                raw_val = vd.isoformat()
+            except Exception:
+                raw_val = str(vd)
+        cells_by_row[row_id][str(sf_key)] = raw_val
+        
+    # 4. Map to subfields config for visibility checks
     sub_fields = getattr(field, "sub_fields", None) or []
     subfields_dict = {}
+    has_cond = False
     for sf in sub_fields:
         subfields_dict[sf.key] = sf
         if getattr(sf, "id", None) is not None:
             subfields_dict[int(sf.id)] = sf
+        if sf.config and isinstance(sf.config, dict):
+            if (sf.config.get("condition_trigger_field_id") is not None or 
+                sf.config.get("condition_trigger_field_key") is not None or 
+                sf.config.get("conditional_rules")):
+                has_cond = True
 
-    from app.fields.conditional import is_subfield_visible
-    by_entry: dict[int, list[dict]] = defaultdict(list)
-    for r in res.scalars().all():
-        eid = getattr(r, "entry_id", None)
-        if eid is None:
-            continue
-        row_dict = _kpi_multi_line_orm_row_to_dict(r)
-        
-        cleaned_r = {}
-        for k, v in row_dict.items():
-            sf = subfields_dict.get(k)
-            if sf and is_subfield_visible(sf, subfields_dict, row_dict):
-                cleaned_r[k] = v
-            elif not sf:
-                cleaned_r[k] = v
-                
-        by_entry[int(eid)].append(cleaned_r)
+    by_entry = defaultdict(list)
+    if not has_cond:
+        for rid, eid, r_idx in rows_list:
+            row_dict = cells_by_row.get(rid, {})
+            by_entry[int(eid)].append(dict(row_dict))
+    else:
+        from app.fields.conditional import is_subfield_visible
+        for rid, eid, r_idx in rows_list:
+            row_dict = cells_by_row.get(rid, {})
+            cleaned_r = {}
+            for k, v in row_dict.items():
+                sf = subfields_dict.get(k)
+                if sf and is_subfield_visible(sf, subfields_dict, row_dict):
+                    cleaned_r[k] = v
+                elif not sf:
+                    cleaned_r[k] = v
+            by_entry[int(eid)].append(cleaned_r)
     return dict(by_entry)
 
 
-async def _load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField) -> list[dict]:
-    m = await _load_multi_line_items_rows_batch(db, entry_ids=[entry_id], field=field)
+async def _load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField, current_user_id: int | None = None) -> list[dict]:
+    m = await _load_multi_line_items_rows_batch(db, entry_ids=[entry_id], field=field, current_user_id=current_user_id)
     return m.get(entry_id, [])
 
 
@@ -1949,7 +2033,7 @@ async def generate_report_data(
         for mf in ml_fields:
             t_ml0 = time.perf_counter()
             ml_rows_by_field_id[mf.id] = await _load_multi_line_items_rows_batch(
-                db, entry_ids=entry_ids_sorted, field=mf
+                db, entry_ids=entry_ids_sorted, field=mf, current_user_id=current_user_id
             )
             total_ml_load_ms += (time.perf_counter() - t_ml0) * 1000.0
             for _eid, _rows in ml_rows_by_field_id[mf.id].items():
@@ -2899,7 +2983,7 @@ async def generate_kpi_pdf_report(
                 raw_filters = field_config.get("filters", {})
 
                 from app.entries.multi_line_load import load_multi_line_row_dicts
-                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=current_user_id)
                 rows = [r for _, r in row_pairs]
 
                 filtered_rows = []
@@ -3342,7 +3426,7 @@ async def generate_kpi_docx_report(
                 raw_filters = field_config.get("filters", {})
 
                 from app.entries.multi_line_load import load_multi_line_row_dicts
-                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=current_user_id)
                 rows = [r for _, r in row_pairs]
 
                 filtered_rows = []

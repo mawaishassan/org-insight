@@ -452,6 +452,8 @@ class KPI(Base):
     api_endpoint_url = Column(String(2048), nullable=True)  # URL we call (GET or POST with year) to get entry payload
     time_dimension = Column(String(32), nullable=True)  # None = inherit org; else yearly, half_yearly, quarterly, monthly
     carry_forward_data = Column(Boolean, default=False, nullable=False, server_default="0")  # Non-cyclic: copy from previous period when new
+    is_joined = Column(Boolean, default=False, nullable=False, server_default="0")
+    joined_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -1201,7 +1203,7 @@ class CaptchaChallenge(Base):
     question = Column(String(255), nullable=False)
     answer = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=utc_now)
-    expires_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
     attempts = Column(Integer, default=0, nullable=False)
 
 
@@ -1233,6 +1235,14 @@ class CustomReport(Base):
         lazy="selectin",
         cascade="all, delete-orphan",
     )
+    attachments = relationship(
+        "CustomReportAttachment",
+        back_populates="custom_report",
+        lazy="selectin",
+        order_by="CustomReportAttachment.sort_order",
+        cascade="all, delete-orphan",
+    )
+
 
 
 class CustomReportSection(Base):
@@ -1245,7 +1255,7 @@ class CustomReportSection(Base):
         Integer, ForeignKey("custom_reports.id", ondelete="CASCADE"), nullable=False, index=True
     )
     kpi_id = Column(
-        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
+        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=True, index=True
     )
     custom_header = Column(String(255), nullable=True)
     sort_order = Column(Integer, default=0, nullable=False)
@@ -1277,6 +1287,7 @@ class CustomReportField(Base):
         Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
     )
     sort_order = Column(Integer, default=0, nullable=False)
+    config = Column(JSON, nullable=True)  # For MLI column selection/filters: {"visible_sub_fields": [...], "filters": [...]}
 
     custom_report = relationship("CustomReport")
     section = relationship("CustomReportSection", back_populates="fields")
@@ -1306,6 +1317,32 @@ class CustomReportAssignment(Base):
 
     custom_report = relationship("CustomReport", back_populates="assignments")
     user = relationship("User")
+
+
+class CustomReportAttachment(Base):
+    """Internal report attachment configuration for custom reports."""
+
+    __tablename__ = "custom_report_attachments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    custom_report_id = Column(
+        Integer, ForeignKey("custom_reports.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kpi_id = Column(
+        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kpi_field_id = Column(
+        Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title = Column(String(255), nullable=False)
+    selected_columns = Column(JSON, nullable=True)  # list of sub-field keys
+    filters = Column(JSON, nullable=True)  # advanced filters JSON
+    sort_order = Column(Integer, default=0, nullable=False)
+
+    custom_report = relationship("CustomReport", back_populates="attachments")
+    kpi = relationship("KPI")
+    kpi_field = relationship("KPIField")
+
 
 
 

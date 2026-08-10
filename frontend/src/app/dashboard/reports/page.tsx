@@ -270,7 +270,7 @@ export default function ReportsPage() {
                 <Link className="btn btn-primary" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
                   View print report
                 </Link>
-                {canManageAssignments && (
+                {canManageAssignments && userRole !== "SUPER_ADMIN" && (
                   <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
                     Assign users
                   </Link>

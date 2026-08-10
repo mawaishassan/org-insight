@@ -81,12 +81,15 @@ export default function DashboardViewPage() {
       if (res?.errors && res.errors.length > 0) {
         res.errors.forEach((err) => toast.error(err, { duration: 6000 }));
       }
+      const imported = res?.total_imported_rows ?? 0;
       if (res?.synced_count && res.synced_count > 0) {
-        toast.success(`Successfully synced ${res.synced_count} Odoo integration(s).`);
-        setRefreshCount((prev) => prev + 1);
+        toast.success(`Successfully synced ${res.synced_count} Odoo integration(s) (${imported} rows imported). Refreshing graphs...`);
       } else {
-        toast.success("Odoo sync completed.");
+        toast.success("Odoo sync completed. Refreshing graphs...");
       }
+      setTimeout(() => {
+        window.location.reload();
+      }, 800);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to sync Odoo data");
     } finally {

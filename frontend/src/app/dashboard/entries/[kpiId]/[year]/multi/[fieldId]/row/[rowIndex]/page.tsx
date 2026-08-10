@@ -521,6 +521,7 @@ export default function MultiItemRowDetail() {
   const [rowCanEdit, setRowCanEdit] = useState<boolean>(true);
   const [rowCanDelete, setRowCanDelete] = useState<boolean>(true);
   const [canAddRow, setCanAddRow] = useState<boolean>(false);
+  const [isJoinedKpi, setIsJoinedKpi] = useState<boolean>(false);
 
   const effectiveOrgId = useMemo(
     () => (organizationIdFromUrl ? Number(organizationIdFromUrl) : meOrgId ?? undefined),
@@ -659,7 +660,7 @@ export default function MultiItemRowDetail() {
       if (loadId !== rowPageContextLoadGenRef.current) return;
       setEntryId(forPeriod.id);
 
-      const pageContext = await api<{ can_add_row: boolean }>(
+      const pageContext = await api<{ can_add_row: boolean; is_joined?: boolean }>(
         `/entries/multi-items/page-context?${new URLSearchParams({
           kpi_id: String(kpiId),
           year: String(year),
@@ -671,6 +672,7 @@ export default function MultiItemRowDetail() {
       ).catch(() => null);
       if (loadId !== rowPageContextLoadGenRef.current) return;
       setCanAddRow(pageContext?.can_add_row === true);
+      setIsJoinedKpi(pageContext?.is_joined === true);
 
       if (!isNew && rowIndex != null) {
         // Fetch the specific row's page with a server-allowed page_size (<= 200)
@@ -718,7 +720,7 @@ export default function MultiItemRowDetail() {
   }, [token, effectiveOrgId, kpiId, year, fieldId, rowIndex, isNew, periodKey]);
 
   const subFields = field?.sub_fields ?? [];
-  const isRowEditable = rowCanEdit && (isNew ? canAddRow : true);
+  const isRowEditable = rowCanEdit && (isNew ? canAddRow : true) && !isJoinedKpi;
 
   const isSubFieldVisible = useCallback((sf: any, currentData: Record<string, any>): boolean => {
     return evaluateSubFieldVisible(sf, subFields as any, currentData);
@@ -1149,7 +1151,7 @@ export default function MultiItemRowDetail() {
                     </button>
                   )
                 )}
-                {!isNew && rowCanDelete && (
+                {!isNew && rowCanDelete && !isJoinedKpi && (
                   <button type="button" className="btn" onClick={handleDelete} style={{ color: "var(--error)" }} disabled={saving}>
                     Delete
                   </button>

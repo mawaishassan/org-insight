@@ -104,8 +104,14 @@ async def odoo_authenticate(cfg: OrganizationOdooConfig) -> str:
         },
         "id": None,
     }
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(cfg.login_url, json=payload)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(cfg.login_url, json=payload)
+    except httpx.HTTPError as e:
+        raise ValueError(f"Odoo server connection failed: {e}") from e
+    except Exception as e:
+        raise ValueError(f"Odoo request error: {e}") from e
+
     if resp.status_code < 200 or resp.status_code >= 300:
         raise ValueError(f"Odoo login failed (HTTP {resp.status_code})")
     try:
@@ -173,7 +179,7 @@ async def odoo_fetch_items(
     headers: dict[str, str] = {"Content-Type": "application/json"}
     cookies = {"session_id": session_id}
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
             cfg.data_fetch_url,
             json=body if isinstance(body, (dict, list)) else {"payload": body},

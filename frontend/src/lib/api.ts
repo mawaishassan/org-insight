@@ -158,24 +158,19 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
 
 export async function api<T>(
   path: string,
-  options: RequestInit & { token?: string } = {}
+  options: RequestInit & { token?: string; useCache?: boolean; cacheTTL?: number } = {}
 ): Promise<T> {
-  const { token, body, ...init } = options;
+  const { token, body, useCache, cacheTTL, ...init } = options;
   const url = getApiUrl(path);
   const method = (init.method || "GET").toUpperCase();
 
-  // Fast cache for /auth/me to avoid repeating this call across pages/components.
-  // Token-scoped and short-lived to prevent stale UI after role/org changes.
-  if ((method === "GET" || method === "HEAD") && url.endsWith("/api/auth/me") && token) {
-    const cached = meCacheByToken.get(token);
-    if (cached && Date.now() - cached.ts < ME_CACHE_TTL_MS) {
-      return cached.data as T;
-    }
+  const isGet = method === "GET" || method === "HEAD";
+
+  // Invalidate cache on mutate
+  if (!isGet) {
+    responseCache.clear();
   }
 
-  // In-flight de-duplication: if multiple components trigger the exact same request at the same time
-  // (common with React strict mode + shared layout fetching), share one Promise and one network call.
-  // Key includes token because auth can change the response.
   const dedupeKey = (() => {
     const b =
       body === undefined || body === null
@@ -192,11 +187,37 @@ export async function api<T>(
     return `${method} ${url} token=${token || ""} body=${b}`;
   })();
 
-  // Only dedupe safe idempotent methods by default.
-  const canDedupe = method === "GET" || method === "HEAD";
+  const canDedupe = isGet;
+
+  // Cache hit check
+  if (canDedupe && useCache) {
+    const cached = responseCache.get(dedupeKey);
+    const ttl = cacheTTL !== undefined ? cacheTTL : CACHE_TTL_MS;
+    if (cached && Date.now() - cached.ts < ttl) {
+      return cached.data as T;
+    }
+  }
+
+  if (isGet && url.endsWith("/api/auth/me") && token) {
+    const cached = meCacheByToken.get(token);
+    if (cached && Date.now() - cached.ts < ME_CACHE_TTL_MS) {
+      return cached.data as T;
+    }
+  }
+
   if (canDedupe) {
     const existing = inflightRequests.get(dedupeKey);
     if (existing) return existing as Promise<T>;
+  }
+
+  const cancelKey = `${method} ${path}`;
+
+  let controller: AbortController | undefined = undefined;
+  if (isGet && !options.signal) {
+    controller = new AbortController();
+    init.signal = controller.signal;
+  } else if (options.signal) {
+    init.signal = options.signal;
   }
 
   const headers: HeadersInit = {
@@ -210,31 +231,48 @@ export async function api<T>(
   }
 
   const run = (async () => {
-    const res = await fetch(url, { ...init, body, headers });
-    if (!res.ok) {
-      if (res.status === 401 && typeof window !== "undefined") {
-        import("./auth").then(({ clearTokens }) => {
-          clearTokens();
-          window.location.href = "/login";
-        });
-        return new Promise(() => {}) as Promise<T>;
+    try {
+      const res = await fetch(url, { ...init, body, headers });
+      if (!res.ok) {
+        if (res.status === 401 && typeof window !== "undefined") {
+          import("./auth").then(({ clearTokens }) => {
+            clearTokens();
+            window.location.href = "/login";
+          });
+          throw new Error("Unauthorized: Session expired. Redirecting to login...");
+        }
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        const message = Array.isArray(err.detail)
+          ? err.detail.map((e: { msg: string }) => e.msg).join(", ")
+          : (err.detail || res.statusText);
+        const error = new Error(typeof message === "string" ? message : "Request failed") as Error & {
+          errors?: unknown[];
+        };
+        if (Array.isArray(err.errors)) error.errors = err.errors;
+        throw error;
       }
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      const message = Array.isArray(err.detail)
-        ? err.detail.map((e: { msg: string }) => e.msg).join(", ")
-        : (err.detail || res.statusText);
-      const error = new Error(typeof message === "string" ? message : "Request failed") as Error & {
-        errors?: unknown[];
-      };
-      if (Array.isArray(err.errors)) error.errors = err.errors;
+      if (res.status === 204) return undefined as T;
+      const json = (await res.json()) as T;
+      if (isGet && url.endsWith("/api/auth/me") && token) {
+        meCacheByToken.set(token, { ts: Date.now(), data: json as unknown });
+      }
+      if (canDedupe && useCache) {
+        responseCache.set(dedupeKey, { ts: Date.now(), data: json });
+      }
+      return json;
+    } catch (error: any) {
+      const isAborted =
+        Boolean(controller?.signal?.aborted) ||
+        Boolean(init.signal?.aborted) ||
+        Boolean(options.signal?.aborted) ||
+        error.name === "AbortError" ||
+        (typeof error.message === "string" && error.message.toLowerCase().includes("aborted"));
+
+      if (isAborted) {
+        throw new Error("Request cancelled or timed out.");
+      }
       throw error;
     }
-    if (res.status === 204) return undefined as T;
-    const json = (await res.json()) as T;
-    if ((method === "GET" || method === "HEAD") && url.endsWith("/api/auth/me") && token) {
-      meCacheByToken.set(token, { ts: Date.now(), data: json as unknown });
-    }
-    return json;
   })();
 
   if (canDedupe) {
@@ -248,6 +286,9 @@ export async function api<T>(
 }
 
 const inflightRequests = new Map<string, Promise<unknown>>();
+const responseCache = new Map<string, { ts: number; data: unknown }>();
+const activeControllers = new Map<string, AbortController>();
+const CACHE_TTL_MS = 30_000;
 
 const ME_CACHE_TTL_MS = 30_000;
 const meCacheByToken = new Map<string, { ts: number; data: unknown }>();

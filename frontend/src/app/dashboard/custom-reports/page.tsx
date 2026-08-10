@@ -234,24 +234,6 @@ export default function CustomReportsPage() {
         </button>
       </div>
 
-      <div style={{ display: "flex", gap: "1rem", alignItems: "center", marginBottom: "1.5rem", padding: "1rem", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8 }}>
-        <label htmlFor="org-select" style={{ fontWeight: 600, fontSize: "0.9rem", color: "var(--text)" }}>Select Organization:</label>
-        <select
-          id="org-select"
-          value={selectedOrgId ?? ""}
-          onChange={(e) => {
-            const val = e.target.value ? Number(e.target.value) : null;
-            setSelectedOrgId(val);
-            router.replace(`/dashboard/custom-reports?organization_id=${val || ""}`);
-          }}
-          style={{ padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.9rem", minWidth: 260 }}
-        >
-          {organizations.map((org) => (
-            <option key={org.id} value={org.id}>{org.name}</option>
-          ))}
-        </select>
-      </div>
-
       {error && <p className="form-error" style={{ marginBottom: "1.5rem" }}>{error}</p>}
 
       {loading ? (
@@ -284,13 +266,6 @@ export default function CustomReportsPage() {
                         style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
                       >
                         Design Layout
-                      </Link>
-                      <Link
-                        className="btn"
-                        href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`}
-                        style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
-                      >
-                        Assign Users
                       </Link>
                       <button
                         type="button"

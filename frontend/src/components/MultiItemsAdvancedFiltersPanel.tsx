@@ -33,6 +33,7 @@ interface MultiItemsAdvancedFiltersPanelProps {
   showCloseButton?: boolean;
   entryId?: number | null;
   fieldId?: number | null;
+  year?: number | null;
 }
 
 export default function MultiItemsAdvancedFiltersPanel({
@@ -50,6 +51,7 @@ export default function MultiItemsAdvancedFiltersPanel({
   showCloseButton = true,
   entryId = null,
   fieldId = null,
+  year = null,
 }: MultiItemsAdvancedFiltersPanelProps) {
   // Load source KPI fields as needed
   React.useEffect(() => {
@@ -139,6 +141,9 @@ export default function MultiItemsAdvancedFiltersPanel({
       if (entryId != null) {
         params.set("entry_id", String(entryId));
       }
+      if (year != null) {
+        params.set("year", String(year));
+      }
 
       api<{ values: { value: string; count: number }[] }>(`/entries/multi-items/column-unique-values?${params.toString()}`, { token })
         .then((r) => {
@@ -148,7 +153,7 @@ export default function MultiItemsAdvancedFiltersPanel({
           setColUniqueValues((prev) => ({ ...prev, [fieldKey]: [] }));
         });
     });
-  }, [token, effectiveOrgId, entryId, fieldId, filterDraft, colUniqueValues]);
+  }, [token, effectiveOrgId, entryId, fieldId, filterDraft, colUniqueValues, year]);
 
   const setRow = (idx: number, patch: Partial<MultiFilterConditionRow>) => {
     setFilterDraft((prev) => prev.map((x, i) => (i === idx ? { ...x, ...patch } : x)));

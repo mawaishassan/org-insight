@@ -29,15 +29,22 @@ class DataExportAuth:
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    token: str | None = None,
 ) -> User:
     """Resolve current user from JWT. Raises 401 if invalid or missing."""
-    if not credentials:
+    token_val = None
+    if credentials:
+        token_val = credentials.credentials
+    elif token:
+        token_val = token
+
+    if not token_val:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    payload = decode_token(credentials.credentials)
+    payload = decode_token(token_val)
     if not payload or payload.get("type") != "access":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

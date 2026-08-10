@@ -35,29 +35,95 @@ async def load_multi_line_row_dicts(
     entry_id: int,
     field: KPIField,
     row_indices: list[int] | None = None,
+    current_user_id: int | None = None,
 ) -> list[tuple[int, dict]]:
-    """Load rows then cells (two indexed queries). Avoids one huge JOIN that can stall ORM dedup."""
-    q = (
-        select(KpiMultiLineRow)
+    """Optimized direct load of multi_line rows and cells to scale efficiently for large entries."""
+    from app.core.models import KPI
+    kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
+    kpi = kpi_res.scalar_one_or_none()
+        
+    if kpi and getattr(kpi, "is_joined", False):
+        from app.core.models import KPIEntry
+        entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
+        entry = entry_res.scalar_one_or_none()
+        if not entry:
+            return []
+            
+        from app.entries.load_joined import load_joined_multi_line_rows
+        combined_rows = await load_joined_multi_line_rows(
+            db,
+            joined_field=field,
+            organization_id=entry.organization_id,
+            year=entry.year,
+            period_key=entry.period_key,
+            current_user_id=current_user_id
+        )
+        out = [(idx, r) for idx, r in enumerate(combined_rows)]
+        if row_indices is not None:
+            idx_set = {int(x) for x in row_indices}
+            out = [(i, r) for i, r in out if i in idx_set]
+        return out
+
+    q_rows = (
+        select(KpiMultiLineRow.id, KpiMultiLineRow.row_index)
         .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
         .order_by(KpiMultiLineRow.row_index)
-        .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
     )
     if row_indices is not None:
         idx = [int(i) for i in row_indices if isinstance(i, int)]
         if not idx:
             return []
-        q = q.where(KpiMultiLineRow.row_index.in_(idx))
-    res = await db.execute(q)
-    rows_orm = list(res.scalars().all())
-    out: list[tuple[int, dict]] = []
-    for r in rows_orm:
-        data: dict[str, Any] = {}
-        for c in getattr(r, "cells", None) or []:
-            sf = getattr(c, "sub_field", None)
-            key = getattr(sf, "key", None) if sf is not None else None
-            if not key:
-                continue
-            data[str(key)] = _cell_value_raw(c)
-        out.append((int(getattr(r, "row_index", 0)), data))
+        q_rows = q_rows.where(KpiMultiLineRow.row_index.in_(idx))
+        
+    rows_res = await db.execute(q_rows)
+    rows_list = rows_res.all()
+    if not rows_list:
+        return []
+        
+    row_ids = [r[0] for r in rows_list]
+    
+    # Load cells in chunks to avoid parameter limits
+    from app.core.models import KPIFieldSubField
+    cells_list = []
+    chunk_size = 5000
+    for i in range(0, len(row_ids), chunk_size):
+        chunk_ids = row_ids[i:i+chunk_size]
+        cells_res = await db.execute(
+            select(
+                KpiMultiLineCell.row_id,
+                KpiMultiLineCell.value_text,
+                KpiMultiLineCell.value_number,
+                KpiMultiLineCell.value_boolean,
+                KpiMultiLineCell.value_date,
+                KpiMultiLineCell.value_json,
+                KPIFieldSubField.key
+            )
+            .join(KPIFieldSubField, KPIFieldSubField.id == KpiMultiLineCell.sub_field_id)
+            .where(KpiMultiLineCell.row_id.in_(chunk_ids))
+        )
+        cells_list.extend(cells_res.all())
+        
+    # Reconstruct dictionary
+    from collections import defaultdict
+    cells_by_row = defaultdict(dict)
+    for row_id, vt, vn, vb, vd, vj, sf_key in cells_list:
+        raw_val = None
+        if vj is not None:
+            raw_val = vj
+        elif vt is not None:
+            raw_val = vt
+        elif vn is not None:
+            raw_val = vn
+        elif vb is not None:
+            raw_val = vb
+        elif vd is not None:
+            try:
+                raw_val = vd.isoformat()
+            except Exception:
+                raw_val = str(vd)
+        cells_by_row[row_id][str(sf_key)] = raw_val
+        
+    out = []
+    for rid, r_idx in rows_list:
+        out.append((int(r_idx), cells_by_row.get(rid, {})))
     return out

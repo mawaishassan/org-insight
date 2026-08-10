@@ -149,6 +149,8 @@ interface KpiRow {
   domain_tags?: DomainTagRef[];
   category_tags?: CategoryTagRef[];
   organization_tags?: OrganizationTagRef[];
+  is_joined?: boolean;
+  joined_config?: any;
 }
 
 interface KpiField {
@@ -207,6 +209,7 @@ const kpiCreateSchema = z.object({
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
+  is_joined: z.boolean().optional(),
 });
 
 const kpiUpdateSchema = z.object({
@@ -216,6 +219,7 @@ const kpiUpdateSchema = z.object({
   entry_mode: z.enum(["manual", "api"]),
   api_endpoint_url: z.string().max(2048).optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
+  is_joined: z.boolean().optional(),
 });
 
 const tagCreateSchema = z.object({
@@ -408,6 +412,7 @@ export default function OrganizationDetailPage() {
     tagCount: number;
     reportCount: number;
     dashboardCount: number;
+    customReportCount: number;
   } | null>(null);
 
   useEffect(() => {
@@ -422,8 +427,9 @@ export default function OrganizationDetailPage() {
       api<OrgTagRow[]>(`/organizations/${orgId}/tags`, { token }),
       api<{ id: number }[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token }),
       api<{ id: number }[]>(`/dashboards?${qs({ organization_id: orgId })}`, { token }),
+      api<{ id: number }[]>(`/custom-reports?${qs({ organization_id: orgId })}`, { token }),
     ])
-      .then(([domainsList, kpisList, tagsList, reportsList, dashboardsList]) => {
+      .then(([domainsList, kpisList, tagsList, reportsList, dashboardsList, customReportsList]) => {
         const categoryCount = domainsList.reduce((s, d) => s + (d.summary?.category_count ?? 0), 0);
         const kpiManual = kpisList.filter((k) => (k.entry_mode ?? "manual") === "manual").length;
         const kpiApi = kpisList.filter((k) => k.entry_mode === "api").length;
@@ -436,6 +442,7 @@ export default function OrganizationDetailPage() {
           tagCount: tagsList.length,
           reportCount: reportsList.length,
           dashboardCount: dashboardsList.length,
+          customReportCount: customReportsList.length,
         });
       })
       .catch(() => setOverviewSummary(null));
@@ -648,6 +655,7 @@ function OrganizationOverviewCards({
     tagCount: number;
     reportCount: number;
     dashboardCount: number;
+    customReportCount: number;
   } | null;
   updateUrl: (tab: TabId, sub?: SettingsSubId) => void;
   userRole: UserRole | null;
@@ -718,6 +726,24 @@ function OrganizationOverviewCards({
               "Charts, tables, and shared views",
             ],
             href: `/dashboard/dashboards?organization_id=${orgId}`,
+          },
+          {
+            id: "custom-reports",
+            title: "Custom Reports",
+            icon: (
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6" />
+                <path d="M16 13H8" />
+                <path d="M16 17H8" />
+                <circle cx="10" cy="9" r="1" />
+              </svg>
+            ),
+            lines: [
+              `${summary.customReportCount} custom report template${summary.customReportCount !== 1 ? "s" : ""}`,
+              "Design layouts and assign to organization users",
+            ],
+            href: `/dashboard/custom-reports?organization_id=${orgId}`,
           },
         ]
       : []),
@@ -2238,6 +2264,7 @@ function KpisSection({
       entry_mode: "manual",
       api_endpoint_url: "",
       organization_tag_ids: [],
+      is_joined: false,
     },
   });
 
@@ -2253,6 +2280,7 @@ function KpisSection({
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
           organization_tag_ids: data.organization_tag_ids ?? [],
+          is_joined: !!data.is_joined,
         }),
         token,
       });
@@ -2263,6 +2291,7 @@ function KpisSection({
         entry_mode: "manual",
         api_endpoint_url: "",
         organization_tag_ids: [],
+        is_joined: false,
       });
       setShowCreate(false);
       loadList();
@@ -2284,6 +2313,7 @@ function KpisSection({
           entry_mode: data.entry_mode ?? "manual",
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
           organization_tag_ids: data.organization_tag_ids,
+          is_joined: !!data.is_joined,
         }),
         token,
       });
@@ -2483,6 +2513,19 @@ function KpisSection({
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", maxWidth: 560, borderCollapse: "collapse", fontSize: "0.9rem" }}>
                   <tbody>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ padding: "0.5rem 0.75rem 0.5rem 0", fontWeight: 500, width: 140 }}>Joined KPI</td>
+                      <td style={{ padding: "0.5rem 0" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontWeight: 600 }}>
+                          <input
+                            type="checkbox"
+                            {...createForm.register("is_joined")}
+                            style={{ cursor: "pointer" }}
+                          />
+                          Joined KPI (Virtual KPI)
+                        </label>
+                      </td>
+                    </tr>
                     <tr style={{ borderBottom: "1px solid var(--border)" }}>
                       <td style={{ padding: "0.5rem 0.75rem 0.5rem 0", fontWeight: 500, width: 140 }}>Entry mode</td>
                       <td style={{ padding: "0.5rem 0" }}>
@@ -2805,6 +2848,7 @@ function KpiEditForm({
       entry_mode: kpi.entry_mode === "api" ? "api" : "manual",
       api_endpoint_url: kpi.api_endpoint_url ?? "",
       organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
+      is_joined: !!kpi.is_joined,
     },
   });
   const isApiMode = watch("entry_mode") === "api";
@@ -2868,6 +2912,16 @@ function KpiEditForm({
       <div className="form-group">
         <label>Sort order</label>
         <input type="number" min={0} {...register("sort_order")} />
+      </div>
+      <div className="form-group">
+        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontWeight: 600 }}>
+          <input
+            type="checkbox"
+            {...register("is_joined")}
+            style={{ cursor: "pointer" }}
+          />
+          Joined KPI (Virtual KPI)
+        </label>
       </div>
       <div className="form-group">
         <label>Entry mode</label>
@@ -4266,7 +4320,7 @@ function ReportsSection({
   const openReportPrint = (templateId: number, year: number) => {
     setPrintLoadingId(templateId);
     setError(null);
-    const url = `/reports/templates/${templateId}/generate?format=json&year=${year}&_t=${Date.now()}`;
+    const url = `/reports/templates/${templateId}/generate?format=json&year=${year}`;
     api<ReportData>(url, { token, cache: "no-store" })
       .then((data) => {
         const doc = buildReportPrintDocument(data);

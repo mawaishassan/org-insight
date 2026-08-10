@@ -551,7 +551,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     { href: kpisHref, label: "KPIs", show: role === "ORG_ADMIN" || role === "SUPER_ADMIN" },
     { href: dashboardsHref, label: "Dashboards", show: true },
     { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
-    { href: customReportsHref, label: "Custom Reports", show: isSuperAdmin },
+    { href: customReportsHref, label: "Custom Reports", show: isSuperAdmin && selectedOrgId != null },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },
   ].filter((x) => x.show);
 
