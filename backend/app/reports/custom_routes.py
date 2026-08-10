@@ -177,10 +177,25 @@ async def get_report_details(
         sections_data.append({
             "id": sec.id,
             "kpi_id": sec.kpi_id,
-            "kpi_name": sec.kpi.name if sec.kpi else f"KPI #{sec.kpi_id}",
+            "kpi_name": sec.kpi.name if sec.kpi else (f"KPI #{sec.kpi_id}" if sec.kpi_id is not None else "Custom Section"),
             "custom_header": sec.custom_header,
             "sort_order": sec.sort_order,
             "fields": fields_data
+        })
+
+    # Serialize attachments
+    attachments_data = []
+    for att in report.attachments:
+        attachments_data.append({
+            "id": att.id,
+            "kpi_id": att.kpi_id,
+            "kpi_field_id": att.kpi_field_id,
+            "title": att.title,
+            "selected_columns": att.selected_columns,
+            "filters": att.filters,
+            "sort_order": att.sort_order,
+            "kpi_name": att.kpi.name if att.kpi else f"KPI #{att.kpi_id}",
+            "field_name": att.kpi_field.name if att.kpi_field else f"Field #{att.kpi_field_id}"
         })
 
     return {
@@ -188,7 +203,8 @@ async def get_report_details(
         "organization_id": report.organization_id,
         "name": report.name,
         "description": report.description,
-        "sections": sections_data
+        "sections": sections_data,
+        "attachments": attachments_data
     }
 
 
@@ -267,10 +283,11 @@ async def save_layout(
             status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may edit custom report layouts"
         )
     org_id = _org_id(current_user, organization_id)
-    ok = await save_custom_report_layout(db, id, org_id, body.sections)
+    ok = await save_custom_report_layout(db, id, org_id, body.sections, body.attachments)
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
     await db.commit()
+
 
 
 @router.get("/{id}/generate")
@@ -279,6 +296,7 @@ async def generate_report(
     year: int | None = Query(None),
     organization_id: int | None = Query(None),
     preview: bool = Query(True),
+    include_attachments: bool = Query(True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -287,13 +305,13 @@ async def generate_report(
     if not await check_custom_report_access(db, current_user, id, "generate"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
-    cache_key = (id, org_id, year or "current", "preview" if preview else "full")
+    cache_key = (id, org_id, year or "current", "preview" if preview else "full", include_attachments)
     cached = CUSTOM_REPORT_CACHE.get(cache_key)
     if cached:
         return cached
 
     data = await generate_custom_report_data(
-        db, id, org_id, year=year, include_drafts=False, preview=preview
+        db, id, org_id, year=year, include_drafts=False, preview=preview, include_attachments=include_attachments
     )
     if not data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
@@ -314,6 +332,7 @@ async def generate_report_stream(
     id: int,
     year: int | None = Query(None),
     organization_id: int | None = Query(None),
+    include_attachments: bool = Query(True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -331,7 +350,7 @@ async def generate_report_stream(
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as stream_db:
             try:
-                async for chunk in stream_custom_report_data(stream_db, id, org_id, year):
+                async for chunk in stream_custom_report_data(stream_db, id, org_id, year, include_attachments=include_attachments):
                     yield json.dumps(chunk) + "\n"
             except Exception as e:
                 logger.exception("Error during custom report streaming")
@@ -346,6 +365,7 @@ async def generate_report_async(
     background_tasks: BackgroundTasks,
     year: int | None = Query(None),
     organization_id: int | None = Query(None),
+    include_attachments: bool = Query(True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -355,7 +375,7 @@ async def generate_report_async(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
     task_id = str(uuid.uuid4())
-    background_tasks.add_task(run_background_generation_task, task_id, id, org_id, year)
+    background_tasks.add_task(run_background_generation_task, task_id, id, org_id, year, include_attachments)
     
     return {"task_id": task_id, "status": "processing", "progress": 0}
 
@@ -472,20 +492,33 @@ async def export_custom_report(
     year: int = Query(...),
     format: str = Query("pdf"), # "pdf" | "docx" | "xlsx"
     organization_id: int | None = Query(None),
+    attachment_ids: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Export custom report as PDF, DOCX, or XLSX."""
+    """Export custom report as PDF, DOCX, or XLSX (or ZIP for multiple attachments)."""
     org_id = _org_id(current_user, organization_id)
     if not await check_custom_report_access(db, current_user, id, "export"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
-    from app.reports.custom_service import export_custom_report_file
+    parsed_att_ids = None
+    if attachment_ids:
+        parsed_att_ids = [int(x.strip()) for x in attachment_ids.split(",") if x.strip().isdigit()]
+
     try:
-        file_bytes, filename, content_type = await export_custom_report_file(
-            db, id, org_id, year, format
-        )
+        if parsed_att_ids:
+            from app.reports.custom_service import export_custom_report_attachments
+            file_bytes, filename, content_type = await export_custom_report_attachments(
+                db, id, org_id, year, format, attachment_ids=parsed_att_ids
+            )
+        else:
+            from app.reports.custom_service import export_custom_report_file
+            file_bytes, filename, content_type = await export_custom_report_file(
+                db, id, org_id, year, format
+            )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to export report: {str(e)}"

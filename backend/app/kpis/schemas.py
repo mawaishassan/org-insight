@@ -15,6 +15,8 @@ class KPICreate(BaseModel):
     domain_ids: list[int] = Field(default_factory=list, description="Domain tags to attach")
     category_ids: list[int] = Field(default_factory=list, description="Category tags to attach (one per domain)")
     organization_tag_ids: list[int] = Field(default_factory=list, description="Organization tags for search")
+    is_joined: bool = Field(default=False, description="Is Joined (Virtual) KPI")
+    joined_config: dict | None = Field(default=None, description="Joined KPI mapping configuration")
 
 
 class KPIAssignUserBody(BaseModel):
@@ -139,6 +141,8 @@ class KPIUpdate(BaseModel):
     card_display_field_ids: list[int] | None = Field(None, description="Field IDs to show on domain KPI card (order preserved)")
     time_dimension: str | None = Field(None, description="yearly, half_yearly, quarterly, monthly; empty/null = inherit org")
     carry_forward_data: bool | None = Field(None, description="Non-cyclic: new period entries copy values from previous period until changed")
+    is_joined: bool | None = Field(None, description="Is Joined (Virtual) KPI")
+    joined_config: dict | None = Field(None, description="Joined KPI mapping configuration")
 
 
 class DomainTagRef(BaseModel):
@@ -211,6 +215,8 @@ class KPIResponse(BaseModel):
     assigned_users: list[AssignedUserRef] = []
     assigned_roles: list[AssignedRoleRef] = []
     used_in_reports: list[UsedInReportRef] = []
+    is_joined: bool = False
+    joined_config: dict | None = None
 
     class Config:
         from_attributes = True

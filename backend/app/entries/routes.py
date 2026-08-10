@@ -386,7 +386,7 @@ async def _replace_multi_line_rows_from_dicts(
         await db.flush()
 
 
-def _entry_to_response(entry):
+async def _entry_to_response(db: AsyncSession, entry: KPIEntry, current_user_id: int | None = None) -> EntryResponse:
     entered_by_name = None
     if "user" in entry.__dict__ and entry.user:
         u = entry.user
@@ -401,6 +401,17 @@ def _entry_to_response(entry):
     if "last_modified_by" in entry.__dict__ and entry.last_modified_by:
         mod_u = entry.last_modified_by
         last_modified_by_name = (getattr(mod_u, "full_name", None) or getattr(mod_u, "username", None) or "").strip() or getattr(mod_u, "username", None)
+
+    # Load KPI to check if it is joined
+    from app.core.models import KPI
+    kpi_res = await db.execute(select(KPI).where(KPI.id == entry.kpi_id).options(selectinload(KPI.fields)))
+    kpi = kpi_res.scalar_one_or_none()
+    
+    if kpi and getattr(kpi, "is_joined", False):
+        from app.entries.load_joined import load_joined_scalar_values
+        field_values = await load_joined_scalar_values(db, joined_kpi=kpi, entry_id=entry.id, current_user_id=current_user_id)
+    else:
+        field_values = entry.field_values or []
 
     return EntryResponse(
         id=entry.id,
@@ -425,7 +436,7 @@ def _entry_to_response(entry):
                 value_boolean=fv.value_boolean,
                 value_date=fv.value_date,
             )
-            for fv in (entry.field_values or [])
+            for fv in field_values
         ],
         entered_by_user_name=entered_by_name,
         updated_at=getattr(entry, "updated_at", None),
@@ -444,6 +455,23 @@ async def _load_multi_items_field(db: AsyncSession, org_id: int, field_id: int) 
     if not field or field.field_type != FieldType.multi_line_items:
         return None
     return field
+
+
+async def _assert_field_not_joined(db: AsyncSession, field_id: int):
+    """Raise HTTP 403 Forbidden if the field belongs to a Joined (Virtual) KPI."""
+    from app.core.models import KPI
+    res = await db.execute(
+        select(KPIField)
+        .join(KPI, KPI.id == KPIField.kpi_id)
+        .where(KPIField.id == field_id)
+        .options(selectinload(KPIField.kpi))
+    )
+    field = res.scalar_one_or_none()
+    if field and field.kpi and getattr(field.kpi, "is_joined", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Joined KPI is read-only. Modify data in the source KPIs instead."
+        )
 
 
 def _serialize_multi_item_cell_for_xlsx(val: Any, field_type: FieldType | str | None) -> Any:
@@ -1069,6 +1097,7 @@ class MultiItemsPageContextResponse(BaseModel):
     kpi_level_can_edit: bool
     can_add_row: bool
     can_export: bool = False
+    is_joined: bool = False
 
 
 class EntryIdResponse(BaseModel):
@@ -1146,6 +1175,7 @@ async def upload_multi_items_excel(
         getattr(current_user, "id", None),
     )
     org_id = _org_id(current_user, organization_id)
+    await _assert_field_not_joined(db, field_id)
 
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
@@ -1470,7 +1500,10 @@ async def get_column_unique_values(
         # Load time dimension mapping to find correct entry
         org = await db.get(Organization, org_id)
         org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
-        kpi_td_raw = getattr(field.kpi, "time_dimension", None) if hasattr(field, "kpi") and field.kpi else None
+        from app.core.models import KPI
+        kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
+        kpi = kpi_res.scalar_one_or_none()
+        kpi_td_raw = getattr(kpi, "time_dimension", None) if kpi else None
         kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
         effective_td = effective_kpi_time_dimension(kpi_td, org_td)
 
@@ -1922,7 +1955,12 @@ async def list_multi_items_rows(
 
     # Fast path: if caller isn't using search and filters are SQL-able, do true SQL pagination.
     # If filters are present but unsupported (e.g. reference_resolution), fall back to the existing slow path.
+    from app.core.models import KPI
+    kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
+    kpi = kpi_res.scalar_one_or_none()
     use_fast_sql_paging = not search and (not filters or sql_filters_spec is not None)
+    if kpi and getattr(kpi, "is_joined", False):
+        use_fast_sql_paging = False
     rows: list[tuple[int, dict]] = []
 
     # Restrict to sub_fields (columns) the user can view.
@@ -2306,7 +2344,7 @@ async def list_multi_items_rows(
 
     # Slow path: load all rows into memory for complex search/filters/sort_by.
     # (This is kept for feature parity; we can iterate to push these into SQL later.)
-    rows: list[tuple[int, dict]] = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+    rows: list[tuple[int, dict]] = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, current_user_id=current_user.id)
 
     # Restrict keys for search/sort/filter operations.
     subfield_key_set = {str(getattr(s, "key", "")) for s in (field.sub_fields or []) if getattr(s, "key", None)}
@@ -2463,6 +2501,7 @@ async def add_multi_items_row(
 ):
     """Append a new row to relational multi_line_items storage for an entry+field."""
     org_id = _org_id(current_user, organization_id)
+    await _assert_field_not_joined(db, field_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
     )
@@ -2584,6 +2623,7 @@ async def update_multi_items_row(
 ):
     """Update a single row in relational multi_line_items storage."""
     org_id = _org_id(current_user, organization_id)
+    await _assert_field_not_joined(db, field_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
     )
@@ -2748,6 +2788,7 @@ async def update_multi_items_row_cell(
     without overwriting the rest of the row.
     """
     org_id = _org_id(current_user, organization_id)
+    await _assert_field_not_joined(db, field_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
     )
@@ -3040,6 +3081,7 @@ async def delete_multi_items_row(
 ):
     """Delete a single row in relational multi_line_items storage."""
     org_id = _org_id(current_user, organization_id)
+    await _assert_field_not_joined(db, field_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
     )
@@ -3091,6 +3133,7 @@ async def bulk_delete_multi_items_rows(
 ):
     """Bulk delete rows in relational multi_line_items storage by index list."""
     org_id = _org_id(current_user, organization_id)
+    await _assert_field_not_joined(db, field_id)
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
     )
@@ -3498,35 +3541,40 @@ async def sync_multi_items_from_odoo(
         
         unique_att_ids = list(set(all_att_ids))
         
-        # 2. Download all files in parallel
+        # 2. Download all files in parallel with controlled concurrency
         downloaded_data = {}
         if unique_att_ids:
             import httpx
             import asyncio
             
-            async def fetch_one(att_id):
-                target_url = (
-                    att_template.replace("{ATTACHMENT_ID}", str(att_id))
-                    .replace("{attachment_id}", str(att_id))
-                    .replace("__ATTACHMENT_ID__", str(att_id))
-                    .replace("{SESSION_ID}", session_id)
-                    .replace("{session_id}", session_id)
-                    .replace("__SESSION_ID__", session_id)
-                )
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-                    resp = await client.get(target_url, cookies={"session_id": session_id})
-                    if resp.status_code < 200 or resp.status_code >= 300:
-                        raise ValueError(f"HTTP {resp.status_code}")
-                    return att_id, resp.content, dict(resp.headers)
+            sem = asyncio.Semaphore(5)
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                async def fetch_one(att_id):
+                    async with sem:
+                        target_url = (
+                            att_template.replace("{ATTACHMENT_ID}", str(att_id))
+                            .replace("{attachment_id}", str(att_id))
+                            .replace("__ATTACHMENT_ID__", str(att_id))
+                            .replace("{SESSION_ID}", session_id)
+                            .replace("{session_id}", session_id)
+                            .replace("__SESSION_ID__", session_id)
+                        )
+                        try:
+                            resp = await client.get(target_url, cookies={"session_id": session_id})
+                            if resp.status_code < 200 or resp.status_code >= 300:
+                                return Exception(f"HTTP {resp.status_code}")
+                            return att_id, resp.content, dict(resp.headers)
+                        except Exception as ex:
+                            return Exception(f"Download failed: {ex}")
 
-            tasks = [fetch_one(aid) for aid in unique_att_ids]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for aid, res in zip(unique_att_ids, results):
-                if isinstance(res, Exception):
-                    msg = f"Failed to download Odoo attachment ID {aid}: {res}"
-                    all_attachment_errors.append(msg)
-                else:
-                    downloaded_data[aid] = (res[1], res[2])  # (content, headers)
+                tasks = [fetch_one(aid) for aid in unique_att_ids]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for aid, res in zip(unique_att_ids, results):
+                    if isinstance(res, Exception) or (isinstance(res, tuple) and len(res) == 0):
+                        msg = f"Failed to download Odoo attachment ID {aid}: {res}"
+                        all_attachment_errors.append(msg)
+                    elif isinstance(res, tuple) and len(res) == 3:
+                        downloaded_data[aid] = (res[1], res[2])  # (content, headers)
 
         # 3. Store downloaded attachments sequentially for DB safety
         for row in item_dicts:
@@ -3618,6 +3666,7 @@ async def import_multi_items_from_year(
 ):
     """Import multi_line_items rows from a selected year's entry into this entry+field."""
     org_id = _org_id(current_user, organization_id)
+    await _assert_field_not_joined(db, field_id)
 
     entry_res = await db.execute(
         select(KPIEntry).where(KPIEntry.id == entry_id, KPIEntry.organization_id == org_id)
@@ -3849,7 +3898,7 @@ async def export_multi_items_csv(
     if field_row_access_enabled and not is_org_admin:
         row_edit_map = await get_user_row_edit_map(db, current_user.id, entry.id, field.id)
 
-    pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
+    pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, current_user_id=current_user.id)
     rows: list[tuple[int, dict]] = list(pairs) if pairs else []
 
     if field_row_access_enabled and not is_org_admin:
@@ -4200,11 +4249,12 @@ async def get_multi_items_page_context(
         await db.commit()
 
     # KPI minimal
-    kpi_res = await db.execute(select(KPI.id, KPI.name).where(KPI.id == kpi_id, KPI.organization_id == org_id))
+    kpi_res = await db.execute(select(KPI.id, KPI.name, KPI.is_joined).where(KPI.id == kpi_id, KPI.organization_id == org_id))
     kpi_row = kpi_res.first()
     if not kpi_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
     kpi_name = str(kpi_row[1] or "")
+    is_joined = bool(kpi_row[2])
 
     # Load just the requested field (fast path) + permissions payload like /entries/fields
     field_res = await db.execute(
@@ -4308,6 +4358,7 @@ async def get_multi_items_page_context(
         kpi_level_can_edit=bool(kpi_level_can_edit),
         can_add_row=bool(can_add),
         can_export=bool(can_export),
+        is_joined=is_joined,
     )
 
 
@@ -4485,6 +4536,7 @@ async def _build_kpi_entry_xlsx(
     org_id: int,
     fields: list,
     entry,
+    current_user_id: int | None = None,
 ) -> bytes:
     """Build Excel workbook: one sheet for scalar fields, one sheet per multi_line_items field."""
     from openpyxl import Workbook
@@ -4570,7 +4622,7 @@ async def _build_kpi_entry_xlsx(
             sheet_name = _excel_sheet_name(f"{f.name}_{idx}") or f"Table_{idx + 1}"
         ws = wb.create_sheet(title=sheet_name)
         ws.append(keys)
-        pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+        pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=current_user_id)
         rows = [r for _, r in pairs] if pairs else []
         
         key_to_sf = {}
@@ -4646,6 +4698,10 @@ async def export_entry_excel(
         ).options(selectinload(KPIEntry.field_values).selectinload(KPIFieldValue.field))
         entry_res = await db.execute(entry_stmt)
         entry = entry_res.scalar_one_or_none()
+    if kpi and getattr(kpi, "is_joined", False) and entry:
+        from app.entries.load_joined import load_joined_scalar_values
+        entry.field_values = await load_joined_scalar_values(db, joined_kpi=kpi, entry_id=entry.id, current_user_id=current_user.id)
+
     xlsx_bytes = await _build_kpi_entry_xlsx(
         db,
         kpi_name=getattr(kpi, "name", "") or f"KPI_{kpi_id}",
@@ -4653,6 +4709,7 @@ async def export_entry_excel(
         org_id=org_id,
         fields=fields,
         entry=entry,
+        current_user_id=current_user.id,
     )
     filename = f"KPI_{kpi_id}_{year}_org{org_id}.xlsx"
     return StreamingResponse(
@@ -5442,7 +5499,7 @@ async def get_or_create_entry_for_period(
     if created:
         await db.commit()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
-    return _entry_to_response(entry)
+    return await _entry_to_response(db, entry, current_user.id)
 
 
 @router.get("/for-period-id", response_model=EntryIdResponse)
@@ -5487,7 +5544,7 @@ async def list_my_entries(
     entries = await list_entries(
         db, current_user.id, org_id, kpi_id=kpi_id, year=year, period_key=period_key, as_admin=as_admin
     )
-    return [_entry_to_response(e) for e in entries]
+    return [await _entry_to_response(db, e, current_user.id) for e in entries]
 
 
 @router.post("", response_model=EntryResponse, status_code=status.HTTP_201_CREATED)
@@ -5531,7 +5588,7 @@ async def create_or_update_entry(
         raise  # Handled by app exception_handler; returns 400 with errors list
     await db.commit()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
-    return _entry_to_response(entry)
+    return await _entry_to_response(db, entry, current_user.id)
 
 
 @router.post("/submit", response_model=EntryResponse)
@@ -5557,7 +5614,7 @@ async def submit_entry_route(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found or locked")
     await db.commit()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
-    return _entry_to_response(entry)
+    return await _entry_to_response(db, entry, current_user.id)
 
 
 @router.post("/lock", response_model=EntryResponse)
@@ -5574,4 +5631,4 @@ async def lock_entry_route(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
     await db.commit()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
-    return _entry_to_response(entry)
+    return await _entry_to_response(db, entry, current_user.id)

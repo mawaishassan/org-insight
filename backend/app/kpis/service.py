@@ -83,6 +83,8 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
             sort_order=next_order,
             entry_mode=entry_mode,
             api_endpoint_url=api_url,
+            is_joined=getattr(data, "is_joined", False) or False,
+            joined_config=getattr(data, "joined_config", None),
         )
     else:
         kpi = KPI(
@@ -94,6 +96,8 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
             sort_order=next_order,
             entry_mode=entry_mode,
             api_endpoint_url=api_url,
+            is_joined=getattr(data, "is_joined", False) or False,
+            joined_config=getattr(data, "joined_config", None),
         )
     db.add(kpi)
     await db.flush()
@@ -102,6 +106,8 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
         await _sync_kpi_categories(db, kpi.id, org_id, data.category_ids)
     if data.organization_tag_ids:
         await _sync_kpi_organization_tags(db, kpi.id, org_id, data.organization_tag_ids)
+    if kpi.is_joined:
+        await sync_joined_kpi_fields(db, kpi)
     return kpi
 
 
@@ -326,6 +332,10 @@ async def update_kpi(
         kpi.card_display_field_ids = data.card_display_field_ids
     if data.carry_forward_data is not None:
         kpi.carry_forward_data = data.carry_forward_data
+    if data.is_joined is not None:
+        kpi.is_joined = data.is_joined
+    if data.joined_config is not None:
+        kpi.joined_config = data.joined_config
     await db.flush()
     if data.domain_ids is not None:
         await _sync_kpi_domains(db, kpi_id, org_id, data.domain_ids)
@@ -333,6 +343,8 @@ async def update_kpi(
         await _sync_kpi_categories(db, kpi_id, org_id, data.category_ids)
     if data.organization_tag_ids is not None:
         await _sync_kpi_organization_tags(db, kpi_id, org_id, data.organization_tag_ids)
+    if kpi.is_joined:
+        await sync_joined_kpi_fields(db, kpi)
     return kpi
 
 
@@ -1796,3 +1808,140 @@ async def delete_kpi_section(db: AsyncSession, section_id: int, kpi_id: int, org
     await db.delete(section)
     await db.flush()
     return "ok"
+
+
+async def sync_joined_kpi_fields(db: AsyncSession, kpi: KPI):
+    """Synchronizes dynamic KPIField and KPIFieldSubField rows based on joined_config."""
+    if not kpi.is_joined or not kpi.joined_config:
+        return
+        
+    config = kpi.joined_config
+    mappings = config.get("mappings", [])
+    
+    # 1. Fetch current fields
+    existing_fields = {f.key: f for f in kpi.fields}
+    active_keys = set()
+    
+    # 2. Get or create section "Joined Data"
+    sect_res = await db.execute(
+        select(KpiSection).where(KpiSection.kpi_id == kpi.id, KpiSection.name == "Joined Data")
+    )
+    section = sect_res.scalar_one_or_none()
+    if not section:
+        section = KpiSection(kpi_id=kpi.id, name="Joined Data", sort_order=0)
+        db.add(section)
+        await db.flush()
+        
+    # Import KPIFieldSubField locally to be safe
+    from app.core.models import KPIFieldSubField
+    
+    for m_idx, m in enumerate(mappings):
+        f_key = m.get("joined_field_key")
+        f_name = m.get("joined_field_name") or f_key
+        f_type = m.get("field_type")
+        active_keys.add(f_key)
+        
+        try:
+            ft_enum = FieldType(f_type)
+        except ValueError:
+            continue
+            
+        field = existing_fields.get(f_key)
+        if not field:
+            field = KPIField(
+                kpi_id=kpi.id,
+                key=f_key,
+                name=f_name,
+                field_type=ft_enum,
+                section_id=section.id,
+                sort_order=m_idx
+            )
+            db.add(field)
+            await db.flush()
+        else:
+            field.name = f_name
+            field.field_type = ft_enum
+            field.sort_order = m_idx
+            field.section_id = section.id
+            await db.flush()
+            
+        # 3. Synchronize subfields if it is a multi_line_items field
+        if ft_enum == FieldType.multi_line_items:
+            subfields_info = {}
+            pkpi = int(m.get("primary_kpi_id") or 0)
+            pfield_key = str(m.get("primary_field_key") or "")
+            if pkpi and pfield_key:
+                primary_field_res = await db.execute(
+                    select(KPIField)
+                    .where(KPIField.kpi_id == pkpi, KPIField.key == pfield_key)
+                    .options(selectinload(KPIField.sub_fields))
+                )
+                primary_field = primary_field_res.scalar_one_or_none()
+                if primary_field:
+                    psub_keys = m.get("primary_sub_field_keys")
+                    for ssf in primary_field.sub_fields:
+                        if psub_keys is None or ssf.key in psub_keys:
+                            subfields_info[ssf.key] = (ssf.name or ssf.key, ssf.field_type.value if hasattr(ssf.field_type, "value") else ssf.field_type)
+            else:
+                for sf_info in m.get("sub_fields", []):
+                    sf_key = sf_info.get("key")
+                    sf_name = sf_info.get("name") or sf_key
+                    sf_type = sf_info.get("type", "single_line_text")
+                    subfields_info[sf_key] = (sf_name, sf_type)
+            for j in m.get("joins", []):
+                jkpi = int(j.get("kpi_id") or 0)
+                jsrc = str(j.get("source_field_key") or "")
+                jkeys = j.get("sub_field_keys") or []
+                if jkpi and jsrc and jkeys:
+                    source_field_res = await db.execute(
+                        select(KPIField)
+                        .where(KPIField.kpi_id == jkpi, KPIField.key == jsrc)
+                        .options(selectinload(KPIField.sub_fields))
+                    )
+                    source_field = source_field_res.scalar_one_or_none()
+                    if source_field:
+                        for ssf in source_field.sub_fields:
+                            if ssf.key in jkeys:
+                                subfields_info[ssf.key] = (ssf.name or ssf.key, ssf.field_type.value if hasattr(ssf.field_type, "value") else ssf.field_type)
+                
+            # Fetch existing subfields from DB
+            sf_res = await db.execute(
+                select(KPIFieldSubField).where(KPIFieldSubField.field_id == field.id)
+            )
+            existing_subfields = {sf.key: sf for sf in sf_res.scalars().all()}
+            active_sf_keys = set()
+            
+            for sf_idx, (sf_key, (sf_name, sf_type)) in enumerate(subfields_info.items()):
+                active_sf_keys.add(sf_key)
+                try:
+                    sft_enum = FieldType(sf_type)
+                except ValueError:
+                    sft_enum = FieldType.single_line_text
+                    
+                sf_obj = existing_subfields.get(sf_key)
+                if not sf_obj:
+                    sf_obj = KPIFieldSubField(
+                        field_id=field.id,
+                        key=sf_key,
+                        name=sf_name,
+                        field_type=sft_enum,
+                        sort_order=sf_idx
+                    )
+                    db.add(sf_obj)
+                else:
+                    sf_obj.name = sf_name
+                    sf_obj.field_type = sft_enum
+                    sf_obj.sort_order = sf_idx
+                    
+            # Delete removed subfields
+            for sf_key, sf_obj in existing_subfields.items():
+                if sf_key not in active_sf_keys:
+                    await db.delete(sf_obj)
+                    
+    # Delete removed fields
+    for f_key, field in existing_fields.items():
+        if f_key not in active_keys:
+            await db.delete(field)
+            
+    await db.flush()
+

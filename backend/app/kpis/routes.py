@@ -189,6 +189,8 @@ def _kpi_to_response(k):
         assigned_users=assigned_users,
         assigned_roles=assigned_roles,
         used_in_reports=used_in_reports,
+        is_joined=getattr(k, "is_joined", False),
+        joined_config=getattr(k, "joined_config", None),
     )
 
 

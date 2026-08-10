@@ -1697,6 +1697,12 @@ async def save_entry_values(
     kpi = result.scalar_one_or_none()
     if not kpi:
         return None
+    if getattr(kpi, "is_joined", False):
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=403,
+            detail="Joined KPI is read-only. Modify data in the source KPIs instead."
+        )
     key_to_field = {f.key: f for f in kpi.fields}
     validation_errors: list[dict] = []
 

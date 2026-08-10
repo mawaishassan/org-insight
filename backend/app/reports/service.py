@@ -140,12 +140,38 @@ def _kpi_multi_line_orm_row_to_dict(r: KpiMultiLineRow) -> dict:
 
 
 async def _load_multi_line_items_rows_batch(
-    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None
+    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None
 ) -> dict[int, list[dict]]:
     """Optimized direct load of multi-line rows and cells to handle large datasets efficiently without ORM eager load overhead."""
     if not entry_ids:
         return {}
-    
+        
+    from app.core.models import KPI
+    kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
+    kpi = kpi_res.scalar_one_or_none()
+        
+    if kpi and getattr(kpi, "is_joined", False):
+        from app.core.models import KPIEntry
+        from app.entries.load_joined import load_joined_multi_line_rows
+        out_batch = {}
+        for eid in entry_ids:
+            entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == eid))
+            entry = entry_res.scalar_one_or_none()
+            if not entry:
+                continue
+            combined_rows = await load_joined_multi_line_rows(
+                db,
+                joined_field=field,
+                organization_id=entry.organization_id,
+                year=entry.year,
+                period_key=entry.period_key,
+                current_user_id=current_user_id
+            )
+            start = offset if offset is not None else 0
+            end = (start + limit) if limit is not None else len(combined_rows)
+            out_batch[eid] = combined_rows[start:end]
+        return out_batch
+
     # 1. Fetch all rows
     stmt = (
         select(KpiMultiLineRow.id, KpiMultiLineRow.entry_id, KpiMultiLineRow.row_index)
@@ -239,8 +265,8 @@ async def _load_multi_line_items_rows_batch(
     return dict(by_entry)
 
 
-async def _load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField) -> list[dict]:
-    m = await _load_multi_line_items_rows_batch(db, entry_ids=[entry_id], field=field)
+async def _load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField, current_user_id: int | None = None) -> list[dict]:
+    m = await _load_multi_line_items_rows_batch(db, entry_ids=[entry_id], field=field, current_user_id=current_user_id)
     return m.get(entry_id, [])
 
 
@@ -2007,7 +2033,7 @@ async def generate_report_data(
         for mf in ml_fields:
             t_ml0 = time.perf_counter()
             ml_rows_by_field_id[mf.id] = await _load_multi_line_items_rows_batch(
-                db, entry_ids=entry_ids_sorted, field=mf
+                db, entry_ids=entry_ids_sorted, field=mf, current_user_id=current_user_id
             )
             total_ml_load_ms += (time.perf_counter() - t_ml0) * 1000.0
             for _eid, _rows in ml_rows_by_field_id[mf.id].items():
@@ -2957,7 +2983,7 @@ async def generate_kpi_pdf_report(
                 raw_filters = field_config.get("filters", {})
 
                 from app.entries.multi_line_load import load_multi_line_row_dicts
-                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=current_user_id)
                 rows = [r for _, r in row_pairs]
 
                 filtered_rows = []
@@ -3400,7 +3426,7 @@ async def generate_kpi_docx_report(
                 raw_filters = field_config.get("filters", {})
 
                 from app.entries.multi_line_load import load_multi_line_row_dicts
-                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f)
+                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=current_user_id)
                 rows = [r for _, r in row_pairs]
 
                 filtered_rows = []

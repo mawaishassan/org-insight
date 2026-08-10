@@ -162,7 +162,7 @@ async def resolve_dashboard_chart_widget_data_batch(
         mode = w.get("mode") or "fields"
         if mode != "multi_line_items":
             # Keep existing per-widget path for non-mline charts (rare on bar/pie).
-            meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, w)
+            meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, w, user=user)
             results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": meta, "data": data, "entry_revision": e_rev}
             continue
 
@@ -242,7 +242,7 @@ async def resolve_dashboard_chart_widget_data_batch(
         )
         if compiled is None:
             # Fallback: do not aggregate in SQL for this widget.
-            meta, data, e_rev2 = await _kpi_bar_chart_payload(db, org_id, w)
+            meta, data, e_rev2 = await _kpi_bar_chart_payload(db, org_id, w, user=user)
             results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": meta, "data": data, "entry_revision": e_rev2}
             continue
         filter_where_sql, filter_params, filter_sid_params = compiled
@@ -602,11 +602,23 @@ async def get_entry_id_updated(
 
 
 async def get_field_values_for_field_ids(
-    db: AsyncSession, *, entry_id: int, field_ids: list[int]
+    db: AsyncSession, *, entry_id: int, field_ids: list[int], current_user_id: int | None = None
 ) -> dict[int, KPIFieldValue]:
     if not field_ids:
         return {}
     uq = sorted({int(x) for x in field_ids})
+    
+    from app.core.models import KPIEntry, KPI
+    entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
+    entry = entry_res.scalar_one_or_none()
+    if entry:
+        kpi_res = await db.execute(select(KPI).where(KPI.id == entry.kpi_id).options(selectinload(KPI.fields)))
+        kpi = kpi_res.scalar_one_or_none()
+        if kpi and kpi.is_joined:
+            from app.entries.load_joined import load_joined_scalar_values
+            mock_fvs = await load_joined_scalar_values(db, joined_kpi=kpi, entry_id=entry_id, current_user_id=current_user_id)
+            return {int(fv.field_id): fv for fv in mock_fvs if int(fv.field_id) in uq}
+
     res = await db.execute(
         select(KPIFieldValue).where(
             KPIFieldValue.entry_id == entry_id,
@@ -632,6 +644,41 @@ async def fetch_entry_revision_and_field_values(
     """
     pk = _period_key_norm(period_key)
     uq = sorted({int(x) for x in field_ids})
+    
+    from app.core.models import KPI
+    kpi_res = await db.execute(select(KPI).where(KPI.id == kpi_id).options(selectinload(KPI.fields)))
+    kpi = kpi_res.scalar_one_or_none()
+    if kpi and kpi.is_joined:
+        from app.core.models import KPIEntry
+        entry_res = await db.execute(
+            select(KPIEntry).where(
+                KPIEntry.organization_id == org_id,
+                KPIEntry.kpi_id == kpi_id,
+                KPIEntry.year == int(year),
+                KPIEntry.period_key == pk,
+                KPIEntry.is_draft == False,
+            )
+        )
+        entry = entry_res.scalar_one_or_none()
+        if not entry:
+            entry = KPIEntry(
+                organization_id=org_id,
+                kpi_id=kpi_id,
+                year=int(year),
+                period_key=pk,
+                is_draft=False,
+            )
+            db.add(entry)
+            await db.flush()
+        
+        eid = entry.id
+        e_ts = entry.updated_at
+        
+        from app.entries.load_joined import load_joined_scalar_values
+        mock_fvs = await load_joined_scalar_values(db, joined_kpi=kpi, entry_id=eid)
+        fv_by_id = {int(fv.field_id): fv for fv in mock_fvs if int(fv.field_id) in uq}
+        return eid, e_ts, fv_by_id
+
     if not uq:
         eid, e_ts = await get_entry_id_updated(
             db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
@@ -812,8 +859,9 @@ async def load_multi_line_row_dicts_filtered(
     kpi_id: int,
     year: int,
     raw_filters: Any,
+    current_user_id: int | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    pairs = await load_multi_line_row_dicts(db, entry_id=entry_id, field=field)
+    pairs = await load_multi_line_row_dicts(db, entry_id=entry_id, field=field, current_user_id=current_user_id)
     rows = [d for _i, d in pairs if isinstance(d, dict)]
     n_before = len(rows)
     filtered = await _apply_row_filters(
@@ -859,7 +907,7 @@ WidgetResolver = Callable[[AsyncSession, User, int, dict[str, Any]], Awaitable[t
 
 
 async def _kpi_bar_chart_payload(
-    db: AsyncSession, org_id: int, w: dict[str, Any]
+    db: AsyncSession, org_id: int, w: dict[str, Any], user: User | None = None
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     """
     Bar/pie widget data after tenant KPI existence is verified.
@@ -1039,7 +1087,7 @@ async def _kpi_bar_chart_payload(
             db, org_id, f_obj, raw_filters
         )
         rows, _n_before = await load_multi_line_row_dicts_filtered(
-            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=raw_filters
+            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=raw_filters, current_user_id=user.id if user else None
         )
         return (
             {
@@ -1103,7 +1151,7 @@ async def _resolve_kpi_bar_chart(
             {"error": "forbidden"},
             None,
         )
-    return await _kpi_bar_chart_payload(db, org_id, w)
+    return await _kpi_bar_chart_payload(db, org_id, w, user=user)
 
 
 async def _resolve_kpi_trend(db: AsyncSession, user: User, org_id: int, w: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str | None]:
@@ -1174,7 +1222,7 @@ async def _resolve_kpi_trend(db: AsyncSession, user: User, org_id: int, w: dict[
                 raw_by_year[str(yy)] = []
                 continue
             row_list, _n = await load_multi_line_row_dicts_filtered(
-                db, org_id, entry_id=eid_y, field=f_obj, kpi_id=kpi_id, year=yy, raw_filters=w.get("filters")
+                db, org_id, entry_id=eid_y, field=f_obj, kpi_id=kpi_id, year=yy, raw_filters=w.get("filters"), current_user_id=user.id
             )
             raw_by_year[str(yy)] = row_list
         e_rev = "|".join(revisions) if revisions else None
@@ -1204,7 +1252,7 @@ async def _resolve_kpi_trend(db: AsyncSession, user: User, org_id: int, w: dict[
             for key in keys:
                 bars.append({"key": key, "label": fmap["name_by_key"].get(key) or key, "value": None})
         else:
-            fv_by_id = await get_field_values_for_field_ids(db, entry_id=eid_y, field_ids=fids)
+            fv_by_id = await get_field_values_for_field_ids(db, entry_id=eid_y, field_ids=fids, current_user_id=user.id)
             for key in keys:
                 fid = fmap["id_by_key"].get(key)
                 v = to_numeric(raw_field_from_fv_map(fv_by_id, int(fid))) if fid else None
@@ -1249,7 +1297,7 @@ async def _resolve_kpi_line_chart(
         if not eid_y:
             points.append({"year": y, "value": None})
             continue
-        fv_by_id = await get_field_values_for_field_ids(db, entry_id=eid_y, field_ids=[int(fid)])
+        fv_by_id = await get_field_values_for_field_ids(db, entry_id=eid_y, field_ids=[int(fid)], current_user_id=user.id)
         v = to_numeric(raw_field_from_fv_map(fv_by_id, int(fid)))
         points.append({"year": y, "value": v})
     e_rev = "|".join(revisions) if revisions else None
@@ -1275,7 +1323,7 @@ async def _resolve_kpi_table(db: AsyncSession, user: User, org_id: int, w: dict[
         db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
     )
     fids = [fmap["id_by_key"][k] for k in fkeys if fmap["id_by_key"].get(k)]
-    fv_by_id = await get_field_values_for_field_ids(db, entry_id=eid, field_ids=fids) if eid else {}
+    fv_by_id = await get_field_values_for_field_ids(db, entry_id=eid, field_ids=fids, current_user_id=user.id) if eid else {}
     rows_out: list[dict[str, Any]] = []
     for k in fkeys:
         fid = fmap["id_by_key"].get(k)
@@ -1314,7 +1362,7 @@ async def _resolve_kpi_single_value(
     )
     raw = None
     if eid and fid:
-        fvm = await get_field_values_for_field_ids(db, entry_id=eid, field_ids=[int(fid)])
+        fvm = await get_field_values_for_field_ids(db, entry_id=eid, field_ids=[int(fid)], current_user_id=user.id)
         raw = raw_field_from_fv_map(fvm, int(fid))
     return (
         {
@@ -1360,7 +1408,7 @@ async def _resolve_kpi_card_single_value(
         fid = fmap["id_by_key"].get(fk)
         raw = None
         if eid and fid:
-            fvm = await get_field_values_for_field_ids(db, entry_id=eid, field_ids=[int(fid)])
+            fvm = await get_field_values_for_field_ids(db, entry_id=eid, field_ids=[int(fid)], current_user_id=user.id)
             raw = raw_field_from_fv_map(fvm, int(fid))
         n = to_numeric(raw)
         return (
@@ -1397,7 +1445,7 @@ async def _resolve_kpi_card_single_value(
             db, org_id, f_obj, w.get("filters")
         )
         rows, _n = await load_multi_line_row_dicts_filtered(
-            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters")
+            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters"), current_user_id=user.id
         )
         agg = w.get("agg") or "sum"
         n = aggregate_single_value(rows, agg=agg, value_key=w.get("value_sub_field_key") or None)
@@ -1460,7 +1508,7 @@ async def _resolve_kpi_multi_line_table(
         )
     # f_obj already has sub_fields from get_field_with_subfields_only (labels + row filters)
     rows, _n = await load_multi_line_row_dicts_filtered(
-        db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters")
+        db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters"), current_user_id=user.id
     )
     truncated = len(rows) > MAX_MULTILINE_TABLE_ROWS
     if truncated:
@@ -1497,7 +1545,7 @@ async def _resolve_kpi_multi_line_table(
         if jf and jeid:
             jf = await get_field_with_subfields_only(db, jf.id, org_id) or jf
             jrows_full, _ = await load_multi_line_row_dicts_filtered(
-                db, org_id, entry_id=jeid, field=jf, kpi_id=jkpi, year=year, raw_filters=None
+                db, org_id, entry_id=jeid, field=jf, kpi_id=jkpi, year=year, raw_filters=None, current_user_id=user.id
             )
             jrows = jrows_full[:MAX_MULTILINE_TABLE_ROWS]
             if jf.sub_fields:
@@ -1565,7 +1613,7 @@ async def resolve_dashboard_chart_widget_data(
     kpi_id = int(merged.get("kpi_id") or 0)
     if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
-    meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, merged)
+    meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, merged, user=user)
     err = data.get("error")
     if err == "KPI not found" or err == "missing kpi_id or year":
         return meta, data, "error", e_rev
@@ -1587,7 +1635,7 @@ async def _field_id_for_kpi_key(db: AsyncSession, *, org_id: int, kpi_id: int, f
 
 
 async def _dashboard_card_payload(
-    db: AsyncSession, org_id: int, merged: dict[str, Any]
+    db: AsyncSession, org_id: int, merged: dict[str, Any], user: User | None = None
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     """
     Fast path for `kpi_card_single_value`:
@@ -1615,7 +1663,7 @@ async def _dashboard_card_payload(
         fid = await _field_id_for_kpi_key(db, org_id=org_id, kpi_id=kpi_id, field_key=fk)
         raw = None
         if eid and fid:
-            fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=[int(fid)])
+            fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=[int(fid)], current_user_id=user.id if user else None)
             raw = raw_field_from_fv_map(fvm, int(fid))
         n = to_numeric(raw)
         return (
@@ -1651,7 +1699,7 @@ async def _dashboard_card_payload(
             db, org_id, f_obj, merged.get("filters")
         )
         rows, _n = await load_multi_line_row_dicts_filtered(
-            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=merged.get("filters")
+            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=merged.get("filters"), current_user_id=user.id if user else None
         )
         agg = merged.get("agg") or "sum"
         n = aggregate_single_value(rows, agg=agg, value_key=merged.get("value_sub_field_key") or None)
@@ -1693,7 +1741,7 @@ async def resolve_dashboard_card_widget_data(
     kpi_id = int(merged.get("kpi_id") or 0)
     if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
-    meta, data, e_rev = await _dashboard_card_payload(db, org_id, merged)
+    meta, data, e_rev = await _dashboard_card_payload(db, org_id, merged, user=user)
     err = data.get("error")
     if err == "KPI not found" or err == "missing parameters":
         return meta, data, "error", e_rev
@@ -1760,7 +1808,7 @@ async def resolve_dashboard_card_widget_data_batch(
             continue
         if sm == "multi_line_agg":
             try:
-                meta, data, e_rev = await _dashboard_card_payload(db, org_id, w)
+                meta, data, e_rev = await _dashboard_card_payload(db, org_id, w, user=user)
                 out[key] = {
                     "ok": True,
                     "widget_type": "kpi_card_single_value",
@@ -1788,7 +1836,7 @@ async def resolve_dashboard_card_widget_data_batch(
             if fid:
                 key_to_fid[key] = int(fid)
         fids = sorted(set(key_to_fid.values()))
-        fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=fids) if (eid and fids) else {}
+        fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=fids, current_user_id=user.id if user else None) if (eid and fids) else {}
         for key, w in items2:
             fid = key_to_fid.get(key)
             raw = raw_field_from_fv_map(fvm, int(fid)) if (eid and fid) else None
@@ -1823,7 +1871,7 @@ async def resolve_dashboard_table_widget_data(
     kpi_id = int(merged.get("kpi_id") or 0)
     if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
-    meta, data, e_rev = await _dashboard_multi_line_table_payload(db, org_id, merged)
+    meta, data, e_rev = await _dashboard_multi_line_table_payload(db, org_id, merged, user=user)
     err = data.get("error")
     if err == "KPI not found" or err == "missing parameters":
         return meta, data, "error", e_rev
@@ -1864,7 +1912,7 @@ def _parse_join_specs(w: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def _dashboard_multi_line_table_payload(
-    db: AsyncSession, org_id: int, w: dict[str, Any]
+    db: AsyncSession, org_id: int, w: dict[str, Any], user: User | None = None
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     """
     Dashboard fast path for `kpi_multi_line_table`:
@@ -1920,7 +1968,7 @@ async def _dashboard_multi_line_table_payload(
         )
 
     rows, _n = await load_multi_line_row_dicts_filtered(
-        db, org_id, entry_id=int(eid), field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters")
+        db, org_id, entry_id=int(eid), field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters"), current_user_id=user.id if user else None
     )
     truncated = len(rows) > MAX_MULTILINE_TABLE_ROWS
     if truncated:
@@ -1959,7 +2007,7 @@ async def _dashboard_multi_line_table_payload(
             )
             continue
         jrows, _jn = await load_multi_line_row_dicts_filtered(
-            db, org_id, entry_id=int(jeid), field=jf_obj, kpi_id=jkpi, year=year, raw_filters=j.get("filters")
+            db, org_id, entry_id=int(jeid), field=jf_obj, kpi_id=jkpi, year=year, raw_filters=j.get("filters"), current_user_id=user.id if user else None
         )
         if len(jrows) > MAX_MULTILINE_TABLE_ROWS:
             jrows = jrows[:MAX_MULTILINE_TABLE_ROWS]
@@ -2043,6 +2091,65 @@ async def resolve_dashboard_table_rows_widget_data(
     if not f_obj or not eid:
         meta0 = {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": eid, "row_count": 0}
         data0 = {"rows": [], "total": 0, "page": page, "page_size": page_size, "sub_field_labels": label_by_key, "joins": [], "source_field_id": f_obj.id if f_obj else (f_light.id if f_light else None)}
+        return (meta0, data0, "kpi_multi_line_table", e_rev)
+
+    # Check if this is a Joined KPI
+    from app.core.models import KPI
+    kpi_res = await db.execute(select(KPI).where(KPI.id == f_obj.kpi_id))
+    kpi = kpi_res.scalar_one_or_none()
+        
+    if kpi and getattr(kpi, "is_joined", False):
+        from app.entries.load_joined import load_joined_multi_line_rows
+        combined_rows = await load_joined_multi_line_rows(
+            db,
+            joined_field=f_obj,
+            organization_id=org_id,
+            year=year,
+            period_key=period_key,
+            current_user_id=user.id
+        )
+        
+        # Apply search and filters in-memory
+        rows = [{"__index": idx, **r} for idx, r in enumerate(combined_rows)]
+        raw_filters = merged.get("filters")
+        
+        if search and search.strip():
+            q = search.strip().lower()
+            rows = [r for r in rows if any(q in str(v).lower() for v in r.values() if v is not None)]
+            
+        if raw_filters:
+            from app.entries.routes import row_passes_filters
+            reference_field_types = {str(getattr(sf, "key", "")): str(getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", "")) or "") for sf in (f_obj.sub_fields or []) if getattr(sf, "key", None)}
+            rows = [r for r in rows if row_passes_filters(r, raw_filters, reference_field_types=reference_field_types)]
+            
+        allowed_keys = [str(x) for x in (merged.get("sub_field_keys") or []) if str(x).strip()]
+        sf_by_key = {str(getattr(sf, "key", "")): sf for sf in (f_obj.sub_fields or []) if getattr(sf, "key", None)}
+        if not allowed_keys:
+            allowed_keys = [k for k in sf_by_key.keys() if k]
+            
+        if sort_by and sort_by in sf_by_key:
+            reverse = sort_dir == "desc"
+            def sort_key(row: dict):
+                v = row.get(sort_by)
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return str(v) if v is not None else ""
+            try:
+                rows = sorted(rows, key=sort_key, reverse=reverse)
+            except Exception:
+                pass
+                
+        total = len(rows)
+        start = (int(page) - 1) * int(page_size)
+        paged_rows = rows[start:start+int(page_size)]
+        
+        # Keep only visible columns in the output
+        allowed_keys_set = set(allowed_keys)
+        paged_rows = [{"__index": r["__index"], **{k: v for k, v in r.items() if k in allowed_keys_set}} for r in paged_rows]
+        
+        meta0 = {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": eid, "row_count": len(paged_rows), "total": total, "source_field_id": int(f_obj.id)}
+        data0 = {"rows": paged_rows, "total": total, "page": page, "page_size": page_size, "sub_field_labels": label_by_key, "joins": [], "source_field_id": int(f_obj.id)}
         return (meta0, data0, "kpi_multi_line_table", e_rev)
 
     allowed_keys: list[str] = [str(x) for x in (merged.get("sub_field_keys") or []) if str(x).strip()]
@@ -2199,11 +2306,11 @@ async def resolve_dashboard_table_rows_widget_data(
         jr = KpiMultiLineRow.__table__.alias("jr")
         jc = KpiMultiLineCell.__table__.alias("jc")
         jbase = (
-            select(jr.c.id, jr.c.row_index)
+            select(func.min(jr.c.id).label("id"), func.min(jr.c.row_index).label("row_index"))
             .select_from(jr)
             .join(jc, and_(jc.c.row_id == jr.c.id, jc.c.sub_field_id == right_sf_id))
             .where(jr.c.entry_id == int(jeid), jr.c.field_id == int(jf_obj.id), cast(jc.c.value_text, String()).in_(needed))
-            .limit(500)
+            .group_by(jc.c.value_text)
         )
         jrows = list((await db.execute(jbase)).all())
         jrow_ids = [int(x[0]) for x in jrows]
@@ -2212,7 +2319,10 @@ async def resolve_dashboard_table_rows_widget_data(
             joins_pack.append({"rows": [], "sub_field_labels": jlabels, "source_field_id": int(jf_obj.id)})
             continue
         want_keys = [str(x) for x in (j.get("sub_field_keys") or []) if str(x).strip()]
-        if not want_keys:
+        if want_keys:
+            if right_key and right_key not in want_keys:
+                want_keys.append(right_key)
+        else:
             want_keys = list(jsf_by_key.keys())
         want_ids = [int(getattr(jsf_by_key[k], "id")) for k in want_keys if k in jsf_by_key]
         jcell_res = await db.execute(
@@ -2386,7 +2496,7 @@ async def resolve_dashboard_single_value_widget_data(
     e_rev = revision_for_parts(eid, e_ts)
     raw = None
     if eid and fid:
-        fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=[int(fid)])
+        fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=[int(fid)], current_user_id=user.id)
         raw = raw_field_from_fv_map(fvm, int(fid))
     return (
         {
@@ -2704,7 +2814,7 @@ async def resolve_dashboard_kpi_table_widget_data(
 
     eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
     e_rev = revision_for_parts(eid, e_ts)
-    fv_by_id = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=list(id_by_key.values())) if eid else {}
+    fv_by_id = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=list(id_by_key.values()), current_user_id=user.id) if eid else {}
 
     rows_out: list[dict[str, Any]] = []
     for k in key_order:

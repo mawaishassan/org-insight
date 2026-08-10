@@ -35,8 +35,35 @@ async def load_multi_line_row_dicts(
     entry_id: int,
     field: KPIField,
     row_indices: list[int] | None = None,
+    current_user_id: int | None = None,
 ) -> list[tuple[int, dict]]:
     """Optimized direct load of multi_line rows and cells to scale efficiently for large entries."""
+    from app.core.models import KPI
+    kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
+    kpi = kpi_res.scalar_one_or_none()
+        
+    if kpi and getattr(kpi, "is_joined", False):
+        from app.core.models import KPIEntry
+        entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
+        entry = entry_res.scalar_one_or_none()
+        if not entry:
+            return []
+            
+        from app.entries.load_joined import load_joined_multi_line_rows
+        combined_rows = await load_joined_multi_line_rows(
+            db,
+            joined_field=field,
+            organization_id=entry.organization_id,
+            year=entry.year,
+            period_key=entry.period_key,
+            current_user_id=current_user_id
+        )
+        out = [(idx, r) for idx, r in enumerate(combined_rows)]
+        if row_indices is not None:
+            idx_set = {int(x) for x in row_indices}
+            out = [(i, r) for i, r in out if i in idx_set]
+        return out
+
     q_rows = (
         select(KpiMultiLineRow.id, KpiMultiLineRow.row_index)
         .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
