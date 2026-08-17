@@ -10,6 +10,7 @@ export function CustomLabel({
   svgProps = {},
   truncateLength,
   suffix = "",
+  showUnderline = true,
 }: {
   value: string;
   widgetId?: string;
@@ -17,6 +18,7 @@ export function CustomLabel({
   svgProps?: any;
   truncateLength?: number;
   suffix?: string;
+  showUnderline?: boolean;
 }) {
   const { getDisplayLabel, isOrgAdmin, openEditModal } = useDashboardCustomization();
 
@@ -45,7 +47,7 @@ export function CustomLabel({
         onClick={handleClick}
         style={{
           cursor: isOrgAdmin ? "pointer" : "default",
-          textDecoration: isOrgAdmin ? "underline dashed rgba(255, 255, 255, 0.45)" : "none",
+          textDecoration: showUnderline && isOrgAdmin ? "underline dashed rgba(255, 255, 255, 0.45)" : "none",
           paintOrder: "stroke",
           stroke: svgProps?.stroke || "none",
           strokeWidth: svgProps?.strokeWidth || 0,
@@ -63,7 +65,7 @@ export function CustomLabel({
       onClick={handleClick}
       style={{
         cursor: isOrgAdmin ? "pointer" : "default",
-        textDecoration: isOrgAdmin ? "underline dashed var(--border)" : "none",
+        textDecoration: showUnderline && isOrgAdmin ? "underline dashed var(--border)" : "none",
         display: "inline-block",
       }}
       title={isOrgAdmin ? `Click to customize label "${originalStr}"` : undefined}

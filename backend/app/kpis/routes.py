@@ -919,6 +919,7 @@ async def get_kpi_odoo_config_route(
     return KpiOdooConfigResponse(
         kpi_id=kpi_id,
         configured=True,
+        odoo_endpoint_id=cfg.odoo_endpoint_id,
         request_body=cfg.request_body,
         response_items_path=cfg.response_items_path,
     )
@@ -956,12 +957,17 @@ async def update_kpi_odoo_config_route(
     if not await kpi_belongs_to_org(db, kpi_id, org_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
     cfg = await upsert_kpi_odoo_config(
-        db, kpi_id, body.request_body, (body.response_items_path or "").strip() or None
+        db,
+        kpi_id,
+        body.request_body,
+        (body.response_items_path or "").strip() or None,
+        odoo_endpoint_id=body.odoo_endpoint_id,
     )
     await db.commit()
     return KpiOdooConfigResponse(
         kpi_id=kpi_id,
         configured=True,
+        odoo_endpoint_id=cfg.odoo_endpoint_id,
         request_body=cfg.request_body,
         response_items_path=cfg.response_items_path,
     )
@@ -981,6 +987,7 @@ async def _fetch_kpi_odoo_preview_items(
 
     from app.odoo.config_service import get_org_odoo_config, get_kpi_odoo_config, kpi_belongs_to_org
     from app.odoo.service import odoo_authenticate, odoo_fetch_items
+    from app.odoo.endpoint_service import get_odoo_endpoint_by_id
 
     if not await kpi_belongs_to_org(db, kpi_id, org_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
@@ -1011,8 +1018,22 @@ async def _fetch_kpi_odoo_preview_items(
         request_body = preview_body
         response_items_path = preview_path or (saved_kpi_odoo.response_items_path if saved_kpi_odoo else None)
 
+    odoo_endpoint_id = (
+        body.odoo_endpoint_id
+        if (body and body.odoo_endpoint_id is not None)
+        else (saved_kpi_odoo.odoo_endpoint_id if saved_kpi_odoo else None)
+    )
+    endpoint = None
+    if odoo_endpoint_id:
+        endpoint = await get_odoo_endpoint_by_id(db, odoo_endpoint_id)
+
     preview_year = year if year is not None else datetime.utcnow().year
-    kpi_cfg = SimpleNamespace(request_body=request_body, response_items_path=response_items_path)
+    kpi_cfg = SimpleNamespace(
+        request_body=request_body,
+        response_items_path=response_items_path,
+        endpoint=endpoint,
+        odoo_endpoint_id=odoo_endpoint_id,
+    )
 
     try:
         session_id = await odoo_authenticate(org_odoo)

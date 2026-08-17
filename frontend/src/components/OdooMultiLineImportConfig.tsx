@@ -31,6 +31,13 @@ type OdooPreview = {
   list_columns?: Record<string, OdooListColumnPart[]>;
 };
 
+type OdooEndpointOption = {
+  id: number;
+  name: string;
+  url: string;
+  is_active: boolean;
+};
+
 type KpiMeta = {
   name: string;
   categoryPath: string;
@@ -153,6 +160,8 @@ export function OdooMultiLineImportAdmin({
   const [kpiMetaById, setKpiMetaById] = useState<Record<number, KpiMeta>>({});
   const [fieldsByKpiId, setFieldsByKpiId] = useState<Record<number, FieldSummary[]>>({});
   const [refSamplesByKey, setRefSamplesByKey] = useState<Record<string, string[]>>({});
+  const [endpoints, setEndpoints] = useState<OdooEndpointOption[]>([]);
+  const [odooEndpointId, setOdooEndpointId] = useState<number | null>(null);
 
   const oq = orgId != null ? `?organization_id=${orgId}` : "";
   const hasMultiLineField = fieldId != null;
@@ -207,6 +216,13 @@ export function OdooMultiLineImportAdmin({
   const refSampleTargetsSig = refSampleTargets.map((t) => t.cacheKey).join("|");
 
   useEffect(() => {
+    if (!token || orgId == null) return;
+    api<OdooEndpointOption[]>(`/organizations/${orgId}/odoo-endpoints?active_only=true`, { token })
+      .then((eps) => setEndpoints(eps))
+      .catch(() => setEndpoints([]));
+  }, [token, orgId]);
+
+  useEffect(() => {
     if (typeof window === "undefined" || window.location.hash !== "#odoo-bulk-import") return;
     const el = document.getElementById("odoo-bulk-import");
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -214,15 +230,18 @@ export function OdooMultiLineImportAdmin({
 
   useEffect(() => {
     if (!token || !kpiId) return;
-    api<{ configured: boolean; request_body?: unknown; response_items_path?: string | null }>(
+    api<{ configured: boolean; odoo_endpoint_id?: number | null; request_body?: unknown; response_items_path?: string | null }>(
       `/kpis/${kpiId}/odoo-config${oq}`,
       { token }
     )
       .then((c) => {
         setKpiConfigured(!!c.configured);
-        if (c.configured && c.request_body != null) {
-          setRequestBodyText(JSON.stringify(c.request_body, null, 2));
-          setResponsePath(c.response_items_path || "");
+        if (c.configured) {
+          if (c.odoo_endpoint_id != null) setOdooEndpointId(c.odoo_endpoint_id);
+          if (c.request_body != null) {
+            setRequestBodyText(JSON.stringify(c.request_body, null, 2));
+            setResponsePath(c.response_items_path || "");
+          }
         }
       })
       .catch(() => setKpiConfigured(false));
@@ -376,6 +395,10 @@ export function OdooMultiLineImportAdmin({
 
   async function saveKpiBody(e: React.FormEvent) {
     e.preventDefault();
+    if (!odooEndpointId) {
+      toast.error("Please select an Odoo API endpoint.");
+      return;
+    }
     setSavingKpi(true);
     try {
       const request_body = JSON.parse(requestBodyText);
@@ -383,11 +406,12 @@ export function OdooMultiLineImportAdmin({
         method: "PUT",
         token,
         body: JSON.stringify({
+          odoo_endpoint_id: odooEndpointId,
           request_body,
           response_items_path: responsePath.trim() || null,
         }),
       });
-      toast.success("KPI Odoo request body saved");
+      toast.success("KPI Odoo configuration saved");
       setKpiConfigured(true);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Invalid JSON or save failed");
@@ -413,6 +437,7 @@ export function OdooMultiLineImportAdmin({
       if (orgId != null) params.set("organization_id", String(orgId));
 
       const body: Record<string, unknown> = {};
+      if (odooEndpointId != null) body.odoo_endpoint_id = odooEndpointId;
       if (request_body !== undefined) {
         body.request_body = request_body;
         body.response_items_path = responsePath.trim() || null;
@@ -651,9 +676,33 @@ export function OdooMultiLineImportAdmin({
       </ul>
 
       <form onSubmit={saveKpiBody}>
-        <h4 style={{ fontSize: "0.9rem", margin: "0 0 0.35rem" }}>Step 1 — KPI Odoo request body</h4>
+        <h4 style={{ fontSize: "0.9rem", margin: "0 0 0.5rem" }}>Step 1 — Select API Endpoint &amp; Request Body</h4>
+        <div className="form-group" style={{ marginBottom: "0.75rem" }}>
+          <label style={{ fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>
+            API Endpoint <span style={{ color: "var(--danger, red)" }}>*</span>
+          </label>
+          <select
+            className="input"
+            value={odooEndpointId ?? ""}
+            onChange={(e) => setOdooEndpointId(e.target.value ? Number(e.target.value) : null)}
+            style={{ width: "100%", padding: "0.45rem" }}
+            required
+          >
+            <option value="">— Select Odoo Endpoint —</option>
+            {endpoints.map((ep) => (
+              <option key={ep.id} value={ep.id}>
+                {ep.name} {ep.url ? `(${ep.url})` : ""}
+              </option>
+            ))}
+          </select>
+          {endpoints.length === 0 && (
+            <p style={{ color: "var(--muted)", fontSize: "0.8rem", marginTop: "0.25rem" }}>
+              No active Odoo endpoints found. Please configure Odoo API Endpoints in Organization Odoo Settings.
+            </p>
+          )}
+        </div>
         <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
-          JSON sent to your organization&apos;s Odoo data fetch URL. Placeholders: __SESSION_ID__, __YEAR__, __KPI_ID__,
+          JSON sent to your selected Odoo API endpoint. Placeholders: __SESSION_ID__, __YEAR__, __KPI_ID__,
           __ORG_ID__, __ENTRY_ID__, __FIELD_ID__, __FIELD_KEY__.
         </p>
         <textarea
@@ -667,7 +716,7 @@ export function OdooMultiLineImportAdmin({
           <input value={responsePath} onChange={(e) => setResponsePath(e.target.value)} style={{ width: "100%" }} />
         </div>
         <button type="submit" className="btn btn-primary" disabled={savingKpi} style={{ marginTop: "0.5rem" }}>
-          {savingKpi ? "Saving…" : "Save KPI Odoo request body"}
+          {savingKpi ? "Saving…" : "Save KPI Odoo configuration"}
         </button>
       </form>
 

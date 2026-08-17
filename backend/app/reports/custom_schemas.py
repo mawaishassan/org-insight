@@ -5,11 +5,15 @@ from pydantic import BaseModel, Field
 class CustomReportCreate(BaseModel):
     name: str = Field(..., max_length=255)
     description: str | None = None
+    fetch_data_with_date: bool = False
+    date_fetching_config: dict | None = None
 
 
 class CustomReportUpdate(BaseModel):
     name: str = Field(..., max_length=255)
     description: str | None = None
+    fetch_data_with_date: bool | None = None
+    date_fetching_config: dict | None = None
 
 
 class CustomReportAssignmentRequest(BaseModel):
@@ -39,6 +43,8 @@ class CustomReportResponse(BaseModel):
     organization_id: int
     name: str
     description: str | None
+    fetch_data_with_date: bool = False
+    date_fetching_config: dict | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -71,4 +77,6 @@ class CustomReportAttachmentLayout(BaseModel):
 class CustomReportLayoutSave(BaseModel):
     sections: list[CustomReportSectionLayout]
     attachments: list[CustomReportAttachmentLayout] = []
+    fetch_data_with_date: bool | None = None
+    date_fetching_config: dict | None = None
 

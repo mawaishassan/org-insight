@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { fetchAllMultiItemsRows, getKpiFieldsWithSubs, type KpiFieldWithSubs } from "@/lib/fetchMultiItemsRows";
 import { CustomLabel } from "./CustomLabel";
 import { useDashboardCustomization } from "./DashboardCustomizationContext";
+import { SmartChartViewer } from "./SmartChartViewer";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
 import {
@@ -650,7 +651,6 @@ function WidgetSettingsShell({
     </WidgetViewerMenuSetterContext.Provider>
   );
 }
-
 export function WidgetRenderer({
   widget,
   organizationId,
@@ -660,6 +660,7 @@ export function WidgetRenderer({
   tableRowsPerPage,
   onTableRowsPerPageChange,
   tableRowsPerPageOptions,
+  periodOverride,
 }: {
   widget: Widget;
   organizationId: number;
@@ -669,78 +670,89 @@ export function WidgetRenderer({
   tableRowsPerPage?: number;
   onTableRowsPerPageChange?: (n: number) => void;
   tableRowsPerPageOptions?: number[];
+  periodOverride?: string;
 }) {
-  if (widget.type === "text") {
+  const effectiveWidget = useMemo(() => {
+    if (periodOverride) {
+      return {
+        ...widget,
+        year: periodOverride as any,
+      };
+    }
+    return widget;
+  }, [widget, periodOverride]);
+
+  if (effectiveWidget.type === "text") {
     return (
-      <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
-        <div style={{ whiteSpace: "pre-wrap" }}>{widget.text || ""}</div>
+      <WidgetSettingsShell title={effectiveWidget.title} designActions={designActions} widgetKey={effectiveWidget.id}>
+        <div style={{ whiteSpace: "pre-wrap" }}>{effectiveWidget.text || ""}</div>
       </WidgetSettingsShell>
     );
   }
-  if (widget.type === "kpi_single_value") {
+  if (effectiveWidget.type === "kpi_single_value") {
     return (
       <KpiSingleValueWidget
-        widget={widget}
+        widget={effectiveWidget}
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
       />
     );
   }
-  if (widget.type === "kpi_table") {
+  if (effectiveWidget.type === "kpi_table") {
     return (
       <KpiTableWidget
-        widget={widget}
+        widget={effectiveWidget}
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
       />
     );
   }
-  if (widget.type === "kpi_line_chart") {
+  if (effectiveWidget.type === "kpi_line_chart") {
     return (
       <KpiLineChartWidget
-        widget={widget}
+        widget={effectiveWidget}
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
       />
     );
   }
-  if (widget.type === "kpi_bar_chart") {
+  if (effectiveWidget.type === "kpi_bar_chart") {
     return (
       <KpiBarChartWidget
-        widget={widget}
+        widget={effectiveWidget}
         organizationId={organizationId}
         dashboardId={dashboardId}
         designActions={designActions}
       />
     );
   }
-  if (widget.type === "kpi_trend") {
+  if (effectiveWidget.type === "kpi_trend") {
     return (
       <KpiTrendWidget
-        widget={widget}
+        widget={effectiveWidget}
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
       />
     );
   }
-  if (widget.type === "kpi_card_single_value") {
+  if (effectiveWidget.type === "kpi_card_single_value") {
     return (
       <KpiCardSingleValueWidget
-        widget={widget}
+        widget={effectiveWidget}
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
       />
     );
   }
-  if (widget.type === "kpi_multi_line_table") {
+  if (effectiveWidget.type === "kpi_multi_line_table") {
     return (
       <KpiMultiLineTableWidget
-        widget={widget}
+        widget={effectiveWidget}
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
@@ -751,10 +763,10 @@ export function WidgetRenderer({
       />
     );
   }
-  const w = widget as { id?: string };
+  const w = effectiveWidget as { id?: string };
   return (
     <WidgetSettingsShell title="Unknown widget" designActions={designActions} widgetKey={w.id ?? "unknown"}>
-      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(widget, null, 2)}</pre>
+      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(effectiveWidget, null, 2)}</pre>
     </WidgetSettingsShell>
   );
 }
@@ -949,6 +961,8 @@ function KpiCardSingleValueWidget({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
+  const { selectedPeriod } = useDashboardCustomization();
+  const overrides = selectedPeriod ? { year: selectedPeriod } : undefined;
   const [value, setValue] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -978,6 +992,7 @@ function KpiCardSingleValueWidget({
               dashboardId,
               widgetId: String((w as any)?.id ?? ""),
               widget: w,
+              overrides,
             }).then((r) => ({
               version: 1,
               widget_type: "kpi_card_single_value",
@@ -992,6 +1007,7 @@ function KpiCardSingleValueWidget({
                 organization_id: organizationId,
                 ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
                 widget: w,
+                overrides,
               },
               { signal: ac.signal }
             );
@@ -1073,6 +1089,7 @@ function KpiCardSingleValueWidget({
     widget.decimals,
     widget.thousand_sep,
     JSON.stringify(widget.filters ?? null),
+    selectedPeriod,
   ]);
 
   const theme = useMemo(() => KPI_CARD_THEMES.find((t) => t.id === (widget.theme || "")) ?? KPI_CARD_THEMES[0], [widget.theme]);
@@ -1436,23 +1453,29 @@ function aggregateMultiLine(
   }
 ): Array<{ label: string; value: number }> {
   const { groupByKey, agg, valueKey } = opts;
-  const map = new Map<string, { sum: number; count: number }>();
+  const map = new Map<string, { label: string; sum: number; count: number }>();
   for (const row of items) {
     if (!row || typeof row !== "object") continue;
-    const g = safeKey((row as any)[groupByKey]);
-    const cur = map.get(g) ?? { sum: 0, count: 0 };
+    const originalLabel = safeKey((row as any)[groupByKey]);
+    const g = originalLabel.toLowerCase();
+    const cur = map.get(g) ?? { label: originalLabel, sum: 0, count: 0 };
     cur.count += 1;
     if (agg === "sum" || agg === "avg") {
       const n = toNumeric((row as any)[valueKey || ""]);
       if (n != null) cur.sum += n;
     }
+    const curUpper = (cur.label.match(/[A-Z]/g) || []).length;
+    const newUpper = (originalLabel.match(/[A-Z]/g) || []).length;
+    if (newUpper > curUpper) {
+      cur.label = originalLabel;
+    }
     map.set(g, cur);
   }
   const out: Array<{ label: string; value: number }> = [];
-  Array.from(map.entries()).forEach(([label, v]) => {
-    if (agg === "count_rows") out.push({ label, value: v.count });
-    else if (agg === "sum") out.push({ label, value: v.sum });
-    else out.push({ label, value: v.count ? v.sum / v.count : 0 });
+  Array.from(map.values()).forEach((v) => {
+    if (agg === "count_rows") out.push({ label: v.label, value: v.count });
+    else if (agg === "sum") out.push({ label: v.label, value: v.sum });
+    else out.push({ label: v.label, value: v.count ? v.sum / v.count : 0 });
   });
   return out;
 }
@@ -1464,22 +1487,29 @@ function rollupSqlBuckets(
   filterKey: string,
   selectedFilterValues: string[]
 ): Array<{ label: string; value: number }> {
-  const byLabel = new Map<string, { n: number; s: number }>();
+  const byLabel = new Map<string, { label: string; n: number; s: number }>();
   for (const b of buckets) {
     if (filterKey && selectedFilterValues.length > 0) {
       const fv = safeKey(b.f);
       if (!selectedFilterValues.includes(fv)) continue;
     }
-    const cur = byLabel.get(b.g) ?? { n: 0, s: 0 };
+    const originalLabel = b.g || "";
+    const g = originalLabel.toLowerCase();
+    const cur = byLabel.get(g) ?? { label: originalLabel, n: 0, s: 0 };
     cur.n += b.n;
     cur.s += b.s;
-    byLabel.set(b.g, cur);
+    const curUpper = (cur.label.match(/[A-Z]/g) || []).length;
+    const newUpper = (originalLabel.match(/[A-Z]/g) || []).length;
+    if (newUpper > curUpper) {
+      cur.label = originalLabel;
+    }
+    byLabel.set(g, cur);
   }
   const out: Array<{ label: string; value: number }> = [];
-  for (const [label, { n, s }] of byLabel) {
-    if (agg === "count_rows") out.push({ label, value: n });
-    else if (agg === "sum") out.push({ label, value: s });
-    else out.push({ label, value: n ? s / n : 0 });
+  for (const v of byLabel.values()) {
+    if (agg === "count_rows") out.push({ label: v.label, value: v.n });
+    else if (agg === "sum") out.push({ label: v.label, value: v.s });
+    else out.push({ label: v.label, value: v.n ? v.s / v.n : 0 });
   }
   return out;
 }
@@ -1506,11 +1536,55 @@ function KpiBarChartWidgetInner({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
-  const { getDisplayLabel, registerWidgetLabels } = useDashboardCustomization();
+  const { getDisplayLabel, registerWidgetLabels, fetchDataWithDate, periodOptions, selectedPeriod } = useDashboardCustomization();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
-  const [viewerYear, setViewerYear] = useState<number>(widget.year);
+  const [viewerYear, setViewerYear] = useState<any>(() => {
+    if (fetchDataWithDate && periodOptions && periodOptions.length > 0) {
+      if (widget.year && periodOptions.some(opt => opt.value === String(widget.year))) {
+        return String(widget.year);
+      }
+      return periodOptions[0].value;
+    }
+    return widget.year;
+  });
   const [yearOptions, setYearOptions] = useState<number[]>([]);
+
+  const findDefaultPeriod = (opts: any[]) => {
+    if (!opts || opts.length === 0) return "";
+    const currentYear = new Date().getFullYear();
+    const currentYearStr = String(currentYear);
+    const prevYearStr = String(currentYear - 1);
+    const nextYearStr = String(currentYear + 1);
+
+    const exactMatch = opts.find(opt => opt.value === currentYearStr);
+    if (exactMatch) return exactMatch.value;
+
+    const startCurrent = opts.find(opt => opt.value.startsWith(currentYearStr));
+    if (startCurrent) return startCurrent.value;
+
+    const endCurrent = opts.find(opt => opt.value.endsWith(currentYearStr) || opt.value.endsWith(currentYearStr.slice(2)));
+    if (endCurrent) return endCurrent.value;
+
+    const startPrev = opts.find(opt => opt.value.startsWith(prevYearStr));
+    if (startPrev) return startPrev.value;
+
+    const startNext = opts.find(opt => opt.value.startsWith(nextYearStr));
+    if (startNext) return startNext.value;
+
+    const middleIdx = Math.floor(opts.length / 2);
+    return opts[middleIdx]?.value || opts[0]?.value || "";
+  };
+
+  useEffect(() => {
+    if (fetchDataWithDate && selectedPeriod) {
+      setViewerYear(selectedPeriod);
+    } else if (fetchDataWithDate && periodOptions && periodOptions.length > 0) {
+      if (!periodOptions.some(opt => opt.value === String(viewerYear))) {
+        setViewerYear(findDefaultPeriod(periodOptions));
+      }
+    }
+  }, [periodOptions, fetchDataWithDate, selectedPeriod]);
   const [bars, setBars] = useState<Array<{ key: string; label: string; value: number | null }>>([]);
   const [groups, setGroups] = useState<Array<{ label: string; value: number }>>([]);
   const [filterValues, setFilterValues] = useState<string[]>([]);
@@ -1541,7 +1615,7 @@ function KpiBarChartWidgetInner({
     setFilterSearch("");
     setFilterEditing(false);
     setSqlAggBuckets(null);
-  }, [widget.id, widget.chart_type, widget.mode]);
+  }, [widget.id, widget.chart_type, widget.mode, widget.year]);
 
   useEffect(() => {
     if (!token) return;
@@ -1656,13 +1730,32 @@ function KpiBarChartWidgetInner({
           setSqlAggBuckets(null);
           setRawMultiLineItems([]);
           const br = Array.isArray(d.bars) ? d.bars : [];
-          setBars(
-            br.map((b: { key: string; label: string; value: unknown }) => ({
-              key: b.key,
-              label: b.label,
-              value: b.value != null && b.value !== "" ? toNumeric(b.value) : null,
-            }))
-          );
+          const mergedBarsMap = new Map<string, { key: string; label: string; value: number | null }>();
+          for (const b of br) {
+            const labelStr = String(b.label || b.key || "").trim();
+            if (!labelStr) continue;
+            const keyLower = labelStr.toLowerCase();
+            const val = b.value != null && b.value !== "" ? toNumeric(b.value) : null;
+            const existing = mergedBarsMap.get(keyLower);
+            if (existing) {
+              if (val != null) {
+                existing.value = (existing.value ?? 0) + val;
+              }
+              const existingUpper = (existing.label.match(/[A-Z]/g) || []).length;
+              const currentUpper = (labelStr.match(/[A-Z]/g) || []).length;
+              if (currentUpper > existingUpper) {
+                existing.label = labelStr;
+                existing.key = labelStr;
+              }
+            } else {
+              mergedBarsMap.set(keyLower, {
+                key: labelStr,
+                label: labelStr,
+                value: val,
+              });
+            }
+          }
+          setBars(Array.from(mergedBarsMap.values()));
           setGroups([]);
         })
         .catch((e) => {
@@ -1966,25 +2059,35 @@ function KpiBarChartWidgetInner({
       <select
         value={viewerYear}
         onChange={(e) => {
-          const next = Number(e.target.value);
+          const next = fetchDataWithDate ? e.target.value : Number(e.target.value);
           setViewerYear(next);
           setSelectedFilterValues([]);
           setFilterSearch("");
           setFilterEditing(false);
         }}
         style={{ height: 36, padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
-        title="Year"
+        title={fetchDataWithDate ? "Period" : "Year"}
       >
-        {(yearOptions.length ? yearOptions : [viewerYear]).map((y) => (
-          <option key={y} value={y}>
-            {y}
-          </option>
-        ))}
+        {fetchDataWithDate && periodOptions && periodOptions.length > 0 ? (
+          periodOptions.map((opt: any) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))
+        ) : (
+          (yearOptions.length ? yearOptions : [viewerYear]).map((y) => (
+            <option key={y} value={y}>
+              {y}
+            </option>
+          ))
+        )}
       </select>
     );
 
     if (modeNow !== "multi_line_items" || !filterKey) {
-      setHeaderAddon(<div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>{yearSelect}</div>);
+      setHeaderAddon(
+        fetchDataWithDate ? null : <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>{yearSelect}</div>
+      );
       return;
     }
 
@@ -1994,7 +2097,7 @@ function KpiBarChartWidgetInner({
 
     setHeaderAddon(
       <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
-        {yearSelect}
+        {!fetchDataWithDate && yearSelect}
         <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.35rem" }}>
           {!filterEditing ? (
             <button
@@ -2198,7 +2301,7 @@ function KpiBarChartWidgetInner({
       setViewerMenu(
         <div style={{ display: "grid", gap: "0.65rem" }}>
           <div>
-            <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 4 }}>Chart</div>
+            <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 4 }}>Chart Type</div>
             {chartToggle}
           </div>
           {hiddenSeriesKeys.length > 0 && (
@@ -2235,7 +2338,7 @@ function KpiBarChartWidgetInner({
     setViewerMenu(
       <div style={{ display: "grid", gap: "0.65rem" }}>
         <div>
-          <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 4 }}>Chart</div>
+          <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 4 }}>Chart Type</div>
           {chartToggle}
         </div>
         {hiddenSeriesKeys.length > 0 && (
@@ -2333,787 +2436,28 @@ function KpiBarChartWidgetInner({
 
           {visibleGroups.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>No grouped data available for this multi-line field.</p>
-          ) :chartType === "pie" ? (
-            <div style={{ display: "flex", gap: "1.5rem", alignItems: "center", flexWrap: "wrap", width: "100%", padding: "0.25rem" }}>
-              <div style={{ width: 250, height: 250, flexShrink: 0, margin: "0 auto" }}>
-                <svg
-                  viewBox="0 0 300 300"
-                  role="img"
-                  aria-label="Pie chart"
-                  style={{ width: "100%", height: "100%", display: "block", touchAction: "none" }}
-                  onMouseLeave={() => {
-                    setHoverPieKey(null);
-                    setHoverPiePt(null);
-                  }}
-                  onTouchEnd={() => {
-                    setHoverPieKey(null);
-                    setHoverPiePt(null);
-                  }}
-                  onMouseMove={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const clientX = e.clientX - rect.left;
-                    const clientY = e.clientY - rect.top;
-                    const localX = (clientX / rect.width) * 300;
-                    const localY = (clientY / rect.height) * 300;
-                    const cx = 150;
-                    const cy = 150;
-                    const r = 120;
-                    const dx = localX - cx;
-                    const dy = localY - cy;
-                    const dist = Math.sqrt(dx * dx + dy * dy);
-                    
-                    const topN = 8;
-                    let pieGroups: Array<{ label: string; value: number; isOther?: boolean }> = [];
-                    if (visibleGroups.length <= topN + 1) {
-                      pieGroups = visibleGroups;
-                    } else {
-                      const top = visibleGroups.slice(0, topN);
-                      const tail = visibleGroups.slice(topN);
-                      const tailSum = tail.reduce((sum, g) => sum + g.value, 0);
-                      pieGroups = [
-                        ...top,
-                        { label: "Other", value: tailSum, isOther: true }
-                      ];
-                    }
-
-                    const total = pieGroups.reduce((s, g) => s + g.value, 0) || 1;
-                    if (dist <= r && dist > 5) {
-                      let angle = Math.atan2(dy, dx);
-                      let normalizedAngle = angle - (-Math.PI / 2);
-                      if (normalizedAngle < 0) {
-                        normalizedAngle += Math.PI * 2;
-                      }
-                      let currentAngleSum = 0;
-                      for (let i = 0; i < pieGroups.length; i++) {
-                        const g = pieGroups[i];
-                        const frac = g.value / total;
-                        const sweep = frac * Math.PI * 2;
-                        if (normalizedAngle >= currentAngleSum && normalizedAngle < currentAngleSum + sweep) {
-                          setHoverPieKey(g.label);
-                          const mid = -Math.PI / 2 + currentAngleSum + sweep / 2;
-                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
-                          setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                          break;
-                        }
-                        currentAngleSum += sweep;
-                      }
-                    } else {
-                      setHoverPieKey(null);
-                      setHoverPiePt(null);
-                    }
-                  }}
-                  onTouchMove={(e) => {
-                    if (e.touches.length === 0) return;
-                    const touch = e.touches[0];
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const clientX = touch.clientX - rect.left;
-                    const clientY = touch.clientY - rect.top;
-                    const localX = (clientX / rect.width) * 300;
-                    const localY = (clientY / rect.height) * 300;
-                    const cx = 150;
-                    const cy = 150;
-                    const r = 120;
-                    const dx = localX - cx;
-                    const dy = localY - cy;
-                    const dist = Math.sqrt(dx * dx + dy * dy);
-                    
-                    const topN = 8;
-                    let pieGroups: Array<{ label: string; value: number; isOther?: boolean }> = [];
-                    if (visibleGroups.length <= topN + 1) {
-                      pieGroups = visibleGroups;
-                    } else {
-                      const top = visibleGroups.slice(0, topN);
-                      const tail = visibleGroups.slice(topN);
-                      const tailSum = tail.reduce((sum, g) => sum + g.value, 0);
-                      pieGroups = [
-                        ...top,
-                        { label: "Other", value: tailSum, isOther: true }
-                      ];
-                    }
-
-                    const total = pieGroups.reduce((s, g) => s + g.value, 0) || 1;
-                    if (dist <= r && dist > 5) {
-                      let angle = Math.atan2(dy, dx);
-                      let normalizedAngle = angle - (-Math.PI / 2);
-                      if (normalizedAngle < 0) {
-                        normalizedAngle += Math.PI * 2;
-                      }
-                      let currentAngleSum = 0;
-                      for (let i = 0; i < pieGroups.length; i++) {
-                        const g = pieGroups[i];
-                        const frac = g.value / total;
-                        const sweep = frac * Math.PI * 2;
-                        if (normalizedAngle >= currentAngleSum && normalizedAngle < currentAngleSum + sweep) {
-                          setHoverPieKey(g.label);
-                          const mid = -Math.PI / 2 + currentAngleSum + sweep / 2;
-                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
-                          setHoverPiePt({ x: p.x, y: p.y, label: g.label, value: g.value });
-                          break;
-                        }
-                        currentAngleSum += sweep;
-                      }
-                    } else {
-                      setHoverPieKey(null);
-                      setHoverPiePt(null);
-                    }
-                  }}
-                >
-                  <rect x="0" y="0" width="300" height="300" fill="var(--bg)" rx="6" />
-                  {(() => {
-                    const topN = 8;
-                    let pieGroups: Array<{ label: string; value: number; isOther?: boolean }> = [];
-                    if (visibleGroups.length <= topN + 1) {
-                      pieGroups = visibleGroups;
-                    } else {
-                      const top = visibleGroups.slice(0, topN);
-                      const tail = visibleGroups.slice(topN);
-                      const tailSum = tail.reduce((sum, g) => sum + g.value, 0);
-                      pieGroups = [
-                        ...top,
-                        { label: "Other", value: tailSum, isOther: true }
-                      ];
-                    }
-
-                    const total = pieGroups.reduce((s, g) => s + g.value, 0) || 1;
-                    const cx = 150;
-                    const cy = 150;
-                    const r = 120;
-                    let a = -Math.PI / 2;
-                    return (
-                      <>
-                        {pieGroups.map((g, i) => {
-                          const frac = g.value / total;
-                          const next = a + frac * Math.PI * 2;
-                          const d = pieArcPath(cx, cy, r, a, next);
-                          const mid = (a + next) / 2;
-                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
-                          a = next;
-                          const fill = g.isOther ? "#a1a1aa" : colorForIndex(i, pieGroups.length);
-                          return (
-                            <path
-                              key={g.label}
-                              d={d}
-                              fill={fill}
-                              stroke="var(--surface)"
-                              strokeWidth="1"
-                              style={{ transition: "opacity 0.15s ease", cursor: "pointer" }}
-                              opacity={hoverPieKey === null || hoverPieKey === g.label ? 1.0 : 0.65}
-                            />
-                          );
-                        })}
-                        {hoverPiePt && hoverPieKey ? (
-                          <g>
-                            <circle cx={hoverPiePt.x} cy={hoverPiePt.y} r={4} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
-                            {(() => {
-                              const label = hoverPiePt.label === "Other"
-                                ? `Other: ${hoverPiePt.value.toLocaleString()}`
-                                : `${getDisplayLabel(hoverPiePt.label, widget.id)}: ${hoverPiePt.value.toLocaleString()}`;
-                              const padX = 8;
-                              const boxW = Math.min(220, 12 + label.length * 6.2);
-                              const boxH = 26;
-                              const x = Math.min(300 - boxW - 8, Math.max(8, hoverPiePt.x + 12));
-                              const y = Math.min(300 - boxH - 8, Math.max(8, hoverPiePt.y - boxH - 10));
-                              return (
-                                <g>
-                                  <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
-                                  <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
-                                    {label}
-                                  </text>
-                                </g>
-                              );
-                            })()}
-                          </g>
-                        ) : null}
-                      </>
-                    );
-                  })()}
-                </svg>
-              </div>
-              <div style={{ flex: 1, minWidth: 220, maxHeight: 200, overflowY: "auto", scrollbarWidth: "thin", paddingRight: "0.5rem" }}>
-                <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.5rem" }}>
-                  All Groups ({visibleGroups.length})
-                </div>
-                <div style={{ display: "grid", gap: "0.45rem" }}>
-                  {visibleGroups.map((g, i) => (
-                    <div key={g.label} style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <div style={{ width: 10, height: 10, borderRadius: "2px", background: colorForIndex(i, visibleGroups.length), flexShrink: 0 }} />
-                      <div style={{ fontSize: "0.85rem", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        <CustomLabel value={g.label} widgetId={widget.id} />
-                        <span style={{ color: "var(--muted)", marginLeft: "0.25rem" }}>({g.value.toLocaleString()})</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
           ) : (
-            <div style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 720 }}>
-
-              <svg
-
-                viewBox={`0 0 ${widget.full_width ? 1280 : 640} 300`}
-
-                role="img"
-
-                aria-label="Bar chart"
-
-                style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
-
-                onMouseLeave={() => {
-
-                  setHoverBarKey(null);
-
-                  setHoverBarPt(null);
-
-                }}
-
-                onTouchEnd={() => {
-
-                  setHoverBarKey(null);
-
-                  setHoverBarPt(null);
-
-                }}
-
-              >
-
-                <rect x="0" y="0" width={widget.full_width ? 1280 : 640} height="300" fill="var(--bg)" rx="6" />
-
-                {(() => {
-
-                  const W = widget.full_width ? 1280 : 640;
-
-                  const H = 300;
-                  const left = 40;
-                  const right = 16;
-                  const top = 16;
-                  const bottom = 58;
-                  const innerW = W - left - right;
-                  const innerH = H - top - bottom;
-                  const data = visibleGroups;
-                  const n = data.length;
-                  const gap = 8;
-                  const barW = n > 0 ? Math.max(10, (innerW - gap * (n - 1)) / n) : 10;
-                  const minIdx = data.reduce((best, b, i) => (b.value < data[best].value ? i : best), 0);
-                  const maxIdx = data.reduce((best, b, i) => (b.value > data[best].value ? i : best), 0);
-                  return (
-                    <>
-                      <text x={8} y={top + 12} fontSize="11" fill="var(--muted)">
-                        {maxG.toLocaleString()}
-                      </text>
-                      {data.map((b, i) => {
-                        const x = left + i * (barW + gap);
-                        const h = maxG > 0 ? (b.value / maxG) * innerH : 0;
-                        const y = top + innerH - h;
-                        const fill = colorForIndex(i, data.length);
-                        return (
-                          <g key={b.label}>
-                            <rect
-
-                              x={x}
-
-                              y={y}
-
-                              width={barW}
-
-                              height={h}
-
-                              fill={fill}
-
-                              opacity={hoverBarKey === b.label ? 1.0 : 0.85}
-
-                              style={{ transition: "opacity 0.15s ease" }}
-
-                              rx={2}
-
-                            />
-
-                            <rect
-
-                              x={x}
-
-                              y={top}
-
-                              width={barW}
-
-                              height={innerH}
-
-                              fill="transparent"
-
-                              style={{ cursor: "pointer" }}
-
-                              onMouseEnter={() => {
-
-                                setHoverBarKey(b.label);
-
-                                setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
-
-                              }}
-
-                              onMouseMove={() => {
-
-                                setHoverBarKey(b.label);
-
-                                setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
-
-                              }}
-
-                              onTouchStart={() => {
-
-                                setHoverBarKey(b.label);
-
-                                setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
-
-                              }}
-
-                              onTouchMove={() => {
-
-                                setHoverBarKey(b.label);
-
-                                setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.label, value: b.value });
-
-                              }}
-
-                            />
-                            {(i === minIdx || i === maxIdx) && h > 0 ? (
-                              <text
-                                x={x + barW / 2}
-                                y={Math.max(12, y - 6)}
-                                fontSize="11"
-                                fill="var(--text)"
-                                textAnchor="middle"
-                                style={{ paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3 }}
-                              >
-                                {b.value.toLocaleString()}
-                              </text>
-                            ) : null}
-                            <CustomLabel
-                              value={b.label}
-                              widgetId={widget.id}
-                              isSvg={true}
-                              truncateLength={12}
-                              svgProps={{
-                                x: x + barW / 2,
-                                y: H - 10,
-                                fontSize: "9",
-                                fill: "var(--muted)",
-                                textAnchor: "middle",
-                              }}
-                            />
-                          </g>
-                        );
-                      })}
-                      {hoverBarPt && hoverBarKey ? (
-                        <g>
-                          <line x1={hoverBarPt.x} y1={top} x2={hoverBarPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
-                          {(() => {
-                            const label = `${getDisplayLabel(hoverBarPt.label, widget.id)}: ${hoverBarPt.value.toLocaleString()}`;
-                            const padX = 8;
-                            const boxW = Math.min(300, 12 + label.length * 6.2);
-                            const boxH = 26;
-                            const preferLeft = hoverBarPt.x > W * 0.55;
-                            const x = preferLeft ? Math.max(8, hoverBarPt.x - boxW - 10) : Math.min(W - boxW - 8, hoverBarPt.x + 10);
-                            const y = Math.max(8, Math.min(H - boxH - 8, hoverBarPt.y - boxH - 10));
-                            return (
-                              <g>
-                                <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
-                                <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
-                                  {label}
-                                </text>
-                              </g>
-                            );
-                          })()}
-                        </g>
-                      ) : null}
-                    </>
-                  );
-                })()}
-              </svg>
-            </div>
+            <SmartChartViewer
+              rawItems={visibleGroups.map((g) => ({ key: g.label, label: g.label, value: g.value }))}
+              widgetId={widget.id}
+              chartType={chartType}
+              fullWidth={widget.full_width}
+              colorForIndex={colorForIndex}
+              onChartTypeChange={setViewerChartType}
+            />
           )}
         </div>
       ) : visibleNumeric.length === 0 ? (
         <p style={{ color: "var(--muted)", margin: 0 }}>No numeric data for the selected fields.</p>
       ) : (
-        <div style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 720 }}>
-          {chartType === "pie" ? (
-            <div style={{ display: "flex", gap: "1.5rem", alignItems: "center", flexWrap: "wrap", width: "100%", padding: "0.25rem" }}>
-              <div style={{ width: 250, height: 250, flexShrink: 0, margin: "0 auto" }}>
-                <svg
-                  viewBox="0 0 300 300"
-                  role="img"
-                  aria-label="Pie chart"
-                  style={{ width: "100%", height: "100%", display: "block", touchAction: "none" }}
-                  onMouseLeave={() => {
-                    setHoverPieKey(null);
-                    setHoverPiePt(null);
-                  }}
-                  onTouchEnd={() => {
-                    setHoverPieKey(null);
-                    setHoverPiePt(null);
-                  }}
-                  onMouseMove={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const clientX = e.clientX - rect.left;
-                    const clientY = e.clientY - rect.top;
-                    const localX = (clientX / rect.width) * 300;
-                    const localY = (clientY / rect.height) * 300;
-                    const cx = 150;
-                    const cy = 150;
-                    const r = 120;
-                    const dx = localX - cx;
-                    const dy = localY - cy;
-                    const dist = Math.sqrt(dx * dx + dy * dy);
-                    
-                    const topN = 8;
-                    let pieNumeric: Array<{ key: string; value: number; isOther?: boolean }> = [];
-                    if (visibleNumeric.length <= topN + 1) {
-                      pieNumeric = visibleNumeric;
-                    } else {
-                      const top = visibleNumeric.slice(0, topN);
-                      const tail = visibleNumeric.slice(topN);
-                      const tailSum = tail.reduce((sum, b) => sum + b.value, 0);
-                      pieNumeric = [
-                        ...top,
-                        { key: "Other", value: tailSum, isOther: true }
-                      ];
-                    }
-
-                    const total = pieNumeric.reduce((s, b) => s + b.value, 0) || 1;
-                    if (dist <= r && dist > 5) {
-                      let angle = Math.atan2(dy, dx);
-                      let normalizedAngle = angle - (-Math.PI / 2);
-                      if (normalizedAngle < 0) {
-                        normalizedAngle += Math.PI * 2;
-                      }
-                      let currentAngleSum = 0;
-                      for (let i = 0; i < pieNumeric.length; i++) {
-                        const b = pieNumeric[i];
-                        const frac = b.value / total;
-                        const sweep = frac * Math.PI * 2;
-                        if (normalizedAngle >= currentAngleSum && normalizedAngle < currentAngleSum + sweep) {
-                          setHoverPieKey(b.key);
-                          const mid = -Math.PI / 2 + currentAngleSum + sweep / 2;
-                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
-                          setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
-                          break;
-                        }
-                        currentAngleSum += sweep;
-                      }
-                    } else {
-                      setHoverPieKey(null);
-                      setHoverPiePt(null);
-                    }
-                  }}
-                  onTouchMove={(e) => {
-                    if (e.touches.length === 0) return;
-                    const touch = e.touches[0];
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const clientX = touch.clientX - rect.left;
-                    const clientY = touch.clientY - rect.top;
-                    const localX = (clientX / rect.width) * 300;
-                    const localY = (clientY / rect.height) * 300;
-                    const cx = 150;
-                    const cy = 150;
-                    const r = 120;
-                    const dx = localX - cx;
-                    const dy = localY - cy;
-                    const dist = Math.sqrt(dx * dx + dy * dy);
-                    
-                    const topN = 8;
-                    let pieNumeric: Array<{ key: string; value: number; isOther?: boolean }> = [];
-                    if (visibleNumeric.length <= topN + 1) {
-                      pieNumeric = visibleNumeric;
-                    } else {
-                      const top = visibleNumeric.slice(0, topN);
-                      const tail = visibleNumeric.slice(topN);
-                      const tailSum = tail.reduce((sum, b) => sum + b.value, 0);
-                      pieNumeric = [
-                        ...top,
-                        { key: "Other", value: tailSum, isOther: true }
-                      ];
-                    }
-
-                    const total = pieNumeric.reduce((s, b) => s + b.value, 0) || 1;
-                    if (dist <= r && dist > 5) {
-                      let angle = Math.atan2(dy, dx);
-                      let normalizedAngle = angle - (-Math.PI / 2);
-                      if (normalizedAngle < 0) {
-                        normalizedAngle += Math.PI * 2;
-                      }
-                      let currentAngleSum = 0;
-                      for (let i = 0; i < pieNumeric.length; i++) {
-                        const b = pieNumeric[i];
-                        const frac = b.value / total;
-                        const sweep = frac * Math.PI * 2;
-                        if (normalizedAngle >= currentAngleSum && normalizedAngle < currentAngleSum + sweep) {
-                          setHoverPieKey(b.key);
-                          const mid = -Math.PI / 2 + currentAngleSum + sweep / 2;
-                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
-                          setHoverPiePt({ x: p.x, y: p.y, label: b.key, value: b.value });
-                          break;
-                        }
-                        currentAngleSum += sweep;
-                      }
-                    } else {
-                      setHoverPieKey(null);
-                      setHoverPiePt(null);
-                    }
-                  }}
-                >
-                  <rect x="0" y="0" width="300" height="300" fill="var(--bg)" rx="6" />
-                  {(() => {
-                    const topN = 8;
-                    let pieNumeric: Array<{ key: string; value: number; isOther?: boolean }> = [];
-                    if (visibleNumeric.length <= topN + 1) {
-                      pieNumeric = visibleNumeric;
-                    } else {
-                      const top = visibleNumeric.slice(0, topN);
-                      const tail = visibleNumeric.slice(topN);
-                      const tailSum = tail.reduce((sum, b) => sum + b.value, 0);
-                      pieNumeric = [
-                        ...top,
-                        { key: "Other", value: tailSum, isOther: true }
-                      ];
-                    }
-
-                    const total = pieNumeric.reduce((s, b) => s + b.value, 0) || 1;
-                    const cx = 150;
-                    const cy = 150;
-                    const r = 120;
-                    let a = -Math.PI / 2;
-                    return (
-                      <>
-                        {pieNumeric.map((b, i) => {
-                          const frac = b.value / total;
-                          const next = a + frac * Math.PI * 2;
-                          const d = pieArcPath(cx, cy, r, a, next);
-                          const mid = (a + next) / 2;
-                          const p = polarToCartesian(cx, cy, r * 0.72, mid);
-                          a = next;
-                          const fill = b.isOther ? "#a1a1aa" : colorForIndex(i, pieNumeric.length);
-                          return (
-                            <path
-                              key={b.key}
-                              d={d}
-                              fill={fill}
-                              stroke="var(--surface)"
-                              strokeWidth="1"
-                              style={{ transition: "opacity 0.15s ease", cursor: "pointer" }}
-                              opacity={hoverPieKey === null || hoverPieKey === b.key ? 1.0 : 0.65}
-                            />
-                          );
-                        })}
-                        {hoverPiePt && hoverPieKey ? (
-                          <g>
-                            <circle cx={hoverPiePt.x} cy={hoverPiePt.y} r={4} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
-                            {(() => {
-                              const label = hoverPiePt.label === "Other"
-                                ? `Other: ${hoverPiePt.value.toLocaleString()}`
-                                : `${getDisplayLabel(hoverPiePt.label, widget.id)}: ${hoverPiePt.value.toLocaleString()}`;
-                              const padX = 8;
-                              const boxW = Math.min(220, 12 + label.length * 6.2);
-                              const boxH = 26;
-                              const x = Math.min(300 - boxW - 8, Math.max(8, hoverPiePt.x + 12));
-                              const y = Math.min(300 - boxH - 8, Math.max(8, hoverPiePt.y - boxH - 10));
-                              return (
-                                <g>
-                                  <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
-                                  <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
-                                    {label}
-                                  </text>
-                                </g>
-                              );
-                            })()}
-                          </g>
-                        ) : null}
-                      </>
-                    );
-                  })()}
-                </svg>
-              </div>
-              <div style={{ flex: 1, minWidth: 220, maxHeight: 200, overflowY: "auto", scrollbarWidth: "thin", paddingRight: "0.5rem" }}>
-                <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.5rem" }}>
-                  All Fields ({visibleNumeric.length})
-                </div>
-                <div style={{ display: "grid", gap: "0.45rem" }}>
-                  {visibleNumeric.map((b, i) => (
-                    <div key={b.key} style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <div style={{ width: 10, height: 10, borderRadius: "2px", background: colorForIndex(i, visibleNumeric.length), flexShrink: 0 }} />
-                      <div style={{ fontSize: "0.85rem", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        <CustomLabel value={b.key} widgetId={widget.id} />
-                        <span style={{ color: "var(--muted)", marginLeft: "0.25rem" }}>({b.value.toLocaleString()})</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <svg
-              viewBox={`0 0 ${widget.full_width ? 1280 : 640} 300`}
-              role="img"
-              aria-label="Bar chart"
-              style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
-              onMouseLeave={() => {
-                setHoverBarKey(null);
-                setHoverBarPt(null);
-              }}
-              onTouchEnd={() => {
-                setHoverBarKey(null);
-                setHoverBarPt(null);
-              }}
-            >
-              <rect x="0" y="0" width={widget.full_width ? 1280 : 640} height="300" fill="var(--bg)" rx="6" />
-              {(() => {
-                const W = widget.full_width ? 1280 : 640;
-                const H = 300;
-                const left = 40;
-                const right = 16;
-                const top = 16;
-                const bottom = 58;
-                const innerW = W - left - right;
-                const innerH = H - top - bottom;
-                const n = visibleNumeric.length;
-                const gap = 8;
-                const barW = n > 0 ? Math.max(8, (innerW - gap * (n - 1)) / n) : 8;
-                const minIdx = visibleNumeric.reduce((best, b, i) => (b.value < visibleNumeric[best].value ? i : best), 0);
-                const maxIdx = visibleNumeric.reduce((best, b, i) => (b.value > visibleNumeric[best].value ? i : best), 0);
-                return (
-                  <>
-                    <text x={8} y={top + 12} fontSize="11" fill="var(--muted)">
-                      {maxV.toLocaleString()}
-                    </text>
-                    {visibleNumeric.map((b, i) => {
-                      const x = left + i * (barW + gap);
-                      const h = maxV > 0 ? (b.value / maxV) * innerH : 0;
-                      const y = top + innerH - h;
-                      const fill = colorForIndex(i, visibleNumeric.length);
-                      return (
-                        <g key={b.key}>
-                          <rect
-
-                            x={x}
-
-                            y={y}
-
-                            width={barW}
-
-                            height={h}
-
-                            fill={fill}
-
-                            opacity={hoverBarKey === b.key ? 1.0 : 0.85}
-
-                            style={{ transition: "opacity 0.15s ease" }}
-
-                            rx={2}
-
-                          />
-
-                          <rect
-
-                            x={x}
-
-                            y={top}
-
-                            width={barW}
-
-                            height={innerH}
-
-                            fill="transparent"
-
-                            style={{ cursor: "pointer" }}
-
-                            onMouseEnter={() => {
-
-                              setHoverBarKey(b.key);
-
-                              setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
-
-                            }}
-
-                            onMouseMove={() => {
-
-                              setHoverBarKey(b.key);
-
-                              setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
-
-                            }}
-
-                            onTouchStart={() => {
-
-                              setHoverBarKey(b.key);
-
-                              setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
-
-                            }}
-
-                            onTouchMove={() => {
-
-                              setHoverBarKey(b.key);
-
-                              setHoverBarPt({ x: x + barW / 2, y: Math.max(top, y), label: b.key, value: b.value });
-
-                            }}
-
-                          />
-                          {(i === minIdx || i === maxIdx) && h > 0 ? (
-                            <text
-                              x={x + barW / 2}
-                              y={Math.max(12, y - 6)}
-                              fontSize="11"
-                              fill="var(--text)"
-                              textAnchor="middle"
-                              style={{ paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3 }}
-                            >
-                              {b.value.toLocaleString()}
-                            </text>
-                          ) : null}
-                          <CustomLabel
-                            value={b.key}
-                            widgetId={widget.id}
-                            isSvg={true}
-                            truncateLength={14}
-                            svgProps={{
-                              x: x + barW / 2,
-                              y: H - 8,
-                              fontSize: "9",
-                              fill: "var(--muted)",
-                              textAnchor: "middle",
-                            }}
-                          />
-                        </g>
-                      );
-                    })}
-                    {hoverBarPt && hoverBarKey ? (
-                      <g>
-                        <line x1={hoverBarPt.x} y1={top} x2={hoverBarPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
-                        {(() => {
-                          const label = `${getDisplayLabel(hoverBarPt.label, widget.id)}: ${hoverBarPt.value.toLocaleString()}`;
-                          const padX = 8;
-                          const boxW = Math.min(300, 12 + label.length * 6.2);
-                          const boxH = 26;
-                          const preferLeft = hoverBarPt.x > W * 0.55;
-                          const x = preferLeft ? Math.max(8, hoverBarPt.x - boxW - 10) : Math.min(W - boxW - 8, hoverBarPt.x + 10);
-                          const y = Math.max(8, Math.min(H - boxH - 8, hoverBarPt.y - boxH - 10));
-                          return (
-                            <g>
-                              <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" />
-                              <text x={x + padX} y={y + 17} fontSize="12" fill="var(--text)">
-                                {label}
-                              </text>
-                            </g>
-                          );
-                        })()}
-                      </g>
-                    ) : null}
-                  </>
-                );
-              })()}
-            </svg>
-          )}
-        </div>
+        <SmartChartViewer
+          rawItems={visibleNumeric.map((b) => ({ key: b.key, label: b.label, value: b.value }))}
+          widgetId={widget.id}
+          chartType={chartType}
+          fullWidth={widget.full_width}
+          colorForIndex={colorForIndex}
+          onChartTypeChange={setViewerChartType}
+        />
       )}
     </>
   );
@@ -3175,7 +2519,7 @@ function KpiTrendWidgetInner({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
-  const { getDisplayLabel, registerWidgetLabels } = useDashboardCustomization();
+  const { getDisplayLabel, registerWidgetLabels, consistentColors, getColorForValue } = useDashboardCustomization();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const mode = widget.mode || "multi_line_items";
@@ -4172,7 +3516,11 @@ function KpiTrendWidgetInner({
                   const xStep = years.length > 1 ? innerW / (years.length - 1) : 0;
 
                   const topCats = categories.slice(0, 6);
-                  const catColor = (idx: number) => colorForIndex(idx, topCats.length);
+                  const catColor = (idx: number) => {
+                    const originalLabel = topCats[idx];
+                    const displayLabel = getDisplayLabel(originalLabel, widget.id);
+                    return getColorForValue(displayLabel, idx, topCats.length, colorForIndex(idx, topCats.length));
+                  };
 
                   let maxV = 1;
                   topCats.forEach((c) => {
@@ -4586,10 +3934,55 @@ function KpiMultiLineTableWidgetInner({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
+  const { fetchDataWithDate, periodOptions, selectedPeriod } = useDashboardCustomization();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
-  const [viewerYear, setViewerYear] = useState<number>(widget.year);
+  const [viewerYear, setViewerYear] = useState<any>(() => {
+    if (fetchDataWithDate && periodOptions && periodOptions.length > 0) {
+      if (widget.year && periodOptions.some(opt => opt.value === String(widget.year))) {
+        return String(widget.year);
+      }
+      return periodOptions[0].value;
+    }
+    return widget.year;
+  });
   const [yearOptions, setYearOptions] = useState<number[]>([]);
+
+  const findDefaultPeriod = (opts: any[]) => {
+    if (!opts || opts.length === 0) return "";
+    const currentYear = new Date().getFullYear();
+    const currentYearStr = String(currentYear);
+    const prevYearStr = String(currentYear - 1);
+    const nextYearStr = String(currentYear + 1);
+
+    const exactMatch = opts.find(opt => opt.value === currentYearStr);
+    if (exactMatch) return exactMatch.value;
+
+    const startCurrent = opts.find(opt => opt.value.startsWith(currentYearStr));
+    if (startCurrent) return startCurrent.value;
+
+    const endCurrent = opts.find(opt => opt.value.endsWith(currentYearStr) || opt.value.endsWith(currentYearStr.slice(2)));
+    if (endCurrent) return endCurrent.value;
+
+    const startPrev = opts.find(opt => opt.value.startsWith(prevYearStr));
+    if (startPrev) return startPrev.value;
+
+    const startNext = opts.find(opt => opt.value.startsWith(nextYearStr));
+    if (startNext) return startNext.value;
+
+    const middleIdx = Math.floor(opts.length / 2);
+    return opts[middleIdx]?.value || opts[0]?.value || "";
+  };
+
+  useEffect(() => {
+    if (fetchDataWithDate && selectedPeriod) {
+      setViewerYear(selectedPeriod);
+    } else if (fetchDataWithDate && periodOptions && periodOptions.length > 0) {
+      if (!periodOptions.some(opt => opt.value === String(viewerYear))) {
+        setViewerYear(findDefaultPeriod(periodOptions));
+      }
+    }
+  }, [periodOptions, fetchDataWithDate, selectedPeriod]);
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [viewerFilters, setViewerFilters] = useState<MultiItemsFilterPayloadV2 | null>(
     (widget.filters as MultiItemsFilterPayloadV2 | null) ?? null
@@ -4652,7 +4045,7 @@ function KpiMultiLineTableWidgetInner({
     setPage(0);
     setViewerYear(widget.year);
     setTotal(0);
-  }, [widget.id, JSON.stringify(allowedKeys), JSON.stringify(joinSpecs)]);
+  }, [widget.id, JSON.stringify(allowedKeys), JSON.stringify(joinSpecs), widget.year]);
 
   useEffect(() => {
     if (!token) return;
@@ -4946,21 +4339,29 @@ function KpiMultiLineTableWidgetInner({
     const yearSelect = (
       <select
         value={viewerYear}
-        onChange={(e) => setViewerYear(Number(e.target.value))}
+        onChange={(e) => setViewerYear(fetchDataWithDate ? e.target.value : Number(e.target.value))}
         style={{ height: 36, padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
-        title="Year"
+        title={fetchDataWithDate ? "Period" : "Year"}
       >
-        {(yearOptions.length ? yearOptions : [now]).map((y) => (
-          <option key={y} value={y}>
-            {y}
-          </option>
-        ))}
+        {fetchDataWithDate && periodOptions && periodOptions.length > 0 ? (
+          periodOptions.map((opt: any) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))
+        ) : (
+          (yearOptions.length ? yearOptions : [now]).map((y) => (
+            <option key={y} value={y}>
+              {y}
+            </option>
+          ))
+        )}
       </select>
     );
 
     setHeaderAddon(
       <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
-        {yearSelect}
+        {!fetchDataWithDate && yearSelect}
         <button
           type="button"
           className="btn"

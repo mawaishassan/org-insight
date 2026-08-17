@@ -50,8 +50,15 @@ async def upsert_org_odoo_config(
     return cfg
 
 
+from sqlalchemy.orm import selectinload
+
+
 async def get_kpi_odoo_config(db: AsyncSession, kpi_id: int) -> KpiOdooConfig | None:
-    result = await db.execute(select(KpiOdooConfig).where(KpiOdooConfig.kpi_id == kpi_id))
+    result = await db.execute(
+        select(KpiOdooConfig)
+        .options(selectinload(KpiOdooConfig.endpoint))
+        .where(KpiOdooConfig.kpi_id == kpi_id)
+    )
     return result.scalar_one_or_none()
 
 
@@ -60,11 +67,13 @@ async def upsert_kpi_odoo_config(
     kpi_id: int,
     request_body: dict | list,
     response_items_path: str | None,
+    odoo_endpoint_id: int | None = None,
 ) -> KpiOdooConfig:
     cfg = await get_kpi_odoo_config(db, kpi_id)
     if cfg is None:
         cfg = KpiOdooConfig(
             kpi_id=kpi_id,
+            odoo_endpoint_id=odoo_endpoint_id,
             request_body=request_body,
             response_items_path=response_items_path,
         )
@@ -72,6 +81,7 @@ async def upsert_kpi_odoo_config(
     else:
         cfg.request_body = request_body
         cfg.response_items_path = response_items_path
+        cfg.odoo_endpoint_id = odoo_endpoint_id
     await db.flush()
     await db.refresh(cfg)
     return cfg

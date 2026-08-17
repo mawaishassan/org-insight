@@ -300,6 +300,7 @@ class KpiFileResponse(BaseModel):
 class KpiOdooConfigUpdate(BaseModel):
     """KPI-specific Odoo fetch request body (Super Admin only)."""
 
+    odoo_endpoint_id: int | None = Field(None, description="ID of configured OdooEndpoint for this KPI")
     request_body: dict | list = Field(..., description="JSON body sent to Odoo data fetch URL")
     response_items_path: str | None = Field(
         None,
@@ -313,6 +314,7 @@ class KpiOdooConfigResponse(BaseModel):
 
     kpi_id: int
     configured: bool
+    odoo_endpoint_id: int | None = None
     request_body: dict | list | None = None
     response_items_path: str | None = None
 
@@ -320,6 +322,7 @@ class KpiOdooConfigResponse(BaseModel):
 class KpiOdooPreviewRequest(BaseModel):
     """Optional overrides when previewing Odoo data before saving KPI config."""
 
+    odoo_endpoint_id: int | None = None
     request_body: dict | list | None = None
     response_items_path: str | None = Field(
         None,

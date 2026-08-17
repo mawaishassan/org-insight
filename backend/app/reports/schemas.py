@@ -10,6 +10,8 @@ class ReportTemplateCreate(BaseModel):
     description: str | None = None
     # Optional rich layout template text (Jinja2-style) used when rendering HTML.
     body_template: str | None = None
+    fetch_data_with_date: bool = False
+    date_fetching_config: dict | None = None
 
 
 class ReportTemplateUpdate(BaseModel):
@@ -20,6 +22,8 @@ class ReportTemplateUpdate(BaseModel):
     template_mode: str | None = Field(None, pattern="^(designer|code)$")
     body_template: str | None = None
     body_blocks: list[dict] | None = None
+    fetch_data_with_date: bool | None = None
+    date_fetching_config: dict | None = None
 
 
 class ReportTemplateKPIAdd(BaseModel):
@@ -64,6 +68,8 @@ class ReportTemplateResponse(BaseModel):
     organization_id: int
     name: str
     description: str | None
+    fetch_data_with_date: bool = False
+    date_fetching_config: dict | None = None
 
     class Config:
         from_attributes = True
@@ -79,7 +85,7 @@ class ReportGenerateOptions(BaseModel):
     """Options for report generation."""
 
     format: str = Field(default="json", pattern="^(json|csv|pdf)$")
-    year: int | None = None  # year for data; required at generate/print time
+    year: str | int | None = None  # year for data; required at generate/print time
 
 
 class ReportPreviewRequest(BaseModel):
@@ -93,7 +99,7 @@ class EvaluateSnippetRequest(BaseModel):
 
     type: str = Field(..., pattern="^(kpi_value|formula)$")
     organization_id: int = Field(...)
-    year: int | None = None  # year for report data (required for correct context)
+    year: str | int | None = None  # year for report data (required for correct context)
     # For kpi_value: which value to resolve
     kpi_id: int | None = None
     field_key: str | None = None

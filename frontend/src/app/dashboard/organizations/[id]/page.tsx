@@ -88,6 +88,14 @@ interface OrgInfo {
   description: string | null;
   is_active: boolean;
   time_dimension?: string;
+  custom_period_name?: string;
+  custom_period_start_month?: number;
+  custom_period_start_day?: number;
+  custom_period_duration_months?: number;
+  custom_period_display_format?: string;
+  custom_period_prefix?: string;
+  custom_period_suffix?: string;
+  custom_periods?: any[] | null;
 }
 
 interface DomainRow {
@@ -402,7 +410,27 @@ export default function OrganizationDetailPage() {
   const [kpiEditingId, setKpiEditingId] = useState<number | null>(null);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [timeDimension, setTimeDimension] = useState(org?.time_dimension ?? "yearly");
+  const [customPeriodName, setCustomPeriodName] = useState(org?.custom_period_name ?? "");
+  const [customPeriodStartMonth, setCustomPeriodStartMonth] = useState(org?.custom_period_start_month ?? 1);
+  const [customPeriodStartDay, setCustomPeriodStartDay] = useState(org?.custom_period_start_day ?? 1);
+  const [customPeriodDurationMonths, setCustomPeriodDurationMonths] = useState(org?.custom_period_duration_months ?? 12);
+  const [customPeriodDisplayFormat, setCustomPeriodDisplayFormat] = useState(org?.custom_period_display_format ?? "YYYY");
+  const [customPeriodPrefix, setCustomPeriodPrefix] = useState(org?.custom_period_prefix ?? "");
+  const [customPeriodSuffix, setCustomPeriodSuffix] = useState(org?.custom_period_suffix ?? "");
+  const [enableCustomPeriod, setEnableCustomPeriod] = useState(!!org?.custom_period_name);
   const [timeDimensionSaving, setTimeDimensionSaving] = useState(false);
+
+  useEffect(() => {
+    setTimeDimension(org?.time_dimension ?? "yearly");
+    setCustomPeriodName(org?.custom_period_name ?? "");
+    setCustomPeriodStartMonth(org?.custom_period_start_month ?? 1);
+    setCustomPeriodStartDay(org?.custom_period_start_day ?? 1);
+    setCustomPeriodDurationMonths(org?.custom_period_duration_months ?? 12);
+    setCustomPeriodDisplayFormat(org?.custom_period_display_format ?? "YYYY");
+    setCustomPeriodPrefix(org?.custom_period_prefix ?? "");
+    setCustomPeriodSuffix(org?.custom_period_suffix ?? "");
+    setEnableCustomPeriod(!!org?.custom_period_name);
+  }, [org]);
   const [overviewSummary, setOverviewSummary] = useState<{
     domainCount: number;
     categoryCount: number;
@@ -618,6 +646,22 @@ export default function OrganizationDetailPage() {
           timeDimensionSaving={timeDimensionSaving}
           setTimeDimensionSaving={setTimeDimensionSaving}
           loadOrg={loadOrg}
+          customPeriodName={customPeriodName}
+          setCustomPeriodName={setCustomPeriodName}
+          customPeriodStartMonth={customPeriodStartMonth}
+          setCustomPeriodStartMonth={setCustomPeriodStartMonth}
+          customPeriodStartDay={customPeriodStartDay}
+          setCustomPeriodStartDay={setCustomPeriodStartDay}
+          customPeriodDurationMonths={customPeriodDurationMonths}
+          setCustomPeriodDurationMonths={setCustomPeriodDurationMonths}
+          customPeriodDisplayFormat={customPeriodDisplayFormat}
+          setCustomPeriodDisplayFormat={setCustomPeriodDisplayFormat}
+          customPeriodPrefix={customPeriodPrefix}
+          setCustomPeriodPrefix={setCustomPeriodPrefix}
+          customPeriodSuffix={customPeriodSuffix}
+          setCustomPeriodSuffix={setCustomPeriodSuffix}
+          enableCustomPeriod={enableCustomPeriod}
+          setEnableCustomPeriod={setEnableCustomPeriod}
         />
       )}
 
@@ -857,6 +901,22 @@ function SettingsPage({
   timeDimensionSaving,
   setTimeDimensionSaving,
   loadOrg,
+  customPeriodName,
+  setCustomPeriodName,
+  customPeriodStartMonth,
+  setCustomPeriodStartMonth,
+  customPeriodStartDay,
+  setCustomPeriodStartDay,
+  customPeriodDurationMonths,
+  setCustomPeriodDurationMonths,
+  customPeriodDisplayFormat,
+  setCustomPeriodDisplayFormat,
+  customPeriodPrefix,
+  setCustomPeriodPrefix,
+  customPeriodSuffix,
+  setCustomPeriodSuffix,
+  enableCustomPeriod,
+  setEnableCustomPeriod,
 }: {
   orgId: number;
   org: OrgInfo | null;
@@ -870,8 +930,39 @@ function SettingsPage({
   timeDimensionSaving: boolean;
   setTimeDimensionSaving: (v: boolean) => void;
   loadOrg: () => void;
+  customPeriodName: string;
+  setCustomPeriodName: (s: string) => void;
+  customPeriodStartMonth: number;
+  setCustomPeriodStartMonth: (n: number) => void;
+  customPeriodStartDay: number;
+  setCustomPeriodStartDay: (n: number) => void;
+  customPeriodDurationMonths: number;
+  setCustomPeriodDurationMonths: (n: number) => void;
+  customPeriodDisplayFormat: string;
+  setCustomPeriodDisplayFormat: (s: string) => void;
+  customPeriodPrefix: string;
+  setCustomPeriodPrefix: (s: string) => void;
+  customPeriodSuffix: string;
+  setCustomPeriodSuffix: (s: string) => void;
+  enableCustomPeriod: boolean;
+  setEnableCustomPeriod: (v: boolean) => void;
 }) {
   const [settingsSearch, setSettingsSearch] = useState("");
+  const [isEditing, setIsEditing] = useState(false);
+
+  const [customPeriods, setCustomPeriods] = useState<any[]>(org?.custom_periods ?? []);
+  const [editingPeriodIndex, setEditingPeriodIndex] = useState<number | null>(null); // null = not editing, -1 = adding new
+  const [formName, setFormName] = useState("");
+  const [formStartMonth, setFormStartMonth] = useState(1);
+  const [formStartDay, setFormStartDay] = useState(1);
+  const [formDuration, setFormDuration] = useState(12);
+  const [formDisplayFormat, setFormDisplayFormat] = useState("YYYY");
+  const [formPrefix, setFormPrefix] = useState("");
+  const [formSuffix, setFormSuffix] = useState("");
+
+  useEffect(() => {
+    setCustomPeriods(org?.custom_periods ?? []);
+  }, [org]);
   const sortedSubIds = useMemo(() => {
     const byLabel = [...SETTINGS_SUB_IDS].sort((a, b) =>
       SETTINGS_SUB_LABELS[a].localeCompare(SETTINGS_SUB_LABELS[b], undefined, { sensitivity: "base" })
@@ -933,12 +1024,30 @@ function SettingsPage({
             <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
               Default reporting period for this organization. KPIs can use this or a finer dimension (e.g. Quarterly when org is Yearly).
             </p>
-            <div className="form-group">
+            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
               <label htmlFor="time_dimension">Period</label>
               <select
                 id="time_dimension"
                 value={timeDimension}
-                onChange={(e) => setTimeDimension(e.target.value)}
+                onChange={async (e) => {
+                  const newTd = e.target.value;
+                  setTimeDimension(newTd);
+                  if (!token || !orgId) return;
+                  setTimeDimensionSaving(true);
+                  try {
+                    await api(`/organizations/${orgId}`, {
+                      method: "PATCH",
+                      body: JSON.stringify({ time_dimension: newTd }),
+                      token,
+                    });
+                    toast.success("Time dimension updated successfully!");
+                    loadOrg();
+                  } catch {
+                    toast.error("Failed to update time dimension.");
+                  } finally {
+                    setTimeDimensionSaving(false);
+                  }
+                }}
                 disabled={timeDimensionSaving}
                 style={{ maxWidth: 240 }}
               >
@@ -948,29 +1057,341 @@ function SettingsPage({
                 <option value="monthly">Monthly</option>
               </select>
             </div>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={timeDimensionSaving || !token}
-              onClick={async () => {
-                if (!token || !orgId) return;
-                setTimeDimensionSaving(true);
-                try {
-                  await api(`/organizations/${orgId}`, {
-                    method: "PATCH",
-                    body: JSON.stringify({ time_dimension: timeDimension }),
-                    token,
-                  });
-                  loadOrg();
-                } catch {
-                  // leave state unchanged
-                } finally {
-                  setTimeDimensionSaving(false);
-                }
-              }}
-            >
-              {timeDimensionSaving ? "Saving…" : "Save"}
-            </button>
+
+            <div style={{ marginTop: "1.5rem", borderTop: "1px solid var(--border, #eee)", paddingTop: "1rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                <h4 style={{ fontSize: "1.05rem", margin: 0 }}>
+                  Custom Period Configurations
+                </h4>
+                <span 
+                  style={{ 
+                    fontSize: "0.75rem", 
+                    padding: "0.2rem 0.5rem", 
+                    borderRadius: 4, 
+                    fontWeight: 600,
+                    background: customPeriods.length > 0 ? "rgba(16, 185, 129, 0.1)" : "rgba(107, 114, 128, 0.1)",
+                    color: customPeriods.length > 0 ? "#10b981" : "#6b7280"
+                  }}
+                >
+                  {customPeriods.length > 0 ? `${customPeriods.length} Configured` : "Not Configured"}
+                </span>
+              </div>
+            </div>
+
+            {editingPeriodIndex !== null ? (
+              <div>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginBottom: "1rem" }}>
+                  {editingPeriodIndex === -1 ? "Configure a new custom period." : "Configure custom period properties."}
+                </p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "1rem", marginBottom: "1.5rem" }}>
+                  <div className="form-group">
+                    <label htmlFor="custom_period_name">Period Name</label>
+                    <input
+                      id="custom_period_name"
+                      type="text"
+                      className="form-control"
+                      placeholder="e.g. Financial Year"
+                      value={formName}
+                      onChange={(e) => setFormName(e.target.value)}
+                      disabled={timeDimensionSaving}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="custom_period_start_month">Start Month</label>
+                    <select
+                      id="custom_period_start_month"
+                      value={formStartMonth}
+                      onChange={(e) => setFormStartMonth(parseInt(e.target.value) || 1)}
+                      disabled={timeDimensionSaving}
+                    >
+                      <option value="1">January</option>
+                      <option value="2">February</option>
+                      <option value="3">March</option>
+                      <option value="4">April</option>
+                      <option value="5">May</option>
+                      <option value="6">June</option>
+                      <option value="7">July</option>
+                      <option value="8">August</option>
+                      <option value="9">September</option>
+                      <option value="10">October</option>
+                      <option value="11">November</option>
+                      <option value="12">December</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="custom_period_start_day">Start Day (1-31)</label>
+                    <input
+                      id="custom_period_start_day"
+                      type="number"
+                      className="form-control"
+                      min="1"
+                      max="31"
+                      value={formStartDay}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value) || 1;
+                        setFormStartDay(Math.max(1, Math.min(31, val)));
+                      }}
+                      disabled={timeDimensionSaving}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="custom_period_duration_months">Duration (Months)</label>
+                    <input
+                      id="custom_period_duration_months"
+                      type="number"
+                      className="form-control"
+                      min="1"
+                      value={formDuration}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value) || 1;
+                        setFormDuration(Math.max(1, val));
+                      }}
+                      disabled={timeDimensionSaving}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="custom_period_display_format">Display Format</label>
+                    <select
+                      id="custom_period_display_format"
+                      value={formDisplayFormat}
+                      onChange={(e) => setFormDisplayFormat(e.target.value)}
+                      disabled={timeDimensionSaving}
+                    >
+                      <option value="YYYY">YYYY (e.g. 2026)</option>
+                      <option value="YYYY/YY">YYYY/YY (e.g. 2026/27)</option>
+                      <option value="YYYY-YY">YYYY-YY (e.g. 2026-27)</option>
+                      <option value="YYYY-YYYY">YYYY-YYYY (e.g. 2026-2027)</option>
+                      <option value="YYYY–YYYY">YYYY–YYYY (e.g. 2026–2027)</option>
+                      <option value="YY/YYYY">YY/YYYY (e.g. 26/2027)</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="custom_period_prefix">Prefix</label>
+                    <input
+                      id="custom_period_prefix"
+                      type="text"
+                      className="form-control"
+                      placeholder="e.g. FY "
+                      value={formPrefix}
+                      onChange={(e) => setFormPrefix(e.target.value)}
+                      disabled={timeDimensionSaving}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="custom_period_suffix">Suffix</label>
+                    <input
+                      id="custom_period_suffix"
+                      type="text"
+                      className="form-control"
+                      placeholder="e.g. (FY)"
+                      value={formSuffix}
+                      onChange={(e) => setFormSuffix(e.target.value)}
+                      disabled={timeDimensionSaving}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={timeDimensionSaving || !token}
+                    onClick={async () => {
+                      if (!token || !orgId) return;
+                      const name = formName.trim();
+                      if (!name) {
+                        toast.error("Period Name is required.");
+                        return;
+                      }
+
+                      const periodObj = {
+                        custom_period_name: name,
+                        custom_period_start_month: formStartMonth,
+                        custom_period_start_day: formStartDay,
+                        custom_period_duration_months: formDuration,
+                        custom_period_display_format: formDisplayFormat,
+                        custom_period_prefix: formPrefix || null,
+                        custom_period_suffix: formSuffix || null,
+                      };
+
+                      const nextList = [...customPeriods];
+                      if (editingPeriodIndex === -1) {
+                        nextList.push(periodObj);
+                      } else {
+                        nextList[editingPeriodIndex] = periodObj;
+                      }
+
+                      const firstCP = nextList[0] || {};
+
+                      setTimeDimensionSaving(true);
+                      try {
+                        await api(`/organizations/${orgId}`, {
+                          method: "PATCH",
+                          body: JSON.stringify({
+                            custom_periods: nextList,
+                            custom_period_name: firstCP.custom_period_name || null,
+                            custom_period_start_month: firstCP.custom_period_start_month || 1,
+                            custom_period_start_day: firstCP.custom_period_start_day || 1,
+                            custom_period_duration_months: firstCP.custom_period_duration_months || 12,
+                            custom_period_display_format: firstCP.custom_period_display_format || "YYYY",
+                            custom_period_prefix: firstCP.custom_period_prefix || null,
+                            custom_period_suffix: firstCP.custom_period_suffix || null,
+                          }),
+                          token,
+                        });
+                        toast.success("Custom period configuration saved successfully!");
+                        setEditingPeriodIndex(null);
+                        loadOrg();
+                      } catch {
+                        toast.error("Failed to save settings. Please try again.");
+                      } finally {
+                        setTimeDimensionSaving(false);
+                      }
+                    }}
+                  >
+                    {timeDimensionSaving ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ background: "rgba(107, 114, 128, 0.1)", color: "var(--text)" }}
+                    onClick={() => {
+                      setEditingPeriodIndex(null);
+                    }}
+                    disabled={timeDimensionSaving}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                {customPeriods.length > 0 ? (
+                  <div style={{ display: "grid", gap: "1rem", marginBottom: "1rem" }}>
+                    {customPeriods.map((cp, idx) => (
+                      <div 
+                        key={idx}
+                        style={{ 
+                          padding: "1rem 1.25rem", 
+                          border: "1px solid var(--border)", 
+                          borderRadius: "8px", 
+                          background: "var(--surface)", 
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          gap: "1rem"
+                        }}
+                      >
+                        <div>
+                          <h5 style={{ margin: 0, fontSize: "0.95rem", fontWeight: 600, color: "var(--text)" }}>
+                            {cp.custom_period_name}
+                          </h5>
+                          <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                            Starts: {
+                              [
+                                "January", "February", "March", "April", "May", "June",
+                                "July", "August", "September", "October", "November", "December"
+                              ][(cp.custom_period_start_month || 1) - 1]
+                            } {cp.custom_period_start_day || 1} • Duration: {cp.custom_period_duration_months || 12} Months • Format: {cp.custom_period_display_format || "YYYY"}
+                            {(cp.custom_period_prefix || cp.custom_period_suffix) && (
+                              ` • Label: "${cp.custom_period_prefix || ""}{year}${cp.custom_period_suffix || ""}"`
+                            )}
+                          </p>
+                        </div>
+                        <div style={{ display: "flex", gap: "0.5rem" }}>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-secondary"
+                            onClick={() => {
+                              setEditingPeriodIndex(idx);
+                              setFormName(cp.custom_period_name || "");
+                              setFormStartMonth(cp.custom_period_start_month || 1);
+                              setFormStartDay(cp.custom_period_start_day || 1);
+                              setFormDuration(cp.custom_period_duration_months || 12);
+                              setFormDisplayFormat(cp.custom_period_display_format || "YYYY");
+                              setFormPrefix(cp.custom_period_prefix || "");
+                              setFormSuffix(cp.custom_period_suffix || "");
+                            }}
+                          >
+                            Update
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-danger"
+                            style={{ background: "#ef4444", color: "white", border: "none" }}
+                            onClick={async () => {
+                              if (!window.confirm("Are you sure you want to delete this custom period configuration?")) return;
+                              if (!token || !orgId) return;
+
+                              const nextList = customPeriods.filter((_, i) => i !== idx);
+                              const firstCP = nextList[0] || {};
+
+                              setTimeDimensionSaving(true);
+                              try {
+                                await api(`/organizations/${orgId}`, {
+                                  method: "PATCH",
+                                  body: JSON.stringify({
+                                    custom_periods: nextList,
+                                    custom_period_name: firstCP.custom_period_name || null,
+                                    custom_period_start_month: firstCP.custom_period_start_month || 1,
+                                    custom_period_start_day: firstCP.custom_period_start_day || 1,
+                                    custom_period_duration_months: firstCP.custom_period_duration_months || 12,
+                                    custom_period_display_format: firstCP.custom_period_display_format || "YYYY",
+                                    custom_period_prefix: firstCP.custom_period_prefix || null,
+                                    custom_period_suffix: firstCP.custom_period_suffix || null,
+                                  }),
+                                  token,
+                                });
+                                toast.success("Custom period configuration deleted successfully!");
+                                loadOrg();
+                              } catch {
+                                toast.error("Failed to delete custom period.");
+                              } finally {
+                                setTimeDimensionSaving(false);
+                              }
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div 
+                    style={{ 
+                      padding: "1.5rem", 
+                      textAlign: "center", 
+                      border: "2px dashed var(--border)", 
+                      borderRadius: "8px", 
+                      background: "var(--surface)", 
+                      marginBottom: "1rem" 
+                    }}
+                  >
+                    <p style={{ margin: "0 0 0 0", color: "var(--muted)", fontSize: "0.875rem" }}>
+                      No custom period is configured for this organization yet.
+                    </p>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setEditingPeriodIndex(-1);
+                    setFormName("");
+                    setFormStartMonth(1);
+                    setFormStartDay(1);
+                    setFormDuration(12);
+                    setFormDisplayFormat("YYYY");
+                    setFormPrefix("");
+                    setFormSuffix("");
+                  }}
+                >
+                  ➕ Add Custom Period
+                </button>
+              </div>
+            )}
           </div>
         )}
         {settingsSub === "tags" && (
@@ -1474,65 +1895,382 @@ function OdooConfigSection({ orgId, token }: { orgId: number; token: string }) {
 
   if (loading) return <p style={{ color: "var(--muted)" }}>Loading Odoo config…</p>;
 
+  if (loading) return <p style={{ color: "var(--muted)" }}>Loading Odoo config…</p>;
+
   return (
-    <div style={{ maxWidth: "36rem" }}>
-      <h2 style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>Odoo connection</h2>
-      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.5rem" }}>
-        Organization ID: <strong>{orgId}</strong>
-        {configured ? (
-          <span style={{ marginLeft: "0.75rem", color: "var(--accent, green)" }}>● Configured</span>
-        ) : (
-          <span style={{ marginLeft: "0.75rem", color: "var(--muted)" }}>○ Not configured yet</span>
-        )}
-      </p>
-      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
-        Configure Odoo login, data fetch, and attachment download URLs for KPI multi-line bulk import. Credentials are used server-side only.
-      </p>
-      <form onSubmit={handleSave}>
-        <div className="form-group">
-          <label>Odoo login URL</label>
-          <input value={form.login_url} onChange={(e) => setForm((p) => ({ ...p, login_url: e.target.value }))} required style={{ width: "100%" }} />
+    <div style={{ width: "100%" }}>
+      <div style={{ maxWidth: "36rem" }}>
+        <h2 style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>Odoo connection</h2>
+        <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.5rem" }}>
+          Organization ID: <strong>{orgId}</strong>
+          {configured ? (
+            <span style={{ marginLeft: "0.75rem", color: "var(--accent, green)" }}>● Configured</span>
+          ) : (
+            <span style={{ marginLeft: "0.75rem", color: "var(--muted)" }}>○ Not configured yet</span>
+          )}
+        </p>
+        <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
+          Configure Odoo login, data fetch, and attachment download URLs for KPI multi-line bulk import. Credentials are used server-side only.
+        </p>
+        <form onSubmit={handleSave}>
+          <div className="form-group">
+            <label>Odoo login URL</label>
+            <input value={form.login_url} onChange={(e) => setForm((p) => ({ ...p, login_url: e.target.value }))} required style={{ width: "100%" }} />
+          </div>
+          <div className="form-group">
+            <label>Odoo data fetch URL</label>
+            <input value={form.data_fetch_url} onChange={(e) => setForm((p) => ({ ...p, data_fetch_url: e.target.value }))} required style={{ width: "100%" }} />
+          </div>
+          <div className="form-group">
+            <label>Attachment Download URL Template (optional)</label>
+            <input
+              value={form.attachment_url_template}
+              onChange={(e) => setForm((p) => ({ ...p, attachment_url_template: e.target.value }))}
+              placeholder="e.g. https://domain/web/binary/saveas?model=ir.attachment&field=datas&id={ATTACHMENT_ID}&filename_field=datas_fname"
+              style={{ width: "100%" }}
+            />
+            <small style={{ color: "var(--muted)", display: "block", marginTop: "0.25rem" }}>
+              Use <code>&#123;ATTACHMENT_ID&#125;</code> as placeholder for the Odoo attachment ID.
+            </small>
+          </div>
+          <div className="form-group">
+            <label>Odoo database (optional)</label>
+            <input value={form.odoo_db} onChange={(e) => setForm((p) => ({ ...p, odoo_db: e.target.value }))} style={{ width: "100%" }} />
+          </div>
+          <div className="form-group">
+            <label>Username</label>
+            <input value={form.username} onChange={(e) => setForm((p) => ({ ...p, username: e.target.value }))} required style={{ width: "100%" }} />
+          </div>
+          <div className="form-group">
+            <label>Password{!configured ? " *" : ""}</label>
+            <input
+              type="password"
+              value={form.password}
+              onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
+              placeholder={configured ? "Leave blank to keep existing password" : "Required on first save"}
+              required={!configured}
+              style={{ width: "100%" }}
+            />
+          </div>
+          {message && <p style={{ fontSize: "0.9rem", marginBottom: "0.75rem" }}>{message}</p>}
+          <button type="submit" className="btn btn-primary" disabled={saving}>
+            {saving ? "Saving…" : "Save Odoo settings"}
+          </button>
+        </form>
+      </div>
+      <OdooEndpointsSection orgId={orgId} token={token} />
+    </div>
+  );
+}
+
+interface OdooEndpointItem {
+  id: number;
+  organization_id: number;
+  name: string;
+  url: string;
+  description: string | null;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+function OdooEndpointsSection({ orgId, token }: { orgId: number; token: string }) {
+  const [endpoints, setEndpoints] = useState<OdooEndpointItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+  const [editingEp, setEditingEp] = useState<OdooEndpointItem | null>(null);
+  const [testingId, setTestingId] = useState<number | null>(null);
+
+  const [form, setForm] = useState({
+    name: "",
+    url: "",
+    description: "",
+    is_active: true,
+  });
+
+  const loadEndpoints = () => {
+    setLoading(true);
+    api<OdooEndpointItem[]>(`/organizations/${orgId}/odoo-endpoints`, { token })
+      .then((res) => setEndpoints(res))
+      .catch((err) => toast.error(err instanceof Error ? err.message : "Failed to load Odoo endpoints"))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadEndpoints();
+  }, [orgId, token]);
+
+  const handleOpenAdd = () => {
+    setEditingEp(null);
+    setForm({ name: "", url: "", description: "", is_active: true });
+    setShowModal(true);
+  };
+
+  const handleOpenEdit = (ep: OdooEndpointItem) => {
+    setEditingEp(ep);
+    setForm({
+      name: ep.name,
+      url: ep.url,
+      description: ep.description || "",
+      is_active: ep.is_active,
+    });
+    setShowModal(true);
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      if (editingEp) {
+        await api(`/organizations/${orgId}/odoo-endpoints/${editingEp.id}`, {
+          method: "PATCH",
+          token,
+          body: JSON.stringify(form),
+        });
+        toast.success(`Endpoint '${form.name}' updated`);
+      } else {
+        await api(`/organizations/${orgId}/odoo-endpoints`, {
+          method: "POST",
+          token,
+          body: JSON.stringify(form),
+        });
+        toast.success(`Endpoint '${form.name}' created`);
+      }
+      setShowModal(false);
+      loadEndpoints();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save endpoint");
+    }
+  };
+
+  const handleToggleStatus = async (ep: OdooEndpointItem) => {
+    try {
+      await api(`/organizations/${orgId}/odoo-endpoints/${ep.id}`, {
+        method: "PATCH",
+        token,
+        body: JSON.stringify({ is_active: !ep.is_active }),
+      });
+      toast.success(`Endpoint '${ep.name}' ${!ep.is_active ? "activated" : "deactivated"}`);
+      loadEndpoints();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update endpoint status");
+    }
+  };
+
+  const handleDelete = async (ep: OdooEndpointItem) => {
+    if (!confirm(`Are you sure you want to delete endpoint '${ep.name}'?`)) return;
+    try {
+      await api(`/organizations/${orgId}/odoo-endpoints/${ep.id}`, {
+        method: "DELETE",
+        token,
+      });
+      toast.success(`Endpoint '${ep.name}' deleted`);
+      loadEndpoints();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete endpoint");
+    }
+  };
+
+  const handleTestConnection = async (ep: OdooEndpointItem) => {
+    setTestingId(ep.id);
+    try {
+      const res = await api<{ success: boolean; message: string }>(`/organizations/${orgId}/odoo-endpoints/test`, {
+        method: "POST",
+        token,
+        body: JSON.stringify({ url: ep.url }),
+      });
+      if (res.success) {
+        toast.success(res.message);
+      } else {
+        toast.error(res.message);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Test connection failed");
+    } finally {
+      setTestingId(null);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: "2rem", borderTop: "1px solid var(--border, #eee)", paddingTop: "1.5rem", width: "100%" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "1rem", marginBottom: "1rem", flexWrap: "wrap" }}>
+        <div>
+          <h3 style={{ fontSize: "1.05rem", fontWeight: 600, margin: "0 0 0.25rem" }}>Odoo API Endpoints</h3>
+          <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: 0 }}>
+            Manage multiple Odoo API endpoints for your organization. KPIs select their designated endpoint during KPI configuration.
+          </p>
         </div>
-        <div className="form-group">
-          <label>Odoo data fetch URL</label>
-          <input value={form.data_fetch_url} onChange={(e) => setForm((p) => ({ ...p, data_fetch_url: e.target.value }))} required style={{ width: "100%" }} />
-        </div>
-        <div className="form-group">
-          <label>Attachment Download URL Template (optional)</label>
-          <input
-            value={form.attachment_url_template}
-            onChange={(e) => setForm((p) => ({ ...p, attachment_url_template: e.target.value }))}
-            placeholder="e.g. https://domain/web/binary/saveas?model=ir.attachment&field=datas&id={ATTACHMENT_ID}&filename_field=datas_fname"
-            style={{ width: "100%" }}
-          />
-          <small style={{ color: "var(--muted)", display: "block", marginTop: "0.25rem" }}>
-            Use <code>&#123;ATTACHMENT_ID&#125;</code> as placeholder for the Odoo attachment ID.
-          </small>
-        </div>
-        <div className="form-group">
-          <label>Odoo database (optional)</label>
-          <input value={form.odoo_db} onChange={(e) => setForm((p) => ({ ...p, odoo_db: e.target.value }))} style={{ width: "100%" }} />
-        </div>
-        <div className="form-group">
-          <label>Username</label>
-          <input value={form.username} onChange={(e) => setForm((p) => ({ ...p, username: e.target.value }))} required style={{ width: "100%" }} />
-        </div>
-        <div className="form-group">
-          <label>Password{!configured ? " *" : ""}</label>
-          <input
-            type="password"
-            value={form.password}
-            onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
-            placeholder={configured ? "Leave blank to keep existing password" : "Required on first save"}
-            required={!configured}
-            style={{ width: "100%" }}
-          />
-        </div>
-        {message && <p style={{ fontSize: "0.9rem", marginBottom: "0.75rem" }}>{message}</p>}
-        <button type="submit" className="btn btn-primary" disabled={saving}>
-          {saving ? "Saving…" : "Save Odoo settings"}
+        <button className="btn btn-primary btn-sm" onClick={handleOpenAdd} style={{ whiteSpace: "nowrap" }}>
+          + Add Endpoint
         </button>
-      </form>
+      </div>
+
+      {loading ? (
+        <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Loading endpoints…</p>
+      ) : endpoints.length === 0 ? (
+        <div style={{ padding: "1.5rem", background: "var(--surface, #f9f9f9)", borderRadius: "6px", textAlign: "center", color: "var(--muted)", fontSize: "0.9rem" }}>
+          No endpoints configured yet. Click "+ Add Endpoint" to create your first Odoo endpoint.
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto", width: "100%" }}>
+          <table className="table" style={{ width: "100%", fontSize: "0.875rem", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: "2px solid var(--border, #eee)", textAlign: "left" }}>
+                <th style={{ padding: "0.6rem 0.75rem", minWidth: "140px" }}>Endpoint Name</th>
+                <th style={{ padding: "0.6rem 0.75rem", minWidth: "220px" }}>URL</th>
+                <th style={{ padding: "0.6rem 0.75rem", minWidth: "150px" }}>Description</th>
+                <th style={{ padding: "0.6rem 0.75rem", minWidth: "90px" }}>Status</th>
+                <th style={{ padding: "0.6rem 0.75rem", textAlign: "right", minWidth: "260px" }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {endpoints.map((ep) => (
+                <tr key={ep.id} style={{ borderBottom: "1px solid var(--border, #f3f4f6)" }}>
+                  <td style={{ padding: "0.75rem", fontWeight: 600, verticalAlign: "middle" }}>{ep.name}</td>
+                  <td style={{ padding: "0.75rem", verticalAlign: "middle", wordBreak: "break-all" }}>
+                    <code style={{ fontSize: "0.8rem", background: "var(--surface-muted, #f1f5f9)", padding: "0.2rem 0.4rem", borderRadius: "4px" }}>
+                      {ep.url}
+                    </code>
+                  </td>
+                  <td style={{ padding: "0.75rem", color: "var(--muted)", verticalAlign: "middle" }}>{ep.description || "—"}</td>
+                  <td style={{ padding: "0.75rem", verticalAlign: "middle" }}>
+                    <span
+                      style={{
+                        display: "inline-block",
+                        padding: "0.2rem 0.5rem",
+                        borderRadius: "12px",
+                        fontSize: "0.75rem",
+                        fontWeight: 600,
+                        background: ep.is_active ? "rgba(16, 185, 129, 0.15)" : "rgba(107, 114, 128, 0.15)",
+                        color: ep.is_active ? "#10b981" : "#6b7280",
+                      }}
+                    >
+                      {ep.is_active ? "Active" : "Inactive"}
+                    </span>
+                  </td>
+                  <td style={{ padding: "0.75rem", textAlign: "right", verticalAlign: "middle" }}>
+                    <div style={{ display: "flex", gap: "0.375rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleTestConnection(ep)}
+                        disabled={testingId === ep.id}
+                      >
+                        {testingId === ep.id ? "Testing…" : "Test Connection"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleToggleStatus(ep)}
+                      >
+                        {ep.is_active ? "Deactivate" : "Activate"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleOpenEdit(ep)}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-sm"
+                        onClick={() => handleDelete(ep)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {showModal && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0, 0, 0, 0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+        >
+          <div className="card" style={{ width: "100%", maxWidth: "30rem", padding: "1.5rem" }}>
+            <h3 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>
+              {editingEp ? "Edit Odoo Endpoint" : "Add Odoo Endpoint"}
+            </h3>
+            <form onSubmit={handleSave}>
+              <div className="form-group" style={{ marginBottom: "1rem" }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>
+                  Endpoint Name *
+                </label>
+                <input
+                  value={form.name}
+                  onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                  placeholder="e.g. Student Data API"
+                  required
+                  style={{ width: "100%" }}
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: "1rem" }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>
+                  Endpoint URL *
+                </label>
+                <input
+                  value={form.url}
+                  onChange={(e) => setForm((p) => ({ ...p, url: e.target.value }))}
+                  placeholder="e.g. https://odoo.example.com/api/students"
+                  required
+                  style={{ width: "100%" }}
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: "1rem" }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>
+                  Description (optional)
+                </label>
+                <input
+                  value={form.description}
+                  onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))}
+                  placeholder="e.g. Student records from Odoo"
+                  style={{ width: "100%" }}
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: "0.25rem" }}>
+                  Status
+                </label>
+                <select
+                  value={form.is_active ? "active" : "inactive"}
+                  onChange={(e) => setForm((p) => ({ ...p, is_active: e.target.value === "active" }))}
+                  style={{ width: "100%" }}
+                >
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+                <button type="button" className="btn btn-secondary" onClick={() => setShowModal(false)}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary">
+                  {editingEp ? "Save Endpoint" : "Create Endpoint"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

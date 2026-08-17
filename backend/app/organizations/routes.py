@@ -19,6 +19,10 @@ from app.organizations.schemas import (
     StorageConfigResponse,
     OdooConfigUpdate,
     OdooConfigResponse,
+    OdooEndpointCreate,
+    OdooEndpointUpdate,
+    OdooEndpointResponse,
+    OdooEndpointTestRequest,
     STORAGE_TYPES,
     mask_storage_params,
     OrganizationRoleCreate,
@@ -375,6 +379,137 @@ async def update_org_odoo_config(
         created_at=config.created_at.isoformat() + "Z" if config.created_at else None,
         updated_at=config.updated_at.isoformat() + "Z" if config.updated_at else None,
     )
+
+
+# --- Odoo Endpoints (Super Admin / KPI Config) ---
+
+@router.get("/{org_id}/odoo-endpoints", response_model=list[OdooEndpointResponse])
+async def list_org_odoo_endpoints(
+    org_id: int,
+    active_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List configured Odoo endpoints for an organization."""
+    from app.odoo.endpoint_service import get_org_odoo_endpoints
+
+    endpoints = await get_org_odoo_endpoints(db, org_id, active_only=active_only)
+    return [
+        OdooEndpointResponse(
+            id=ep.id,
+            organization_id=ep.organization_id,
+            name=ep.name,
+            url=ep.url,
+            description=ep.description,
+            is_active=ep.is_active,
+            created_at=ep.created_at.isoformat() + "Z" if ep.created_at else None,
+            updated_at=ep.updated_at.isoformat() + "Z" if ep.updated_at else None,
+        )
+        for ep in endpoints
+    ]
+
+
+@router.post("/{org_id}/odoo-endpoints", response_model=OdooEndpointResponse)
+async def create_org_odoo_endpoint(
+    org_id: int,
+    body: OdooEndpointCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Create a new Odoo endpoint (Super Admin only)."""
+    from app.odoo.endpoint_service import create_odoo_endpoint
+
+    ep = await create_odoo_endpoint(
+        db,
+        org_id,
+        name=body.name,
+        url=body.url,
+        description=body.description,
+        is_active=body.is_active,
+    )
+    await db.commit()
+    return OdooEndpointResponse(
+        id=ep.id,
+        organization_id=ep.organization_id,
+        name=ep.name,
+        url=ep.url,
+        description=ep.description,
+        is_active=ep.is_active,
+        created_at=ep.created_at.isoformat() + "Z" if ep.created_at else None,
+        updated_at=ep.updated_at.isoformat() + "Z" if ep.updated_at else None,
+    )
+
+
+@router.patch("/{org_id}/odoo-endpoints/{endpoint_id}", response_model=OdooEndpointResponse)
+async def update_org_odoo_endpoint(
+    org_id: int,
+    endpoint_id: int,
+    body: OdooEndpointUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Update an Odoo endpoint (Super Admin only)."""
+    from app.odoo.endpoint_service import get_odoo_endpoint_by_id, update_odoo_endpoint
+
+    ep = await get_odoo_endpoint_by_id(db, endpoint_id)
+    if not ep or ep.organization_id != org_id:
+        raise HTTPException(status_code=404, detail="Odoo endpoint not found")
+
+    ep = await update_odoo_endpoint(
+        db,
+        ep,
+        name=body.name,
+        url=body.url,
+        description=body.description,
+        is_active=body.is_active,
+    )
+    await db.commit()
+    return OdooEndpointResponse(
+        id=ep.id,
+        organization_id=ep.organization_id,
+        name=ep.name,
+        url=ep.url,
+        description=ep.description,
+        is_active=ep.is_active,
+        created_at=ep.created_at.isoformat() + "Z" if ep.created_at else None,
+        updated_at=ep.updated_at.isoformat() + "Z" if ep.updated_at else None,
+    )
+
+
+@router.delete("/{org_id}/odoo-endpoints/{endpoint_id}")
+async def delete_org_odoo_endpoint(
+    org_id: int,
+    endpoint_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Delete an Odoo endpoint (Super Admin only). Blocked if endpoint is referenced by KPIs."""
+    from app.odoo.endpoint_service import get_odoo_endpoint_by_id, delete_odoo_endpoint
+
+    ep = await get_odoo_endpoint_by_id(db, endpoint_id)
+    if not ep or ep.organization_id != org_id:
+        raise HTTPException(status_code=404, detail="Odoo endpoint not found")
+
+    try:
+        await delete_odoo_endpoint(db, ep)
+        await db.commit()
+        return {"detail": f"Odoo endpoint '{ep.name}' deleted successfully"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{org_id}/odoo-endpoints/test")
+async def test_org_odoo_endpoint(
+    org_id: int,
+    body: OdooEndpointTestRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Test connection to an Odoo endpoint (Super Admin only)."""
+    from app.odoo.endpoint_service import test_odoo_endpoint_connection
+
+    res = await test_odoo_endpoint_connection(db, org_id, body.url)
+    return result
 
 
 # --- Organization roles (Org Admin: create roles, assign users) ---

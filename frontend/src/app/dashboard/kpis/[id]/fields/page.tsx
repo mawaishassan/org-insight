@@ -70,11 +70,12 @@ function mergeUiSectionLabelsForMultiField(
 }
 
 const GROUP_FUNCTIONS = [
+  { value: "COUNT_ITEMS", label: "COUNT" },
   { value: "SUM_ITEMS", label: "SUM (total)" },
   { value: "AVG_ITEMS", label: "AVG (average)" },
-  { value: "COUNT_ITEMS", label: "COUNT" },
   { value: "MIN_ITEMS", label: "MIN" },
   { value: "MAX_ITEMS", label: "MAX" },
+  { value: "COUNT_UNIQUE_ITEMS", label: "Count Unique" },
 ] as const;
 
 const WHERE_OPERATORS = [
@@ -123,6 +124,16 @@ interface ReferenceConfig {
   condition_trigger_value?: boolean;
   formula_expression?: string;
   conditional_rules?: any[];
+  conditional_logic?: {
+    enabled?: boolean;
+    rules?: Array<{
+      operator?: string;
+      value?: string;
+      then?: string;
+    }>;
+    else_output?: string;
+  };
+  [key: string]: any;
 }
 
 interface SubFieldDef {
@@ -4343,6 +4354,11 @@ export default function KpiFieldsPage() {
                             currentSubFieldKey={addSubFieldDraft.key}
                           />
                         </div>
+
+                        <ConditionalLogicEditor
+                          config={addSubFieldDraft.config}
+                          onChangeConfig={(newCfg) => setAddSubFieldDraft((p) => ({ ...p, config: newCfg }))}
+                        />
                       </div>
                     );
                   })()}
@@ -4368,12 +4384,28 @@ export default function KpiFieldsPage() {
                           toast.error("Please select a source KPI and field.");
                           return;
                         }
-                        if (
-                          addSubFieldDraft.field_type === "formula" &&
-                          !addSubFieldDraft.config.formula_expression?.trim()
-                        ) {
-                          toast.error("Please enter a formula expression.");
-                          return;
+                        if (addSubFieldDraft.field_type === "formula") {
+                          if (!addSubFieldDraft.config.formula_expression?.trim()) {
+                            toast.error("Please enter a formula expression.");
+                            return;
+                          }
+                          const cond = addSubFieldDraft.config.conditional_logic;
+                          if (cond?.enabled) {
+                            const r0 = cond.rules?.[0];
+                            const op = r0?.operator || "op_lt";
+                            if (op !== "is_empty" && op !== "is_not_empty" && (r0?.value === undefined || r0?.value === null || String(r0?.value).trim() === "")) {
+                              toast.error("Please enter a comparison value for the IF condition.");
+                              return;
+                            }
+                            if (r0?.then === undefined || r0?.then === null || String(r0?.then).trim() === "") {
+                              toast.error("Please enter a THEN output value.");
+                              return;
+                            }
+                            if (cond.else_output === undefined || cond.else_output === null || String(cond.else_output).trim() === "") {
+                              toast.error("Please enter an ELSE output value.");
+                              return;
+                            }
+                          }
                         }
                         const field = list.find((x) => x.id === modal.fieldId) as any;
                         if (!field) return;
@@ -4388,6 +4420,9 @@ export default function KpiFieldsPage() {
                           if (addSubFieldDraft.config.reference_source_sub_field_key) cfg.reference_source_sub_field_key = addSubFieldDraft.config.reference_source_sub_field_key;
                         } else if (addSubFieldDraft.field_type === "formula") {
                           cfg.formula_expression = addSubFieldDraft.config.formula_expression;
+                          if (addSubFieldDraft.config.conditional_logic) {
+                            cfg.conditional_logic = addSubFieldDraft.config.conditional_logic;
+                          }
                         }
                         const nextSub = {
                           name,
@@ -4569,6 +4604,11 @@ export default function KpiFieldsPage() {
                             currentSubFieldKey={editSubFieldDraft.key}
                           />
                         </div>
+
+                        <ConditionalLogicEditor
+                          config={editSubFieldDraft.config}
+                          onChangeConfig={(newCfg) => setEditSubFieldDraft((p) => ({ ...p, config: newCfg }))}
+                        />
                       </div>
                     );
                   })()}
@@ -4594,12 +4634,28 @@ export default function KpiFieldsPage() {
                           toast.error("Please select a source KPI and field.");
                           return;
                         }
-                        if (
-                          editSubFieldDraft.field_type === "formula" &&
-                          !editSubFieldDraft.config.formula_expression?.trim()
-                        ) {
-                          toast.error("Please enter a formula expression.");
-                          return;
+                        if (editSubFieldDraft.field_type === "formula") {
+                          if (!editSubFieldDraft.config.formula_expression?.trim()) {
+                            toast.error("Please enter a formula expression.");
+                            return;
+                          }
+                          const cond = editSubFieldDraft.config.conditional_logic;
+                          if (cond?.enabled) {
+                            const r0 = cond.rules?.[0];
+                            const op = r0?.operator || "op_lt";
+                            if (op !== "is_empty" && op !== "is_not_empty" && (r0?.value === undefined || r0?.value === null || String(r0?.value).trim() === "")) {
+                              toast.error("Please enter a comparison value for the IF condition.");
+                              return;
+                            }
+                            if (r0?.then === undefined || r0?.then === null || String(r0?.then).trim() === "") {
+                              toast.error("Please enter a THEN output value.");
+                              return;
+                            }
+                            if (cond.else_output === undefined || cond.else_output === null || String(cond.else_output).trim() === "") {
+                              toast.error("Please enter an ELSE output value.");
+                              return;
+                            }
+                          }
                         }
                         const field = list.find((x) => x.id === modal.fieldId) as any;
                         if (!field) return;
@@ -4624,8 +4680,14 @@ export default function KpiFieldsPage() {
                             cfg.reference_source_sub_field_key = editSubFieldDraft.config.reference_source_sub_field_key;
                           }
                           delete cfg.formula_expression;
+                          delete cfg.conditional_logic;
                         } else if (editSubFieldDraft.field_type === "formula") {
                           cfg.formula_expression = editSubFieldDraft.config.formula_expression;
+                          if (editSubFieldDraft.config.conditional_logic) {
+                            cfg.conditional_logic = editSubFieldDraft.config.conditional_logic;
+                          } else {
+                            delete cfg.conditional_logic;
+                          }
                           delete cfg.reference_source_kpi_id;
                           delete cfg.reference_source_field_key;
                           delete cfg.reference_source_sub_field_key;
@@ -4634,6 +4696,7 @@ export default function KpiFieldsPage() {
                           delete cfg.reference_source_field_key;
                           delete cfg.reference_source_sub_field_key;
                           delete cfg.formula_expression;
+                          delete cfg.conditional_logic;
                         }
                         const nextSub = {
                           ...existingSubs[modal.subIndex],
@@ -5205,6 +5268,115 @@ interface FormulaRefKpi {
   }>;
 }
 
+interface ConditionalLogicEditorProps {
+  config: Record<string, any>;
+  onChangeConfig: (newConfig: Record<string, any>) => void;
+}
+
+function ConditionalLogicEditor({ config, onChangeConfig }: ConditionalLogicEditorProps) {
+  const condLogic = config?.conditional_logic ?? { enabled: false, rules: [{ operator: "op_lt", value: "0", then: "" }], else_output: "" };
+  const isEnabled = !!condLogic.enabled;
+  const rule = condLogic.rules?.[0] ?? { operator: "op_lt", value: "0", then: "" };
+  const elseOutput = condLogic.else_output ?? "";
+
+  const updateCond = (patch: Partial<typeof condLogic>) => {
+    onChangeConfig({
+      ...config,
+      conditional_logic: {
+        ...condLogic,
+        ...patch,
+      },
+    });
+  };
+
+  const updateRule0 = (rulePatch: Partial<typeof rule>) => {
+    const updatedRules = [{ ...rule, ...rulePatch }];
+    updateCond({ rules: updatedRules });
+  };
+
+  return (
+    <div style={{ marginTop: "1rem", paddingTop: "0.75rem", borderTop: "1px dashed var(--border)" }}>
+      <label style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", fontWeight: 650, cursor: "pointer", fontSize: "0.88rem" }}>
+        <input
+          type="checkbox"
+          checked={isEnabled}
+          onChange={(e) => {
+            const checked = e.target.checked;
+            updateCond({
+              enabled: checked,
+              rules: condLogic.rules?.length ? condLogic.rules : [{ operator: "op_lt", value: "0", then: "Non Initialized" }],
+              else_output: elseOutput || "Initialized",
+            });
+          }}
+        />
+        Apply Conditional (IF / ELSE) Output Logic
+      </label>
+
+      {isEnabled && (
+        <div style={{ marginTop: "0.75rem", padding: "0.75rem", borderRadius: "8px", border: "1px solid var(--border)", background: "var(--bg-subtle, #f8f9fa)" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "0.75rem" }}>
+            <span style={{ fontSize: "0.8rem", fontWeight: 700, padding: "0.25rem 0.5rem", background: "var(--primary-light, #e0f2fe)", color: "var(--primary-dark, #0369a1)", borderRadius: 6 }}>
+              IF
+            </span>
+            <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)" }}>
+              Formula Result
+            </span>
+
+            <select
+              value={rule.operator || "op_lt"}
+              onChange={(e) => updateRule0({ operator: e.target.value })}
+              style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+            >
+              <option value="op_lt">less than (&lt;)</option>
+              <option value="op_lte">less or equal (≤)</option>
+              <option value="op_eq">equals (=)</option>
+              <option value="op_neq">not equals (≠)</option>
+              <option value="op_gt">greater than (&gt;)</option>
+              <option value="op_gte">greater or equal (≥)</option>
+              <option value="is_empty">IS EMPTY</option>
+              <option value="is_not_empty">IS NOT EMPTY</option>
+            </select>
+
+            {rule.operator !== "is_empty" && rule.operator !== "is_not_empty" && (
+              <input
+                type="text"
+                value={rule.value ?? ""}
+                onChange={(e) => updateRule0({ value: e.target.value })}
+                placeholder="Comparison Value (e.g. 0)"
+                style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", flex: "1 1 120px", fontSize: "0.85rem" }}
+              />
+            )}
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>THEN Output (If True)</label>
+              <input
+                type="text"
+                value={rule.then ?? ""}
+                onChange={(e) => updateRule0({ then: e.target.value })}
+                placeholder='e.g. "Non Initialized"'
+                style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>ELSE Output (If False)</label>
+              <input
+                type="text"
+                value={elseOutput}
+                onChange={(e) => updateCond({ else_output: e.target.value })}
+                placeholder='e.g. "Initialized"'
+                style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FormulaBuilder({
   formulaValue,
   onInsert,
@@ -5235,7 +5407,9 @@ function FormulaBuilder({
   const [sourceKpi, setSourceKpi] = useState<"current" | "other">("current");
   const [selectedFieldKey, setSelectedFieldKey] = useState<string>("");
   const [refSubKey, setRefSubKey] = useState("");
-  const [refGroupFn, setRefGroupFn] = useState<string>("SUM_ITEMS");
+  const [refGroupFn, setRefGroupFn] = useState<string>("COUNT_ITEMS");
+  const [primaryGroupByKey, setPrimaryGroupByKey] = useState<string>("");
+  const [secondaryGroupByKey, setSecondaryGroupByKey] = useState<string>("");
   const [useConditional, setUseConditional] = useState(false);
   const [whereConditions, setWhereConditions] = useState<WhereCondition[]>([
     { filterSubKey: "", op: "op_eq", value: "", compareType: "constant", multiValues: [], logicWithPrev: "op_and" },
@@ -5281,6 +5455,8 @@ function FormulaBuilder({
     setSelectedFieldKey("");
     setRefOtherKpiId("");
     setRefSubKey("");
+    setPrimaryGroupByKey("");
+    setSecondaryGroupByKey("");
     setUseConditional(false);
     setWhereConditions([{ filterSubKey: "", op: "op_eq", value: "", compareType: "constant", multiValues: [], logicWithPrev: "op_and" }]);
   };
@@ -5302,9 +5478,11 @@ function FormulaBuilder({
   const isConditionalWhere = useConditional && activeMliField !== null && !!refFilterSubKey;
   const isCountWhere = refGroupFn === "COUNT_ITEMS";
   const canInsertItems = activeMliField !== null && (
-    isConditionalWhere
-      ? (isCountWhere ? !!refFilterSubKey : (subFields.length > 0 && !!refSubKey && !!refFilterSubKey))
-      : (isCountItemsOnly || (subFields.length > 0 && !!refSubKey))
+    primaryGroupByKey !== ""
+      ? (isCountItemsOnly || (subFields.length > 0 && !!refSubKey))
+      : (isConditionalWhere
+          ? (isCountWhere ? !!refFilterSubKey : (subFields.length > 0 && !!refSubKey && !!refFilterSubKey))
+          : (isCountItemsOnly || (subFields.length > 0 && !!refSubKey)))
   );
 
   const getRefSourceFromSubKey = (subKey: string): { cacheKey: string; sid: number; skey: string; sourceSubKey?: string } | null => {
@@ -5351,6 +5529,70 @@ function FormulaBuilder({
     const isOther = sourceKpi === "other";
     const kpiIdPrefix = isOther ? `${refOtherKpiId}, ` : "";
 
+    // 1. Group By (primaryGroupByKey selected)
+    if (primaryGroupByKey !== "") {
+      let leafAggStr = "";
+      if (refGroupFn === "COUNT_ITEMS") {
+        leafAggStr = refSubKey ? `COUNT(${refSubKey})` : "COUNT()";
+      } else if (refGroupFn === "COUNT_UNIQUE_ITEMS") {
+        leafAggStr = refSubKey ? `UNIQUE_COUNT(${refSubKey})` : "UNIQUE_COUNT()";
+      } else if (refGroupFn === "SUM_ITEMS") {
+        leafAggStr = `SUM(${refSubKey})`;
+      } else if (refGroupFn === "AVG_ITEMS") {
+        leafAggStr = `AVG(${refSubKey})`;
+      } else if (refGroupFn === "MIN_ITEMS") {
+        leafAggStr = `MIN(${refSubKey})`;
+      } else if (refGroupFn === "MAX_ITEMS") {
+        leafAggStr = `MAX(${refSubKey})`;
+      }
+
+      let condStr = "";
+      if (isConditionalWhere) {
+        const condArgs: string[] = [];
+        whereConditions.forEach((c, idx) => {
+          if (!c.filterSubKey) return;
+          const isLhsCurrent = c.filterSubKey.startsWith("CurrentRow.");
+          const resolvedFilterSubKey = isLhsCurrent ? c.filterSubKey.substring(11) : c.filterSubKey;
+          const sfRow = subFields.find((s: SubFieldDef) => s.key === (isLhsCurrent ? c.value : resolvedFilterSubKey));
+          const allowedOps = operatorsForSubFieldType(sfRow?.field_type);
+          const resolvedOp = allowedOps.some((o) => o.value === c.op) ? c.op : (allowedOps[0]?.value ?? "op_eq");
+          const raw = String(c.value ?? "").trim();
+          if (!raw) return;
+          if (idx > 0) condArgs.push(c.logicWithPrev);
+          if (isLhsCurrent) {
+            condArgs.push(raw, resolvedOp, `CurrentRow.${resolvedFilterSubKey}`);
+          } else {
+            const isUnquoted = c.compareType === "subfield" || c.compareType === "scalar" || c.compareType === "other_scalar";
+            const val = isUnquoted ? raw : quoteFormulaWhereValue(raw);
+            condArgs.push(resolvedFilterSubKey, resolvedOp, val);
+          }
+        });
+        if (condArgs.length >= 3) {
+          condStr = `WHERE(${condArgs.join(", ")})`;
+        }
+      }
+
+      let innerExpr = leafAggStr;
+      if (secondaryGroupByKey !== "") {
+        innerExpr = `GROUP_BY(${secondaryGroupByKey}, ${leafAggStr})`;
+      }
+
+      let groupExpr = "";
+      if (condStr) {
+        groupExpr = `GROUP_BY(${primaryGroupByKey}, ${condStr}, ${innerExpr})`;
+      } else {
+        groupExpr = `GROUP_BY(${primaryGroupByKey}, ${innerExpr})`;
+      }
+
+      if (isOther) {
+        onInsert(`KPI_GROUP_BY(${refOtherKpiId}, "${activeMliField.key}", ${groupExpr})`);
+      } else {
+        onInsert(groupExpr);
+      }
+      return;
+    }
+
+    // 2. Standard Simple Group Functions (no grouping)
     let baseFn = refGroupFn;
     if (isOther) {
       baseFn = refGroupFn.replace("_ITEMS", "_KPI_ITEMS");
@@ -5408,7 +5650,7 @@ function FormulaBuilder({
       return;
     }
 
-    if (isCountItemsOnly && !refSubKey) {
+    if (refGroupFn === "COUNT_ITEMS" && !refSubKey) {
       onInsert(isOther
         ? `COUNT_KPI_ITEMS(${refOtherKpiId}, "${activeMliField.key}")`
         : `COUNT_ITEMS(${activeMliField.key})`
@@ -5502,7 +5744,7 @@ function FormulaBuilder({
         {activeMliField !== null && subFields.length > 0 && (
           <>
             <div style={{ flex: "1 1 150px", minWidth: "130px", maxWidth: "100%", boxSizing: "border-box" }}>
-              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Sub-field</label>
+              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Target Sub-field</label>
               <select value={refSubKey} onChange={(e) => setRefSubKey(e.target.value)} style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", textOverflow: "ellipsis" }}>
                 <option value="">
                   {useConditional && refGroupFn === "COUNT_ITEMS"
@@ -5524,6 +5766,40 @@ function FormulaBuilder({
                 ))}
               </select>
             </div>
+            <div style={{ flex: "1 1 150px", minWidth: "130px", maxWidth: "100%", boxSizing: "border-box" }}>
+              <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Group By</label>
+              <select
+                value={primaryGroupByKey}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setPrimaryGroupByKey(val);
+                  if (!val) setSecondaryGroupByKey("");
+                }}
+                style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", textOverflow: "ellipsis" }}
+              >
+                <option value="">— None (No Group By) —</option>
+                {subFields.map((s: SubFieldDef) => (
+                  <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
+                ))}
+              </select>
+            </div>
+            {primaryGroupByKey !== "" && (
+              <div style={{ flex: "1 1 160px", minWidth: "140px", maxWidth: "100%", boxSizing: "border-box" }}>
+                <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Secondary Group By (Optional)</label>
+                <select
+                  value={secondaryGroupByKey}
+                  onChange={(e) => setSecondaryGroupByKey(e.target.value)}
+                  style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", textOverflow: "ellipsis" }}
+                >
+                  <option value="">— None —</option>
+                  {subFields
+                    .filter((s: SubFieldDef) => s.key !== primaryGroupByKey)
+                    .map((s: SubFieldDef) => (
+                      <option key={s.id ?? s.key} value={s.key}>{s.name} ({s.key})</option>
+                    ))}
+                </select>
+              </div>
+            )}
             <label style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", height: "34px", alignSelf: "flex-end", cursor: "pointer", marginBottom: "0.25rem" }}>
               <input type="checkbox" checked={useConditional} onChange={(e) => setUseConditional(e.target.checked)} />
               Conditional (where)

@@ -6,6 +6,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
+import { generatePeriodOptions } from "@/lib/periodHelpers";
 import {
   SubField,
   FieldSummary,
@@ -68,6 +69,8 @@ interface CustomReportDetail {
   name: string;
   description: string | null;
   sections: CustomReportSection[];
+  fetch_data_with_date?: boolean;
+  date_fetching_config?: any;
 }
 
 export default function CustomReportDesignPage() {
@@ -90,11 +93,107 @@ export default function CustomReportDesignPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saveSaving, setSaveSaving] = useState(false);
+  const [fetchDataWithDate, setFetchDataWithDate] = useState<boolean>(false);
+  const [dateFetchingConfig, setDateFetchingConfig] = useState<any>({});
+  const [reportSettingsOpen, setReportSettingsOpen] = useState(false);
 
   // Live Preview properties
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
   const [previewYear, setPreviewYear] = useState(() => new Date().getFullYear());
   const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Identify all referenced KPI IDs in sections and attachments
+  const referencedKpiIds = useMemo(() => {
+    const ids = new Set<number>();
+    sections.forEach((s) => {
+      if (s.kpi_id) ids.add(s.kpi_id);
+    });
+    attachments.forEach((a) => {
+      if (a.kpi_id) ids.add(a.kpi_id);
+    });
+    return Array.from(ids);
+  }, [sections, attachments]);
+
+  // Identify all MLI fields used in custom report sections
+  const customReportMliFields = useMemo(() => {
+    const list: Array<{ kpiId: number; kpiName: string; field: KPIField }> = [];
+    sections.forEach((s) => {
+      const kpiObj = allKpis.find((k) => k.id === s.kpi_id);
+      s.fields.forEach((f) => {
+        const kpiField = kpiObj?.fields?.find((kf) => kf.id === f.kpi_field_id);
+        if (kpiField && kpiField.field_type === "multi_line_items") {
+          list.push({
+            kpiId: s.kpi_id!,
+            kpiName: s.kpi_name || kpiObj?.name || `KPI #${s.kpi_id}`,
+            field: kpiField,
+          });
+        }
+      });
+    });
+    return list;
+  }, [sections, allKpis]);
+
+  const [organization, setOrganization] = useState<any>(null);
+  const [localPeriodType, setLocalPeriodType] = useState<string>("");
+  const [localDateBasedFetching, setLocalDateBasedFetching] = useState<boolean>(false);
+  const [localDateColumn, setLocalDateColumn] = useState<string>("");
+  const [localMliDateCols, setLocalMliDateCols] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token || !orgId) return;
+    api<any>(`/organizations/${orgId}`, { token })
+      .then((orgData) => {
+        setOrganization(orgData);
+      })
+      .catch((err) => {
+        console.error("Failed to load org details", err);
+      });
+  }, [orgId]);
+
+  useEffect(() => {
+    if (reportSettingsOpen) {
+      setLocalPeriodType(dateFetchingConfig?.period_type || "");
+      setLocalDateBasedFetching(fetchDataWithDate);
+      setLocalDateColumn(dateFetchingConfig?.date_column || "");
+      setLocalMliDateCols(dateFetchingConfig?.mli_date_cols || {});
+    }
+  }, [reportSettingsOpen, fetchDataWithDate, dateFetchingConfig]);
+
+  const customPeriods = useMemo(() => {
+    if (!organization) return [];
+    if (organization.custom_periods && organization.custom_periods.length > 0) {
+      return organization.custom_periods;
+    }
+    if (organization.custom_period_name) {
+      return [{
+        custom_period_name: organization.custom_period_name,
+        custom_period_start_month: organization.custom_period_start_month,
+        custom_period_start_day: organization.custom_period_start_day,
+        custom_period_duration_months: organization.custom_period_duration_months,
+        custom_period_display_format: organization.custom_period_display_format,
+        custom_period_prefix: organization.custom_period_prefix,
+        custom_period_suffix: organization.custom_period_suffix,
+      }];
+    }
+    return [];
+  }, [organization]);
+
+  const periodOptionsList = useMemo(() => {
+    return customPeriods.map((p: any) => p.custom_period_name);
+  }, [customPeriods]);
+
+  const dateColumns = useMemo(() => {
+    const cols = new Set<string>();
+    customReportMliFields.forEach(({ field }) => {
+      field.sub_fields?.forEach((sf) => {
+        if (sf.field_type === "date" || sf.field_type === "datetime") {
+          cols.add(sf.key);
+        }
+      });
+    });
+    return Array.from(cols);
+  }, [customReportMliFields]);
 
   // Drag and drop states
   const [draggedSectionIdx, setDraggedSectionIdx] = useState<number | null>(null);
@@ -122,7 +221,9 @@ export default function CustomReportDesignPage() {
         selected_columns: a.selected_columns || [],
         filters: a.filters || null,
         sort_order: a.sort_order,
-      }))
+      })),
+      fetch_data_with_date: fetchDataWithDate,
+      date_fetching_config: dateFetchingConfig,
     };
     const reportLayout = {
       sections: report.sections.map(s => ({
@@ -142,10 +243,12 @@ export default function CustomReportDesignPage() {
         selected_columns: a.selected_columns || [],
         filters: a.filters || null,
         sort_order: a.sort_order,
-      })) || []
+      })) || [],
+      fetch_data_with_date: report.fetch_data_with_date ?? false,
+      date_fetching_config: report.date_fetching_config ?? {},
     };
     return JSON.stringify(currentLayout) !== JSON.stringify(reportLayout);
-  }, [report, sections, attachments]);
+  }, [report, sections, attachments, fetchDataWithDate, dateFetchingConfig]);
 
   // Column Selection & Reordering + Row Filtering States for MLIs
   const [editingFieldLoc, setEditingFieldLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
@@ -241,6 +344,8 @@ export default function CustomReportDesignPage() {
         setReport(detail);
         setSections(detail.sections.sort((a, b) => a.sort_order - b.sort_order));
         setAttachments((detail as any).attachments || []);
+        setFetchDataWithDate(detail.fetch_data_with_date ?? false);
+        setDateFetchingConfig(detail.date_fetching_config ?? {});
 
         // Group fields by kpi_id in memory
         const fieldsByKpi = (allFields || []).reduce((acc, f) => {
@@ -594,6 +699,8 @@ export default function CustomReportDesignPage() {
           filters: a.filters || null,
           sort_order: a.sort_order,
         })),
+        fetch_data_with_date: fetchDataWithDate,
+        date_fetching_config: dateFetchingConfig,
       };
 
       await api(`/custom-reports/${id}/layout?organization_id=${orgId}`, {
@@ -601,6 +708,14 @@ export default function CustomReportDesignPage() {
         token,
         body: JSON.stringify(payload),
       });
+
+      setReport((prev) => prev ? {
+        ...prev,
+        sections: sections,
+        attachments: attachments,
+        fetch_data_with_date: fetchDataWithDate,
+        date_fetching_config: dateFetchingConfig,
+      } : null);
 
       toast.success("Report layout saved successfully");
       fetchPreview(previewYear);
@@ -635,6 +750,17 @@ export default function CustomReportDesignPage() {
           </button>
           <button type="button" className="btn" onClick={() => handleSave(false)} disabled={saveSaving}>
             Save Layout
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setReportSettingsOpen(!reportSettingsOpen)}
+            style={{
+              background: reportSettingsOpen ? "var(--border)" : "transparent",
+              border: "1px solid var(--border)",
+            }}
+          >
+            ⚙️ Settings
           </button>
           <button type="button" className="btn btn-primary" onClick={() => handleSave(true)} disabled={saveSaving}>
             {saveSaving ? "Saving..." : "Save & Close"}
@@ -687,6 +813,160 @@ export default function CustomReportDesignPage() {
           </div>
 
           <div style={{ flex: 1, overflowY: "auto", padding: "1rem" }}>
+            {reportSettingsOpen && (
+              <div className="card" style={{ padding: "0.75rem", display: "grid", gap: "0.75rem", marginBottom: "1rem", background: "var(--bg-muted, #fcfcfc)", border: "1px dashed var(--border)", borderRadius: "8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Report Date-Fetching Settings</span>
+                  <button type="button" className="btn btn-secondary btn-sm" style={{ padding: "0.1rem 0.35rem", fontSize: "0.7rem" }} onClick={() => setReportSettingsOpen(false)}>Close</button>
+                </div>
+                
+                <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
+                  <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Report Date-Fetching Configuration</span>
+                  
+                  <div style={{ display: "grid", gap: "0.3rem" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontWeight: 600, fontSize: "0.85rem", cursor: "pointer", margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={localDateBasedFetching}
+                        onChange={(e) => setLocalDateBasedFetching(e.target.checked)}
+                      />
+                      Fetch Data with Date
+                    </label>
+                    <p style={{ margin: 0, fontSize: "0.75rem", color: "var(--muted)" }}>
+                      Enable date-based data-fetching using organization custom reporting periods. If disabled, default integer year logic will be used.
+                    </p>
+                  </div>
+
+                  {localDateBasedFetching && (
+                    <div style={{ display: "grid", gap: "0.6rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
+                      <div style={{ display: "grid", gap: "0.5rem" }}>
+                        <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Configure Date Column per Multi-Line Field</label>
+                        {customReportMliFields.length === 0 ? (
+                          <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
+                            No multi-line fields are used in this report. Add fields that are multi-line fields to configure date columns.
+                          </p>
+                        ) : (
+                          <div style={{ display: "grid", gap: "0.75rem" }}>
+                            {customReportMliFields.map((item) => {
+                              const key = `${item.kpiId}_${item.field.key}`;
+                              return (
+                                <div key={key} style={{ padding: "0.75rem", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--surface)", display: "grid", gap: "0.5rem" }}>
+                                  <div style={{ fontSize: "0.82rem", fontWeight: 650 }}>
+                                    <span style={{ color: "var(--muted)" }}>KPI:</span> {item.kpiName} <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>Field:</span> {item.field.name}
+                                  </div>
+                                  <div style={{ display: "grid", gap: "0.35rem" }}>
+                                    <select
+                                      value={localMliDateCols[key] || ""}
+                                      onChange={(e) => {
+                                        const val = e.target.value;
+                                        setLocalMliDateCols(prev => ({
+                                          ...prev,
+                                          [key]: val
+                                        }));
+                                      }}
+                                      style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", width: "100%" }}
+                                    >
+                                      <option value="">Select date column...</option>
+                                      {item.field.sub_fields?.map((sf: any) => (
+                                        <option key={sf.key} value={sf.key}>
+                                          {sf.name || sf.key} ({sf.field_type})
+                                        </option>
+                                      ))}
+                                      {localMliDateCols[key] &&
+                                        !item.field.sub_fields?.some((sf: any) => sf.key === localMliDateCols[key]) && (
+                                          <option value={localMliDateCols[key]}>
+                                            {localMliDateCols[key]} (Custom)
+                                          </option>
+                                        )}
+                                    </select>
+                                    <input
+                                      type="text"
+                                      placeholder="Or type custom date column key..."
+                                      value={localMliDateCols[key] || ""}
+                                      onChange={(e) => {
+                                        const val = e.target.value;
+                                        setLocalMliDateCols(prev => ({
+                                          ...prev,
+                                          [key]: val
+                                        }));
+                                      }}
+                                      style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={async () => {
+                      const nextConfig = {
+                        ...dateFetchingConfig,
+                        mli_date_cols: localMliDateCols,
+                      };
+                      setFetchDataWithDate(localDateBasedFetching);
+                      setDateFetchingConfig(nextConfig);
+
+                      const tok = getAccessToken();
+                      if (!tok || !id) return;
+                      try {
+                        const payload = {
+                          sections: sections.map((s) => ({
+                            kpi_id: s.kpi_id,
+                            custom_header: s.custom_header,
+                            sort_order: s.sort_order,
+                            fields: s.fields.map((f) => ({
+                              kpi_field_id: f.kpi_field_id,
+                              sort_order: f.sort_order,
+                              config: f.config || null,
+                            })),
+                          })),
+                          attachments: attachments.map((a) => ({
+                            kpi_id: a.kpi_id,
+                            kpi_field_id: a.kpi_field_id,
+                            title: a.title,
+                            selected_columns: a.selected_columns || [],
+                            filters: a.filters || null,
+                            sort_order: a.sort_order,
+                          })),
+                          fetch_data_with_date: localDateBasedFetching,
+                          date_fetching_config: nextConfig,
+                        };
+
+                        await api(`/custom-reports/${id}/layout?organization_id=${orgId}`, {
+                          method: "PUT",
+                          token: tok,
+                          body: JSON.stringify(payload),
+                        });
+
+                        setReport((prev) => prev ? {
+                          ...prev,
+                          sections: sections,
+                          attachments: attachments,
+                          fetch_data_with_date: localDateBasedFetching,
+                          date_fetching_config: nextConfig,
+                        } : null);
+
+                        toast.success("Configuration saved successfully.");
+                        fetchPreview(previewYear);
+                      } catch (e) {
+                        toast.error(e instanceof Error ? e.message : "Failed to save configuration");
+                      }
+                    }}
+                    style={{ marginTop: "0.5rem", width: "100%" }}
+                  >
+                    Save Configuration
+                  </button>
+                </div>
+              </div>
+            )}
+
             <h3 style={{ margin: "0 0 0.75rem 0", fontSize: "0.95rem", fontWeight: 600, textTransform: "uppercase", color: "var(--muted)" }}>Report Structure</h3>
             {displaySections.length === 0 ? (
               <div style={{ padding: "2rem", textAlign: "center", border: "2px dashed var(--border)", borderRadius: 8, color: "var(--muted)" }}>

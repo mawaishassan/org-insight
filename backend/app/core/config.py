@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     # JWT
     JWT_SECRET_KEY: str = "change-me-in-production-use-long-random-string"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # Increased session expiration limit (24 hours)
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 14      # Doubled refresh token expiration limit (14 days)
 
     # CORS (localhost + 127.0.0.1; 3000/3001 for Next.js when the default port is taken)
     CORS_ORIGINS: list[str] = [

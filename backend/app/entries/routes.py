@@ -237,6 +237,26 @@ def _multi_line_cell_insert_row(row_id: int, sub: Any, raw_val: Any) -> dict[str
                 row["value_text"] = str(raw_val)
     elif ft_s == "date":
         row["value_text"] = str(raw_val)
+        if raw_val:
+            from datetime import datetime, date
+            if isinstance(raw_val, (datetime, date)):
+                row["value_date"] = raw_val
+            elif isinstance(raw_val, str):
+                s = raw_val.strip()
+                parsed = None
+                for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"):
+                    try:
+                        parsed = datetime.strptime(s, fmt)
+                        break
+                    except Exception:
+                        pass
+                if not parsed:
+                    try:
+                        parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    except Exception:
+                        pass
+                if parsed:
+                    row["value_date"] = parsed
     elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
         if isinstance(raw_val, (dict, list)):
             row["value_json"] = raw_val
@@ -1666,10 +1686,18 @@ async def list_multi_items_rows(
 
     sub_fields = getattr(field, "sub_fields", None) or []
     subfields_dict = {}
+    has_formula_sub = False
     for sf in sub_fields:
         subfields_dict[sf.key] = sf
         if getattr(sf, "id", None) is not None:
             subfields_dict[int(sf.id)] = sf
+        ft_val = getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", None))
+        if str(ft_val) == "formula":
+            has_formula_sub = True
+
+    if has_formula_sub:
+        from app.entries.service import recompute_mli_formula_subfields
+        await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id, field_id=field.id)
 
     if fetch_all and search:
         raise HTTPException(
@@ -2230,38 +2258,49 @@ async def list_multi_items_rows(
             else:
                 # SQL sort on a specific sub-field to avoid the slow in-memory path on large datasets.
                 # This keeps paging in SQL even for 20k+ rows.
-                sort_sf = next((s for s in (field.sub_fields or []) if str(getattr(s, "key", "")) == str(sort_by)), None)
-                sort_sf_id = int(getattr(sort_sf, "id", 0) or 0) if sort_sf is not None else 0
-                sort_ft = getattr(getattr(sort_sf, "field_type", None), "value", getattr(sort_sf, "field_type", None)) if sort_sf is not None else None
-                if sort_sf_id > 0:
-                    order_cell = KpiMultiLineCell
-                    order_stmt = order_stmt.outerjoin(
-                        order_cell,
-                        and_(
-                            order_cell.row_id == KpiMultiLineRow.id,
-                            order_cell.sub_field_id == sort_sf_id,
-                        ),
-                    )
-                    if str(sort_ft) == "number":
-                        sort_expr = order_cell.value_number
-                    elif str(sort_ft) == "date":
-                        sort_expr = order_cell.value_date
-                    elif str(sort_ft) == "boolean":
-                        # bool sorts false < true; keep nulls last
-                        sort_expr = order_cell.value_boolean
-                    else:
-                        # text / json / reference-like: sort by stringified value
-                        sort_expr = func.coalesce(
-                            cast(order_cell.value_text, String()),
-                            cast(order_cell.value_json, String()),
-                            cast(order_cell.value_number, String()),
-                            cast(order_cell.value_boolean, String()),
-                            cast(order_cell.value_date, String()),
-                        )
-                    reverse = sort_dir == "desc"
-                    order_stmt = order_stmt.order_by(nulls_last(sort_expr.desc() if reverse else sort_expr.asc()))
-                else:
-                    order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
+                 sort_sf = next((s for s in (field.sub_fields or []) if str(getattr(s, "key", "")) == str(sort_by)), None)
+                 sort_sf_id = int(getattr(sort_sf, "id", 0) or 0) if sort_sf is not None else 0
+                 
+                 sort_ft = None
+                 if sort_sf is not None:
+                     ft_attr = getattr(sort_sf, "field_type", None)
+                     sort_ft = getattr(ft_attr, "value", ft_attr)
+                 
+                 if sort_sf_id > 0:
+                     order_cell = KpiMultiLineCell
+                     order_stmt = order_stmt.outerjoin(
+                         order_cell,
+                         and_(
+                             order_cell.row_id == KpiMultiLineRow.id,
+                             order_cell.sub_field_id == sort_sf_id,
+                         ),
+                     )
+                     reverse = sort_dir == "desc"
+                     if str(sort_ft) == "formula":
+                         # Formula subfields: sort numerically by value_number first, then textually by value_text
+                         order_stmt = order_stmt.order_by(
+                             nulls_last(order_cell.value_number.desc() if reverse else order_cell.value_number.asc()),
+                             nulls_last(order_cell.value_text.desc() if reverse else order_cell.value_text.asc())
+                         )
+                     else:
+                         if str(sort_ft) == "number":
+                             sort_expr = order_cell.value_number
+                         elif str(sort_ft) == "date":
+                             sort_expr = order_cell.value_date
+                         elif str(sort_ft) == "boolean":
+                             sort_expr = order_cell.value_boolean
+                         else:
+                             # text / json / reference-like: sort by stringified value
+                             sort_expr = func.coalesce(
+                                 cast(order_cell.value_text, String()),
+                                 cast(order_cell.value_json, String()),
+                                 cast(order_cell.value_number, String()),
+                                 cast(order_cell.value_boolean, String()),
+                                 cast(order_cell.value_date, String()),
+                             )
+                         order_stmt = order_stmt.order_by(nulls_last(sort_expr.desc() if reverse else sort_expr.asc()))
+                 else:
+                     order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
         else:
             order_stmt = order_stmt.order_by(KpiMultiLineRow.row_index)
 
@@ -3000,7 +3039,7 @@ async def preview_row_formulas(
             if not expr:
                 computed = None
             else:
-                from app.formula_engine.evaluator import evaluate_formula
+                from app.formula_engine.evaluator import evaluate_formula, apply_conditional_logic
                 computed = evaluate_formula(
                     expr,
                     value_by_key,
@@ -3009,6 +3048,9 @@ async def preview_row_formulas(
                     current_row=working_row,
                     other_kpi_multi_line_data=other_kpi_mli_data,
                 )
+                cond_logic = cfg.get("conditional_logic") if isinstance(cfg, dict) else None
+                if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
+                    computed = apply_conditional_logic(computed, cond_logic)
             working_row[sf.key] = computed
             computed_formulas[sf.key] = computed
 
@@ -3548,7 +3590,7 @@ async def sync_multi_items_from_odoo(
             import asyncio
             
             sem = asyncio.Semaphore(5)
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
                 async def fetch_one(att_id):
                     async with sem:
                         target_url = (
@@ -3571,7 +3613,8 @@ async def sync_multi_items_from_odoo(
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 for aid, res in zip(unique_att_ids, results):
                     if isinstance(res, Exception) or (isinstance(res, tuple) and len(res) == 0):
-                        msg = f"Failed to download Odoo attachment ID {aid}: {res}"
+                        err_msg = str(res) or res.__class__.__name__
+                        msg = f"Failed to download Odoo attachment ID {aid}: {err_msg}"
                         all_attachment_errors.append(msg)
                     elif isinstance(res, tuple) and len(res) == 3:
                         downloaded_data[aid] = (res[1], res[2])  # (content, headers)

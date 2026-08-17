@@ -21,6 +21,14 @@ class OrganizationUpdate(BaseModel):
     description: str | None = None
     is_active: bool | None = None
     time_dimension: str | None = Field(None, description="yearly, half_yearly, quarterly, monthly")
+    custom_period_name: str | None = None
+    custom_period_start_month: int | None = Field(None, ge=1, le=12)
+    custom_period_start_day: int | None = Field(None, ge=1, le=31)
+    custom_period_duration_months: int | None = Field(None, ge=1)
+    custom_period_display_format: str | None = None
+    custom_period_prefix: str | None = None
+    custom_period_suffix: str | None = None
+    custom_periods: list[dict] | None = None
 
 
 class OrganizationResponse(BaseModel):
@@ -31,6 +39,14 @@ class OrganizationResponse(BaseModel):
     description: str | None
     is_active: bool
     time_dimension: str = "yearly"
+    custom_period_name: str | None = None
+    custom_period_start_month: int = 1
+    custom_period_start_day: int = 1
+    custom_period_duration_months: int = 12
+    custom_period_display_format: str = "YYYY"
+    custom_period_prefix: str = ""
+    custom_period_suffix: str = ""
+    custom_periods: list[dict] | None = None
 
     class Config:
         from_attributes = True
@@ -100,6 +116,35 @@ class OdooConfigResponse(BaseModel):
     password: str = Field(default="***", description="Masked")
     created_at: str | None = None
     updated_at: str | None = None
+
+
+class OdooEndpointCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    url: str = Field(..., min_length=1, max_length=2048)
+    description: str | None = Field(None, max_length=1024)
+    is_active: bool = True
+
+
+class OdooEndpointUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=255)
+    url: str | None = Field(None, min_length=1, max_length=2048)
+    description: str | None = Field(None, max_length=1024)
+    is_active: bool | None = None
+
+
+class OdooEndpointResponse(BaseModel):
+    id: int
+    organization_id: int
+    name: str
+    url: str
+    description: str | None = None
+    is_active: bool
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class OdooEndpointTestRequest(BaseModel):
+    url: str = Field(..., min_length=1, max_length=2048)
 
 
 # Keys that must be masked in API responses (never log or return raw)

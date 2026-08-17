@@ -179,9 +179,17 @@ async def odoo_fetch_items(
     headers: dict[str, str] = {"Content-Type": "application/json"}
     cookies = {"session_id": session_id}
 
+    target_url = cfg.data_fetch_url
+    if getattr(kpi_cfg, "endpoint", None) is not None:
+        if not kpi_cfg.endpoint.is_active:
+            raise ValueError(
+                f"The selected Odoo API endpoint '{kpi_cfg.endpoint.name}' is currently inactive. Please select an active endpoint in KPI configuration."
+            )
+        target_url = kpi_cfg.endpoint.url
+
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
-            cfg.data_fetch_url,
+            target_url,
             json=body if isinstance(body, (dict, list)) else {"payload": body},
             headers=headers,
             cookies=cookies,
@@ -394,7 +402,7 @@ def extract_odoo_attachment_ids(raw_val: Any) -> list[str | int]:
     ids: list[str | int] = []
 
     def _collect(v: Any) -> None:
-        if v is None or v == "":
+        if v is None or v == "" or isinstance(v, bool):
             return
         if isinstance(v, (int, float)):
             if isinstance(v, float) and v.is_integer():
@@ -403,7 +411,7 @@ def extract_odoo_attachment_ids(raw_val: Any) -> list[str | int]:
             return
         if isinstance(v, str):
             s = v.strip()
-            if not s:
+            if not s or s.lower() in ("none", "false", "null", "undefined"):
                 return
             if s.startswith("[") or s.startswith("{"):
                 try:

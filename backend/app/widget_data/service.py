@@ -28,6 +28,8 @@ from app.core.models import (
     KpiMultiLineCell,
     KpiMultiLineRow,
     User,
+    Dashboard,
+    Organization,
 )
 from app.entries.multi_item_filters import row_passes_filters
 from app.entries.reference_filter_resolve import build_reference_resolution_map
@@ -45,6 +47,39 @@ from app.core.database import AsyncSessionLocal
 from app.core.config import get_settings
 
 
+def get_widget_date_col_key(config: dict, kpi_id: int, source_key: str, field_def: Any) -> str | None:
+    if not config:
+        return None
+
+    # 1. Check if specific custom mapping for this MLI in mli_date_cols is set
+    mli_date_cols = config.get("mli_date_cols") or {}
+    field_id = getattr(field_def, "id", None)
+    specific_key = mli_date_cols.get(f"{kpi_id}_{source_key}") or (mli_date_cols.get(f"{kpi_id}_{field_id}") if field_id else None)
+    if specific_key:
+        return specific_key
+
+    # 2. Check if new dashboard-wide/report-wide date_column configuration is set
+    date_column = config.get("date_column")
+    if date_column:
+        if field_def and hasattr(field_def, "sub_fields"):
+            # Get date/datetime subfields
+            date_subfields = []
+            for sf in field_def.sub_fields:
+                sft = getattr(sf.field_type, "value", sf.field_type)
+                if sft in ("date", "datetime") or str(sft).lower() == "fieldtype.date" or str(sft).lower() == "fieldtype.datetime":
+                    date_subfields.append(sf)
+            if date_subfields:
+                # Find matching subfield by key or name (case-insensitive)
+                for sf in date_subfields:
+                    if sf.key.lower() == date_column.lower() or sf.name.lower() == date_column.lower():
+                        return sf.key
+                # Fallback to the first date subfield in this MLI
+                return date_subfields[0].key
+        return None
+
+    return None
+
+
 async def resolve_dashboard_chart_widget_data_batch(
     db: AsyncSession,
     user: User,
@@ -59,47 +94,16 @@ async def resolve_dashboard_chart_widget_data_batch(
       {"<key>": {"ok": bool, "widget_type": str, "meta": {}, "data": {}, "entry_revision": str|None, "error": str?}}
     """
     # ---- Pre-parse + group ----
-    parsed: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
-    info_by_key: dict[str, dict[str, Any]] = {}
-    for idx, it in enumerate(items or []):
-        if not isinstance(it, dict):
-            continue
-        w = it.get("widget")
-        if not isinstance(w, dict):
-            continue
-        wid = w.get("id")
-        key = str(wid) if wid is not None else f"idx:{idx}"
-        overrides = it.get("overrides") if isinstance(it.get("overrides"), dict) else None
-        merged = _merge_overrides(w, overrides)
-        parsed.append((key, merged, overrides))
-        info_by_key[key] = {
-            "kpi_id": int(merged.get("kpi_id") or 0),
-            "year": int(merged.get("year") or 0),
-            "period_key": _period_key_norm(merged.get("period_key")),
-        }
-
-    results: dict[str, dict[str, Any]] = {}
-    if not parsed:
-        return results
-
-    # Distinct KPI ids, validate access once each.
-    kpi_ids: set[int] = set()
-    for _key, w, _ov in parsed:
-        if str(w.get("type") or "") != "kpi_bar_chart":
-            continue
-        kpi_ids.add(int(w.get("kpi_id") or 0))
-
-    for kpi_id in sorted({k for k in kpi_ids if k > 0}):
-        if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
-            # Mark all widgets of this KPI as forbidden.
-            for key, w, _ov in parsed:
-                if int(w.get("kpi_id") or 0) == kpi_id:
-                    results[key] = {"ok": False, "error": "forbidden"}
+    dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
+    is_date_fetching = False
+    org = None
+    if dashboard and getattr(dashboard, "fetch_data_with_date", False):
+        is_date_fetching = True
+        org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
 
     # ---- Caches ----
     fields_cache: dict[int, list[KPIField]] = {}
     fmap_cache: dict[int, dict[str, Any]] = {}
-    entry_cache: dict[tuple[int, int, str | None], tuple[int | None, Any]] = {}
     mline_field_cache: dict[tuple[int, str], KPIField | None] = {}
     sub_map_cache: dict[int, tuple[dict[str, int], dict[str, str]]] = {}
 
@@ -109,13 +113,6 @@ async def resolve_dashboard_chart_widget_data_batch(
             fields_cache[kpi_id] = fs
             fmap_cache[kpi_id] = build_kpi_field_maps(fs)
         return fields_cache[kpi_id]
-
-    async def _entry_for(kpi_id: int, year: int, period_key: Any) -> tuple[int | None, Any]:
-        pk = _period_key_norm(period_key)
-        k = (int(kpi_id), int(year), pk)
-        if k not in entry_cache:
-            entry_cache[k] = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
-        return entry_cache[k]
 
     async def _mline_field_for(kpi_id: int, source_field_key: str) -> KPIField | None:
         k = (int(kpi_id), str(source_field_key))
@@ -128,7 +125,81 @@ async def resolve_dashboard_chart_widget_data_batch(
             return None
         f_full = await get_field_with_subfields_only(db, int(f.id), org_id) or f
         mline_field_cache[k] = f_full
-        if int(f_full.id) not in sub_map_cache:
+        return f_full
+
+    parsed: list[tuple[str, dict[str, Any], dict[str, Any] | None, tuple[datetime.date, datetime.date, str] | None]] = []
+    info_by_key: dict[str, dict[str, Any]] = {}
+    for idx, it in enumerate(items or []):
+        if not isinstance(it, dict):
+            continue
+        w = it.get("widget")
+        if not isinstance(w, dict):
+            continue
+        wid = w.get("id")
+        key = str(wid) if wid is not None else f"idx:{idx}"
+        overrides = it.get("overrides") if isinstance(it.get("overrides"), dict) else None
+        
+        mod_overrides = dict(overrides) if overrides else {}
+        date_range = None
+        if is_date_fetching and org:
+            selected_period = (overrides or {}).get("year") or w.get("year")
+            if selected_period:
+                try:
+                    start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
+                    mod_overrides["year"] = start_year
+                    kpi_id = int(w.get("kpi_id") or 0)
+                    source_key = (w.get("source_field_key") or "").strip()
+                    config = getattr(dashboard, "date_fetching_config", None) or {}
+                    
+                    f_def = None
+                    if kpi_id and source_key:
+                        f_def = await _mline_field_for(kpi_id, source_key)
+                    date_col_key = get_widget_date_col_key(config, kpi_id, source_key, f_def)
+                    
+                    if date_col_key:
+                        date_range = (start_date, end_date, str(date_col_key))
+                except Exception:
+                    pass
+        
+        merged = _merge_overrides(w, mod_overrides)
+        parsed.append((key, merged, mod_overrides, date_range))
+        info_by_key[key] = {
+            "kpi_id": int(merged.get("kpi_id") or 0),
+            "year": int(merged.get("year") or 0),
+            "period_key": _period_key_norm(merged.get("period_key")),
+        }
+
+    results: dict[str, dict[str, Any]] = {}
+    if not parsed:
+        return results
+
+    # Distinct KPI ids, validate access once each.
+    kpi_ids: set[int] = set()
+    for _key, w, _ov, date_range in parsed:
+        if str(w.get("type") or "") != "kpi_bar_chart":
+            continue
+        kpi_ids.add(int(w.get("kpi_id") or 0))
+
+    for kpi_id in sorted({k for k in kpi_ids if k > 0}):
+        if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+            # Mark all widgets of this KPI as forbidden.
+            for key, w, _ov, date_range in parsed:
+                if int(w.get("kpi_id") or 0) == kpi_id:
+                    results[key] = {"ok": False, "error": "forbidden"}
+
+    entry_cache: dict[tuple[int, int, str | None], tuple[int | None, Any]] = {}
+
+    async def _entry_for(kpi_id: int, year: int, period_key: Any) -> tuple[int | None, Any]:
+        pk = _period_key_norm(period_key)
+        k = (int(kpi_id), int(year), pk)
+        if k not in entry_cache:
+            entry_cache[k] = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+        return entry_cache[k]
+
+    # Re-declare sub_map_cache logic for internal payload mapping (uses cached mline field data)
+    async def _populate_sub_map_for(kpi_id: int, source_field_key: str):
+        f_full = await _mline_field_for(kpi_id, source_field_key)
+        if f_full and int(f_full.id) not in sub_map_cache:
             sub_id_by_key: dict[str, int] = {}
             ref_types: dict[str, str] = {}
             for sf in getattr(f_full, "sub_fields", None) or []:
@@ -147,7 +218,7 @@ async def resolve_dashboard_chart_widget_data_batch(
     sig_to_args: dict[tuple[Any, ...], dict[str, Any]] = {}
     sig_to_rev: dict[tuple[Any, ...], str | None] = {}
 
-    for key, w, _ov in parsed:
+    for key, w, _ov, date_range in parsed:
         if key in results:  # forbidden already
             continue
         if str(w.get("type") or "") != "kpi_bar_chart":
@@ -160,14 +231,14 @@ async def resolve_dashboard_chart_widget_data_batch(
             results[key] = {"ok": False, "error": "missing kpi_id or year"}
             continue
         mode = w.get("mode") or "fields"
-        if mode != "multi_line_items":
-            # Keep existing per-widget path for non-mline charts (rare on bar/pie).
-            meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, w, user=user)
+        if mode != "multi_line_items" or date_range:
+            # Keep existing per-widget path for non-mline charts (rare on bar/pie) or if date_range is present.
+            meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, w, user=user, date_range=date_range)
             results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": meta, "data": data, "entry_revision": e_rev}
             continue
 
         source_key = str(w.get("source_field_key") or "").strip()
-        f_full = await _mline_field_for(kpi_id, source_key)
+        f_full = await _populate_sub_map_for(kpi_id, source_key)
         if not f_full:
             results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": {"kpi_id": kpi_id, "year": year, "entry_id": None, "row_count": 0}, "data": {"mode": "multi_line_items", "raw_rows": []}, "entry_revision": None}
             continue
@@ -507,6 +578,192 @@ def _merge_overrides(w: dict[str, Any], overrides: dict[str, Any] | None) -> dic
     for k, v in overrides.items():
         out[k] = v
     return out
+
+
+def _get_config_val(config: Any, key: str, default: Any = None) -> Any:
+    if hasattr(config, key):
+        val = getattr(config, key)
+        return val if val is not None else default
+    if isinstance(config, dict):
+        val = config.get(key)
+        return val if val is not None else default
+    return default
+
+
+def resolve_date_range_for_period(config: Any, selected_period: str) -> tuple[datetime.date, datetime.date, int]:
+    import datetime as dt
+    import calendar
+    import re
+    import math
+
+    # Try to find a matching custom period configuration from config.custom_periods if it exists
+    custom_periods = _get_config_val(config, "custom_periods")
+    if custom_periods and isinstance(custom_periods, list):
+        matched_config = None
+        for cp in custom_periods:
+            if not isinstance(cp, dict):
+                continue
+            # Get prefix, suffix, and display format for this configuration
+            prefix = _get_config_val(cp, "custom_period_prefix") or ""
+            suffix = _get_config_val(cp, "custom_period_suffix") or ""
+            display_format = _get_config_val(cp, "custom_period_display_format") or "YYYY"
+            
+            val = selected_period
+            if prefix and not val.startswith(prefix):
+                continue
+            if suffix and not val.endswith(suffix):
+                continue
+                
+            if prefix:
+                val = val[len(prefix):]
+            if suffix:
+                val = val[:-len(suffix)] if len(suffix) > 0 else val
+            val = val.strip()
+            
+            # Check pattern matching based on display format
+            matched = False
+            if display_format == "YYYY":
+                matched = bool(re.match(r'^\d{4}$', val))
+            elif display_format in ("YYYY/YY", "YYYY-YY", "YYYY-YYYY", "YYYY–YYYY"):
+                matched = bool(re.match(r'^\d{4}[/\-–]\d{2,4}$', val))
+            elif display_format == "YY/YYYY":
+                matched = bool(re.match(r'^\d{2}/\d{4}$', val))
+            else:
+                matched = bool(re.search(r'\b\d{4}\b', val))
+                
+            if matched:
+                matched_config = cp
+                break
+        
+        if matched_config:
+            config = matched_config
+
+    prefix = _get_config_val(config, "custom_period_prefix") or ""
+    suffix = _get_config_val(config, "custom_period_suffix") or ""
+    display_format = _get_config_val(config, "custom_period_display_format") or "YYYY"
+    start_month = int(_get_config_val(config, "custom_period_start_month", 1))
+    start_day = int(_get_config_val(config, "custom_period_start_day", 1))
+    duration_months = int(_get_config_val(config, "custom_period_duration_months", 12))
+    
+    val = selected_period
+    if prefix and val.startswith(prefix):
+        val = val[len(prefix):]
+    if suffix and val.endswith(suffix):
+        val = val[:-len(suffix)] if len(suffix) > 0 else val
+        
+    start_year = dt.date.today().year
+    val = val.strip()
+    
+    if display_format == "YYYY":
+        try:
+            start_year = int(val)
+        except ValueError:
+            pass
+    elif display_format in ("YYYY/YY", "YYYY-YY", "YYYY-YYYY", "YYYY–YYYY"):
+        try:
+            start_year = int(val[:4])
+        except ValueError:
+            pass
+    elif display_format == "YY/YYYY":
+        try:
+            end_year = int(val[-4:])
+            years_diff = math.ceil(duration_months / 12)
+            start_year = end_year - years_diff
+        except ValueError:
+            pass
+    else:
+        match = re.search(r'\b\d{4}\b', val)
+        if match:
+            start_year = int(match.group(0))
+            
+    start_date = dt.date(start_year, start_month, start_day)
+    
+    month = start_date.month - 1 + duration_months
+    end_year = start_date.year + (month // 12)
+    end_month = (month % 12) + 1
+    max_days = calendar.monthrange(end_year, end_month)[1]
+    end_day = min(start_date.day, max_days)
+    end_date = dt.date(end_year, end_month, end_day)
+    
+    entry_year = start_year
+    if start_month > 1:
+        entry_year = start_year + 1
+    return start_date, end_date, entry_year
+
+
+async def preprocess_dashboard_date_fetching(
+    db: AsyncSession,
+    org_id: int,
+    dashboard_id: int | None,
+    w: dict[str, Any],
+    overrides: dict[str, Any] | None
+) -> tuple[dict[str, Any], dict[str, Any] | None, tuple[datetime.date, datetime.date, str] | None]:
+    import datetime as dt
+    merged = _merge_overrides(w, overrides)
+    if dashboard_id is None:
+        return merged, overrides, None
+        
+    dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
+    if not dashboard or not getattr(dashboard, "fetch_data_with_date", False):
+        return merged, overrides, None
+        
+    org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+    if not org:
+        return merged, overrides, None
+        
+    selected_period = (overrides or {}).get("year") or w.get("year")
+    if not selected_period:
+        return merged, overrides, None
+        
+    try:
+        start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
+    except Exception:
+        return merged, overrides, None
+        
+    mod_overrides = dict(overrides or {})
+    mod_overrides["year"] = start_year
+    
+    mod_w = dict(w)
+    mod_w["year"] = start_year
+    
+    merged_mod = _merge_overrides(mod_w, mod_overrides)
+    
+    kpi_id = int(merged_mod.get("kpi_id") or 0)
+    source_key = (merged_mod.get("source_field_key") or merged_mod.get("field_key") or "").strip()
+    
+    date_fetching_config = getattr(dashboard, "date_fetching_config", None) or {}
+    mli_date_cols = date_fetching_config.get("mli_date_cols") or {}
+    
+    date_col_key = None
+    if kpi_id and source_key:
+        date_col_key = mli_date_cols.get(f"{kpi_id}_{source_key}") or mli_date_cols.get(f"{kpi_id}_{merged_mod.get('source_field_id')}")
+        
+    date_range = None
+    if date_col_key:
+        date_range = (start_date, end_date, str(date_col_key))
+        
+    return merged_mod, mod_overrides, date_range
+
+
+async def resolve_date_context_for_dashboard(
+    db: AsyncSession,
+    org_id: int,
+    dashboard_id: int | None,
+    selected_period: Any
+) -> tuple[datetime.date, datetime.date, int, dict] | None:
+    if dashboard_id is None or not selected_period:
+        return None
+    dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
+    if not dashboard or not getattr(dashboard, "fetch_data_with_date", False):
+        return None
+    org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+    if not org:
+        return None
+    try:
+        start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
+        return start_date, end_date, start_year, getattr(dashboard, "date_fetching_config", None) or {}
+    except Exception:
+        return None
 
 
 def _field_value_raw(fv: KPIFieldValue) -> Any:
@@ -860,8 +1117,11 @@ async def load_multi_line_row_dicts_filtered(
     year: int,
     raw_filters: Any,
     current_user_id: int | None = None,
+    date_range: tuple[datetime.date, datetime.date, str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    pairs = await load_multi_line_row_dicts(db, entry_id=entry_id, field=field, current_user_id=current_user_id)
+    pairs = await load_multi_line_row_dicts(
+        db, entry_id=entry_id, field=field, current_user_id=current_user_id, date_range=date_range
+    )
     rows = [d for _i, d in pairs if isinstance(d, dict)]
     n_before = len(rows)
     filtered = await _apply_row_filters(
@@ -907,7 +1167,7 @@ WidgetResolver = Callable[[AsyncSession, User, int, dict[str, Any]], Awaitable[t
 
 
 async def _kpi_bar_chart_payload(
-    db: AsyncSession, org_id: int, w: dict[str, Any], user: User | None = None
+    db: AsyncSession, org_id: int, w: dict[str, Any], user: User | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     """
     Bar/pie widget data after tenant KPI existence is verified.
@@ -934,19 +1194,28 @@ async def _kpi_bar_chart_payload(
     if mode == "multi_line_items":
         fields = await list_kpi_field_definitions(db, kpi_id, org_id)
         fmap = build_kpi_field_maps(fields)
-        eid, e_ts = await get_entry_id_updated(
-            db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
-        )
-        e_rev = revision_for_parts(eid, e_ts)
+        if date_range:
+            entries_res = await db.execute(
+                select(KPIEntry.id)
+                .where(KPIEntry.kpi_id == kpi_id, KPIEntry.organization_id == org_id, KPIEntry.is_draft == False)
+            )
+            eid = [r[0] for r in entries_res.all()]
+            e_rev = None
+        else:
+            eid, e_ts = await get_entry_id_updated(
+                db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+            )
+            e_rev = revision_for_parts(eid, e_ts)
         source_key = (w.get("source_field_key") or "").strip()
         f_obj = next((f for f in fields if f.key == source_key and f.field_type == FieldType.multi_line_items), None)
         if not f_obj or not eid:
+            meta_eid = eid[0] if isinstance(eid, list) and eid else (None if isinstance(eid, list) else eid)
             return (
                 {
                     "kpi_id": kpi_id,
                     "year": year,
                     "period_key": _period_key_norm(period_key),
-                    "entry_id": eid,
+                    "entry_id": meta_eid,
                     "row_count": 0,
                     "source_field_id": f_obj.id if f_obj else None,
                 },
@@ -961,7 +1230,7 @@ async def _kpi_bar_chart_payload(
         group_key = (w.get("group_by_sub_field_key") or "").strip()
         filt_key = (w.get("filter_sub_field_key") or "").strip()
         val_key = (w.get("value_sub_field_key") or "").strip()
-        use_sql_agg = agg_w in ("count_rows", "sum", "avg")
+        use_sql_agg = agg_w in ("count_rows", "sum", "avg") if not date_range else False
         filter_where_sql: str | None = None
         filter_sql_params: dict[str, Any] | None = None
         filter_sid_params: list[str] | None = None
@@ -1087,14 +1356,15 @@ async def _kpi_bar_chart_payload(
             db, org_id, f_obj, raw_filters
         )
         rows, _n_before = await load_multi_line_row_dicts_filtered(
-            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=raw_filters, current_user_id=user.id if user else None
+            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=raw_filters, current_user_id=user.id if user else None, date_range=date_range
         )
+        meta_eid = eid[0] if isinstance(eid, list) and eid else (None if isinstance(eid, list) else eid)
         return (
             {
                 "kpi_id": kpi_id,
                 "year": year,
                 "period_key": _period_key_norm(period_key),
-                "entry_id": eid,
+                "entry_id": meta_eid,
                 "row_count": len(rows),
                 "source_field_id": int(f_obj.id),
             },
@@ -1602,7 +1872,13 @@ async def resolve_dashboard_chart_widget_data(
     Bar/pie (`kpi_bar_chart`) data when the client is on a dashboard view.
     Authorizes with dashboard view only — skips KPI-level and field-level permission queries.
     """
-    merged = _merge_overrides(widget, overrides)
+    date_ctx = await resolve_date_context_for_dashboard(db, org_id, dashboard_id, (overrides or {}).get("year") or widget.get("year"))
+    mod_overrides = dict(overrides) if overrides else {}
+    if date_ctx:
+        _start_date, _end_date, start_year, _config = date_ctx
+        mod_overrides["year"] = start_year
+
+    merged = _merge_overrides(widget, mod_overrides)
     if str(merged.get("type") or "") != "kpi_bar_chart":
         return (
             {"error": "unsupported_widget_type"},
@@ -1613,7 +1889,20 @@ async def resolve_dashboard_chart_widget_data(
     kpi_id = int(merged.get("kpi_id") or 0)
     if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
-    meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, merged, user=user)
+
+    date_range = None
+    if date_ctx:
+        start_date, end_date, start_year, config = date_ctx
+        source_key = (merged.get("source_field_key") or "").strip()
+        f_def = None
+        if kpi_id and source_key:
+            fs = await list_kpi_field_definitions(db, kpi_id, org_id)
+            f_def = next((f for f in fs if f.key == source_key), None)
+        date_col_key = get_widget_date_col_key(config, kpi_id, source_key, f_def)
+        if date_col_key:
+            date_range = (start_date, end_date, str(date_col_key))
+
+    meta, data, e_rev = await _kpi_bar_chart_payload(db, org_id, merged, user=user, date_range=date_range)
     err = data.get("error")
     if err == "KPI not found" or err == "missing kpi_id or year":
         return meta, data, "error", e_rev
@@ -1635,7 +1924,7 @@ async def _field_id_for_kpi_key(db: AsyncSession, *, org_id: int, kpi_id: int, f
 
 
 async def _dashboard_card_payload(
-    db: AsyncSession, org_id: int, merged: dict[str, Any], user: User | None = None
+    db: AsyncSession, org_id: int, merged: dict[str, Any], user: User | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     """
     Fast path for `kpi_card_single_value`:
@@ -1660,11 +1949,73 @@ async def _dashboard_card_payload(
     e_rev = revision_for_parts(eid, e_ts)
     if sm == "field":
         fk = (merged.get("field_key") or "").strip()
-        fid = await _field_id_for_kpi_key(db, org_id=org_id, kpi_id=kpi_id, field_key=fk)
+        f_res = await db.execute(
+            select(KPIField).where(
+                KPIField.kpi_id == kpi_id,
+                KPIField.key == fk,
+            )
+        )
+        f = f_res.scalar_one_or_none()
+        fid = f.id if f else None
+        
         raw = None
-        if eid and fid:
-            fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=[int(fid)], current_user_id=user.id if user else None)
-            raw = raw_field_from_fv_map(fvm, int(fid))
+        if f and f.field_type == FieldType.formula and date_range:
+            # 1. Get all entry IDs for this KPI across years (published only)
+            entries_res = await db.execute(
+                select(KPIEntry.id)
+                .where(KPIEntry.kpi_id == kpi_id, KPIEntry.organization_id == org_id, KPIEntry.is_draft == False)
+            )
+            entry_ids = [r[0] for r in entries_res.all()]
+            
+            # 2. Build value_by_key (scalar fields for target_eid)
+            value_by_key = {}
+            all_fields = await list_kpi_field_definitions(db, kpi_id, org_id)
+            if eid:
+                fvm = await get_field_values_for_field_ids(
+                    db,
+                    entry_id=int(eid),
+                    field_ids=[int(fld.id) for fld in all_fields],
+                    current_user_id=user.id if user else None
+                )
+                for fld in all_fields:
+                    val = raw_field_from_fv_map(fvm, int(fld.id))
+                    n_val = to_numeric(val)
+                    if n_val is not None:
+                        value_by_key[fld.key] = n_val
+            
+            # 3. Build multi_line_items_data, filtered by date_range!
+            multi_line_items_data = {}
+            config = merged.get("date_fetching_config") or {}
+            start_date, end_date, _dummy = date_range
+            for fld in all_fields:
+                if fld.field_type == FieldType.multi_line_items:
+                    fld_date_col = get_widget_date_col_key(config, kpi_id, fld.key, fld)
+                    fld_date_range = (start_date, end_date, str(fld_date_col)) if fld_date_col else None
+                    pairs = await load_multi_line_row_dicts(
+                        db, entry_id=entry_ids, field=fld, current_user_id=user.id if user else None, date_range=fld_date_range
+                    )
+                    rows = [d for _i, d in pairs if isinstance(d, dict)]
+                    multi_line_items_data[fld.key] = rows
+            
+            # 4. Load other KPI values
+            from app.entries.service import _load_other_kpi_values
+            other_kpi_values = await _load_other_kpi_values(
+                db, year, org_id, kpi_id, period_key=period_key, is_draft=False
+            )
+            
+            # 5. Evaluate the formula!
+            from app.formula_engine.evaluator import evaluate_formula
+            raw = evaluate_formula(
+                f.formula_expression or "",
+                value_by_key,
+                multi_line_items_data,
+                other_kpi_values,
+            )
+        else:
+            if eid and fid:
+                fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=[int(fid)], current_user_id=user.id if user else None)
+                raw = raw_field_from_fv_map(fvm, int(fid))
+                
         n = to_numeric(raw)
         return (
             {
@@ -1683,36 +2034,49 @@ async def _dashboard_card_payload(
         fmap = build_kpi_field_maps(fields)
         mls = (merged.get("source_field_key") or "").strip()
         f_obj = next((f for f in fields if f.key == mls and f.field_type == FieldType.multi_line_items), None)
-        if not f_obj or not eid:
+        
+        card_eid = eid
+        card_erev = e_rev
+        if date_range:
+            entries_res = await db.execute(
+                select(KPIEntry.id)
+                .where(KPIEntry.kpi_id == kpi_id, KPIEntry.organization_id == org_id, KPIEntry.is_draft == False)
+            )
+            card_eid = [r[0] for r in entries_res.all()]
+            card_erev = None
+            
+        if not f_obj or not card_eid:
+            meta_eid = card_eid[0] if isinstance(card_eid, list) and card_eid else (None if isinstance(card_eid, list) else card_eid)
             return (
                 {
                     "kpi_id": kpi_id,
                     "year": year,
                     "period_key": _period_key_norm(period_key),
-                    "entry_id": eid,
+                    "entry_id": meta_eid,
                     "row_count": 0,
                 },
                 {"source_mode": "multi_line_agg", "numeric": None, "raw_rows": []},
-                e_rev,
+                card_erev,
             )
         f_obj = await _field_with_subs_if_mline_filters(
             db, org_id, f_obj, merged.get("filters")
         )
         rows, _n = await load_multi_line_row_dicts_filtered(
-            db, org_id, entry_id=eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=merged.get("filters"), current_user_id=user.id if user else None
+            db, org_id, entry_id=card_eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=merged.get("filters"), current_user_id=user.id if user else None, date_range=date_range
         )
         agg = merged.get("agg") or "sum"
         n = aggregate_single_value(rows, agg=agg, value_key=merged.get("value_sub_field_key") or None)
+        meta_eid = card_eid[0] if isinstance(card_eid, list) and card_eid else (None if isinstance(card_eid, list) else card_eid)
         return (
             {
                 "kpi_id": kpi_id,
                 "year": year,
                 "period_key": _period_key_norm(period_key),
-                "entry_id": eid,
+                "entry_id": meta_eid,
                 "row_count": len(rows),
             },
             {"source_mode": "multi_line_agg", "numeric": n, "raw_rows": rows, "field_map": fmap},
-            e_rev,
+            card_erev,
         )
 
     return (
@@ -1730,7 +2094,13 @@ async def resolve_dashboard_card_widget_data(
     widget: dict[str, Any],
     overrides: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
-    merged = _merge_overrides(widget, overrides)
+    date_ctx = await resolve_date_context_for_dashboard(db, org_id, dashboard_id, (overrides or {}).get("year") or widget.get("year"))
+    mod_overrides = dict(overrides) if overrides else {}
+    if date_ctx:
+        _start_date, _end_date, start_year, _config = date_ctx
+        mod_overrides["year"] = start_year
+
+    merged = _merge_overrides(widget, mod_overrides)
     if str(merged.get("type") or "") != "kpi_card_single_value":
         return (
             {"error": "unsupported_widget_type"},
@@ -1741,7 +2111,23 @@ async def resolve_dashboard_card_widget_data(
     kpi_id = int(merged.get("kpi_id") or 0)
     if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
-    meta, data, e_rev = await _dashboard_card_payload(db, org_id, merged, user=user)
+
+    date_range = None
+    if date_ctx and (merged.get("source_mode") == "multi_line_agg" or merged.get("source_mode") == "field"):
+        start_date, end_date, start_year, config = date_ctx
+        source_key = (merged.get("source_field_key") or merged.get("field_key") or "").strip()
+        f_def = None
+        if kpi_id and source_key:
+            fs = await list_kpi_field_definitions(db, kpi_id, org_id)
+            f_def = next((f for f in fs if f.key == source_key), None)
+        date_col_key = get_widget_date_col_key(config, kpi_id, source_key, f_def)
+        if date_col_key:
+            date_range = (start_date, end_date, str(date_col_key))
+        elif f_def and f_def.field_type == FieldType.formula:
+            date_range = (start_date, end_date, "")
+        merged["date_fetching_config"] = config
+
+    meta, data, e_rev = await _dashboard_card_payload(db, org_id, merged, user=user, date_range=date_range)
     err = data.get("error")
     if err == "KPI not found" or err == "missing parameters":
         return meta, data, "error", e_rev
@@ -1763,7 +2149,22 @@ async def resolve_dashboard_card_widget_data_batch(
     - source_mode=field (scalar/formula stored in kpi_field_values)
     """
     out: dict[str, dict[str, Any]] = {}
-    parsed: list[tuple[str, dict[str, Any]]] = []
+    parsed: list[tuple[str, dict[str, Any], tuple[datetime.date, datetime.date, str] | None]] = []
+    dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
+    is_date_fetching = False
+    org = None
+    config = {}
+    if dashboard and getattr(dashboard, "fetch_data_with_date", False):
+        is_date_fetching = True
+        org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+        config = getattr(dashboard, "date_fetching_config", None) or {}
+
+    fields_cache: dict[int, list[KPIField]] = {}
+    async def _fields_for(kpi_id: int) -> list[KPIField]:
+        if kpi_id not in fields_cache:
+            fields_cache[kpi_id] = await list_kpi_field_definitions(db, kpi_id, org_id)
+        return fields_cache[kpi_id]
+
     for idx, it in enumerate(items or []):
         if not isinstance(it, dict):
             continue
@@ -1771,20 +2172,45 @@ async def resolve_dashboard_card_widget_data_batch(
         if not isinstance(w, dict):
             continue
         overrides = it.get("overrides") if isinstance(it.get("overrides"), dict) else None
-        merged = _merge_overrides(w, overrides)
+        
+        mod_overrides = dict(overrides) if overrides else {}
+        date_range = None
+        if is_date_fetching and org:
+            selected_period = (overrides or {}).get("year") or w.get("year")
+            if selected_period:
+                try:
+                    start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
+                    mod_overrides["year"] = start_year
+                    kpi_id = int(w.get("kpi_id") or 0)
+                    source_key = (w.get("source_field_key") or w.get("field_key") or "").strip()
+                    
+                    f_def = None
+                    if kpi_id and source_key:
+                        fs = await _fields_for(kpi_id)
+                        f_def = next((f for f in fs if f.key == source_key), None)
+                    date_col_key = get_widget_date_col_key(config, kpi_id, source_key, f_def)
+                    
+                    if date_col_key:
+                        date_range = (start_date, end_date, str(date_col_key))
+                    elif f_def and f_def.field_type == FieldType.formula:
+                        date_range = (start_date, end_date, "")
+                except Exception:
+                    pass
+        merged = _merge_overrides(w, mod_overrides)
+        merged["date_fetching_config"] = config
         wid = merged.get("id")
         key = str(wid) if wid is not None else f"idx:{idx}"
-        parsed.append((key, merged))
+        parsed.append((key, merged, date_range))
 
     # dashboard auth once per KPI
-    kpi_ids = sorted({int(w.get("kpi_id") or 0) for _k, w in parsed if int(w.get("kpi_id") or 0) > 0})
+    kpi_ids = sorted({int(w.get("kpi_id") or 0) for _k, w, _dr in parsed if int(w.get("kpi_id") or 0) > 0})
     allowed_kpi: dict[int, bool] = {}
     for kpi_id in kpi_ids:
         allowed_kpi[kpi_id] = await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id)
 
     # group field cards by period
     groups: dict[tuple[int, int, str | None], list[tuple[str, dict[str, Any]]]] = {}
-    for key, w in parsed:
+    for key, w, date_range in parsed:
         if str(w.get("type") or "") != "kpi_card_single_value":
             out[key] = {"ok": False, "error": "unsupported_widget_type"}
             continue
@@ -1808,7 +2234,7 @@ async def resolve_dashboard_card_widget_data_batch(
             continue
         if sm == "multi_line_agg":
             try:
-                meta, data, e_rev = await _dashboard_card_payload(db, org_id, w, user=user)
+                meta, data, e_rev = await _dashboard_card_payload(db, org_id, w, user=user, date_range=date_range)
                 out[key] = {
                     "ok": True,
                     "widget_type": "kpi_card_single_value",
@@ -1819,6 +2245,24 @@ async def resolve_dashboard_card_widget_data_batch(
             except Exception as e:
                 out[key] = {"ok": False, "error": str(e)}
             continue
+        if sm == "field":
+            fk = str(w.get("field_key") or "").strip()
+            fs = await _fields_for(kpi_id)
+            fld = next((f for f in fs if f.key == fk), None)
+            if fld and fld.field_type == FieldType.formula and date_range:
+                try:
+                    meta, data, e_rev = await _dashboard_card_payload(db, org_id, w, user=user, date_range=date_range)
+                    out[key] = {
+                        "ok": True,
+                        "widget_type": "kpi_card_single_value",
+                        "meta": meta,
+                        "data": data,
+                        "entry_revision": e_rev,
+                    }
+                except Exception as e:
+                    out[key] = {"ok": False, "error": str(e)}
+                continue
+
         if sm != "field":
             out[key] = {"ok": False, "error": f"unsupported source_mode: {sm}"}
             continue
@@ -1860,7 +2304,13 @@ async def resolve_dashboard_table_widget_data(
     widget: dict[str, Any],
     overrides: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
-    merged = _merge_overrides(widget, overrides)
+    date_ctx = await resolve_date_context_for_dashboard(db, org_id, dashboard_id, (overrides or {}).get("year") or widget.get("year"))
+    mod_overrides = dict(overrides) if overrides else {}
+    if date_ctx:
+        _start_date, _end_date, start_year, _config = date_ctx
+        mod_overrides["year"] = start_year
+
+    merged = _merge_overrides(widget, mod_overrides)
     if str(merged.get("type") or "") != "kpi_multi_line_table":
         return (
             {"error": "unsupported_widget_type"},
@@ -1871,7 +2321,22 @@ async def resolve_dashboard_table_widget_data(
     kpi_id = int(merged.get("kpi_id") or 0)
     if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
-    meta, data, e_rev = await _dashboard_multi_line_table_payload(db, org_id, merged, user=user)
+
+    date_range = None
+    if date_ctx:
+        start_date, end_date, start_year, config = date_ctx
+        source_key = (merged.get("source_field_key") or "").strip()
+        f_def = None
+        if kpi_id and source_key:
+            fs = await list_kpi_field_definitions(db, kpi_id, org_id)
+            f_def = next((f for f in fs if f.key == source_key), None)
+        date_col_key = get_widget_date_col_key(config, kpi_id, source_key, f_def)
+        if date_col_key:
+            date_range = (start_date, end_date, str(date_col_key))
+
+    meta, data, e_rev = await _dashboard_multi_line_table_payload(
+        db, org_id, merged, user=user, dashboard_id=dashboard_id, date_range=date_range
+    )
     err = data.get("error")
     if err == "KPI not found" or err == "missing parameters":
         return meta, data, "error", e_rev
@@ -1912,7 +2377,12 @@ def _parse_join_specs(w: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def _dashboard_multi_line_table_payload(
-    db: AsyncSession, org_id: int, w: dict[str, Any], user: User | None = None
+    db: AsyncSession,
+    org_id: int,
+    w: dict[str, Any],
+    user: User | None = None,
+    dashboard_id: int | None = None,
+    date_range: tuple[datetime.date, datetime.date, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     """
     Dashboard fast path for `kpi_multi_line_table`:
@@ -1941,21 +2411,32 @@ async def _dashboard_multi_line_table_payload(
     ).scalars().first()
     f_obj = await get_field_with_subfields_only(db, int(f_light.id), org_id) if f_light is not None else None
 
-    eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
-    e_rev = revision_for_parts(eid, e_ts)
+    tbl_eid = eid
+    tbl_erev = e_rev
+    if date_range:
+        entries_res = await db.execute(
+            select(KPIEntry.id)
+            .where(KPIEntry.kpi_id == kpi_id, KPIEntry.organization_id == org_id, KPIEntry.is_draft == False)
+        )
+        tbl_eid = [r[0] for r in entries_res.all()]
+        tbl_erev = None
+    else:
+        tbl_eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+        tbl_erev = revision_for_parts(tbl_eid, e_ts)
 
     label_by_key: dict[str, str] = {}
     if f_obj and f_obj.sub_fields:
         for sf in f_obj.sub_fields:
             label_by_key[str(sf.key)] = str(sf.name or sf.key)
 
-    if not f_obj or not eid:
+    if not f_obj or not tbl_eid:
+        meta_eid = tbl_eid[0] if isinstance(tbl_eid, list) and tbl_eid else (None if isinstance(tbl_eid, list) else tbl_eid)
         return (
             {
                 "kpi_id": kpi_id,
                 "year": year,
                 "period_key": _period_key_norm(period_key),
-                "entry_id": eid,
+                "entry_id": meta_eid,
                 "row_count": 0,
             },
             {
@@ -1964,11 +2445,11 @@ async def _dashboard_multi_line_table_payload(
                 "joins": [],
                 "source_field_id": f_obj.id if f_obj else (f_light.id if f_light else None),
             },
-            e_rev,
+            tbl_erev,
         )
 
     rows, _n = await load_multi_line_row_dicts_filtered(
-        db, org_id, entry_id=int(eid), field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters"), current_user_id=user.id if user else None
+        db, org_id, entry_id=tbl_eid, field=f_obj, kpi_id=kpi_id, year=year, raw_filters=w.get("filters"), current_user_id=user.id if user else None, date_range=date_range
     )
     truncated = len(rows) > MAX_MULTILINE_TABLE_ROWS
     if truncated:
@@ -1990,14 +2471,35 @@ async def _dashboard_multi_line_table_payload(
             )
         ).scalars().first()
         jf_obj = await get_field_with_subfields_only(db, int(jf_light.id), org_id) if jf_light is not None else None
-        jeid, _je_ts = await get_entry_id_updated(
-            db, org_id=org_id, kpi_id=jkpi, year=year, period_key=period_key
-        )
+        
+        # Resolve date range for joined tables first so we know if date-based is active
+        j_date_range = None
+        if date_range and dashboard_id:
+            dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
+            if dashboard and getattr(dashboard, "fetch_data_with_date", False):
+                config = getattr(dashboard, "date_fetching_config", None) or {}
+                mli_date_cols = config.get("mli_date_cols") or {}
+                j_date_col_key = mli_date_cols.get(f"{jkpi}_{jsrc}") or mli_date_cols.get(f"{jkpi}_{jf_obj.id if jf_obj else ''}")
+                if j_date_col_key:
+                    start_date, end_date, _col = date_range
+                    j_date_range = (start_date, end_date, str(j_date_col_key))
+
+        if j_date_range:
+            j_entries_res = await db.execute(
+                select(KPIEntry.id)
+                .where(KPIEntry.kpi_id == jkpi, KPIEntry.organization_id == org_id, KPIEntry.is_draft == False)
+            )
+            tbl_jeid = [r[0] for r in j_entries_res.all()]
+        else:
+            tbl_jeid, _je_ts = await get_entry_id_updated(
+                db, org_id=org_id, kpi_id=jkpi, year=year, period_key=period_key
+            )
+
         j_labels: dict[str, str] = {}
         if jf_obj and jf_obj.sub_fields:
             for sf in jf_obj.sub_fields:
                 j_labels[str(sf.key)] = str(sf.name or sf.key)
-        if not jf_obj or not jeid:
+        if not jf_obj or not tbl_jeid:
             joins_pack.append(
                 {
                     "rows": [],
@@ -2006,8 +2508,9 @@ async def _dashboard_multi_line_table_payload(
                 }
             )
             continue
+
         jrows, _jn = await load_multi_line_row_dicts_filtered(
-            db, org_id, entry_id=int(jeid), field=jf_obj, kpi_id=jkpi, year=year, raw_filters=j.get("filters"), current_user_id=user.id if user else None
+            db, org_id, entry_id=tbl_jeid, field=jf_obj, kpi_id=jkpi, year=year, raw_filters=j.get("filters"), current_user_id=user.id if user else None, date_range=j_date_range
         )
         if len(jrows) > MAX_MULTILINE_TABLE_ROWS:
             jrows = jrows[:MAX_MULTILINE_TABLE_ROWS]
@@ -2019,12 +2522,13 @@ async def _dashboard_multi_line_table_payload(
             }
         )
 
+    meta_eid = tbl_eid[0] if isinstance(tbl_eid, list) and tbl_eid else (None if isinstance(tbl_eid, list) else tbl_eid)
     return (
         {
             "kpi_id": kpi_id,
             "year": year,
             "period_key": _period_key_norm(period_key),
-            "entry_id": eid,
+            "entry_id": meta_eid,
             "row_count": len(rows),
             "truncated": truncated,
         },
@@ -2034,7 +2538,7 @@ async def _dashboard_multi_line_table_payload(
             "joins": joins_pack,
             "source_field_id": int(f_obj.id),
         },
-        e_rev,
+        tbl_erev,
     )
 
 
@@ -2056,7 +2560,13 @@ async def resolve_dashboard_table_rows_widget_data(
     Fast paged rows for dashboard `kpi_multi_line_table`.
     Uses SQL paging so 20k rows doesn't mean 20k JSON payload.
     """
-    merged = _merge_overrides(widget, overrides)
+    date_ctx = await resolve_date_context_for_dashboard(db, org_id, dashboard_id, (overrides or {}).get("year") or widget.get("year"))
+    mod_overrides = dict(overrides) if overrides else {}
+    if date_ctx:
+        _start_date, _end_date, start_year, _config = date_ctx
+        mod_overrides["year"] = start_year
+
+    merged = _merge_overrides(widget, mod_overrides)
     if str(merged.get("type") or "") != "kpi_multi_line_table":
         return ({"error": "unsupported_widget_type"}, {"type": merged.get("type")}, "error", None)
     kpi_id = int(merged.get("kpi_id") or 0)
@@ -2079,6 +2589,13 @@ async def resolve_dashboard_table_rows_widget_data(
         )
     ).scalars().first()
     f_obj = await get_field_with_subfields_only(db, int(f_light.id), org_id) if f_light is not None else None
+
+    date_range = None
+    if date_ctx:
+        start_date, end_date, start_year, config = date_ctx
+        date_col_key = get_widget_date_col_key(config, kpi_id, mls, f_obj)
+        if date_col_key:
+            date_range = (start_date, end_date, str(date_col_key))
 
     eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
     e_rev = revision_for_parts(eid, e_ts)
@@ -2109,6 +2626,27 @@ async def resolve_dashboard_table_rows_widget_data(
             current_user_id=user.id
         )
         
+        if date_range:
+            start_date, end_date, date_col_key = date_range
+            import datetime as dt
+            def _parse_cell_date(v):
+                if isinstance(v, dt.date):
+                    return v
+                if isinstance(v, str):
+                    try:
+                        return dt.date.fromisoformat(v[:10])
+                    except Exception:
+                        pass
+                return None
+                
+            filtered_rows = []
+            for row in combined_rows:
+                rv = row.get(date_col_key)
+                rd = _parse_cell_date(rv)
+                if rd and start_date <= rd < end_date:
+                    filtered_rows.append(row)
+            combined_rows = filtered_rows
+            
         # Apply search and filters in-memory
         rows = [{"__index": idx, **r} for idx, r in enumerate(combined_rows)]
         raw_filters = merged.get("filters")
@@ -2160,6 +2698,25 @@ async def resolve_dashboard_table_rows_widget_data(
 
     r = KpiMultiLineRow.__table__.alias("r")
     stmt = select(r.c.id, r.c.row_index).where(r.c.entry_id == int(eid), r.c.field_id == int(f_obj.id))
+
+    if date_range:
+        start_date, end_date, date_col_key = date_range
+        date_sf = sf_by_key.get(date_col_key)
+        if date_sf:
+            date_sf_id = int(getattr(date_sf, "id"))
+            dc = KpiMultiLineCell.__table__.alias("dc")
+            stmt = stmt.join(dc, and_(dc.c.row_id == r.c.id, dc.c.sub_field_id == date_sf_id))
+            from sqlalchemy import func
+            stmt = stmt.where(
+                and_(
+                    dc.c.value_date >= start_date,
+                    dc.c.value_date < end_date,
+                    dc.c.value_text.isnot(None),
+                    func.lower(func.trim(dc.c.value_text)).notin_([
+                        "false", "none", "null", "undefined", ""
+                    ])
+                )
+            )
 
     raw_filters = merged.get("filters")
     sub_id_by_key = {str(getattr(sf, "key", "")): int(getattr(sf, "id")) for sf in (f_obj.sub_fields or []) if getattr(sf, "key", None)}
@@ -2433,7 +2990,35 @@ async def resolve_dashboard_line_widget_data(
     widget: dict[str, Any],
     overrides: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
-    merged = _merge_overrides(widget, overrides)
+    dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
+    is_date_fetching = False
+    org = None
+    if dashboard and getattr(dashboard, "fetch_data_with_date", False):
+        is_date_fetching = True
+        org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+
+    def _map_period_to_year(val: Any) -> Any:
+        if not is_date_fetching or not org or not val:
+            return val
+        try:
+            _start_date, _end_date, start_year = resolve_date_range_for_period(org, str(val))
+            return start_year
+        except Exception:
+            return val
+
+    mod_overrides = dict(overrides) if overrides else {}
+    if is_date_fetching and org:
+        if "start_year" in mod_overrides:
+            mod_overrides["start_year"] = _map_period_to_year(mod_overrides["start_year"])
+        elif "start_year" in widget:
+            mod_overrides["start_year"] = _map_period_to_year(widget["start_year"])
+            
+        if "end_year" in mod_overrides:
+            mod_overrides["end_year"] = _map_period_to_year(mod_overrides["end_year"])
+        elif "end_year" in widget:
+            mod_overrides["end_year"] = _map_period_to_year(widget["end_year"])
+
+    merged = _merge_overrides(widget, mod_overrides)
     if str(merged.get("type") or "") != "kpi_line_chart":
         return (
             {"error": "unsupported_widget_type"},
@@ -2475,7 +3060,13 @@ async def resolve_dashboard_single_value_widget_data(
     widget: dict[str, Any],
     overrides: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
-    merged = _merge_overrides(widget, overrides)
+    date_ctx = await resolve_date_context_for_dashboard(db, org_id, dashboard_id, (overrides or {}).get("year") or widget.get("year"))
+    mod_overrides = dict(overrides) if overrides else {}
+    if date_ctx:
+        _start_date, _end_date, start_year, _config = date_ctx
+        mod_overrides["year"] = start_year
+
+    merged = _merge_overrides(widget, mod_overrides)
     if str(merged.get("type") or "") != "kpi_single_value":
         return (
             {"error": "unsupported_widget_type"},
@@ -2522,7 +3113,40 @@ async def resolve_dashboard_trend_widget_data(
     widget: dict[str, Any],
     overrides: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
-    merged = _merge_overrides(widget, overrides)
+    dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
+    is_date_fetching = False
+    org = None
+    if dashboard and getattr(dashboard, "fetch_data_with_date", False):
+        is_date_fetching = True
+        org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+
+    def _map_period_to_year(val: Any) -> Any:
+        if not is_date_fetching or not org or not val:
+            return val
+        try:
+            _start_date, _end_date, start_year = resolve_date_range_for_period(org, str(val))
+            return start_year
+        except Exception:
+            return val
+
+    mod_overrides = dict(overrides) if overrides else {}
+    if is_date_fetching and org:
+        if "start_year" in mod_overrides:
+            mod_overrides["start_year"] = _map_period_to_year(mod_overrides["start_year"])
+        elif "start_year" in widget:
+            mod_overrides["start_year"] = _map_period_to_year(widget["start_year"])
+            
+        if "end_year" in mod_overrides:
+            mod_overrides["end_year"] = _map_period_to_year(mod_overrides["end_year"])
+        elif "end_year" in widget:
+            mod_overrides["end_year"] = _map_period_to_year(widget["end_year"])
+            
+        if "selected_years" in mod_overrides:
+            mod_overrides["selected_years"] = [_map_period_to_year(y) for y in mod_overrides["selected_years"]]
+        elif "selected_years" in widget:
+            mod_overrides["selected_years"] = [_map_period_to_year(y) for y in widget["selected_years"]]
+
+    merged = _merge_overrides(widget, mod_overrides)
     if str(merged.get("type") or "") != "kpi_trend":
         return (
             {"error": "unsupported_widget_type"},
@@ -2773,7 +3397,13 @@ async def resolve_dashboard_kpi_table_widget_data(
     widget: dict[str, Any],
     overrides: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
-    merged = _merge_overrides(widget, overrides)
+    date_ctx = await resolve_date_context_for_dashboard(db, org_id, dashboard_id, (overrides or {}).get("year") or widget.get("year"))
+    mod_overrides = dict(overrides) if overrides else {}
+    if date_ctx:
+        _start_date, _end_date, start_year, _config = date_ctx
+        mod_overrides["year"] = start_year
+
+    merged = _merge_overrides(widget, mod_overrides)
     if str(merged.get("type") or "") != "kpi_table":
         return (
             {"error": "unsupported_widget_type"},

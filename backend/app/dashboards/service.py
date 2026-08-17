@@ -40,6 +40,8 @@ async def update_dashboard(
     name: str | None = None,
     description: str | None = None,
     layout=None,
+    fetch_data_with_date: bool | None = None,
+    date_fetching_config: dict | None = None,
 ) -> Dashboard | None:
     d = await get_dashboard(db, dashboard_id, org_id)
     if not d:
@@ -50,6 +52,10 @@ async def update_dashboard(
         d.description = description
     if layout is not None:
         d.layout = layout
+    if fetch_data_with_date is not None:
+        d.fetch_data_with_date = fetch_data_with_date
+    if date_fetching_config is not None:
+        d.date_fetching_config = date_fetching_config
     await db.flush()
     return d
 
