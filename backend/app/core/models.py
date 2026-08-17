@@ -108,6 +108,14 @@ class Organization(Base):
     time_dimension = Column(
         String(32), nullable=False, default=TimeDimension.YEARLY.value, server_default=TimeDimension.YEARLY.value
     )
+    custom_period_name = Column(String(255), nullable=True)
+    custom_period_start_month = Column(Integer, default=1, nullable=False, server_default="1")
+    custom_period_start_day = Column(Integer, default=1, nullable=False, server_default="1")
+    custom_period_duration_months = Column(Integer, default=12, nullable=False, server_default="12")
+    custom_period_display_format = Column(String(32), default="YYYY", nullable=False, server_default="YYYY")
+    custom_period_prefix = Column(String(32), default="", nullable=False, server_default="")
+    custom_period_suffix = Column(String(32), default="", nullable=False, server_default="")
+    custom_periods = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -132,6 +140,12 @@ class Organization(Base):
         back_populates="organization",
         uselist=False,
         lazy="selectin",
+    )
+    odoo_endpoints = relationship(
+        "OdooEndpoint",
+        back_populates="organization",
+        lazy="selectin",
+        cascade="all, delete-orphan",
     )
 
 
@@ -179,6 +193,29 @@ class OrganizationOdooConfig(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     organization = relationship("Organization", back_populates="odoo_config")
+
+
+class OdooEndpoint(Base):
+    """Configured Odoo API endpoint definition for an organization (Super Admin managed)."""
+
+    __tablename__ = "odoo_endpoints"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name = Column(String(255), nullable=False)
+    url = Column(String(2048), nullable=False)
+    description = Column(String(1024), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    organization = relationship("Organization", back_populates="odoo_endpoints")
+    kpi_configs = relationship("KpiOdooConfig", back_populates="endpoint")
 
 
 class ExportAPIToken(Base):
@@ -491,12 +528,16 @@ class KpiOdooConfig(Base):
     kpi_id = Column(
         Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=False, index=True, unique=True
     )
+    odoo_endpoint_id = Column(
+        Integer, ForeignKey("odoo_endpoints.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     request_body = Column(JSON, nullable=False)
     response_items_path = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     kpi = relationship("KPI", back_populates="odoo_config")
+    endpoint = relationship("OdooEndpoint", back_populates="kpi_configs")
 
 
 class KpiSection(Base):
@@ -979,6 +1020,8 @@ class ReportTemplate(Base):
     body_template = Column(Text, nullable=True)
     # Visual builder: list of block configs (JSON). When set, body_template is generated from this at render time.
     body_blocks = Column(JSON, nullable=True)
+    fetch_data_with_date = Column(Boolean, default=False, nullable=False, server_default="false")
+    date_fetching_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -1105,6 +1148,8 @@ class Dashboard(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     layout = Column(JSON, nullable=True)  # list of widgets + layout metadata
+    fetch_data_with_date = Column(Boolean, default=False, nullable=False, server_default="false")
+    date_fetching_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -1218,6 +1263,8 @@ class CustomReport(Base):
     )
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
+    fetch_data_with_date = Column(Boolean, default=False, nullable=False, server_default="false")
+    date_fetching_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 

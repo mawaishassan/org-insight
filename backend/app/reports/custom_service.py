@@ -97,6 +97,10 @@ async def update_custom_report(db: AsyncSession, id: int, org_id: int, data: Cus
         return None
     report.name = data.name
     report.description = data.description
+    if getattr(data, "fetch_data_with_date", None) is not None:
+        report.fetch_data_with_date = data.fetch_data_with_date
+    if getattr(data, "date_fetching_config", None) is not None:
+        report.date_fetching_config = data.date_fetching_config
     await db.flush()
     CUSTOM_REPORT_CACHE.invalidate_report(id)
     return report
@@ -157,11 +161,18 @@ async def save_custom_report_layout(
     id: int,
     org_id: int,
     sections: list[CustomReportSectionLayout],
-    attachments: list[CustomReportAttachmentLayout] | None = None
+    attachments: list[CustomReportAttachmentLayout] | None = None,
+    fetch_data_with_date: bool | None = None,
+    date_fetching_config: dict | None = None
 ) -> bool:
     report = await get_custom_report(db, id, org_id)
     if not report:
         return False
+
+    if fetch_data_with_date is not None:
+        report.fetch_data_with_date = fetch_data_with_date
+    if date_fetching_config is not None:
+        report.date_fetching_config = date_fetching_config
 
     # Delete all existing sections, fields, and attachments
     await db.execute(delete(CustomReportSection).where(CustomReportSection.custom_report_id == id))
@@ -260,7 +271,7 @@ async def generate_custom_report_data(
     db: AsyncSession,
     id: int,
     org_id: int,
-    year: int | None = None,
+    year: str | int | None = None,
     include_drafts: bool = False,
     preview: bool = False,
     include_attachments: bool = True,
@@ -271,6 +282,19 @@ async def generate_custom_report_data(
     custom_report = await get_custom_report(db, id, org_id)
     if not custom_report:
         return None
+
+    selected_period = year
+    date_range = None
+    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period:
+        org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+        if org:
+            try:
+                from app.widget_data.service import get_widget_date_col_key, resolve_date_range_for_period
+                start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
+                year = start_year
+                date_range = (start_date, end_date)
+            except Exception:
+                pass
 
     yr = year if year is not None else datetime.date.today().year
 
@@ -323,8 +347,9 @@ async def generate_custom_report_data(
     all_entries_filters = [
         KPIEntry.organization_id == org_id,
         KPIEntry.kpi_id.in_(referenced_kpi_ids),
-        KPIEntry.year == yr,
     ]
+    if not date_range:
+        all_entries_filters.append(KPIEntry.year == yr)
     if not include_drafts:
         all_entries_filters.append(KPIEntry.is_draft == False)
 
@@ -354,14 +379,31 @@ async def generate_custom_report_data(
         effective_td = effective_kpi_time_dimension(kpi_td, org_td)
 
         all_entries = entries_by_kpi.get(kpi.id, [])
-        entries_sorted = sorted(
-            all_entries,
-            key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td),
-        )
-
-        # Use latest entry
-        if len(entries_sorted) > 1:
-            entries_sorted = [entries_sorted[-1]]
+        if date_range:
+            real_entry = next((e for e in all_entries if e.year == yr), None)
+            if real_entry:
+                entries_sorted = [real_entry]
+            else:
+                if all_entries:
+                    mock_entry = KPIEntry(
+                        id=0,
+                        organization_id=org_id,
+                        kpi_id=kpi.id,
+                        year=yr,
+                        period_key="",
+                        is_draft=False,
+                        field_values=[]
+                    )
+                    entries_sorted = [mock_entry]
+                else:
+                    entries_sorted = []
+        else:
+            entries_sorted = sorted(
+                all_entries,
+                key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td),
+            )
+            if len(entries_sorted) > 1:
+                entries_sorted = [entries_sorted[-1]]
 
         need_cross_kpi = _formulas_need_other_kpi_values(fields_to_include)
         other_kpi_values = (
@@ -379,9 +421,27 @@ async def generate_custom_report_data(
                 limit_val = 50
             else:
                 limit_val = 100 if preview else 200
-            ml_rows_by_field_id[mf.id] = await _load_multi_line_items_rows_batch(
-                db, entry_ids=entry_ids_sorted, field=mf, limit=limit_val
+                
+            mf_date_range = None
+            if date_range:
+                config = getattr(custom_report, "date_fetching_config", None) or {}
+                date_col_key = get_widget_date_col_key(config, kpi.id, mf.key, mf)
+                if date_col_key:
+                    start_date, end_date = date_range
+                    mf_date_range = (start_date, end_date, str(date_col_key))
+
+            target_entry_ids = [e.id for e in all_entries if e.id] if date_range else entry_ids_sorted
+            batch_res = await _load_multi_line_items_rows_batch(
+                db, entry_ids=target_entry_ids, field=mf, limit=limit_val, date_range=mf_date_range
             )
+            if date_range:
+                target_eid = entries_sorted[0].id if entries_sorted else 0
+                combined_rows = []
+                for rows_list in batch_res.values():
+                    combined_rows.extend(rows_list)
+                ml_rows_by_field_id[mf.id] = {target_eid: combined_rows}
+            else:
+                ml_rows_by_field_id[mf.id] = batch_res
 
         if on_progress:
             on_progress(int(30 + 50 * (idx + 1) / total_kpis))
@@ -606,7 +666,7 @@ async def render_custom_report_html(
     db: AsyncSession,
     id: int,
     org_id: int,
-    year: int | None = None,
+    year: str | int | None = None,
     include_drafts: bool = False,
     report_data: dict | None = None,
 ) -> str | None:
@@ -680,7 +740,7 @@ async def export_custom_report_file(
     db: AsyncSession,
     custom_report_id: int,
     org_id: int,
-    year: int,
+    year: str | int,
     format: str,
 ) -> tuple[bytes, str, str]:
     """Export custom report as PDF, DOCX, or XLSX bytes, with name and content-type."""
@@ -1079,12 +1139,25 @@ async def stream_custom_report_data(
     db: AsyncSession,
     id: int,
     org_id: int,
-    year: int | None = None,
+    year: str | int | None = None,
 ):
     custom_report = await get_custom_report(db, id, org_id)
     if not custom_report:
         yield {"type": "error", "message": "Report not found"}
         return
+
+    selected_period = year
+    date_range = None
+    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period:
+        org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+        if org:
+            try:
+                from app.widget_data.service import get_widget_date_col_key, resolve_date_range_for_period
+                start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
+                year = start_year
+                date_range = (start_date, end_date)
+            except Exception:
+                pass
 
     yr = year if year is not None else datetime.date.today().year
 
@@ -1126,9 +1199,10 @@ async def stream_custom_report_data(
     all_entries_filters = [
         KPIEntry.organization_id == org_id,
         KPIEntry.kpi_id.in_(referenced_kpi_ids),
-        KPIEntry.year == yr,
         KPIEntry.is_draft == False,
     ]
+    if not date_range:
+        all_entries_filters.append(KPIEntry.year == yr)
     entries_result = await db.execute(
         select(KPIEntry)
         .where(*all_entries_filters)
@@ -1149,12 +1223,31 @@ async def stream_custom_report_data(
         effective_td = effective_kpi_time_dimension(kpi_td, org_td)
 
         all_entries = entries_by_kpi.get(kpi.id, [])
-        entries_sorted = sorted(
-            all_entries,
-            key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td),
-        )
-        if len(entries_sorted) > 1:
-            entries_sorted = [entries_sorted[-1]]
+        if date_range:
+            real_entry = next((e for e in all_entries if e.year == yr), None)
+            if real_entry:
+                entries_sorted = [real_entry]
+            else:
+                if all_entries:
+                    mock_entry = KPIEntry(
+                        id=0,
+                        organization_id=org_id,
+                        kpi_id=kpi.id,
+                        year=yr,
+                        period_key="",
+                        is_draft=False,
+                        field_values=[]
+                    )
+                    entries_sorted = [mock_entry]
+                else:
+                    entries_sorted = []
+        else:
+            entries_sorted = sorted(
+                all_entries,
+                key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td),
+            )
+            if len(entries_sorted) > 1:
+                entries_sorted = [entries_sorted[-1]]
 
         need_cross_kpi = _formulas_need_other_kpi_values(fields_to_include)
         other_kpi_values = (
@@ -1184,10 +1277,25 @@ async def stream_custom_report_data(
             # Load multi-line rows for all multi-line fields to evaluate formulas
             ml_fields = [f for f in fields_to_include if f.field_type == FieldType.multi_line_items]
             for mf in ml_fields:
+                mf_date_range = None
+                if date_range:
+                    config = getattr(custom_report, "date_fetching_config", None) or {}
+                    date_col_key = get_widget_date_col_key(config, kpi.id, mf.key, mf)
+                    if date_col_key:
+                        start_date, end_date = date_range
+                        mf_date_range = (start_date, end_date, str(date_col_key))
+
+                target_entry_ids = [e.id for e in all_entries if e.id] if date_range else [entry.id]
                 ml_rows = await _load_multi_line_items_rows_batch(
-                    db, entry_ids=[entry.id], field=mf
+                    db, entry_ids=target_entry_ids, field=mf, date_range=mf_date_range
                 )
-                multi_line_items_data[mf.key] = ml_rows.get(entry.id, [])
+                if date_range:
+                    combined_rows = []
+                    for rows_list in ml_rows.values():
+                        combined_rows.extend(rows_list)
+                    multi_line_items_data[mf.key] = combined_rows
+                else:
+                    multi_line_items_data[mf.key] = ml_rows.get(entry.id, [])
 
             for f in fields_to_include:
                 if f.field_type == FieldType.formula or f.field_type == FieldType.multi_line_items:
@@ -1328,80 +1436,108 @@ async def stream_custom_report_data(
                 entries_sorted = [entries_sorted[-1]]
             entry = entries_sorted[0]
 
-            count_stmt = (
-                select(func.count(KpiMultiLineRow.id))
-                .where(
-                    KpiMultiLineRow.entry_id == entry.id,
-                    KpiMultiLineRow.field_id == kfield.id,
+            mf_date_range = None
+            if date_range:
+                config = getattr(custom_report, "date_fetching_config", None) or {}
+                date_col_key = get_widget_date_col_key(config, kfield.kpi_id, kfield.key, kfield)
+                if date_col_key:
+                    start_date, end_date = date_range
+                    mf_date_range = (start_date, end_date, str(date_col_key))
+
+            if date_range:
+                target_entry_ids = [e.id for e in all_entries if e.id]
+                batch_res = await _load_multi_line_items_rows_batch(
+                    db, entry_ids=target_entry_ids, field=kfield, date_range=mf_date_range
                 )
-            )
-            total_count = (await db.execute(count_stmt)).scalar_one() or 0
-
-            yield {
-                "type": "table_meta",
-                "field_id": f.id,
-                "total_count": total_count
-            }
-
-            if total_count == 0:
-                continue
-
-            chunk_size = 1000
-            for offset in range(0, total_count, chunk_size):
-                rows_stmt = (
-                    select(KpiMultiLineRow.id, KpiMultiLineRow.row_index)
+                combined_rows = []
+                for rows_list in batch_res.values():
+                    combined_rows.extend(rows_list)
+                total_count = len(combined_rows)
+                
+                yield {
+                    "type": "table_meta",
+                    "field_id": f.id,
+                    "total_count": total_count
+                }
+                
+                chunk_size = 1000
+                for offset in range(0, total_count, chunk_size):
+                    chunk_rows = combined_rows[offset : offset + chunk_size]
+            else:
+                count_stmt = (
+                    select(func.count(KpiMultiLineRow.id))
                     .where(
                         KpiMultiLineRow.entry_id == entry.id,
                         KpiMultiLineRow.field_id == kfield.id,
-                    )
-                    .order_by(KpiMultiLineRow.row_index)
-                    .limit(chunk_size)
-                    .offset(offset)
+                      )
                 )
-                rows_res = await db.execute(rows_stmt)
-                rows_list = rows_res.all()
-                if not rows_list:
-                    break
+                total_count = (await db.execute(count_stmt)).scalar_one() or 0
 
-                row_ids = [r[0] for r in rows_list]
+                yield {
+                    "type": "table_meta",
+                    "field_id": f.id,
+                    "total_count": total_count
+                }
 
-                cells_res = await db.execute(
-                    select(
-                        KpiMultiLineCell.row_id,
-                        KpiMultiLineCell.value_text,
-                        KpiMultiLineCell.value_number,
-                        KpiMultiLineCell.value_boolean,
-                        KpiMultiLineCell.value_date,
-                        KpiMultiLineCell.value_json,
-                        KPIFieldSubField.key
+                if total_count == 0:
+                    continue
+
+                chunk_size = 1000
+                for offset in range(0, total_count, chunk_size):
+                    rows_stmt = (
+                        select(KpiMultiLineRow.id, KpiMultiLineRow.row_index)
+                        .where(
+                            KpiMultiLineRow.entry_id == entry.id,
+                            KpiMultiLineRow.field_id == kfield.id,
+                        )
+                        .order_by(KpiMultiLineRow.row_index)
+                        .limit(chunk_size)
+                        .offset(offset)
                     )
-                    .join(KPIFieldSubField, KPIFieldSubField.id == KpiMultiLineCell.sub_field_id)
-                    .where(KpiMultiLineCell.row_id.in_(row_ids))
-                )
-                cells_list = cells_res.all()
+                    rows_res = await db.execute(rows_stmt)
+                    rows_list = rows_res.all()
+                    if not rows_list:
+                        break
 
-                cells_by_row = defaultdict(dict)
-                for row_id, vt, vn, vb, vd, vj, sf_key in cells_list:
-                    raw_val = None
-                    if vj is not None:
-                        raw_val = vj
-                    elif vt is not None:
-                        raw_val = vt
-                    elif vn is not None:
-                        raw_val = vn
-                    elif vb is not None:
-                        raw_val = vb
-                    elif vd is not None:
-                        try:
-                            raw_val = vd.isoformat()
-                        except Exception:
-                            raw_val = str(vd)
-                    cells_by_row[row_id][str(sf_key)] = raw_val
+                    row_ids = [r[0] for r in rows_list]
 
-                chunk_rows = []
-                for rid, r_idx in rows_list:
-                    row_dict = cells_by_row.get(rid, {})
-                    chunk_rows.append(row_dict)
+                    cells_res = await db.execute(
+                        select(
+                            KpiMultiLineCell.row_id,
+                            KpiMultiLineCell.value_text,
+                            KpiMultiLineCell.value_number,
+                            KpiMultiLineCell.value_boolean,
+                            KpiMultiLineCell.value_date,
+                            KpiMultiLineCell.value_json,
+                            KPIFieldSubField.key
+                        )
+                        .join(KPIFieldSubField, KPIFieldSubField.id == KpiMultiLineCell.sub_field_id)
+                        .where(KpiMultiLineCell.row_id.in_(row_ids))
+                    )
+                    cells_list = cells_res.all()
+
+                    cells_by_row = defaultdict(dict)
+                    for row_id, vt, vn, vb, vd, vj, sf_key in cells_list:
+                        raw_val = None
+                        if vj is not None:
+                            raw_val = vj
+                        elif vt is not None:
+                            raw_val = vt
+                        elif vn is not None:
+                            raw_val = vn
+                        elif vb is not None:
+                            raw_val = vb
+                        elif vd is not None:
+                            try:
+                                raw_val = vd.isoformat()
+                            except Exception:
+                                raw_val = str(vd)
+                        cells_by_row[row_id][str(sf_key)] = raw_val
+
+                    chunk_rows = []
+                    for rid, r_idx in rows_list:
+                        row_dict = cells_by_row.get(rid, {})
+                        chunk_rows.append(row_dict)
 
                 cfg = getattr(f, "config", None) or {}
                 raw_filters = cfg.get("filters") or {}

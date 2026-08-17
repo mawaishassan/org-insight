@@ -7,7 +7,7 @@ import os
 import time
 from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_
 from sqlalchemy.orm import selectinload
 
 from app.core.models import (
@@ -140,7 +140,7 @@ def _kpi_multi_line_orm_row_to_dict(r: KpiMultiLineRow) -> dict:
 
 
 async def _load_multi_line_items_rows_batch(
-    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None
+    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None
 ) -> dict[int, list[dict]]:
     """Optimized direct load of multi-line rows and cells to handle large datasets efficiently without ORM eager load overhead."""
     if not entry_ids:
@@ -167,6 +167,25 @@ async def _load_multi_line_items_rows_batch(
                 period_key=entry.period_key,
                 current_user_id=current_user_id
             )
+            if date_range:
+                start_date, end_date, date_col_key = date_range
+                def _parse_cell_date(v):
+                    if isinstance(v, datetime.date):
+                        return v
+                    if isinstance(v, str):
+                        try:
+                            return datetime.date.fromisoformat(v[:10])
+                        except Exception:
+                            pass
+                    return None
+                    
+                filtered_rows = []
+                for row in combined_rows:
+                    rv = row.get(date_col_key)
+                    rd = _parse_cell_date(rv)
+                    if rd and start_date <= rd < end_date:
+                        filtered_rows.append(row)
+                combined_rows = filtered_rows
             start = offset if offset is not None else 0
             end = (start + limit) if limit is not None else len(combined_rows)
             out_batch[eid] = combined_rows[start:end]
@@ -181,6 +200,32 @@ async def _load_multi_line_items_rows_batch(
         )
         .order_by(KpiMultiLineRow.entry_id, KpiMultiLineRow.row_index)
     )
+    if date_range:
+        start_date, end_date, date_col_key = date_range
+        sf_res = await db.execute(
+            select(KPIFieldSubField.id).where(
+                KPIFieldSubField.field_id == field.id,
+                KPIFieldSubField.key == date_col_key
+            )
+        )
+        sf_id = sf_res.scalar_one_or_none()
+        if sf_id:
+            stmt = stmt.join(
+                KpiMultiLineCell,
+                and_(
+                    KpiMultiLineCell.row_id == KpiMultiLineRow.id,
+                    KpiMultiLineCell.sub_field_id == sf_id
+                )
+            ).where(
+                and_(
+                    KpiMultiLineCell.value_date >= start_date,
+                    KpiMultiLineCell.value_date < end_date,
+                    KpiMultiLineCell.value_text.isnot(None),
+                    func.lower(func.trim(KpiMultiLineCell.value_text)).notin_([
+                        "false", "none", "null", "undefined", ""
+                    ])
+                )
+            )
     if limit is not None:
         stmt = stmt.limit(limit)
     if offset is not None:
@@ -433,6 +478,10 @@ async def update_report_template(
         rt.body_template = data.body_template
     if data.body_blocks is not None:
         rt.body_blocks = data.body_blocks
+    if getattr(data, "fetch_data_with_date", None) is not None:
+        rt.fetch_data_with_date = data.fetch_data_with_date
+    if getattr(data, "date_fetching_config", None) is not None:
+        rt.date_fetching_config = data.date_fetching_config
     await db.flush()
     return rt
 
@@ -1807,7 +1856,7 @@ async def generate_report_data(
     db: AsyncSession,
     template_id: int,
     org_id: int,
-    year: int | None = None,
+    year: str | int | None = None,
     include_drafts: bool = False,
 ) -> dict | None:
     """
@@ -1819,6 +1868,20 @@ async def generate_report_data(
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
+
+    selected_period = year
+    date_range = None
+    if rt and getattr(rt, "fetch_data_with_date", False) and selected_period:
+        org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+        if org:
+            try:
+                from app.widget_data.service import get_widget_date_col_key, resolve_date_range_for_period
+                start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
+                year = start_year
+                date_range = (start_date, end_date)
+            except Exception:
+                pass
+
     yr = year if year is not None else datetime.date.today().year
     t0 = time.perf_counter()
     cache_key = (template_id, org_id, int(yr), bool(include_drafts), "v3")
@@ -1990,8 +2053,9 @@ async def generate_report_data(
         entry_filters = [
             KPIEntry.organization_id == org_id,
             KPIEntry.kpi_id == kpi.id,
-            KPIEntry.year == yr,
         ]
+        if not date_range:
+            entry_filters.append(KPIEntry.year == yr)
         if not include_drafts:
             entry_filters.append(KPIEntry.is_draft == False)
         t_eq0 = time.perf_counter()
@@ -2002,23 +2066,43 @@ async def generate_report_data(
         )
         total_entries_query_ms += (time.perf_counter() - t_eq0) * 1000.0
         all_entries = list(entries_result.scalars().all())
-        # Sort by period (e.g. Q1, Q2, Q3, Q4) so "latest" filter returns last; report can show all or one period
-        entries_sorted = sorted(
-            all_entries,
-            key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td),
-        )
-        # Match designer time filter (latest / single period / all) — was Jinja-only; loading all periods was the main cost.
-        td_scope = kpi_td_scope.get(kpi.id, "latest")
-        td_pk = kpi_td_single_period.get(kpi.id)
-        if td_scope == "latest" and len(entries_sorted) > 1:
-            entries_sorted = [entries_sorted[-1]]
-        elif td_scope == "single" and td_pk is not None:
-            pk_s = str(td_pk).strip()
-            entries_sorted = [
-                e
-                for e in entries_sorted
-                if (getattr(e, "period_key", "") or "").strip() == pk_s
-            ]
+        
+        if date_range:
+            real_entry = next((e for e in all_entries if e.year == yr), None)
+            if real_entry:
+                entries_sorted = [real_entry]
+            else:
+                if all_entries:
+                    mock_entry = KPIEntry(
+                        id=0,
+                        organization_id=org_id,
+                        kpi_id=kpi.id,
+                        year=yr,
+                        period_key="",
+                        is_draft=False,
+                        field_values=[]
+                    )
+                    entries_sorted = [mock_entry]
+                else:
+                    entries_sorted = []
+        else:
+            # Sort by period (e.g. Q1, Q2, Q3, Q4) so "latest" filter returns last; report can show all or one period
+            entries_sorted = sorted(
+                all_entries,
+                key=lambda e: period_key_sort_order(getattr(e, "period_key", "") or "", effective_td),
+            )
+            # Match designer time filter (latest / single period / all) — was Jinja-only; loading all periods was the main cost.
+            td_scope = kpi_td_scope.get(kpi.id, "latest")
+            td_pk = kpi_td_single_period.get(kpi.id)
+            if td_scope == "latest" and len(entries_sorted) > 1:
+                entries_sorted = [entries_sorted[-1]]
+            elif td_scope == "single" and td_pk is not None:
+                pk_s = str(td_pk).strip()
+                entries_sorted = [
+                    e
+                    for e in entries_sorted
+                    if (getattr(e, "period_key", "") or "").strip() == pk_s
+                ]
 
         need_cross_kpi = _formulas_need_other_kpi_values(fields_to_include)
         other_kpi_values = (
@@ -2032,9 +2116,29 @@ async def generate_report_data(
         ml_rows_by_field_id: dict[int, dict[int, list[dict]]] = {}
         for mf in ml_fields:
             t_ml0 = time.perf_counter()
-            ml_rows_by_field_id[mf.id] = await _load_multi_line_items_rows_batch(
-                db, entry_ids=entry_ids_sorted, field=mf, current_user_id=current_user_id
+            
+            mf_date_range = None
+            if date_range:
+                config = getattr(rt, "date_fetching_config", None) or {}
+                date_col_key = get_widget_date_col_key(config, kpi.id, mf.key, mf)
+                if date_col_key:
+                    start_date, end_date = date_range
+                    mf_date_range = (start_date, end_date, str(date_col_key))
+
+            target_entry_ids = [e.id for e in all_entries if e.id] if date_range else entry_ids_sorted
+            batch_res = await _load_multi_line_items_rows_batch(
+                db, entry_ids=target_entry_ids, field=mf, current_user_id=current_user_id, date_range=mf_date_range
             )
+            
+            if date_range:
+                target_eid = entries_sorted[0].id if entries_sorted else 0
+                combined_rows = []
+                for rows_list in batch_res.values():
+                    combined_rows.extend(rows_list)
+                ml_rows_by_field_id[mf.id] = {target_eid: combined_rows}
+            else:
+                ml_rows_by_field_id[mf.id] = batch_res
+                
             total_ml_load_ms += (time.perf_counter() - t_ml0) * 1000.0
             for _eid, _rows in ml_rows_by_field_id[mf.id].items():
                 total_ml_rows += len(_rows or [])
@@ -2349,7 +2453,7 @@ async def render_report_html(
     db: AsyncSession,
     template_id: int,
     org_id: int,
-    year: int | None = None,
+    year: str | int | None = None,
     include_drafts: bool = False,
     report_data: dict | None = None,
 ) -> str | None:
@@ -2383,7 +2487,7 @@ async def render_report_html_with_template(
     db: AsyncSession,
     template_id: int,
     org_id: int,
-    year: int | None = None,
+    year: str | int | None = None,
     body_template_override: str | None = None,
     include_drafts: bool = False,
     report_data: dict | None = None,
@@ -2426,7 +2530,7 @@ async def evaluate_report_snippet(
     template_id: int,
     org_id: int,
     snippet_type: str,
-    year: int | None = None,
+    year: str | int | None = None,
     kpi_id: int | None = None,
     field_key: str | None = None,
     sub_field_key: str | None = None,
@@ -2983,7 +3087,7 @@ async def generate_kpi_pdf_report(
                 raw_filters = field_config.get("filters", {})
 
                 from app.entries.multi_line_load import load_multi_line_row_dicts
-                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=current_user_id)
+                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=requesting_user_id)
                 rows = [r for _, r in row_pairs]
 
                 filtered_rows = []

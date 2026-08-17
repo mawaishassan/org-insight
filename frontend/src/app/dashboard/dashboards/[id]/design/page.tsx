@@ -1,12 +1,14 @@
 "use client";
 
 import type { CSSProperties } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
+import { generatePeriodOptions } from "@/lib/periodHelpers";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer } from "../widgets";
+import { DashboardCustomizationProvider, useDashboardCustomization } from "../DashboardCustomizationContext";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
 import {
@@ -255,6 +257,8 @@ interface DashboardDetail {
   name: string;
   description: string | null;
   layout: any;
+  fetch_data_with_date?: boolean;
+  date_fetching_config?: any;
 }
 
 interface KpiRow {
@@ -362,17 +366,67 @@ function DesignMoveArrow({
 export default function DashboardDesignPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const router = useRouter();
   const id = Number(params.id);
-  const token = getAccessToken();
   const orgIdFromQuery = searchParams.get("organization_id");
+  const token = getAccessToken();
 
   const [dashboard, setDashboard] = useState<DashboardDetail | null>(null);
-  const [widgets, setWidgets] = useState<Widget[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!id || !token) return;
+    setLoading(true);
+    setError(null);
+    const query = orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : "";
+    api<DashboardDetail>(`/dashboards/${id}${query}`, { token })
+      .then(setDashboard)
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load dashboard"))
+      .finally(() => setLoading(false));
+  }, [id, token, orgIdFromQuery]);
+
+  if (loading) return <p>Loading…</p>;
+  if (error) return <p className="form-error">{error}</p>;
+  if (!dashboard) return null;
+
+  return (
+    <DashboardCustomizationProvider
+      dashboardId={id}
+      organizationId={dashboard.organization_id}
+      consistentColors={dashboard.layout?.consistent_colors}
+      colorMappings={dashboard.layout?.color_mappings}
+    >
+      <DashboardDesignContent
+        dashboard={dashboard}
+        setDashboard={setDashboard}
+        id={id}
+        token={token}
+        orgIdFromQuery={orgIdFromQuery}
+      />
+    </DashboardCustomizationProvider>
+  );
+}
+
+function DashboardDesignContent({
+  dashboard,
+  setDashboard,
+  id,
+  token,
+  orgIdFromQuery,
+}: {
+  dashboard: DashboardDetail;
+  setDashboard: React.Dispatch<React.SetStateAction<DashboardDetail | null>>;
+  id: number;
+  token: string | null | undefined;
+  orgIdFromQuery: string | null;
+}) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const [widgets, setWidgets] = useState<Widget[]>(() => ensureLayout(dashboard.layout).widgets);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
   const [fieldsByKpiId, setFieldsByKpiId] = useState<Record<number, KpiFieldRow[]>>({});
 
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
@@ -384,12 +438,139 @@ export default function DashboardDesignPage() {
   const [editingWidgetId, setEditingWidgetId] = useState<string | null>(null);
   const [fullWidth, setFullWidth] = useState(false);
 
+  const [dashboardSettingsOpen, setDashboardSettingsOpen] = useState(false);
+  const [consistentColors, setConsistentColors] = useState<boolean>(() => dashboard.layout?.consistent_colors ?? false);
+  const [colorMappings, setColorMappings] = useState<Record<string, string>>(() => dashboard.layout?.color_mappings ?? {});
+  const [fetchDataWithDate, setFetchDataWithDate] = useState<boolean>(() => dashboard.fetch_data_with_date ?? false);
+  const [dateFetchingConfig, setDateFetchingConfig] = useState<any>(() => dashboard.date_fetching_config ?? {});
+  const [allDashboards, setAllDashboards] = useState<any[]>([]);
+  const [importSourceDashboardId, setImportSourceDashboardId] = useState<number | null>(null);
+
+  useEffect(() => {
+    setWidgets(ensureLayout(dashboard.layout).widgets);
+    setConsistentColors(dashboard.layout?.consistent_colors ?? false);
+    setColorMappings(dashboard.layout?.color_mappings ?? {});
+    setFetchDataWithDate(dashboard.fetch_data_with_date ?? false);
+    setDateFetchingConfig(dashboard.date_fetching_config ?? {});
+  }, [dashboard]);
+
+  const referencedKpiIds = useMemo(() => {
+    const ids = new Set<number>();
+    widgets.forEach((w: any) => {
+      if (w.kpi_id) ids.add(w.kpi_id);
+      if (w.joins) {
+        w.joins.forEach((j: any) => {
+          if (j.kpi_id) ids.add(j.kpi_id);
+        });
+      }
+    });
+    return Array.from(ids);
+  }, [widgets]);
+
+  useEffect(() => {
+    if (!token || !dashboard?.organization_id || referencedKpiIds.length === 0) return;
+    referencedKpiIds.forEach((kpiId) => {
+      if (fieldsByKpiId[kpiId]) return;
+      api<KpiFieldRow[]>(`/fields?kpi_id=${kpiId}&organization_id=${dashboard.organization_id}`, { token })
+        .then((fields) => setFieldsByKpiId((prev) => ({ ...prev, [kpiId]: fields })))
+        .catch(() => {});
+    });
+  }, [token, dashboard?.organization_id, referencedKpiIds, fieldsByKpiId]);
+
+  const dashboardMliFields = useMemo(() => {
+    const list: Array<{ kpiId: number; kpiName: string; field: KpiFieldRow }> = [];
+    referencedKpiIds.forEach((kpiId) => {
+      const kpiObj = kpis.find((k) => k.id === kpiId);
+      const fields = fieldsByKpiId[kpiId] || [];
+      const mlis = fields.filter((f) => f.field_type === "multi_line_items");
+      mlis.forEach((field) => {
+        list.push({
+          kpiId,
+          kpiName: kpiObj?.name || `KPI #${kpiId}`,
+          field,
+        });
+      });
+    });
+    return list;
+  }, [referencedKpiIds, kpis, fieldsByKpiId]);
+
+  const [organization, setOrganization] = useState<any>(null);
+  const [localPeriodType, setLocalPeriodType] = useState<string>("");
+  const [localDateBasedFetching, setLocalDateBasedFetching] = useState<boolean>(false);
+  const [localDateColumn, setLocalDateColumn] = useState<string>("");
+  const [localMliDateCols, setLocalMliDateCols] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!token || !dashboard?.organization_id) return;
+    api<any>(`/organizations/${dashboard.organization_id}`, { token })
+      .then((orgData) => {
+        setOrganization(orgData);
+      })
+      .catch((err) => {
+        console.error("Failed to load org details", err);
+      });
+  }, [token, dashboard?.organization_id]);
+
+  useEffect(() => {
+    if (dashboardSettingsOpen) {
+      setLocalPeriodType(dateFetchingConfig?.period_type || "");
+      setLocalDateBasedFetching(fetchDataWithDate);
+      setLocalDateColumn(dateFetchingConfig?.date_column || "");
+      setLocalMliDateCols(dateFetchingConfig?.mli_date_cols || {});
+    }
+  }, [dashboardSettingsOpen, fetchDataWithDate, dateFetchingConfig]);
+
+  const customPeriods = useMemo(() => {
+    if (!organization) return [];
+    if (organization.custom_periods && organization.custom_periods.length > 0) {
+      return organization.custom_periods;
+    }
+    if (organization.custom_period_name) {
+      return [{
+        custom_period_name: organization.custom_period_name,
+        custom_period_start_month: organization.custom_period_start_month,
+        custom_period_start_day: organization.custom_period_start_day,
+        custom_period_duration_months: organization.custom_period_duration_months,
+        custom_period_display_format: organization.custom_period_display_format,
+        custom_period_prefix: organization.custom_period_prefix,
+        custom_period_suffix: organization.custom_period_suffix,
+      }];
+    }
+    return [];
+  }, [organization]);
+
+  const periodOptionsList = useMemo(() => {
+    return customPeriods.map((p: any) => p.custom_period_name);
+  }, [customPeriods]);
+
+  const dateColumns = useMemo(() => {
+    const cols = new Set<string>();
+    dashboardMliFields.forEach(({ field }) => {
+      field.sub_fields?.forEach((sf) => {
+        if (sf.field_type === "date" || sf.field_type === "datetime") {
+          cols.add(sf.key);
+        }
+      });
+    });
+    return Array.from(cols);
+  }, [dashboardMliFields]);
+
+  const widgetActivePeriodConfig = useMemo(() => {
+    const currentPeriodType = localPeriodType || dateFetchingConfig?.period_type || customPeriods[0]?.custom_period_name || "";
+    return customPeriods.find((p: any) => p.custom_period_name === currentPeriodType) || null;
+  }, [customPeriods, localPeriodType, dateFetchingConfig]);
+
+  const widgetPeriodOptions = useMemo(() => {
+    if (!widgetActivePeriodConfig) return [];
+    return generatePeriodOptions(widgetActivePeriodConfig);
+  }, [widgetActivePeriodConfig]);
+
   const [addType, setAddType] = useState<WidgetType>("text");
   const [addTitle, setAddTitle] = useState("");
   const [addText, setAddText] = useState("");
   const [addKpiId, setAddKpiId] = useState<number | null>(null);
   const [addFieldKey, setAddFieldKey] = useState<string>("");
-  const [addYear, setAddYear] = useState<number>(new Date().getFullYear());
+  const [addYear, setAddYear] = useState<any>(new Date().getFullYear());
   const [addStartYear, setAddStartYear] = useState<number>(new Date().getFullYear() - 4);
   const [addEndYear, setAddEndYear] = useState<number>(new Date().getFullYear());
   const [addPeriodKey, setAddPeriodKey] = useState<string>("");
@@ -651,19 +832,177 @@ export default function DashboardDesignPage() {
   }, [token]);
 
   useEffect(() => {
-    if (!id || !token) return;
-    setLoading(true);
-    setError(null);
-    const query = orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : "";
-    api<DashboardDetail>(`/dashboards/${id}${query}`, { token })
-      .then((d) => {
-        setDashboard(d);
-        setWidgets(ensureLayout(d.layout).widgets);
-        return d;
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load dashboard"))
-      .finally(() => setLoading(false));
-  }, [id, token, orgIdFromQuery]);
+    if (!token || !dashboard?.organization_id) return;
+    api<any[]>(`/dashboards?organization_id=${dashboard.organization_id}`, { token })
+      .then(setAllDashboards)
+      .catch(() => setAllDashboards([]));
+  }, [token, dashboard?.organization_id]);
+
+  const { allPageLabels, getDisplayLabel } = useDashboardCustomization();
+
+  const allPageDisplayLabels = useMemo(() => {
+    const set = new Set<string>();
+    allPageLabels.forEach((l) => {
+      const display = getDisplayLabel(l);
+      if (display && display.trim()) {
+        set.add(display.trim());
+      }
+    });
+    set.add("Others");
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [allPageLabels, getDisplayLabel]);
+
+  const DEFAULT_COLORS = useMemo(() => [
+    "#4E79A7", // Blue
+    "#F28E2B", // Orange
+    "#E15759", // Red
+    "#76B7B2", // Cyan/Teal
+    "#59A14F", // Green
+    "#EDC948", // Yellow
+    "#B07AA1", // Purple
+    "#FF9DA7", // Pink
+    "#9C755F", // Brown
+    "#56B4E9", // Light Blue
+    "#009E73", // Emerald
+    "#0072B2", // Medium Blue
+    "#D55E00", // Dark Orange
+    "#CC79A7", // Magenta
+  ], []);
+
+  const OTHERS_COLOR = "#9ca3af"; // Gray
+
+  // Utility to convert HSL to hex string
+  const hslToHex = (h: number, s: number, l: number): string => {
+    l /= 100;
+    const a = (s * Math.min(l, 1 - l)) / 100;
+    const f = (n: number) => {
+      const k = (n + h / 30) % 12;
+      const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+      return Math.round(255 * color).toString(16).padStart(2, "0");
+    };
+    return `#${f(0)}${f(8)}${f(4)}`;
+  };
+
+  const getDeterministicColor = useCallback((value: string, mappings: Record<string, string>) => {
+    if (value.toLowerCase() === "others") return OTHERS_COLOR;
+    if (mappings[value]) return mappings[value];
+    
+    let hash = 0;
+    for (let i = 0; i < value.length; i++) {
+      hash = value.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    
+    const usedColors = new Set(Object.values(mappings));
+    const available = DEFAULT_COLORS.filter(c => !usedColors.has(c));
+    
+    if (available.length > 0) {
+      const index = Math.abs(hash) % available.length;
+      return available[index];
+    } else {
+      // Generate deterministic unique color based on hash to avoid collisions
+      const hue = Math.abs(hash) % 360;
+      const lightness = 50 + (Math.abs(hash) % 3) * 7;
+      return hslToHex(hue, 70, lightness);
+    }
+  }, [DEFAULT_COLORS]);
+
+  // Auto-sync missing color mappings in design mode
+  useEffect(() => {
+    if (!dashboard || !consistentColors) return;
+    
+    let changed = false;
+    const nextMappings = { ...colorMappings };
+    
+    allPageDisplayLabels.forEach((val) => {
+      const key = val.trim();
+      if (!key) return;
+      
+      const keyLower = key.toLowerCase();
+      if (keyLower === "others") {
+        if (!nextMappings[key]) {
+          nextMappings[key] = OTHERS_COLOR;
+          changed = true;
+        }
+        return;
+      }
+      
+      if (!nextMappings[key]) {
+        const usedColors = new Set(Object.values(nextMappings));
+        const available = DEFAULT_COLORS.filter(c => !usedColors.has(c));
+        let chosenColor = "";
+        if (available.length > 0) {
+          chosenColor = available[0];
+        } else {
+          // Generate a unique color to prevent collisions when defaults are exhausted
+          const count = Object.keys(nextMappings).length;
+          const hue = (count * 137.5) % 360;
+          const lightness = 50 + (count % 3) * 7;
+          chosenColor = hslToHex(hue, 70, lightness);
+        }
+        
+        nextMappings[key] = chosenColor;
+        changed = true;
+      }
+    });
+    
+    if (changed) {
+      setColorMappings(nextMappings);
+      persistDashboardLayout(widgets, consistentColors, nextMappings);
+    }
+  }, [allPageDisplayLabels, consistentColors, colorMappings, widgets, dashboard, DEFAULT_COLORS]);
+
+  const handleAutoGenerateColors = () => {
+    const nextMappings: Record<string, string> = {};
+    let realIdx = 0;
+    allPageDisplayLabels.forEach((val) => {
+      const key = val.trim();
+      if (!key) return;
+      if (key.toLowerCase() === "others") {
+        nextMappings[key] = OTHERS_COLOR;
+      } else {
+        if (realIdx < DEFAULT_COLORS.length) {
+          nextMappings[key] = DEFAULT_COLORS[realIdx];
+        } else {
+          // Generate a unique color to prevent collisions when defaults are exhausted
+          const hue = (realIdx * 137.5) % 360;
+          const lightness = 50 + (realIdx % 3) * 7;
+          nextMappings[key] = hslToHex(hue, 70, lightness);
+        }
+        realIdx++;
+      }
+    });
+    setColorMappings(nextMappings);
+    persistDashboardLayout(widgets, consistentColors, nextMappings);
+    toast.success("Colors auto-generated!");
+  };
+
+  const handleResetColorMapping = () => {
+    setColorMappings({});
+    persistDashboardLayout(widgets, consistentColors, {});
+    toast.success("Color mappings reset!");
+  };
+
+  const handleUpdateValueColor = (valueKey: string, newColor: string) => {
+    const nextMappings = { ...colorMappings, [valueKey]: newColor };
+    setColorMappings(nextMappings);
+    persistDashboardLayout(widgets, consistentColors, nextMappings);
+  };
+
+  const handleImportColors = async () => {
+    if (!importSourceDashboardId || !token) return;
+    try {
+      const srcDash = await api<DashboardDetail>(`/dashboards/${importSourceDashboardId}?organization_id=${dashboard.organization_id}`, { token });
+      const srcMappings = srcDash?.layout?.color_mappings || {};
+      
+      const merged = { ...colorMappings, ...srcMappings };
+      setColorMappings(merged);
+      persistDashboardLayout(widgets, consistentColors, merged);
+      toast.success(`Successfully imported colors from "${srcDash.name}"!`);
+      setImportSourceDashboardId(null);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to import colors");
+    }
+  };
 
   useEffect(() => {
     if (!token || !dashboard?.organization_id) return;
@@ -724,16 +1063,37 @@ export default function DashboardDesignPage() {
   );
   const joinMultiLineSubFields = useMemo(() => selectedJoinMultiLineField?.sub_fields ?? [], [selectedJoinMultiLineField]);
 
-  const persistWidgets = async (nextWidgets: Widget[]) => {
+  const persistDashboardLayout = async (
+    nextWidgets: Widget[],
+    nextConsistentColors: boolean,
+    nextColorMappings: Record<string, string>,
+    nextFetchDataWithDate: boolean = fetchDataWithDate,
+    nextDateFetchingConfig: any = dateFetchingConfig
+  ) => {
     if (!token || !dashboard) return;
     setSaving(true);
     setError(null);
     try {
+      const newLayout = {
+        widgets: nextWidgets,
+        consistent_colors: nextConsistentColors,
+        color_mappings: nextColorMappings,
+      };
       await api(`/dashboards/${dashboard.id}?organization_id=${dashboard.organization_id}`, {
         method: "PATCH",
         token,
-        body: JSON.stringify({ layout: { widgets: nextWidgets } }),
+        body: JSON.stringify({
+          layout: newLayout,
+          fetch_data_with_date: nextFetchDataWithDate,
+          date_fetching_config: nextDateFetchingConfig,
+        }),
       });
+      setDashboard((prev) => prev ? {
+        ...prev,
+        layout: newLayout,
+        fetch_data_with_date: nextFetchDataWithDate,
+        date_fetching_config: nextDateFetchingConfig
+      } : null);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Save failed";
       setError(msg);
@@ -751,7 +1111,7 @@ export default function DashboardDesignPage() {
     toast.success(editingWidgetId ? "Widget updated" : "Widget added");
     setWidgetModalOpen(false);
     // Auto-persist so refresh doesn't lose title/filter label/etc.
-    persistWidgets(nextWidgets);
+    persistDashboardLayout(nextWidgets, consistentColors, colorMappings);
   };
 
   const upsertWidget = () => {
@@ -1095,7 +1455,7 @@ export default function DashboardDesignPage() {
   const removeWidget = (wid: string) => {
     setWidgets((prev) => {
       const next = prev.filter((w) => w.id !== wid);
-      void persistWidgets(next);
+      void persistDashboardLayout(next, consistentColors, colorMappings);
       return next;
     });
   };
@@ -1108,7 +1468,7 @@ export default function DashboardDesignPage() {
         if (nextFull) return { ...w, full_width: true, col_span: undefined } as Widget;
         return { ...w, full_width: false, col_span: (w as { col_span?: number }).col_span ?? 6 } as Widget;
       });
-      void persistWidgets(next);
+      void persistDashboardLayout(next, consistentColors, colorMappings);
       return next;
     });
   };
@@ -1123,7 +1483,7 @@ export default function DashboardDesignPage() {
             ? ({ ...w, full_width: true, col_span: undefined } as Widget)
             : ({ ...w, full_width: false, col_span: s } as Widget)
       );
-      void persistWidgets(next);
+      void persistDashboardLayout(next, consistentColors, colorMappings);
       return next;
     });
   };
@@ -1137,7 +1497,7 @@ export default function DashboardDesignPage() {
       const item = prev.find((w) => w.id === fromId);
       if (!item) return prev;
       const next = [...others.slice(0, insertAt), item, ...others.slice(insertAt)];
-      void persistWidgets(next);
+      void persistDashboardLayout(next, consistentColors, colorMappings);
       return next;
     });
   };
@@ -1150,7 +1510,7 @@ export default function DashboardDesignPage() {
       if (ia < 0 || ib < 0) return prev;
       const next = [...prev];
       [next[ia], next[ib]] = [next[ib], next[ia]];
-      void persistWidgets(next);
+      void persistDashboardLayout(next, consistentColors, colorMappings);
       return next;
     });
   };
@@ -1180,12 +1540,265 @@ export default function DashboardDesignPage() {
     return () => document.removeEventListener("mousedown", onDoc, true);
   }, [selectedDesignWidgetId]);
 
-  if (loading) return <p>Loading…</p>;
   if (error) return <p className="form-error">{error}</p>;
-  if (!dashboard) return null;
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
+      {!widgetModalOpen && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)", paddingBottom: "1rem", gap: "1rem", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => router.push(`/dashboard/dashboards/${dashboard.id}${orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : ""}`)}
+            >
+              ← Back to Dashboard
+            </button>
+            <h1 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 700 }}>
+              Design Mode: {dashboard.name}
+            </h1>
+          </div>
+          {isSuperAdminRole(userRole) && (
+            <button
+              type="button"
+              className="btn"
+              style={{
+                background: dashboardSettingsOpen ? "var(--border)" : "var(--accent)",
+                color: "white",
+              }}
+              onClick={() => setDashboardSettingsOpen(!dashboardSettingsOpen)}
+            >
+              ⚙️ Dashboard Settings
+            </button>
+          )}
+        </div>
+      )}
+
+      {!widgetModalOpen && dashboardSettingsOpen && isSuperAdminRole(userRole) && (
+        <div className="card" style={{ padding: "1.25rem", display: "grid", gap: "1.25rem", background: "var(--surface)", border: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <h3 style={{ margin: 0, fontSize: "1.1rem", fontWeight: 700 }}>Dashboard Color & Style Settings</h3>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => setDashboardSettingsOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+
+          <div style={{ display: "grid", gap: "0.5rem" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: 600, fontSize: "0.95rem", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={consistentColors}
+                onChange={(e) => {
+                  const nextVal = e.target.checked;
+                  setConsistentColors(nextVal);
+                  persistDashboardLayout(widgets, nextVal, colorMappings);
+                }}
+              />
+              Consistent Colors for Unique Values
+            </label>
+            <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--muted)" }}>
+              When enabled, the same unique category value (e.g., "UET Lahore") will receive the same color across all charts on this dashboard.
+            </p>
+          </div>
+
+          {consistentColors && (
+            <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+                <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Color Mapping Config</span>
+                <div style={{ display: "flex", gap: "0.35rem" }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
+                    onClick={handleAutoGenerateColors}
+                  >
+                    Auto Generate Colors
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
+                    onClick={handleResetColorMapping}
+                  >
+                    Reset Color Mapping
+                  </button>
+                </div>
+              </div>
+
+              {allDashboards.filter(d => d.id !== dashboard.id).length > 0 && (
+                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.25rem", padding: "0.5rem", background: "var(--bg)", borderRadius: "6px", border: "1px solid var(--border)", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: "0.82rem", color: "var(--muted)" }}>Import color mappings from:</span>
+                  <select
+                    value={importSourceDashboardId || ""}
+                    onChange={(e) => setImportSourceDashboardId(e.target.value ? Number(e.target.value) : null)}
+                    style={{ padding: "0.25rem 0.45rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                  >
+                    <option value="">Select dashboard…</option>
+                    {allDashboards
+                      .filter((d) => d.id !== dashboard.id)
+                      .map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.name}
+                        </option>
+                      ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
+                    disabled={!importSourceDashboardId}
+                    onClick={handleImportColors}
+                  >
+                    Import Colors
+                  </button>
+                </div>
+              )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "0.5rem", maxHeight: "250px", overflowY: "auto", paddingRight: "4px", marginTop: "0.5rem" }}>
+                {allPageDisplayLabels.map((val) => {
+                  const key = val.trim();
+                  if (!key) return null;
+                  const curColor = colorMappings[key] || getDeterministicColor(key, colorMappings);
+                  return (
+                    <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.35rem 0.55rem", background: "var(--bg)", borderRadius: "6px", border: "1px solid var(--border)" }}>
+                      <span style={{ fontSize: "0.85rem", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, paddingRight: "0.5rem" }}>{key}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                        <span
+                          style={{
+                            width: "12px",
+                            height: "12px",
+                            borderRadius: "50%",
+                            background: curColor,
+                            border: "1px solid rgba(0,0,0,0.15)",
+                            display: "inline-block",
+                          }}
+                        />
+                        <input
+                          type="color"
+                          value={curColor.startsWith("#") && curColor.length === 7 ? curColor : "#9ca3af"}
+                          onChange={(e) => handleUpdateValueColor(key, e.target.value)}
+                          style={{ width: "32px", height: "24px", padding: 0, border: "none", cursor: "pointer", background: "transparent" }}
+                          title={`Edit color for ${key}`}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+            <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Dashboard Date-Fetching Configuration</span>
+            
+            <div style={{ display: "grid", gap: "0.3rem" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: 600, fontSize: "0.95rem", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={localDateBasedFetching}
+                  onChange={(e) => setLocalDateBasedFetching(e.target.checked)}
+                />
+                Fetch Data with Date
+              </label>
+              <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--muted)" }}>
+                Enable date-based data-fetching using organization custom reporting periods. If disabled, default integer year logic will be used.
+              </p>
+            </div>
+
+            {localDateBasedFetching && (
+              <div style={{ display: "grid", gap: "0.6rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
+                <div style={{ display: "grid", gap: "0.5rem" }}>
+                  <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Configure Date Column per Multi-Line Field</label>
+                  {dashboardMliFields.length === 0 ? (
+                    <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
+                      No multi-line fields are used in this dashboard. Add widgets using multi-line fields to configure date columns.
+                    </p>
+                  ) : (
+                    <div style={{ display: "grid", gap: "0.75rem" }}>
+                      {dashboardMliFields.map((item) => {
+                        const key = `${item.kpiId}_${item.field.key}`;
+                        return (
+                          <div key={key} style={{ padding: "0.75rem", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--surface)", display: "grid", gap: "0.5rem" }}>
+                            <div style={{ fontSize: "0.82rem", fontWeight: 650 }}>
+                              <span style={{ color: "var(--muted)" }}>KPI:</span> {item.kpiName} <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>Field:</span> {item.field.name}
+                            </div>
+                            <div style={{ display: "grid", gap: "0.35rem" }}>
+                              <select
+                                value={localMliDateCols[key] || ""}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setLocalMliDateCols(prev => ({
+                                    ...prev,
+                                    [key]: val
+                                  }));
+                                }}
+                                style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", width: "100%" }}
+                              >
+                                <option value="">Select date column...</option>
+                                {item.field.sub_fields?.map((sf: any) => (
+                                  <option key={sf.key} value={sf.key}>
+                                    {sf.name || sf.key} ({sf.field_type})
+                                  </option>
+                                ))}
+                                {localMliDateCols[key] &&
+                                  !item.field.sub_fields?.some((sf: any) => sf.key === localMliDateCols[key]) && (
+                                    <option value={localMliDateCols[key]}>
+                                      {localMliDateCols[key]} (Custom)
+                                    </option>
+                                  )}
+                              </select>
+                              <input
+                                type="text"
+                                placeholder="Or type custom date column key..."
+                                value={localMliDateCols[key] || ""}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setLocalMliDateCols(prev => ({
+                                    ...prev,
+                                    [key]: val
+                                  }));
+                                }}
+                                style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={async () => {
+                const nextConfig = {
+                  ...dateFetchingConfig,
+                  mli_date_cols: localMliDateCols,
+                };
+                await persistDashboardLayout(
+                  widgets,
+                  consistentColors,
+                  colorMappings,
+                  localDateBasedFetching,
+                  nextConfig
+                );
+                toast.success("Configuration saved successfully.");
+              }}
+              style={{ marginTop: "0.5rem", width: "100%" }}
+            >
+              Save Configuration
+            </button>
+          </div>
+        </div>
+      )}
+
       {!widgetModalOpen &&
         (widgets.length === 0 ? (
           <div className="card" style={{ padding: "1rem" }}>
@@ -1466,15 +2079,33 @@ export default function DashboardDesignPage() {
                             </div>
                           </div>
                         ) : (
-                          <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
-                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Year</label>
-                            <input
-                              type="number"
-                              value={addYear}
-                              onChange={(e) => setAddYear(Number(e.target.value))}
-                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                            />
-                          </div>
+                          fetchDataWithDate ? (
+                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Default Reporting Period</label>
+                              <select
+                                value={addYear}
+                                onChange={(e) => setAddYear(e.target.value)}
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                              >
+                                <option value="">Select period...</option>
+                                {widgetPeriodOptions.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ) : (
+                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Year</label>
+                              <input
+                                type="number"
+                                value={addYear}
+                                onChange={(e) => setAddYear(Number(e.target.value))}
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              />
+                            </div>
+                          )
                         )}
 
                         <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>

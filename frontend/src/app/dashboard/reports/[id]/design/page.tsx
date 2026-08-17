@@ -6,6 +6,7 @@ const AUTO_SAVE_DELAY_MS = 45_000; // 45 seconds after last change
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
+import toast from "react-hot-toast";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { api, getApiUrl } from "@/lib/api";
@@ -75,6 +76,8 @@ interface TemplateDetail {
   kpis_from_domains: KpiFromDomain[];
   /** KPI id string keys → field definitions (same shape as GET /fields per KPI). */
   fields_by_kpi_id?: Record<string, FieldOption[]>;
+  fetch_data_with_date?: boolean;
+  date_fetching_config?: any;
 }
 
 export type ReportBlock =
@@ -841,6 +844,9 @@ export default function ReportDesignPage() {
   const [templateMode, setTemplateMode] = useState<"designer" | "code">("designer");
 
   const [isDirty, setIsDirty] = useState(false);
+  const [fetchDataWithDate, setFetchDataWithDate] = useState<boolean>(false);
+  const [dateFetchingConfig, setDateFetchingConfig] = useState<any>({});
+  const [reportSettingsOpen, setReportSettingsOpen] = useState(false);
   const [lastAutoSavedAt, setLastAutoSavedAt] = useState<number | null>(null);
   const [autoSave, setAutoSave] = useState(true);
   const autoSaveRef = useRef(true);
@@ -876,6 +882,103 @@ export default function ReportDesignPage() {
 
   const [fieldsByKpiId, setFieldsByKpiId] = useState<Record<number, FieldOption[]>>({});
 
+  const referencedKpiIds = useMemo(() => {
+    const ids = new Set<number>();
+    blocks.forEach((b) => {
+      if (b.type === "kpi_table" && b.kpiIds) {
+        b.kpiIds.forEach((kid) => ids.add(kid));
+      } else if (b.type === "kpi_multi_table" && b.kpiId) {
+        ids.add(b.kpiId);
+      } else if (b.type === "kpi_grid" && b.kpiIds) {
+        b.kpiIds.forEach((kid) => ids.add(kid));
+      } else if (b.type === "kpi_list" && b.kpiIds) {
+        b.kpiIds.forEach((kid) => ids.add(kid));
+      } else if (b.type === "single_value" && b.kpiId) {
+        ids.add(b.kpiId);
+      }
+    });
+    return Array.from(ids);
+  }, [blocks]);
+
+  // Identify all MLI fields in referenced KPIs
+  const reportMliFields = useMemo(() => {
+    const list: Array<{ kpiId: number; kpiName: string; field: FieldOption }> = [];
+    referencedKpiIds.forEach((kpiId) => {
+      const kpiObj = detail?.kpis_from_domains?.find((k) => k.kpi_id === kpiId);
+      const fields = fieldsByKpiId[kpiId] || [];
+      const mlis = fields.filter((f) => f.field_type === "multi_line_items");
+      mlis.forEach((field) => {
+        list.push({
+          kpiId,
+          kpiName: kpiObj?.kpi_name || `KPI #${kpiId}`,
+          field,
+        });
+      });
+    });
+    return list;
+  }, [referencedKpiIds, detail, fieldsByKpiId]);
+
+  const [organization, setOrganization] = useState<any>(null);
+  const [localPeriodType, setLocalPeriodType] = useState<string>("");
+  const [localDateBasedFetching, setLocalDateBasedFetching] = useState<boolean>(false);
+  const [localDateColumn, setLocalDateColumn] = useState<string>("");
+  const [localMliDateCols, setLocalMliDateCols] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!token || !detail?.organization_id) return;
+    api<any>(`/organizations/${detail.organization_id}`, { token })
+      .then((orgData) => {
+        setOrganization(orgData);
+      })
+      .catch((err) => {
+        console.error("Failed to load org details", err);
+      });
+  }, [token, detail?.organization_id]);
+
+  useEffect(() => {
+    if (reportSettingsOpen) {
+      setLocalPeriodType(dateFetchingConfig?.period_type || "");
+      setLocalDateBasedFetching(fetchDataWithDate);
+      setLocalDateColumn(dateFetchingConfig?.date_column || "");
+      setLocalMliDateCols(dateFetchingConfig?.mli_date_cols || {});
+    }
+  }, [reportSettingsOpen, fetchDataWithDate, dateFetchingConfig]);
+
+  const customPeriods = useMemo(() => {
+    if (!organization) return [];
+    if (organization.custom_periods && organization.custom_periods.length > 0) {
+      return organization.custom_periods;
+    }
+    if (organization.custom_period_name) {
+      return [{
+        custom_period_name: organization.custom_period_name,
+        custom_period_start_month: organization.custom_period_start_month,
+        custom_period_start_day: organization.custom_period_start_day,
+        custom_period_duration_months: organization.custom_period_duration_months,
+        custom_period_display_format: organization.custom_period_display_format,
+        custom_period_prefix: organization.custom_period_prefix,
+        custom_period_suffix: organization.custom_period_suffix,
+      }];
+    }
+    return [];
+  }, [organization]);
+
+  const periodOptionsList = useMemo(() => {
+    return customPeriods.map((p: any) => p.custom_period_name);
+  }, [customPeriods]);
+
+  const dateColumns = useMemo(() => {
+    const cols = new Set<string>();
+    reportMliFields.forEach(({ field }) => {
+      field.sub_fields?.forEach((sf) => {
+        if (sf.field_type === "date" || sf.field_type === "datetime") {
+          cols.add(sf.key);
+        }
+      });
+    });
+    return Array.from(cols);
+  }, [reportMliFields]);
+
   const loadDetail = useCallback(() => {
     if (!id || !token) return;
     setError(null);
@@ -888,6 +991,8 @@ export default function ReportDesignPage() {
         const mode: "designer" | "code" =
           d.template_mode === "code" ? "code" : "designer";
         setTemplateMode(mode);
+        setFetchDataWithDate(d.fetch_data_with_date ?? false);
+        setDateFetchingConfig(d.date_fetching_config ?? {});
         if (d.fields_by_kpi_id && typeof d.fields_by_kpi_id === "object") {
           const next: Record<number, FieldOption[]> = {};
           for (const [key, fields] of Object.entries(d.fields_by_kpi_id)) {
@@ -946,6 +1051,8 @@ export default function ReportDesignPage() {
           body: JSON.stringify({
             template_mode: "designer",
             body_blocks: currentBlocks.map(({ id: _id, ...rest }) => rest),
+            fetch_data_with_date: fetchDataWithDate,
+            date_fetching_config: dateFetchingConfig,
           }),
         });
       } else {
@@ -956,6 +1063,8 @@ export default function ReportDesignPage() {
             template_mode: "code",
             body_template: currentBodyTemplate,
             body_blocks: null,
+            fetch_data_with_date: fetchDataWithDate,
+            date_fetching_config: dateFetchingConfig,
           }),
         });
       }
@@ -966,7 +1075,7 @@ export default function ReportDesignPage() {
     } finally {
       setSaving(false);
     }
-  }, [id, token, detail, templateMode]);
+  }, [id, token, detail, templateMode, fetchDataWithDate, dateFetchingConfig]);
 
   const scheduleAutoSave = useCallback(() => {
     if (!autoSaveRef.current) return;
@@ -1008,6 +1117,12 @@ export default function ReportDesignPage() {
     },
     [token, detail?.organization_id, fieldsByKpiId]
   );
+
+  useEffect(() => {
+    if (referencedKpiIds.length > 0) {
+      loadFieldsForKpis(referencedKpiIds);
+    }
+  }, [referencedKpiIds, loadFieldsForKpis]);
 
   const markDirtyAndScheduleAutoSave = useCallback(() => {
     setIsDirty(true);
@@ -1060,6 +1175,8 @@ export default function ReportDesignPage() {
         body: JSON.stringify({
           template_mode: "designer",
           body_blocks: blocks.map(({ id: _id, ...rest }) => rest),
+          fetch_data_with_date: fetchDataWithDate,
+          date_fetching_config: dateFetchingConfig,
         }),
       });
       setIsDirty(false);
@@ -1364,7 +1481,6 @@ export default function ReportDesignPage() {
               </button>
             </div>
           </div>
-          {(
             <div style={{ padding: "1.25rem", borderTop: "1px solid var(--border)" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", marginBottom: "1rem" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -1422,9 +1538,155 @@ export default function ReportDesignPage() {
             <button type="button" className="btn btn-primary" onClick={saveVisual} disabled={saving || previewLoading} style={{ marginLeft: "0.5rem" }}>
               {saving ? "Saving…" : "Save"}
             </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setReportSettingsOpen(!reportSettingsOpen)}
+              style={{
+                marginLeft: "0.35rem",
+                background: reportSettingsOpen ? "var(--border)" : "transparent",
+                border: "1px solid var(--border)",
+              }}
+            >
+              ⚙️ Settings
+            </button>
           </div>
         </div>
         {saveError && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{saveError}</p>}
+
+        {reportSettingsOpen && (
+          <div className="card" style={{ padding: "1rem", display: "grid", gap: "1rem", marginBottom: "1rem", background: "var(--bg-muted, #fcfcfc)", border: "1px dashed var(--border)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontWeight: 650, fontSize: "0.95rem" }}>Report Date-Fetching Settings</span>
+              <button type="button" className="btn btn-secondary btn-sm" style={{ padding: "0.15rem 0.4rem", fontSize: "0.75rem" }} onClick={() => setReportSettingsOpen(false)}>Close</button>
+            </div>
+            <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+              <div style={{ display: "grid", gap: "0.3rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: 600, fontSize: "0.95rem", cursor: "pointer", margin: 0 }}>
+                  <input
+                    type="checkbox"
+                    checked={localDateBasedFetching}
+                    onChange={(e) => setLocalDateBasedFetching(e.target.checked)}
+                  />
+                  Fetch Data with Date
+                </label>
+                <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
+                  Enable date-based data-fetching using organization custom reporting periods. If disabled, default integer year logic will be used.
+                </p>
+              </div>
+
+              {localDateBasedFetching && (
+                <div style={{ display: "grid", gap: "0.6rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
+                  <div style={{ display: "grid", gap: "0.5rem" }}>
+                    <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Configure Date Column per Multi-Line Field</label>
+                    {reportMliFields.length === 0 ? (
+                      <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
+                        No multi-line fields are used in this report. Add sections using multi-line fields to configure date columns.
+                      </p>
+                    ) : (
+                      <div style={{ display: "grid", gap: "0.75rem" }}>
+                        {reportMliFields.map((item) => {
+                          const key = `${item.kpiId}_${item.field.key}`;
+                          return (
+                            <div key={key} style={{ padding: "0.75rem", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--surface)", display: "grid", gap: "0.5rem" }}>
+                              <div style={{ fontSize: "0.82rem", fontWeight: 650 }}>
+                                <span style={{ color: "var(--muted)" }}>KPI:</span> {item.kpiName} <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>Field:</span> {item.field.name}
+                              </div>
+                              <div style={{ display: "grid", gap: "0.35rem" }}>
+                                <select
+                                  value={localMliDateCols[key] || ""}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setLocalMliDateCols(prev => ({
+                                      ...prev,
+                                      [key]: val
+                                    }));
+                                  }}
+                                  style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", width: "100%" }}
+                                >
+                                  <option value="">Select date column...</option>
+                                  {item.field.sub_fields?.map((sf: any) => (
+                                    <option key={sf.key} value={sf.key}>
+                                      {sf.name || sf.key} ({sf.field_type})
+                                    </option>
+                                  ))}
+                                  {localMliDateCols[key] &&
+                                    !item.field.sub_fields?.some((sf: any) => sf.key === localMliDateCols[key]) && (
+                                      <option value={localMliDateCols[key]}>
+                                        {localMliDateCols[key]} (Custom)
+                                      </option>
+                                    )}
+                                </select>
+                                <input
+                                  type="text"
+                                  placeholder="Or type custom date column key..."
+                                  value={localMliDateCols[key] || ""}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setLocalMliDateCols(prev => ({
+                                      ...prev,
+                                      [key]: val
+                                    }));
+                                  }}
+                                  style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={async () => {
+                  const nextConfig = {
+                    ...dateFetchingConfig,
+                    mli_date_cols: localMliDateCols,
+                  };
+                  setFetchDataWithDate(localDateBasedFetching);
+                  setDateFetchingConfig(nextConfig);
+                  if (token && detail) {
+                    setSaving(true);
+                    setSaveError(null);
+                    try {
+                      await api(`/reports/templates/${id}?${qs({ organization_id: detail.organization_id })}`, {
+                        method: "PATCH",
+                        token,
+                        body: JSON.stringify({
+                          template_mode: "designer",
+                          body_blocks: blocks.map(({ id: _id, ...rest }) => rest),
+                          fetch_data_with_date: localDateBasedFetching,
+                          date_fetching_config: nextConfig,
+                        }),
+                      });
+                      setDetail(prev => prev ? {
+                        ...prev,
+                        fetch_data_with_date: localDateBasedFetching,
+                        date_fetching_config: nextConfig,
+                      } : null);
+                      setIsDirty(false);
+                      fetchPreview();
+                      toast.success("Configuration saved successfully.");
+                    } catch (err) {
+                      setSaveError(err instanceof Error ? err.message : "Failed to save");
+                      toast.error(err instanceof Error ? err.message : "Failed to save");
+                    } finally {
+                      setSaving(false);
+                    }
+                  }
+                }}
+                style={{ marginTop: "0.5rem", width: "100%" }}
+              >
+                Save Configuration
+              </button>
+            </div>
+          </div>
+        )}
 
         {blocks.length === 0 ? (
           <div style={{ padding: "2rem", textAlign: "center", border: "1px dashed var(--border)", borderRadius: 8, background: "var(--bg-muted, #fafafa)" }}>
@@ -1467,7 +1729,6 @@ export default function ReportDesignPage() {
           </ul>
         )}
             </div>
-          )}
         </div>
         )}
 

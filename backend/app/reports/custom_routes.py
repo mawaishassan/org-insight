@@ -283,7 +283,11 @@ async def save_layout(
             status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may edit custom report layouts"
         )
     org_id = _org_id(current_user, organization_id)
-    ok = await save_custom_report_layout(db, id, org_id, body.sections, body.attachments)
+    ok = await save_custom_report_layout(
+        db, id, org_id, body.sections, body.attachments,
+        fetch_data_with_date=body.fetch_data_with_date,
+        date_fetching_config=body.date_fetching_config
+    )
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
     await db.commit()
@@ -293,7 +297,7 @@ async def save_layout(
 @router.get("/{id}/generate")
 async def generate_report(
     id: int,
-    year: int | None = Query(None),
+    year: str | int | None = Query(None),
     organization_id: int | None = Query(None),
     preview: bool = Query(True),
     include_attachments: bool = Query(True),
@@ -417,7 +421,7 @@ async def unassign_user_route(
 @router.get("/{id}/export")
 async def export_custom_report(
     id: int,
-    year: int = Query(...),
+    year: str | int = Query(...),
     format: str = Query("pdf"), # "pdf" | "docx" | "xlsx"
     organization_id: int | None = Query(None),
     attachment_ids: str | None = Query(None),

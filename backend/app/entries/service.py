@@ -3,6 +3,7 @@
 import ast
 import json
 import math
+import re
 from datetime import datetime
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,7 +45,7 @@ class EntryValidationError(Exception):
 # Type for multi_line_items data passed to formula evaluator
 MultiLineItemsData = dict[str, list[dict]]
 from app.entries.schemas import FieldValueInput, EntryCreate
-from app.formula_engine.evaluator import evaluate_formula, OtherKpiValues
+from app.formula_engine.evaluator import evaluate_formula, apply_conditional_logic, OtherKpiValues
 
 
 def _ml_cell_raw(c: KpiMultiLineCell) -> Any:
@@ -2997,8 +2998,11 @@ def extract_cross_kpi_mli_references(expression: str) -> set[tuple[int, str]]:
     refs = set()
     if not expression or not expression.strip():
         return refs
+    expr_str = expression.strip()
+    if "GROUP_BY" in expr_str and "=" in expr_str:
+        expr_str = re.sub(r'(\b\w+\b)\s*(?<![!=><])=\s*(?![=])(CurrentRow\.\w+|"[^"]*"|\w+)', r'\1 == \2', expr_str)
     try:
-        tree = ast.parse(expression)
+        tree = ast.parse(expr_str)
     except SyntaxError:
         return refs
         
@@ -3008,7 +3012,7 @@ def extract_cross_kpi_mli_references(expression: str) -> set[tuple[int, str]]:
             if func_name in (
                 "SUM_KPI_ITEMS", "AVG_KPI_ITEMS", "COUNT_KPI_ITEMS", "MIN_KPI_ITEMS", "MAX_KPI_ITEMS",
                 "SUM_KPI_ITEMS_WHERE", "AVG_KPI_ITEMS_WHERE", "COUNT_KPI_ITEMS_WHERE", "MIN_KPI_ITEMS_WHERE", "MAX_KPI_ITEMS_WHERE",
-                "KPI_FIELD"
+                "KPI_FIELD", "KPI_GROUP_BY", "GROUP_BY_KPI"
             ):
                 if len(node.args) >= 2:
                     kpi_id = None
@@ -3168,6 +3172,87 @@ def _topological_sort_subfields(sub_fields: list[Any]) -> list[Any]:
     return result
 
 
+async def _precompute_group_by_lookup_sql(
+    db: AsyncSession,
+    entry_id: int,
+    field_id: int,
+    group_node: Any,
+) -> dict[tuple, float] | None:
+    """Execute optimized single SQL CTE query in PostgreSQL for GROUP_BY subfields."""
+    try:
+        from app.formula_engine.evaluator import GroupNode
+        from sqlalchemy import text
+        if not isinstance(group_node, GroupNode):
+            return None
+        group_fields = group_node.collect_group_fields()
+        leaf_agg = group_node.get_leaf_agg()
+        if not leaf_agg or not group_fields:
+            return None
+
+        pivot_selects = []
+        for g_field in group_fields:
+            pivot_selects.append(
+                f"MAX(CASE WHEN sf.key = '{g_field}' THEN COALESCE(c.value_text, CAST(c.value_number AS TEXT), CAST(c.value_boolean AS TEXT), CAST(c.value_date AS TEXT), c.value_json->>'label', c.value_json->>'name', c.value_json->>'value', CAST(c.value_json AS TEXT)) END) AS {g_field}"
+            )
+        target = leaf_agg.field
+        if target and target not in group_fields:
+            if leaf_agg.func in ("SUM", "AVG", "AVERAGE", "MIN", "MAX"):
+                pivot_selects.append(f"MAX(CASE WHEN sf.key = '{target}' THEN c.value_number END) AS {target}")
+            else:
+                pivot_selects.append(
+                    f"MAX(CASE WHEN sf.key = '{target}' THEN COALESCE(c.value_text, CAST(c.value_number AS TEXT), CAST(c.value_boolean AS TEXT), CAST(c.value_date AS TEXT), c.value_json->>'label', c.value_json->>'name', c.value_json->>'value', CAST(c.value_json AS TEXT)) END) AS {target}"
+                )
+
+        group_cols = ", ".join(group_fields)
+
+        if leaf_agg.func == "COUNT":
+            if target:
+                agg_sql = f"COUNT(CASE WHEN {target} IS NOT NULL AND {target} <> '' THEN 1 END)"
+            else:
+                agg_sql = "COUNT(*)"
+        elif leaf_agg.func in ("UNIQUE_COUNT", "COUNT_DISTINCT"):
+            t_col = target or group_fields[0]
+            agg_sql = f"COUNT(DISTINCT CASE WHEN {t_col} IS NOT NULL AND {t_col} <> '' THEN {t_col} END)"
+        elif leaf_agg.func == "SUM":
+            agg_sql = f"SUM({target})"
+        elif leaf_agg.func in ("AVG", "AVERAGE"):
+            agg_sql = f"AVG({target})"
+        elif leaf_agg.func == "MIN":
+            agg_sql = f"MIN({target})"
+        elif leaf_agg.func == "MAX":
+            agg_sql = f"MAX({target})"
+        else:
+            agg_sql = "COUNT(*)"
+
+        sql = f"""
+            WITH cell_data AS (
+                SELECT c.row_id, sf.key AS sf_key, c.value_text, c.value_number, c.value_boolean, c.value_date, c.value_json
+                FROM kpi_multi_line_cells c
+                JOIN kpi_multi_line_rows r ON r.id = c.row_id
+                JOIN kpi_field_sub_fields sf ON sf.id = c.sub_field_id
+                WHERE r.entry_id = :entry_id AND r.field_id = :field_id
+            ),
+            pivoted AS (
+                SELECT row_id, {", ".join(pivot_selects)}
+                FROM cell_data sf
+                GROUP BY row_id
+            )
+            SELECT {group_cols}, {agg_sql} AS agg_val
+            FROM pivoted
+            GROUP BY {group_cols}
+        """
+
+        res = await db.execute(text(sql), {"entry_id": entry_id, "field_id": field_id})
+        out: dict[tuple, float] = {}
+        for row_data in res.all():
+            keys = tuple(str(x).strip() if x is not None else "" for x in row_data[:-1])
+            val = float(row_data[-1]) if row_data[-1] is not None else 0.0
+            out[keys] = val
+        return out
+    except Exception:
+        return None
+
+
 async def recompute_mli_formula_subfields(
     db: AsyncSession,
     entry_id: int,
@@ -3231,10 +3316,15 @@ async def recompute_mli_formula_subfields(
             text("ALTER TABLE kpi_multi_line_cells DISABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
         )
 
+
     try:
         for f in mli_fields:
             sub_fields = list(f.sub_fields or [])
-            formula_subs = [sf for sf in sub_fields if sf.field_type == FieldType.formula]
+            formula_subs = [
+                sf for sf in sub_fields
+                if getattr(sf, "field_type", None) in ("formula", FieldType.formula) or
+                getattr(getattr(sf, "field_type", None), "value", None) == "formula"
+            ]
             if not formula_subs:
                 continue
 
@@ -3295,6 +3385,10 @@ async def recompute_mli_formula_subfields(
                                 other_kpi_multi_line_data=other_kpi_mli_data,
                             )
 
+                        cond_logic = cfg.get("conditional_logic") if isinstance(cfg, dict) else None
+                        if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
+                            computed = apply_conditional_logic(computed, cond_logic)
+
                         # Update working_row
                         working_row[sf.key] = computed
 
@@ -3312,9 +3406,12 @@ async def recompute_mli_formula_subfields(
                         cell.value_date = None
 
                         if computed is not None:
-                            try:
+                            if isinstance(computed, bool):
+                                cell.value_boolean = computed
+                                cell.value_text = "True" if computed else "False"
+                            elif isinstance(computed, (int, float)):
                                 cell.value_number = float(computed)
-                            except (TypeError, ValueError):
+                            else:
                                 cell.value_text = str(computed)
         await db.flush()
     finally:

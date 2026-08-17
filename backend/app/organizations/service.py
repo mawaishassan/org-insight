@@ -190,6 +190,40 @@ async def update_organization(
         org.is_active = data.is_active
     if data.time_dimension is not None and data.time_dimension.strip() in ("yearly", "half_yearly", "quarterly", "monthly"):
         org.time_dimension = data.time_dimension.strip()
+    if data.custom_period_name is not None:
+        org.custom_period_name = data.custom_period_name
+    if data.custom_period_start_month is not None:
+        org.custom_period_start_month = data.custom_period_start_month
+    if data.custom_period_start_day is not None:
+        org.custom_period_start_day = data.custom_period_start_day
+    if data.custom_period_duration_months is not None:
+        org.custom_period_duration_months = data.custom_period_duration_months
+    if data.custom_period_display_format is not None:
+        org.custom_period_display_format = data.custom_period_display_format
+    if data.custom_period_prefix is not None:
+        org.custom_period_prefix = data.custom_period_prefix
+    if data.custom_period_suffix is not None:
+        org.custom_period_suffix = data.custom_period_suffix
+    if data.custom_periods is not None:
+        org.custom_periods = data.custom_periods
+        # Map the first custom period to top-level organization fields for backward compatibility
+        if isinstance(data.custom_periods, list) and len(data.custom_periods) > 0:
+            first_cp = data.custom_periods[0]
+            org.custom_period_name = first_cp.get("custom_period_name") or "Custom Period"
+            org.custom_period_start_month = int(first_cp.get("custom_period_start_month") or 1)
+            org.custom_period_start_day = int(first_cp.get("custom_period_start_day") or 1)
+            org.custom_period_duration_months = int(first_cp.get("custom_period_duration_months") or 12)
+            org.custom_period_display_format = first_cp.get("custom_period_display_format") or "YYYY"
+            org.custom_period_prefix = first_cp.get("custom_period_prefix") or ""
+            org.custom_period_suffix = first_cp.get("custom_period_suffix") or ""
+        else:
+            org.custom_period_name = None
+            org.custom_period_start_month = 1
+            org.custom_period_start_day = 1
+            org.custom_period_duration_months = 12
+            org.custom_period_display_format = "YYYY"
+            org.custom_period_prefix = ""
+            org.custom_period_suffix = ""
     await db.flush()
     return org
 

@@ -49,7 +49,7 @@ export function isLikelyAbortError(e: unknown): boolean {
     return true;
   }
   const m = String((e as { message?: string })?.message ?? e);
-  return /abort/i.test(m);
+  return /abort|cancel/i.test(m);
 }
 
 export async function postWidgetData(

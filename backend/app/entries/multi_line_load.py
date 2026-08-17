@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -32,19 +32,23 @@ def _cell_value_raw(c: KpiMultiLineCell) -> Any:
 async def load_multi_line_row_dicts(
     db: AsyncSession,
     *,
-    entry_id: int,
+    entry_id: int | list[int],
     field: KPIField,
     row_indices: list[int] | None = None,
     current_user_id: int | None = None,
+    date_range: tuple[datetime.date, datetime.date, str] | None = None,
 ) -> list[tuple[int, dict]]:
     """Optimized direct load of multi_line rows and cells to scale efficiently for large entries."""
+    import datetime
     from app.core.models import KPI
     kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
     kpi = kpi_res.scalar_one_or_none()
         
     if kpi and getattr(kpi, "is_joined", False):
         from app.core.models import KPIEntry
-        entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
+        # Resolve entry_id as single integer if list is passed for joined check
+        joined_eid = entry_id[0] if isinstance(entry_id, list) else entry_id
+        entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == joined_eid))
         entry = entry_res.scalar_one_or_none()
         if not entry:
             return []
@@ -58,6 +62,27 @@ async def load_multi_line_row_dicts(
             period_key=entry.period_key,
             current_user_id=current_user_id
         )
+        
+        if date_range:
+            start_date, end_date, date_col_key = date_range
+            def _parse_cell_date(v):
+                if isinstance(v, datetime.date):
+                    return v
+                if isinstance(v, str):
+                    try:
+                        return datetime.date.fromisoformat(v[:10])
+                    except Exception:
+                        pass
+                return None
+                
+            filtered_rows = []
+            for row in combined_rows:
+                rv = row.get(date_col_key)
+                rd = _parse_cell_date(rv)
+                if rd and start_date <= rd < end_date:
+                    filtered_rows.append(row)
+            combined_rows = filtered_rows
+            
         out = [(idx, r) for idx, r in enumerate(combined_rows)]
         if row_indices is not None:
             idx_set = {int(x) for x in row_indices}
@@ -66,9 +91,44 @@ async def load_multi_line_row_dicts(
 
     q_rows = (
         select(KpiMultiLineRow.id, KpiMultiLineRow.row_index)
-        .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
+        .where(KpiMultiLineRow.field_id == field.id)
         .order_by(KpiMultiLineRow.row_index)
     )
+    if isinstance(entry_id, list):
+        q_rows = q_rows.where(KpiMultiLineRow.entry_id.in_(entry_id))
+    else:
+        q_rows = q_rows.where(KpiMultiLineRow.entry_id == entry_id)
+
+    if date_range:
+        start_date, end_date, date_col_key = date_range
+        from app.core.models import KPIFieldSubField
+        sf_res = await db.execute(
+            select(KPIFieldSubField.id).where(
+                KPIFieldSubField.field_id == field.id,
+                KPIFieldSubField.key == date_col_key
+            )
+        )
+        sf_id = sf_res.scalar_one_or_none()
+        if sf_id:
+            q_rows = q_rows.join(
+                KpiMultiLineCell,
+                and_(
+                    KpiMultiLineCell.row_id == KpiMultiLineRow.id,
+                    KpiMultiLineCell.sub_field_id == sf_id,
+                )
+            )
+            from sqlalchemy import func
+            q_rows = q_rows.where(
+                and_(
+                    KpiMultiLineCell.value_date >= start_date,
+                    KpiMultiLineCell.value_date < end_date,
+                    KpiMultiLineCell.value_text.isnot(None),
+                    func.lower(func.trim(KpiMultiLineCell.value_text)).notin_([
+                        "false", "none", "null", "undefined", ""
+                    ])
+                )
+            )
+
     if row_indices is not None:
         idx = [int(i) for i in row_indices if isinstance(i, int)]
         if not idx:
@@ -126,4 +186,32 @@ async def load_multi_line_row_dicts(
     out = []
     for rid, r_idx in rows_list:
         out.append((int(r_idx), cells_by_row.get(rid, {})))
+
+    if date_range:
+        start_date, end_date, date_col_key = date_range
+        def _parse_cell_date(v):
+            if v is None:
+                return None
+            s = str(v).strip().lower()
+            if s in ("false", "none", "null", "undefined", ""):
+                return None
+            if isinstance(v, datetime.date):
+                return v
+            if isinstance(v, datetime.datetime):
+                return v.date()
+            if isinstance(v, str):
+                try:
+                    return datetime.date.fromisoformat(v[:10])
+                except Exception:
+                    pass
+            return None
+            
+        filtered_out = []
+        for r_idx, row in out:
+            rv = row.get(date_col_key)
+            rd = _parse_cell_date(rv)
+            if rd and start_date <= rd < end_date:
+                filtered_out.append((r_idx, row))
+        out = filtered_out
+
     return out

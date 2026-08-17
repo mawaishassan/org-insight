@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useMemo } from "react";
+import React, { createContext, useContext, useEffect, useState, useMemo, useCallback } from "react";
 import { api } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import toast from "react-hot-toast";
@@ -12,6 +12,17 @@ interface Customization {
   widget_id: string | null;
   original_label: string;
   customized_label: string;
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  l /= 100;
+  const a = (s * Math.min(l, 1 - l)) / 100;
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * color).toString(16).padStart(2, "0");
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
 }
 
 interface DashboardCustomizationContextProps {
@@ -26,6 +37,12 @@ interface DashboardCustomizationContextProps {
   allPageLabels: string[];
   openEditModal: (originalLabel: string, widgetId?: string) => void;
   openGlobalModal: () => void;
+  consistentColors?: boolean;
+  colorMappings?: Record<string, string>;
+  getColorForValue: (value: string, idx: number, total: number, defaultColor: string) => string;
+  fetchDataWithDate?: boolean;
+  periodOptions?: any[];
+  selectedPeriod?: string;
 }
 
 const DashboardCustomizationContext = createContext<DashboardCustomizationContextProps | null>(null);
@@ -45,6 +62,12 @@ export function useDashboardCustomization() {
       allPageLabels: [],
       openEditModal: () => {},
       openGlobalModal: () => {},
+      consistentColors: false,
+      colorMappings: {},
+      getColorForValue: (value: string, idx: number, total: number, defaultColor: string) => defaultColor,
+      fetchDataWithDate: false,
+      periodOptions: [],
+      selectedPeriod: "",
     };
   }
   return context;
@@ -54,16 +77,76 @@ export function DashboardCustomizationProvider({
   children,
   dashboardId,
   organizationId,
+  consistentColors = false,
+  colorMappings = {},
+  fetchDataWithDate = false,
+  periodOptions = [],
+  selectedPeriod = "",
 }: {
   children: React.ReactNode;
   dashboardId: number;
   organizationId: number;
+  consistentColors?: boolean;
+  colorMappings?: Record<string, string>;
+  fetchDataWithDate?: boolean;
+  periodOptions?: any[];
+  selectedPeriod?: string;
 }) {
   const token = getAccessToken();
   const [globalCustomizations, setGlobalCustomizations] = useState<Record<string, string>>({});
   const [widgetCustomizations, setWidgetCustomizations] = useState<Record<string, Record<string, string>>>({});
   const [isOrgAdmin, setIsOrgAdmin] = useState(false); // Controls if user is Super Admin
   const [loading, setLoading] = useState(true);
+
+  const DEFAULT_COLORS = useMemo(() => [
+    "#4E79A7", // Blue
+    "#F28E2B", // Orange
+    "#E15759", // Red
+    "#76B7B2", // Cyan/Teal
+    "#59A14F", // Green
+    "#EDC948", // Yellow
+    "#B07AA1", // Purple
+    "#FF9DA7", // Pink
+    "#9C755F", // Brown
+    "#56B4E9", // Light Blue
+    "#009E73", // Emerald
+    "#0072B2", // Medium Blue
+    "#D55E00", // Dark Orange
+    "#CC79A7", // Magenta
+  ], []);
+
+  const OTHERS_COLOR = "#9ca3af"; // Gray
+
+  const getColorForValue = useCallback((value: string, idx: number, total: number, defaultColor: string) => {
+    if (!consistentColors) return defaultColor;
+    
+    const key = (value || "").trim();
+    if (!key) return defaultColor;
+    
+    const keyLower = key.toLowerCase();
+    if (keyLower === "others") return colorMappings[key] || OTHERS_COLOR;
+    
+    if (colorMappings[key]) return colorMappings[key];
+    
+    // Deterministic fallback if not explicitly mapped yet
+    let hash = 0;
+    for (let i = 0; i < key.length; i++) {
+      hash = key.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    
+    const usedColors = new Set(Object.values(colorMappings));
+    const available = DEFAULT_COLORS.filter(c => !usedColors.has(c));
+    
+    if (available.length > 0) {
+      const index = Math.abs(hash) % available.length;
+      return available[index];
+    } else {
+      // Generate deterministic unique color based on hash to avoid collisions
+      const hue = Math.abs(hash) % 360;
+      const lightness = 50 + (Math.abs(hash) % 3) * 7;
+      return hslToHex(hue, 70, lightness);
+    }
+  }, [consistentColors, colorMappings, DEFAULT_COLORS]);
 
   // Registry for unique original labels detected on this page
   const [registeredLabels, setRegisteredLabels] = useState<Record<string, string[]>>({});
@@ -250,6 +333,12 @@ export function DashboardCustomizationProvider({
         allPageLabels,
         openEditModal,
         openGlobalModal,
+        consistentColors,
+        colorMappings,
+        getColorForValue,
+        fetchDataWithDate,
+        periodOptions,
+        selectedPeriod,
       }}
     >
       {children}

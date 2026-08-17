@@ -6,6 +6,7 @@ import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer, type Widget } from "./widgets";
+import { generatePeriodOptions } from "@/lib/periodHelpers";
 import { DASHBOARD_GRID_COLUMNS, widgetGridColumnStyle } from "./layoutGrid";
 import { DashboardCustomizationProvider, useDashboardCustomization } from "./DashboardCustomizationContext";
 
@@ -15,6 +16,7 @@ interface DashboardDetail {
   name: string;
   description: string | null;
   layout: any;
+  fetch_data_with_date?: boolean;
 }
 
 function asWidgets(layout: any): Widget[] {
@@ -22,6 +24,28 @@ function asWidgets(layout: any): Widget[] {
   if (Array.isArray(layout)) return layout as Widget[];
   if (typeof layout === "object" && Array.isArray(layout.widgets)) return layout.widgets as Widget[];
   return [];
+}
+
+function WidgetWithPeriodSelector({
+  widget,
+  organizationId,
+  dashboardId,
+}: {
+  widget: Widget;
+  organizationId: number;
+  dashboardId: number;
+}) {
+  return (
+    <div className="card" style={{ display: "flex", flexDirection: "column", height: "100%", padding: "0.5rem" }}>
+      <div style={{ flex: 1 }}>
+        <WidgetRenderer
+          widget={widget}
+          organizationId={organizationId}
+          dashboardId={dashboardId}
+        />
+      </div>
+    </div>
+  );
 }
 
 function Card({ title, children }: { title?: string; children: React.ReactNode }) {
@@ -50,6 +74,10 @@ export default function DashboardViewPage() {
   const [syncing, setSyncing] = useState(false);
   const [refreshCount, setRefreshCount] = useState(0);
 
+  const [org, setOrg] = useState<any | null>(null);
+  const [selectedPeriodType, setSelectedPeriodType] = useState<string>("");
+  const [selectedPeriod, setSelectedPeriod] = useState<string>("");
+
   useEffect(() => {
     if (!id || !token) return;
     setLoading(true);
@@ -69,6 +97,89 @@ export default function DashboardViewPage() {
       .catch(() => setSyncInfo(null));
   }, [id, token, organizationId]);
 
+  useEffect(() => {
+    if (!token || !dashboard?.organization_id) return;
+    api<any>(`/organizations/${dashboard.organization_id}`, { token })
+      .then((orgData) => {
+        setOrg(orgData);
+      })
+      .catch((e) => console.error("Failed to load org details", e));
+  }, [token, dashboard?.organization_id]);
+
+  const customPeriods = useMemo(() => {
+    if (!org) return [];
+    if (org.custom_periods && org.custom_periods.length > 0) {
+      return org.custom_periods;
+    }
+    if (org.custom_period_name) {
+      return [{
+        custom_period_name: org.custom_period_name,
+        custom_period_start_month: org.custom_period_start_month,
+        custom_period_start_day: org.custom_period_start_day,
+        custom_period_duration_months: org.custom_period_duration_months,
+        custom_period_display_format: org.custom_period_display_format,
+        custom_period_prefix: org.custom_period_prefix,
+        custom_period_suffix: org.custom_period_suffix,
+      }];
+    }
+    return [];
+  }, [org]);
+
+  useEffect(() => {
+    if (customPeriods.length > 0) {
+      if (!selectedPeriodType || !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType)) {
+        setSelectedPeriodType(customPeriods[0].custom_period_name);
+      }
+    } else {
+      setSelectedPeriodType("");
+    }
+  }, [customPeriods, selectedPeriodType]);
+
+  const activePeriodConfig = useMemo(() => {
+    return customPeriods.find((p: any) => p.custom_period_name === selectedPeriodType) || null;
+  }, [customPeriods, selectedPeriodType]);
+
+  const periodOptions = useMemo(() => {
+    if (!activePeriodConfig) return [];
+    return generatePeriodOptions(activePeriodConfig);
+  }, [activePeriodConfig]);
+
+  const findDefaultPeriod = (opts: any[]) => {
+    if (!opts || opts.length === 0) return "";
+    const currentYear = new Date().getFullYear();
+    const currentYearStr = String(currentYear);
+    const prevYearStr = String(currentYear - 1);
+    const nextYearStr = String(currentYear + 1);
+
+    const exactMatch = opts.find(opt => opt.value === currentYearStr);
+    if (exactMatch) return exactMatch.value;
+
+    const startCurrent = opts.find(opt => opt.value.startsWith(currentYearStr));
+    if (startCurrent) return startCurrent.value;
+
+    const endCurrent = opts.find(opt => opt.value.endsWith(currentYearStr) || opt.value.endsWith(currentYearStr.slice(2)));
+    if (endCurrent) return endCurrent.value;
+
+    const startPrev = opts.find(opt => opt.value.startsWith(prevYearStr));
+    if (startPrev) return startPrev.value;
+
+    const startNext = opts.find(opt => opt.value.startsWith(nextYearStr));
+    if (startNext) return startNext.value;
+
+    const middleIdx = Math.floor(opts.length / 2);
+    return opts[middleIdx]?.value || opts[0]?.value || "";
+  };
+
+  useEffect(() => {
+    if (periodOptions.length > 0) {
+      if (!selectedPeriod || !periodOptions.some(opt => opt.value === selectedPeriod)) {
+        setSelectedPeriod(findDefaultPeriod(periodOptions));
+      }
+    } else {
+      setSelectedPeriod("");
+    }
+  }, [periodOptions, selectedPeriod]);
+
   const handleSync = async () => {
     if (!id || !token || syncing) return;
     setSyncing(true);
@@ -83,15 +194,15 @@ export default function DashboardViewPage() {
       }
       const imported = res?.total_imported_rows ?? 0;
       if (res?.synced_count && res.synced_count > 0) {
-        toast.success(`Successfully synced ${res.synced_count} Odoo integration(s) (${imported} rows imported). Refreshing graphs...`);
+        toast.success(`Successfully synced ${res.synced_count} LMS integration(s) (${imported} rows imported). Refreshing graphs...`);
       } else {
-        toast.success("Odoo sync completed. Refreshing graphs...");
+        toast.success("LMS sync completed. Refreshing graphs...");
       }
       setTimeout(() => {
         window.location.reload();
       }, 800);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to sync Odoo data");
+      toast.error(e instanceof Error ? e.message : "Failed to sync LMS data");
     } finally {
       setSyncing(false);
     }
@@ -104,7 +215,15 @@ export default function DashboardViewPage() {
   if (!dashboard) return null;
 
   return (
-    <DashboardCustomizationProvider dashboardId={id} organizationId={dashboard.organization_id}>
+    <DashboardCustomizationProvider
+      dashboardId={id}
+      organizationId={dashboard.organization_id}
+      consistentColors={dashboard.layout?.consistent_colors}
+      colorMappings={dashboard.layout?.color_mappings}
+      fetchDataWithDate={!!dashboard.fetch_data_with_date}
+      periodOptions={periodOptions}
+      selectedPeriod={selectedPeriod}
+    >
       <DashboardViewContent
         dashboard={dashboard}
         syncInfo={syncInfo}
@@ -112,6 +231,13 @@ export default function DashboardViewPage() {
         handleSync={handleSync}
         widgets={widgets}
         refreshCount={refreshCount}
+        org={org}
+        selectedPeriodType={selectedPeriodType}
+        setSelectedPeriodType={setSelectedPeriodType}
+        selectedPeriod={selectedPeriod}
+        setSelectedPeriod={setSelectedPeriod}
+        customPeriods={customPeriods}
+        periodOptions={periodOptions}
       />
     </DashboardCustomizationProvider>
   );
@@ -124,6 +250,13 @@ function DashboardViewContent({
   handleSync,
   widgets,
   refreshCount,
+  org,
+  selectedPeriodType,
+  setSelectedPeriodType,
+  selectedPeriod,
+  setSelectedPeriod,
+  customPeriods,
+  periodOptions,
 }: {
   dashboard: DashboardDetail;
   syncInfo: { has_odoo_graphs: boolean } | null;
@@ -131,8 +264,16 @@ function DashboardViewContent({
   handleSync: () => void;
   widgets: Widget[];
   refreshCount: number;
-}) {
-  const { isOrgAdmin, openGlobalModal } = useDashboardCustomization();
+  org: any;
+  selectedPeriodType: string;
+  setSelectedPeriodType: (s: string) => void;
+  selectedPeriod: string;
+  setSelectedPeriod: (s: string) => void;
+  customPeriods: any[];
+  periodOptions: any[];
+}) {  const { isOrgAdmin, openGlobalModal } = useDashboardCustomization();
+  const token = getAccessToken();
+
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
@@ -144,27 +285,75 @@ function DashboardViewContent({
               {dashboard.description}
             </p>
           )}
+        </div>        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+          {dashboard.fetch_data_with_date && customPeriods.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>Period Type:</span>
+                <select
+                  value={selectedPeriodType}
+                  onChange={(e) => setSelectedPeriodType(e.target.value)}
+                  style={{
+                    padding: "0.4rem 0.75rem",
+                    borderRadius: "6px",
+                    border: "1px solid var(--border)",
+                    fontSize: "0.875rem",
+                    background: "var(--surface)",
+                    outline: "none"
+                  }}
+                >
+                  {customPeriods.map((cp: any) => (
+                    <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                      {cp.custom_period_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>Reporting Period:</span>
+                <select
+                  value={selectedPeriod}
+                  onChange={(e) => setSelectedPeriod(e.target.value)}
+                  style={{
+                    padding: "0.4rem 0.75rem",
+                    borderRadius: "6px",
+                    border: "1px solid var(--border)",
+                    fontSize: "0.875rem",
+                    background: "var(--surface)",
+                    outline: "none"
+                  }}
+                >
+                  <option value="">Select period...</option>
+                  {periodOptions.map((opt: any) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+          {isOrgAdmin && (
+            <button
+              type="button"
+              className="btn"
+              onClick={openGlobalModal}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                padding: "0.5rem 1rem",
+                fontSize: "0.875rem",
+                height: 38,
+              }}
+            >
+              <svg style={{ width: 16, height: 16 }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+              Customize Labels
+            </button>
+          )}
         </div>
-        {isOrgAdmin && (
-          <button
-            type="button"
-            className="btn"
-            onClick={openGlobalModal}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              padding: "0.5rem 1rem",
-              fontSize: "0.875rem",
-              height: 38,
-            }}
-          >
-            <svg style={{ width: 16, height: 16 }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-            </svg>
-            Customize Labels
-          </button>
-        )}
       </div>
 
       {syncInfo?.has_odoo_graphs && (
@@ -181,9 +370,9 @@ function DashboardViewContent({
           }}
         >
           <div>
-            <h3 style={{ margin: 0, fontSize: "1rem", fontWeight: 600 }}>Odoo Data Integration</h3>
+            <h3 style={{ margin: 0, fontSize: "1rem", fontWeight: 600 }}>LMS Data Integration</h3>
             <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.8rem", color: "var(--muted)" }}>
-              This dashboard contains graphs generated via Odoo integrated API.
+              This dashboard contains graphs generated via LMS integrated API.
             </p>
           </div>
           <button
@@ -202,7 +391,7 @@ function DashboardViewContent({
               fontWeight: 500
             }}
           >
-            {syncing ? "Syncing Odoo..." : "Load Latest Odoo Data"}
+            {syncing ? "Syncing LMS..." : "Load Latest LMS Data"}
           </button>
         </div>
       )}
@@ -221,7 +410,11 @@ function DashboardViewContent({
         >
           {widgets.map((w) => (
             <div key={`${w.id}-${refreshCount}`} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
-              <WidgetRenderer widget={w} organizationId={dashboard.organization_id} dashboardId={dashboard.id} />
+              <WidgetWithPeriodSelector
+                widget={w}
+                organizationId={dashboard.organization_id}
+                dashboardId={dashboard.id}
+              />
             </div>
           ))}
         </div>

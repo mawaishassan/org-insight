@@ -311,7 +311,7 @@ async def remove_text_block(
 @router.get("/templates/{template_id}/generate")
 async def generate_report(
   template_id: int,
-  year: int | None = Query(None),
+  year: str | int | None = Query(None),
   format: str = Query("json", pattern="^(json|csv)$"),
   organization_id: int | None = Query(None),
   db: AsyncSession = Depends(get_db),
@@ -394,7 +394,7 @@ async def evaluate_snippet(
 async def preview_report(
     template_id: int,
     body: ReportPreviewRequest,
-    year: int | None = Query(None),
+    year: str | int | None = Query(None),
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),

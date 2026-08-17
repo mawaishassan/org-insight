@@ -128,6 +128,8 @@ async def update_one_dashboard(
         name=body.name,
         description=body.description,
         layout=body.layout,
+        fetch_data_with_date=body.fetch_data_with_date,
+        date_fetching_config=body.date_fetching_config,
     )
     if not d:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
@@ -576,7 +578,7 @@ async def sync_dashboard_odoo_data(
                     import asyncio
                     
                     sem = asyncio.Semaphore(8)
-                    async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
                         async def fetch_one(att_id):
                             async with sem:
                                 target_url = (
@@ -596,7 +598,8 @@ async def sync_dashboard_odoo_data(
                         results = await asyncio.gather(*tasks, return_exceptions=True)
                         for aid, res in zip(unique_att_ids, results):
                             if isinstance(res, Exception):
-                                msg = f"Failed to download Odoo attachment ID {aid}: {res}"
+                                err_msg = str(res) or res.__class__.__name__
+                                msg = f"Failed to download Odoo attachment ID {aid}: {err_msg}"
                                 errors.append(msg)
                             else:
                                 downloaded_data[aid] = (res[1], res[2])  # (content, headers)

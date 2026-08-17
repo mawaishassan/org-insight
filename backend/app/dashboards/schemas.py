@@ -7,12 +7,16 @@ class DashboardCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
     layout: dict | list | None = None
+    fetch_data_with_date: bool = False
+    date_fetching_config: dict | None = None
 
 
 class DashboardUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
     layout: dict | list | None = None
+    fetch_data_with_date: bool | None = None
+    date_fetching_config: dict | None = None
 
 
 class DashboardAccessAssign(BaseModel):
@@ -34,6 +38,8 @@ class DashboardResponse(BaseModel):
     organization_id: int
     name: str
     description: str | None
+    fetch_data_with_date: bool = False
+    date_fetching_config: dict | None = None
 
     class Config:
         from_attributes = True

@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
+import { generatePeriodOptions } from "@/lib/periodHelpers";
 import { VirtualTable } from "@/components/VirtualTable";
 import toast from "react-hot-toast";
 import { downloadBlob } from "@/lib/download";
@@ -50,6 +51,10 @@ export default function CustomReportViewPage() {
 
   const [userRole, setUserRole] = useState<string | null>(null);
   const [reportYear, setReportYear] = useState(() => new Date().getFullYear());
+  const [template, setTemplate] = useState<any | null>(null);
+  const [org, setOrg] = useState<any | null>(null);
+  const [selectedPeriodType, setSelectedPeriodType] = useState<string>("");
+  const [selectedPeriod, setSelectedPeriod] = useState<string>("");
   const [metadata, setMetadata] = useState<ReportMetadata | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
   const [attachments, setAttachments] = useState<any[]>([]);
@@ -61,8 +66,6 @@ export default function CustomReportViewPage() {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<number[]>([]);
 
-
-
   useEffect(() => {
     if (!token) {
       router.push("/login");
@@ -73,11 +76,81 @@ export default function CustomReportViewPage() {
       .catch(() => setUserRole(null));
   }, [token, router]);
 
+  // Load custom report metadata and organization custom periods
   useEffect(() => {
     if (!id || !token || !orgId) return;
+    api<any>(`/custom-reports/${id}/detail?organization_id=${orgId}`, { token })
+      .then((t) => {
+        setTemplate(t);
+        if (t.fetch_data_with_date) {
+          api<any>(`/organizations/${orgId}`, { token })
+            .then((orgData) => {
+              setOrg(orgData);
+            })
+            .catch((e) => console.error("Failed to load org details", e));
+        }
+      })
+      .catch((e) => console.error("Failed to load custom report details", e));
+  }, [id, orgId, token]);
+
+  const customPeriods = useMemo(() => {
+    if (!org) return [];
+    if (org.custom_periods && org.custom_periods.length > 0) {
+      return org.custom_periods;
+    }
+    if (org.custom_period_name) {
+      return [{
+        custom_period_name: org.custom_period_name,
+        custom_period_start_month: org.custom_period_start_month,
+        custom_period_start_day: org.custom_period_start_day,
+        custom_period_duration_months: org.custom_period_duration_months,
+        custom_period_display_format: org.custom_period_display_format,
+        custom_period_prefix: org.custom_period_prefix,
+        custom_period_suffix: org.custom_period_suffix,
+      }];
+    }
+    return [];
+  }, [org]);
+
+  useEffect(() => {
+    if (customPeriods.length > 0) {
+      if (!selectedPeriodType || !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType)) {
+        setSelectedPeriodType(customPeriods[0].custom_period_name);
+      }
+    } else {
+      setSelectedPeriodType("");
+    }
+  }, [customPeriods, selectedPeriodType]);
+
+  const activePeriodConfig = useMemo(() => {
+    return customPeriods.find((p: any) => p.custom_period_name === selectedPeriodType) || null;
+  }, [customPeriods, selectedPeriodType]);
+
+  const periodOptions = useMemo(() => {
+    if (!activePeriodConfig) return [];
+    return generatePeriodOptions(activePeriodConfig);
+  }, [activePeriodConfig]);
+
+  useEffect(() => {
+    if (periodOptions.length > 0) {
+      if (!selectedPeriod || !periodOptions.some(opt => opt.value === selectedPeriod)) {
+        const curYearStr = String(new Date().getFullYear());
+        const match = periodOptions.find((opt) => opt.value.includes(curYearStr)) || periodOptions[0];
+        setSelectedPeriod(match.value);
+      }
+    } else {
+      setSelectedPeriod("");
+    }
+  }, [periodOptions, selectedPeriod]);
+
+  useEffect(() => {
+    if (!id || !token || !orgId) return;
+    if (template?.fetch_data_with_date && !selectedPeriod) return;
+
     setLoading(true);
     setError(null);
-    const url = `/custom-reports/${id}/generate?year=${reportYear}&organization_id=${orgId}`;
+    const yr = template?.fetch_data_with_date ? selectedPeriod : reportYear;
+    const url = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}`;
     api<any>(url, { token, cache: "no-store" })
       .then((res) => {
         setMetadata({
@@ -90,7 +163,7 @@ export default function CustomReportViewPage() {
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load custom report"))
       .finally(() => setLoading(false));
-  }, [id, reportYear, token, orgId]);
+  }, [id, reportYear, selectedPeriod, template, token, orgId]);
 
   const handleExport = async (format: "pdf" | "docx" | "xlsx") => {
     if (!token) return;
@@ -98,7 +171,8 @@ export default function CustomReportViewPage() {
     setExportModalOpen(false);
     const toastId = toast.loading(`Exporting as ${format.toUpperCase()}...`);
     try {
-      let url = getApiUrl(`/custom-reports/${id}/export?year=${reportYear}&format=${format}&organization_id=${orgId}`);
+      const yr = template?.fetch_data_with_date ? selectedPeriod : reportYear;
+      let url = getApiUrl(`/custom-reports/${id}/export?year=${yr}&format=${format}&organization_id=${orgId}`);
       if (selectedAttachmentIds.length > 0) {
         url += `&attachment_ids=${selectedAttachmentIds.join(",")}`;
       }
@@ -194,18 +268,60 @@ export default function CustomReportViewPage() {
 
         <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
           {/* Year selector */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Year:</label>
-            <select
-              value={reportYear}
-              onChange={(e) => setReportYear(Number(e.target.value))}
-              style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: "pointer", fontWeight: 500 }}
-            >
-              {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
-                <option key={y} value={y}>{y}</option>
-              ))}
-            </select>
-          </div>
+          {template?.fetch_data_with_date ? (
+            <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+              {customPeriods.length === 0 ? (
+                <span style={{ fontSize: "0.85rem", color: "#93c5fd", fontStyle: "italic" }}>No periods configured</span>
+              ) : (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Period Type:</label>
+                    <select
+                      value={selectedPeriodType}
+                      onChange={(e) => setSelectedPeriodType(e.target.value)}
+                      style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: "pointer", fontWeight: 500 }}
+                    >
+                      {customPeriods.map((cp: any) => (
+                        <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                          {cp.custom_period_name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {periodOptions.length > 0 && (
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Reporting Period:</label>
+                      <select
+                        value={selectedPeriod}
+                        onChange={(e) => setSelectedPeriod(e.target.value)}
+                        style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: "pointer", fontWeight: 500 }}
+                      >
+                        {periodOptions.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Year:</label>
+              <select
+                value={reportYear}
+                onChange={(e) => setReportYear(Number(e.target.value))}
+                style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: "pointer", fontWeight: 500 }}
+              >
+                {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div style={{ display: "flex", gap: "0.5rem" }}>
             {userRole === "SUPER_ADMIN" && (
