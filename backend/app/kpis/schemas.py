@@ -7,6 +7,7 @@ class KPICreate(BaseModel):
     """Create KPI (domain optional; can attach domain/category/org tags on create). sort_order is auto-set to next in org."""
 
     domain_id: int | None = None
+    report_header_id: int | None = None
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
     sort_order: int | None = None  # ignored on create; set automatically to next in organization
@@ -143,6 +144,7 @@ class KPIUpdate(BaseModel):
     carry_forward_data: bool | None = Field(None, description="Non-cyclic: new period entries copy values from previous period until changed")
     is_joined: bool | None = Field(None, description="Is Joined (Virtual) KPI")
     joined_config: dict | None = Field(None, description="Joined KPI mapping configuration")
+    report_header_id: int | None = Field(None, description="Set custom report header template; null = No Header")
 
 
 class DomainTagRef(BaseModel):
@@ -193,12 +195,28 @@ class UsedInReportRef(BaseModel):
     organization_id: int = Field(..., description="Organization id")
 
 
+class KPIReportHeaderRef(BaseModel):
+    """Simplified custom report header reference on KPI."""
+
+    id: int
+    name: str
+    main_heading: str
+    sub_heading: str | None = None
+    font_family: str | None = "Helvetica"
+    font_size: int | None = 16
+    text_color: str | None = "#1e3a8a"
+
+    class Config:
+        from_attributes = True
+
+
 class KPIResponse(BaseModel):
     """KPI in API response."""
 
     id: int
     organization_id: int
     domain_id: int | None = None
+    report_header_id: int | None = None
     name: str
     description: str | None
     year: int | None = None  # deprecated; data is scoped by entry year
@@ -217,6 +235,7 @@ class KPIResponse(BaseModel):
     used_in_reports: list[UsedInReportRef] = []
     is_joined: bool = False
     joined_config: dict | None = None
+    report_header: KPIReportHeaderRef | None = None
 
     class Config:
         from_attributes = True

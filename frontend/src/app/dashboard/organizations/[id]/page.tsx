@@ -159,6 +159,13 @@ interface KpiRow {
   organization_tags?: OrganizationTagRef[];
   is_joined?: boolean;
   joined_config?: any;
+  report_header_id?: number | null;
+  report_header?: {
+    id: number;
+    name: string;
+    main_heading: string;
+    sub_heading?: string | null;
+  } | null;
 }
 
 interface KpiField {
@@ -218,6 +225,7 @@ const kpiCreateSchema = z.object({
   api_endpoint_url: z.string().max(2048).optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
   is_joined: z.boolean().optional(),
+  report_header_id: z.union([z.coerce.number().int(), z.literal("none"), z.literal(""), z.null()]).optional(),
 });
 
 const kpiUpdateSchema = z.object({
@@ -228,6 +236,7 @@ const kpiUpdateSchema = z.object({
   api_endpoint_url: z.string().max(2048).optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
   is_joined: z.boolean().optional(),
+  report_header_id: z.union([z.coerce.number().int(), z.literal("none"), z.literal(""), z.null()]).optional(),
 });
 
 const tagCreateSchema = z.object({
@@ -3052,6 +3061,7 @@ function KpisSection({
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
           organization_tag_ids: data.organization_tag_ids,
           is_joined: !!data.is_joined,
+          report_header_id: data.report_header_id === "none" || data.report_header_id === "" ? null : Number(data.report_header_id),
         }),
         token,
       });
@@ -3577,6 +3587,16 @@ function KpiEditForm({
   const [contractOpen, setContractOpen] = useState(false);
   const [contract, setContract] = useState<Record<string, unknown> | null>(null);
   const [syncYear, setSyncYear] = useState<number>(() => new Date().getFullYear());
+  
+  const [customHeaders, setCustomHeaders] = useState<Array<{ id: number; name: string }>>([]);
+
+  useEffect(() => {
+    if (!token || userRole !== "SUPER_ADMIN") return;
+    api<Array<{ id: number; name: string }>>(`/reports/headers?organization_id=${orgId}`, { token })
+      .then(setCustomHeaders)
+      .catch(() => setCustomHeaders([]));
+  }, [token, userRole, orgId]);
+
   const { register, handleSubmit, watch, setValue, getValues, formState: { errors, isSubmitting } } = useForm<KpiUpdateFormData>({
     resolver: zodResolver(kpiUpdateSchema),
     defaultValues: {
@@ -3587,6 +3607,7 @@ function KpiEditForm({
       api_endpoint_url: kpi.api_endpoint_url ?? "",
       organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
       is_joined: !!kpi.is_joined,
+      report_header_id: kpi.report_header_id ?? "none",
     },
   });
   const isApiMode = watch("entry_mode") === "api";
@@ -3647,6 +3668,30 @@ function KpiEditForm({
         <label>Description</label>
         <textarea {...register("description")} rows={2} />
       </div>
+      {userRole === "SUPER_ADMIN" && (
+        <div className="form-group" style={{ marginTop: "1rem" }}>
+          <label>Report Header</label>
+          <select {...register("report_header_id")} style={{ minWidth: 200 }}>
+            <option value="none">No Header</option>
+            {customHeaders.map((h) => (
+              <option key={h.id} value={h.id}>
+                {h.name}
+              </option>
+            ))}
+          </select>
+          <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: "0.25rem" }}>
+            Select custom report header (logo & titles) to show on generated PDF/Word reports.
+          </p>
+        </div>
+      )}
+      {userRole !== "SUPER_ADMIN" && kpi.report_header && (
+        <div className="form-group" style={{ marginTop: "1rem" }}>
+          <label>Report Header</label>
+          <div style={{ padding: "0.5rem", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--bg-subtle)", fontSize: "0.9rem" }}>
+            <strong>{kpi.report_header.name}</strong> ({kpi.report_header.main_heading})
+          </div>
+        </div>
+      )}
       <div className="form-group">
         <label>Sort order</label>
         <input type="number" min={0} {...register("sort_order")} />

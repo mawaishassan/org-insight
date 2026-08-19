@@ -7,6 +7,14 @@ class CustomReportCreate(BaseModel):
     description: str | None = None
     fetch_data_with_date: bool = False
     date_fetching_config: dict | None = None
+    report_header_id: int | None = None
+    show_report_name: bool = True
+    branding_title: str | None = None
+    show_odoo_button: bool = False
+    odoo_sync_kpi_ids: list[int] | None = None  # KPI IDs selected by Super Admin to sync; None = none selected
+
+
+
 
 
 class CustomReportUpdate(BaseModel):
@@ -14,6 +22,14 @@ class CustomReportUpdate(BaseModel):
     description: str | None = None
     fetch_data_with_date: bool | None = None
     date_fetching_config: dict | None = None
+    report_header_id: int | None = None
+    show_report_name: bool | None = None
+    branding_title: str | None = None
+    show_odoo_button: bool | None = None
+    odoo_sync_kpi_ids: list[int] | None = None
+
+
+
 
 
 class CustomReportAssignmentRequest(BaseModel):
@@ -45,6 +61,15 @@ class CustomReportResponse(BaseModel):
     description: str | None
     fetch_data_with_date: bool = False
     date_fetching_config: dict | None = None
+    report_header_id: int | None = None
+    show_report_name: bool = True
+    branding_title: str | None = None
+    show_odoo_button: bool = False
+    odoo_sync_kpi_ids: list[int] | None = None
+
+    scalar_bold: bool = True
+    scalar_font_size: int = 11
+    mli_font_size: int = 10
     created_at: datetime
     updated_at: datetime
 
@@ -79,4 +104,15 @@ class CustomReportLayoutSave(BaseModel):
     attachments: list[CustomReportAttachmentLayout] = []
     fetch_data_with_date: bool | None = None
     date_fetching_config: dict | None = None
+    report_header_id: int | None = None
+    show_report_name: bool | None = None
+    branding_title: str | None = None
+    scalar_bold: bool | None = None
+    scalar_font_size: int | None = None
+    mli_font_size: int | None = None
+    show_odoo_button: bool | None = None
+    odoo_sync_kpi_ids: list[int] | None = None
+
+
+
 

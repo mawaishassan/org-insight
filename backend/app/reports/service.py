@@ -33,6 +33,17 @@ from app.core.models import (
     period_key_sort_order,
 )
 from app.reports.schemas import ReportTemplateCreate, ReportTemplateUpdate, ReportTemplateKPIAdd
+
+
+def _parse_year_int(year_val: float | int | str | None) -> int:
+    if year_val is None:
+        return datetime.date.today().year
+    try:
+        return int(year_val)
+    except (ValueError, TypeError):
+        m = re.search(r'\b\d{4}\b', str(year_val))
+        return int(m.group(0)) if m else datetime.date.today().year
+
 from app.fields.schemas import KPIFieldResponse
 from app.formula_engine.evaluator import evaluate_formula
 from app.core.models import FieldType
@@ -1882,7 +1893,7 @@ async def generate_report_data(
             except Exception:
                 pass
 
-    yr = year if year is not None else datetime.date.today().year
+    yr = _parse_year_int(year)
     t0 = time.perf_counter()
     cache_key = (template_id, org_id, int(yr), bool(include_drafts), "v3")
     cached = _cache_get(cache_key)
@@ -2546,7 +2557,7 @@ async def evaluate_report_snippet(
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
-    yr = year if year is not None else datetime.date.today().year
+    yr = _parse_year_int(year)
     data = await generate_report_data(
         db,
         template_id,
@@ -2637,6 +2648,7 @@ class NumberedCanvas(canvas.Canvas):
         self._saved_page_states = []
         self.organization_name = ""
         self.confidentiality_text = "Confidential Document"
+        self.is_custom_branding = False
         self.include_date = True
 
     def showPage(self):
@@ -2669,7 +2681,7 @@ class NumberedCanvas(canvas.Canvas):
         self.setFillColor(colors.HexColor("#6b7280"))
         
         footer_left = f"{self.confidentiality_text}"
-        if self.organization_name:
+        if not self.is_custom_branding and self.organization_name:
             footer_left += f" | {self.organization_name}"
         self.drawString(54, 40, footer_left)
         
@@ -2740,6 +2752,47 @@ def build_field_tree(all_fields: list) -> list[FieldNode]:
     return roots
 
 
+def _register_report_font(font_name: str, regular_filename: str, bold_filename: str, italic_filename: str):
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import os
+    
+    font_paths = []
+    if os.name == 'nt':
+        font_paths.append("C:\\Windows\\Fonts")
+    else:
+        font_paths.extend([
+            "/usr/share/fonts",
+            "/usr/share/fonts/truetype",
+            "/Library/Fonts",
+            "/System/Library/Fonts"
+        ])
+        
+    for p in font_paths:
+        reg_path = os.path.join(p, regular_filename)
+        bold_path = os.path.join(p, bold_filename)
+        ital_path = os.path.join(p, italic_filename)
+        
+        if os.path.exists(reg_path):
+            try:
+                pdfmetrics.registerFont(TTFont(font_name, reg_path))
+                if os.path.exists(bold_path):
+                    pdfmetrics.registerFont(TTFont(f"{font_name}-Bold", bold_path))
+                if os.path.exists(ital_path):
+                    pdfmetrics.registerFont(TTFont(f"{font_name}-Italic", ital_path))
+                return True
+            except Exception:
+                pass
+    return False
+
+def register_extra_fonts():
+    _register_report_font("Arial", "arial.ttf", "arialbd.ttf", "ariali.ttf")
+    _register_report_font("Georgia", "georgia.ttf", "georgiab.ttf", "georgiai.ttf")
+    _register_report_font("Verdana", "verdana.ttf", "verdanab.ttf", "verdanai.ttf")
+    _register_report_font("Calibri", "calibri.ttf", "calibrib.ttf", "calibrii.ttf")
+    _register_report_font("Garamond", "gara.ttf", "garabd.ttf", "garai.ttf")
+
+
 async def generate_kpi_pdf_report(
     db: AsyncSession,
     organization_id: int,
@@ -2757,7 +2810,7 @@ async def generate_kpi_pdf_report(
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     
-    from app.core.models import KPI, KPIField, KPIEntry, KPIFieldValue, Organization, FieldType
+    from app.core.models import KPI, KPIField, KPIEntry, KPIFieldValue, Organization, FieldType, OrganizationBranding
     from app.entries.routes import _display_string_for_pdf_export
     from sqlalchemy.orm import selectinload
     
@@ -2765,7 +2818,10 @@ async def generate_kpi_pdf_report(
     kpi_stmt = (
         select(KPI)
         .where(KPI.id == kpi_id, KPI.organization_id == organization_id)
-        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+        .options(
+            selectinload(KPI.fields).selectinload(KPIField.sub_fields),
+            selectinload(KPI.report_header)
+        )
     )
     kpi_res = await db.execute(kpi_stmt)
     kpi = kpi_res.scalar_one_or_none()
@@ -2935,9 +2991,301 @@ async def generate_kpi_pdf_report(
 
     elements = []
 
-    # Main Title (Report Header)
-    elements.append(Paragraph(html.escape(title), title_style))
-    elements.append(Spacer(1, 10))
+    # Custom Report Header
+    if kpi.report_header:
+        from app.storage.service import get_file_stream as storage_get_file_stream
+        from reportlab.platypus import Image
+        from reportlab.lib.units import inch
+        
+        img = ""
+        logo_w = 0
+        try:
+            logo_bytes = await storage_get_file_stream(db, organization_id, kpi.report_header.logo_path)
+            from reportlab.lib.utils import ImageReader
+            reader = ImageReader(BytesIO(logo_bytes))
+            w, h = reader.getSize()
+            aspect = float(h) / float(w) if w else 1.0
+            
+            logo_w = 1.2 * inch
+            logo_h = logo_w * aspect
+            if logo_h > 0.6 * inch:
+                logo_h = 0.6 * inch
+                logo_w = logo_h / aspect
+                
+            img = Image(BytesIO(logo_bytes), width=logo_w, height=logo_h)
+        except Exception as ex:
+            import logging
+            logging.getLogger("report_service").error(f"Failed to load logo 1: {ex}")
+            pass
+
+        img2 = ""
+        logo_w2 = 0
+        if kpi.report_header.logo_path_2:
+            try:
+                logo_bytes2 = await storage_get_file_stream(db, organization_id, kpi.report_header.logo_path_2)
+                from reportlab.lib.utils import ImageReader
+                reader2 = ImageReader(BytesIO(logo_bytes2))
+                w2, h2 = reader2.getSize()
+                aspect2 = float(h2) / float(w2) if w2 else 1.0
+                logo_w2 = 1.2 * inch
+                logo_h2 = logo_w2 * aspect2
+                if logo_h2 > 0.6 * inch:
+                    logo_h2 = 0.6 * inch
+                    logo_w2 = logo_h2 / aspect2
+                img2 = Image(BytesIO(logo_bytes2), width=logo_w2, height=logo_h2)
+            except Exception as ex:
+                import logging
+                logging.getLogger("report_service").error(f"Failed to load logo 2: {ex}")
+                pass
+            
+        # Dynamic font styling based on Custom Report Header settings
+        font_name = kpi.report_header.font_family or "Helvetica"
+        font_name_lower = font_name.lower()
+        if font_name_lower in ("times-roman", "times new roman", "times"):
+            font_name_bold = "Times-Bold"
+            font_name_italic = "Times-Italic"
+        elif font_name_lower in ("courier", "courier new"):
+            font_name_bold = "Courier-Bold"
+            font_name_italic = "Courier-Oblique"
+        elif font_name_lower == "helvetica":
+            font_name_bold = "Helvetica-Bold"
+            font_name_italic = "Helvetica-Oblique"
+        else:
+            register_extra_fonts()
+            from reportlab.pdfbase import pdfmetrics
+            registered = pdfmetrics.getRegisteredFontNames()
+            chosen_font = "Helvetica"
+            if font_name in registered:
+                chosen_font = font_name
+            elif font_name_lower == "arial" and "Arial" in registered:
+                chosen_font = "Arial"
+            elif font_name_lower == "georgia" and "Georgia" in registered:
+                chosen_font = "Georgia"
+            elif font_name_lower == "verdana" and "Verdana" in registered:
+                chosen_font = "Verdana"
+            elif font_name_lower == "calibri" and "Calibri" in registered:
+                chosen_font = "Calibri"
+            elif font_name_lower == "garamond" and "Garamond" in registered:
+                chosen_font = "Garamond"
+                
+            font_name_bold = chosen_font
+            if f"{chosen_font}-Bold" in registered:
+                font_name_bold = f"{chosen_font}-Bold"
+            elif chosen_font == "Helvetica":
+                font_name_bold = "Helvetica-Bold"
+                
+            font_name_italic = chosen_font
+            if f"{chosen_font}-Italic" in registered:
+                font_name_italic = f"{chosen_font}-Italic"
+            elif chosen_font == "Helvetica":
+                font_name_italic = "Helvetica-Oblique"
+
+        font_size = kpi.report_header.font_size or 16
+        text_color_hex = kpi.report_header.text_color or "#1e3a8a"
+
+        header_align_str = (kpi.report_header.text_align or "center").lower()
+        if header_align_str == "left":
+            align_code = TA_LEFT
+        elif header_align_str == "right":
+            align_code = TA_RIGHT
+        elif header_align_str == "justify":
+            align_code = TA_JUSTIFY
+        else:
+            align_code = TA_CENTER
+
+        heading_paragraph_style = ParagraphStyle(
+            "CustomHeaderHeadings",
+            parent=styles["Normal"],
+            leading=int(font_size * 1.25),
+            alignment=align_code
+        )
+
+        sub_align_str = (kpi.report_header.sub_text_align or kpi.report_header.text_align or "center").lower()
+        if sub_align_str == "left":
+            sub_align_code = TA_LEFT
+        elif sub_align_str == "right":
+            sub_align_code = TA_RIGHT
+        elif sub_align_str == "justify":
+            sub_align_code = TA_JUSTIFY
+        else:
+            sub_align_code = TA_CENTER
+
+        sub_font_family = kpi.report_header.sub_font_family or "Helvetica"
+        sub_font_lower = sub_font_family.lower()
+        if sub_font_lower in ("times-roman", "times new roman", "times"):
+            sub_font_name_italic = "Times-Italic"
+        elif sub_font_lower in ("courier", "courier new"):
+            sub_font_name_italic = "Courier-Oblique"
+        elif sub_font_lower == "helvetica":
+            sub_font_name_italic = "Helvetica-Oblique"
+        else:
+            register_extra_fonts()
+            from reportlab.pdfbase import pdfmetrics
+            registered = pdfmetrics.getRegisteredFontNames()
+            chosen_sub = "Helvetica"
+            if sub_font_family in registered:
+                chosen_sub = sub_font_family
+            elif sub_font_lower == "arial" and "Arial" in registered:
+                chosen_sub = "Arial"
+            elif sub_font_lower == "georgia" and "Georgia" in registered:
+                chosen_sub = "Georgia"
+            sub_font_name_italic = chosen_sub
+            if f"{chosen_sub}-Italic" in registered:
+                sub_font_name_italic = f"{chosen_sub}-Italic"
+            elif chosen_sub == "Helvetica":
+                sub_font_name_italic = "Helvetica-Oblique"
+
+        sub_font_size = kpi.report_header.sub_font_size or max(9, int(font_size * 0.65))
+        sub_color_hex = kpi.report_header.sub_text_color or "#4b5563"
+
+        sub_heading_paragraph_style = ParagraphStyle(
+            "CustomHeaderSubHeadings",
+            parent=styles["Normal"],
+            leading=int(sub_font_size * 1.25),
+            alignment=sub_align_code,
+            spaceBefore=2
+        )
+
+        desired_p_fs = font_size
+        w1 = (logo_w + 4) if img else 0
+        w2 = (logo_w2 + 4) if img2 else 0
+        mid_width = 540 - w1 - w2
+        from app.reports.custom_service import calc_auto_header_font_size
+        pdf_main_fs = calc_auto_header_font_size(kpi.report_header.main_heading, mid_width, desired_p_fs)
+
+        heading_paragraph_style = ParagraphStyle(
+            "CustomHeaderHeadings",
+            parent=styles["Normal"],
+            leading=int(pdf_main_fs * 1.25),
+            alignment=align_code
+        )
+
+        main_p = Paragraph(f"<font face='{font_name_bold}' size='{pdf_main_fs}' color='{text_color_hex}'><b>{html.escape(kpi.report_header.main_heading)}</b></font>", heading_paragraph_style)
+        
+        header_elements = [main_p]
+        if kpi.report_header.sub_heading:
+            sub_p = Paragraph(f"<font face='{sub_font_name_italic}' size='{sub_font_size}' color='{sub_color_hex}'><i>{html.escape(kpi.report_header.sub_heading)}</i></font>", sub_heading_paragraph_style)
+            header_elements.append(sub_p)
+
+        if img and img2:
+            header_table = Table(
+                [[img, header_elements, img2]],
+                colWidths=[w1, mid_width, w2],
+                hAlign='CENTER'
+            )
+            header_table.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (0, 0), "LEFT"),
+                ("ALIGN", (2, 0), (2, 0), "RIGHT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 1),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 1),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]))
+        elif img:
+            w1 = logo_w + 4
+            mid_width = 540 - w1
+            header_table = Table(
+                [[img, header_elements]],
+                colWidths=[w1, mid_width],
+                hAlign='CENTER'
+            )
+            header_table.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (0, 0), "RIGHT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 1),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 1),
+            ]))
+        elif img2:
+            w2 = logo_w2 + 4
+            mid_width = 540 - w2
+            header_table = Table(
+                [[header_elements, img2]],
+                colWidths=[mid_width, w2],
+                hAlign='CENTER'
+            )
+            header_table.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (1, 0), (1, 0), "LEFT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 1),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 1),
+            ]))
+        else:
+            header_table = Table(
+                [[header_elements]],
+                colWidths=[540],
+                hAlign='CENTER'
+            )
+        
+        elements.append(header_table)
+        elements.append(Spacer(1, 10))
+        # KPI name below the custom report header with custom color and text size
+        kpi_name_color_hex = (
+            configuration.get("kpi_name_color")
+            or (kpi.report_header.kpi_name_color if kpi.report_header else None)
+            or "#1e3a8a"
+        )
+        try:
+            kpi_name_font_size = int(
+                configuration.get("kpi_name_font_size")
+                or configuration.get("kpi_heading_size")
+                or 16
+            )
+        except (ValueError, TypeError):
+            kpi_name_font_size = 16
+
+        kpi_name_style.textColor = colors.HexColor(kpi_name_color_hex)
+        kpi_name_style.fontSize = kpi_name_font_size
+        kpi_name_style.leading = int(kpi_name_font_size * 1.25)
+
+        font_family_override = configuration.get("kpi_name_font_family") or configuration.get("kpi_heading_font_family")
+        if font_family_override:
+            ff_lower = font_family_override.lower()
+            if ff_lower in ("times-roman", "times new roman", "times"):
+                kpi_name_style.fontName = "Times-Bold"
+            elif ff_lower in ("courier", "courier new"):
+                kpi_name_style.fontName = "Courier-Bold"
+            elif ff_lower in ("helvetica", "arial"):
+                kpi_name_style.fontName = "Helvetica-Bold"
+            else:
+                register_extra_fonts()
+                from reportlab.pdfbase import pdfmetrics
+                registered = pdfmetrics.getRegisteredFontNames()
+                if font_family_override in registered:
+                    kpi_name_style.fontName = font_family_override
+
+        elements.append(Paragraph(html.escape(kpi_name_override), kpi_name_style))
+
+    else:
+        # Original Title Header
+        title_color_hex = configuration.get("kpi_name_color") or "#1e3a8a"
+        try:
+            title_font_size = int(
+                configuration.get("kpi_name_font_size")
+                or configuration.get("kpi_heading_size")
+                or 18
+            )
+        except (ValueError, TypeError):
+            title_font_size = 18
+
+        title_style.textColor = colors.HexColor(title_color_hex)
+        title_style.fontSize = title_font_size
+        title_style.leading = int(title_font_size * 1.25)
+
+        font_family_override = configuration.get("kpi_name_font_family") or configuration.get("kpi_heading_font_family")
+        if font_family_override:
+            ff_lower = font_family_override.lower()
+            if ff_lower in ("times-roman", "times new roman", "times"):
+                title_style.fontName = "Times-Bold"
+            elif ff_lower in ("courier", "courier new"):
+                title_style.fontName = "Courier-Bold"
+            elif ff_lower in ("helvetica", "arial"):
+                title_style.fontName = "Helvetica-Bold"
+
+        elements.append(Paragraph(html.escape(title), title_style))
+        elements.append(Spacer(1, 10))
+
+
 
     # Optional Description
     description = (configuration.get("description") or "").strip()
@@ -3089,6 +3437,22 @@ async def generate_kpi_pdf_report(
                 from app.entries.multi_line_load import load_multi_line_row_dicts
                 row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=requesting_user_id)
                 rows = [r for _, r in row_pairs]
+
+                # Sort multi-line rows in memory if specified
+                sort_col = field_config.get("sort_column")
+                sort_dir = field_config.get("sort_direction") or "asc"
+                if sort_col:
+                    reverse = sort_dir == "desc"
+                    def sort_key(row: dict):
+                        v = row.get(sort_col)
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            return str(v) if v is not None else ""
+                    try:
+                        rows = sorted(rows, key=sort_key, reverse=reverse)
+                    except Exception:
+                        pass
 
                 filtered_rows = []
                 if rows:
@@ -3294,11 +3658,20 @@ async def generate_kpi_pdf_report(
         title=title
     )
 
+    # Fetch Organization Branding for footer
+    org_branding_stmt = select(OrganizationBranding).where(OrganizationBranding.organization_id == organization_id)
+    org_branding_res = await db.execute(org_branding_stmt)
+    org_branding = org_branding_res.scalar_one_or_none()
+
     def canvas_maker(*args, **kwargs):
         canvas_obj = NumberedCanvas(*args, **kwargs)
         canvas_obj.organization_name = organization_info or (getattr(org, "name", "") if org else "")
+        if org_branding and org_branding.footer_label:
+            canvas_obj.confidentiality_text = org_branding.footer_label
+            canvas_obj.is_custom_branding = True
         canvas_obj.include_date = include_generation_date
         return canvas_obj
+
 
     doc.build(elements, canvasmaker=canvas_maker)
     return buf.getvalue()
@@ -3319,7 +3692,7 @@ async def generate_kpi_docx_report(
     from docx.shared import Pt, Inches, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     
-    from app.core.models import KPI, KPIField, KPIEntry, KPIFieldValue, Organization, FieldType
+    from app.core.models import KPI, KPIField, KPIEntry, KPIFieldValue, Organization, FieldType, OrganizationBranding
     from app.entries.routes import _display_string_for_pdf_export
     from sqlalchemy.orm import selectinload
     
@@ -3327,7 +3700,10 @@ async def generate_kpi_docx_report(
     kpi_stmt = (
         select(KPI)
         .where(KPI.id == kpi_id, KPI.organization_id == organization_id)
-        .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+        .options(
+            selectinload(KPI.fields).selectinload(KPIField.sub_fields),
+            selectinload(KPI.report_header)
+        )
     )
     kpi_res = await db.execute(kpi_stmt)
     kpi = kpi_res.scalar_one_or_none()
@@ -3382,20 +3758,286 @@ async def generate_kpi_docx_report(
 
     # 4. Extract Configuration
     title = (configuration.get("report_header") or configuration.get("title") or "").strip() or f"{kpi.name} Report"
+    kpi_name_override = (configuration.get("kpi_name_override") or "").strip() or kpi.name
     description = (configuration.get("description") or "").strip()
 
     org = await db.get(Organization, organization_id)
 
     # 5. Initialize Document
     doc = Document()
-    
-    # Add Report Header/Title
-    p_title = doc.add_paragraph()
-    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run_title = p_title.add_run(title)
-    run_title.bold = True
-    run_title.font.size = Pt(18)
-    run_title.font.color.rgb = RGBColor(0x1e, 0x3a, 0x8a)
+
+    # Add Footer with Organization Branding label
+    org_branding_stmt = select(OrganizationBranding).where(OrganizationBranding.organization_id == organization_id)
+    org_branding_res = await db.execute(org_branding_stmt)
+    org_branding = org_branding_res.scalar_one_or_none()
+
+    section = doc.sections[0]
+    footer = section.footer
+    p_ftr = footer.paragraphs[0]
+    p_ftr.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    if org_branding and org_branding.footer_label:
+        ftr_label = org_branding.footer_label
+    else:
+        ftr_label = "Confidential Document"
+        if org and getattr(org, "name", None):
+            ftr_label += f" | {org.name}"
+    run_ftr = p_ftr.add_run(ftr_label)
+    run_ftr.font.size = Pt(8)
+    run_ftr.font.color.rgb = RGBColor(0x6b, 0x72, 0x80)
+
+    # Add Custom Report Header
+
+    if kpi.report_header:
+        from app.storage.service import get_file_stream as storage_get_file_stream
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        
+        has_logo2 = bool(kpi.report_header.logo_path_2)
+        
+        # Create a table for logo + headings + optional logo2
+        header_table = doc.add_table(rows=1, cols=3)
+        header_table.autofit = False
+        header_table.columns[0].width = Inches(1.4)
+        header_table.columns[1].width = Inches(3.7)
+        header_table.columns[2].width = Inches(1.4)
+        cell_logo = header_table.cell(0, 0)
+        cell_text = header_table.cell(0, 1)
+        cell_logo2 = header_table.cell(0, 2)
+        
+        p_logo = cell_logo.paragraphs[0]
+        p_logo.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        try:
+            logo_bytes = await storage_get_file_stream(db, organization_id, kpi.report_header.logo_path)
+            logo_stream = BytesIO(logo_bytes)
+            p_logo.add_run().add_picture(logo_stream, width=Inches(1.2))
+        except Exception:
+            pass
+
+        if cell_logo2:
+            p_logo2 = cell_logo2.paragraphs[0]
+            p_logo2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            try:
+                logo_bytes2 = await storage_get_file_stream(db, organization_id, kpi.report_header.logo_path_2)
+                logo_stream2 = BytesIO(logo_bytes2)
+                p_logo2.add_run().add_picture(logo_stream2, width=Inches(1.2))
+            except Exception:
+                pass
+            
+        header_align_str = (kpi.report_header.text_align or "center").lower()
+        if header_align_str == "left":
+            align_wd = WD_ALIGN_PARAGRAPH.LEFT
+        elif header_align_str == "right":
+            align_wd = WD_ALIGN_PARAGRAPH.RIGHT
+        elif header_align_str == "justify":
+            align_wd = WD_ALIGN_PARAGRAPH.JUSTIFY
+        else:
+            align_wd = WD_ALIGN_PARAGRAPH.CENTER
+
+        p_head = cell_text.paragraphs[0]
+        p_head.alignment = align_wd
+        p_head.paragraph_format.space_before = Pt(4)
+        run_main = p_head.add_run(kpi.report_header.main_heading)
+        run_main.bold = True
+        
+        font_family = kpi.report_header.font_family or "Helvetica"
+        font_family_lower = font_family.lower()
+        docx_font = "Arial"
+        if font_family_lower in ("times-roman", "times new roman", "times"):
+            docx_font = "Times New Roman"
+        elif font_family_lower in ("courier", "courier new"):
+            docx_font = "Courier New"
+        elif font_family_lower == "arial":
+            docx_font = "Arial"
+        elif font_family_lower == "georgia":
+            docx_font = "Georgia"
+        elif font_family_lower == "verdana":
+            docx_font = "Verdana"
+        elif font_family_lower == "calibri":
+            docx_font = "Calibri"
+        elif font_family_lower == "garamond":
+            docx_font = "Garamond"
+            
+        run_main.font.name = docx_font
+        # Force apply font family mapping to oxml
+        r_elem = run_main._r.get_or_add_rPr()
+        rFonts = OxmlElement('w:rFonts')
+        rFonts.set(qn('w:ascii'), docx_font)
+        rFonts.set(qn('w:hAnsi'), docx_font)
+        r_elem.append(rFonts)
+        
+        font_size = kpi.report_header.font_size or 16
+        run_main.font.size = Pt(font_size)
+        
+        color_hex = (kpi.report_header.text_color or "#1e3a8a").lstrip("#")
+        try:
+            r = int(color_hex[0:2], 16)
+            g = int(color_hex[2:4], 16)
+            b = int(color_hex[4:6], 16)
+        except Exception:
+            r, g, b = 0x1e, 0x3a, 0x8a
+        run_main.font.color.rgb = RGBColor(r, g, b)
+        
+        if kpi.report_header.sub_heading:
+            p_sub = cell_text.add_paragraph()
+            sub_align_str = (kpi.report_header.sub_text_align or kpi.report_header.text_align or "center").lower()
+            if sub_align_str == "left":
+                sub_align_wd = WD_ALIGN_PARAGRAPH.LEFT
+            elif sub_align_str == "right":
+                sub_align_wd = WD_ALIGN_PARAGRAPH.RIGHT
+            elif sub_align_str == "justify":
+                sub_align_wd = WD_ALIGN_PARAGRAPH.JUSTIFY
+            else:
+                sub_align_wd = WD_ALIGN_PARAGRAPH.CENTER
+
+            p_sub.alignment = sub_align_wd
+            p_sub.paragraph_format.space_before = Pt(2)
+            run_sub = p_sub.add_run(kpi.report_header.sub_heading)
+            run_sub.italic = True
+
+            sub_font_family = kpi.report_header.sub_font_family or "Helvetica"
+            sub_ff_lower = sub_font_family.lower()
+            sub_docx_font = "Arial"
+            if sub_ff_lower in ("times-roman", "times new roman", "times"):
+                sub_docx_font = "Times New Roman"
+            elif sub_ff_lower in ("courier", "courier new"):
+                sub_docx_font = "Courier New"
+            elif sub_ff_lower == "arial":
+                sub_docx_font = "Arial"
+            elif sub_ff_lower == "georgia":
+                sub_docx_font = "Georgia"
+            elif sub_ff_lower == "verdana":
+                sub_docx_font = "Verdana"
+            elif sub_ff_lower == "calibri":
+                sub_docx_font = "Calibri"
+            elif sub_ff_lower == "garamond":
+                sub_docx_font = "Garamond"
+
+            run_sub.font.name = sub_docx_font
+            r_elem_sub = run_sub._r.get_or_add_rPr()
+            rFonts_sub = OxmlElement('w:rFonts')
+            rFonts_sub.set(qn('w:ascii'), sub_docx_font)
+            rFonts_sub.set(qn('w:hAnsi'), sub_docx_font)
+            r_elem_sub.append(rFonts_sub)
+
+            sub_font_size = kpi.report_header.sub_font_size or max(9, int(font_size * 0.65))
+            run_sub.font.size = Pt(sub_font_size)
+
+            sub_color_hex = (kpi.report_header.sub_text_color or "#4b5563").lstrip("#")
+            try:
+                sr = int(sub_color_hex[0:2], 16)
+                sg = int(sub_color_hex[2:4], 16)
+                sb = int(sub_color_hex[4:6], 16)
+            except Exception:
+                sr, sg, sb = 0x4b, 0x55, 0x63
+            run_sub.font.color.rgb = RGBColor(sr, sg, sb)
+            
+        # KPI name below the custom report header
+        p_kpi_name = doc.add_paragraph()
+        p_kpi_name.paragraph_format.space_before = Pt(10)
+        p_kpi_name.paragraph_format.space_after = Pt(6)
+        run_kn = p_kpi_name.add_run(kpi_name_override)
+        run_kn.bold = True
+
+        kn_color_hex = (
+            configuration.get("kpi_name_color")
+            or (kpi.report_header.kpi_name_color if kpi.report_header else None)
+            or "#1e3a8a"
+        ).lstrip("#")
+        try:
+            kn_r = int(kn_color_hex[0:2], 16)
+            kn_g = int(kn_color_hex[2:4], 16)
+            kn_b = int(kn_color_hex[4:6], 16)
+        except Exception:
+            kn_r, kn_g, kn_b = 0x1e, 0x3a, 0x8a
+        run_kn.font.color.rgb = RGBColor(kn_r, kn_g, kn_b)
+
+        try:
+            kn_size = int(
+                configuration.get("kpi_name_font_size")
+                or configuration.get("kpi_heading_size")
+                or 16
+            )
+        except (ValueError, TypeError):
+            kn_size = 16
+        run_kn.font.size = Pt(kn_size)
+
+        font_family_override = configuration.get("kpi_name_font_family") or configuration.get("kpi_heading_font_family")
+        if font_family_override:
+            ff_lower = font_family_override.lower()
+            docx_font_kn = "Arial"
+            if ff_lower in ("times-roman", "times new roman", "times"):
+                docx_font_kn = "Times New Roman"
+            elif ff_lower in ("courier", "courier new"):
+                docx_font_kn = "Courier New"
+            elif ff_lower == "arial":
+                docx_font_kn = "Arial"
+            elif ff_lower == "georgia":
+                docx_font_kn = "Georgia"
+            elif ff_lower == "verdana":
+                docx_font_kn = "Verdana"
+            elif ff_lower == "calibri":
+                docx_font_kn = "Calibri"
+            elif ff_lower == "garamond":
+                docx_font_kn = "Garamond"
+            run_kn.font.name = docx_font_kn
+            r_elem_kn = run_kn._r.get_or_add_rPr()
+            rFonts_kn = OxmlElement('w:rFonts')
+            rFonts_kn.set(qn('w:ascii'), docx_font_kn)
+            rFonts_kn.set(qn('w:hAnsi'), docx_font_kn)
+            r_elem_kn.append(rFonts_kn)
+
+    else:
+        # Original Title Header
+        p_title = doc.add_paragraph()
+        p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run_title = p_title.add_run(title)
+        run_title.bold = True
+
+        title_color_hex = (configuration.get("kpi_name_color") or "#1e3a8a").lstrip("#")
+        try:
+            t_r = int(title_color_hex[0:2], 16)
+            t_g = int(title_color_hex[2:4], 16)
+            t_b = int(title_color_hex[4:6], 16)
+        except Exception:
+            t_r, t_g, t_b = 0x1e, 0x3a, 0x8a
+        run_title.font.color.rgb = RGBColor(t_r, t_g, t_b)
+
+        try:
+            t_size = int(
+                configuration.get("kpi_name_font_size")
+                or configuration.get("kpi_heading_size")
+                or 18
+            )
+        except (ValueError, TypeError):
+            t_size = 18
+        run_title.font.size = Pt(t_size)
+
+        font_family_override = configuration.get("kpi_name_font_family") or configuration.get("kpi_heading_font_family")
+        if font_family_override:
+            ff_lower = font_family_override.lower()
+            docx_font_t = "Arial"
+            if ff_lower in ("times-roman", "times new roman", "times"):
+                docx_font_t = "Times New Roman"
+            elif ff_lower in ("courier", "courier new"):
+                docx_font_t = "Courier New"
+            elif ff_lower == "arial":
+                docx_font_t = "Arial"
+            elif ff_lower == "georgia":
+                docx_font_t = "Georgia"
+            elif ff_lower == "verdana":
+                docx_font_t = "Verdana"
+            elif ff_lower == "calibri":
+                docx_font_t = "Calibri"
+            elif ff_lower == "garamond":
+                docx_font_t = "Garamond"
+            run_title.font.name = docx_font_t
+            r_elem_t = run_title._r.get_or_add_rPr()
+            rFonts_t = OxmlElement('w:rFonts')
+            rFonts_t.set(qn('w:ascii'), docx_font_t)
+            rFonts_t.set(qn('w:hAnsi'), docx_font_t)
+            r_elem_t.append(rFonts_t)
+
+
     
     # Add Description
     if description:
@@ -3530,8 +4172,24 @@ async def generate_kpi_docx_report(
                 raw_filters = field_config.get("filters", {})
 
                 from app.entries.multi_line_load import load_multi_line_row_dicts
-                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=current_user_id)
+                row_pairs = await load_multi_line_row_dicts(db, entry_id=entry.id, field=f, current_user_id=requesting_user_id)
                 rows = [r for _, r in row_pairs]
+
+                # Sort multi-line rows in memory if specified
+                sort_col = field_config.get("sort_column")
+                sort_dir = field_config.get("sort_direction") or "asc"
+                if sort_col:
+                    reverse = sort_dir == "desc"
+                    def sort_key(row: dict):
+                        v = row.get(sort_col)
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            return str(v) if v is not None else ""
+                    try:
+                        rows = sorted(rows, key=sort_key, reverse=reverse)
+                    except Exception:
+                        pass
 
                 filtered_rows = []
                 if rows:

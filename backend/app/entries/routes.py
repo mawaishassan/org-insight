@@ -620,7 +620,7 @@ def _typed_value_for_xlsx_export(val: Any, field_type: FieldType | str | None) -
     if val is None or val == "":
         return None
     ft = field_type.value if isinstance(field_type, FieldType) else field_type
-    if ft in (FieldType.number.value, "number"):
+    if ft in (FieldType.number.value, "number", FieldType.formula.value, "formula"):
         try:
             f = float(val)
             return int(f) if f.is_integer() else f
@@ -769,9 +769,18 @@ def _display_string_for_pdf_export(val: Any, field_type: FieldType | str | None)
     ft = field_type.value if isinstance(field_type, FieldType) else field_type
     if ft in (FieldType.mixed_list.value, "mixed_list") and isinstance(val, list):
         parts = [str(x).strip() for x in val if x is not None and str(x).strip() != ""]
-        # Blank line between values (not just a line break) for readability; the extra "\n"
-        # becomes a second <br/> in cell_text(), which also grows the row height further.
-        return "\n\n".join(parts)
+        cleaned_parts = []
+        for p in parts:
+            try:
+                if "." in p:
+                    f = float(p)
+                    if f.is_integer():
+                        cleaned_parts.append(str(int(f)))
+                        continue
+            except (TypeError, ValueError):
+                pass
+            cleaned_parts.append(p)
+        return "\n\n".join(cleaned_parts)
     typed = _typed_value_for_xlsx_export(val, field_type)
     if typed is None:
         return ""
@@ -779,6 +788,18 @@ def _display_string_for_pdf_export(val: Any, field_type: FieldType | str | None)
         return "Yes" if typed else "No"
     if isinstance(typed, date):
         return typed.isoformat()
+    if isinstance(typed, float):
+        if typed.is_integer():
+            return str(int(typed))
+        return str(typed)
+    if isinstance(typed, str):
+        try:
+            if "." in typed:
+                f = float(typed)
+                if f.is_integer():
+                    return str(int(f))
+        except (TypeError, ValueError):
+            pass
     return str(typed)
 
 
