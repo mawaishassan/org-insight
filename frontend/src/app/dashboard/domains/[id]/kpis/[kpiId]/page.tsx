@@ -365,6 +365,8 @@ export default function DomainKpiDetailPage() {
   const [showPdfModal, setShowPdfModal] = useState(false);
   const [pdfTitle, setPdfTitle] = useState("");
   const [pdfKpiNameOverride, setPdfKpiNameOverride] = useState("");
+  const [pdfKpiNameColor, setPdfKpiNameColor] = useState("#1e3a8a");
+  const [pdfKpiNameFontSize, setPdfKpiNameFontSize] = useState("16");
   const [pdfCustomHeader, setPdfCustomHeader] = useState("University Research Performance Report");
   const [pdfCustomSubheader, setPdfCustomSubheader] = useState("Department of Computer Science");
   const [pdfOrgInfo, setPdfOrgInfo] = useState("");
@@ -559,6 +561,8 @@ export default function DomainKpiDetailPage() {
           period_key: periodKeyFromUrl || "",
           title: pdfTitle,
           kpi_name_override: pdfKpiNameOverride,
+          kpi_name_color: pdfKpiNameColor,
+          kpi_name_font_size: Number(pdfKpiNameFontSize),
           custom_header: pdfCustomHeader,
           custom_subheader: pdfCustomSubheader,
           organization_info: pdfOrgInfo,
@@ -2043,7 +2047,7 @@ export default function DomainKpiDetailPage() {
                   You are entering data for <span style={{ color: "var(--text)" }}>{timeDimensionLabel != null ? `${timeDimensionLabel} (${year})` : year}</span>.
                 </p>
                 <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
-                {meRole === "ORG_ADMIN" && (
+                {meRole && (
                   <button
                     type="button"
                     onMouseEnter={() => setReportBtnState("hover")}

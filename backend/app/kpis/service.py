@@ -77,6 +77,7 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
         kpi = KPI(
             organization_id=org_id,
             domain_id=data.domain_id,
+            report_header_id=data.report_header_id,
             name=data.name,
             description=data.description,
             year=None,
@@ -90,6 +91,7 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
         kpi = KPI(
             organization_id=org_id,
             domain_id=None,
+            report_header_id=data.report_header_id,
             name=data.name,
             description=data.description,
             year=None,
@@ -336,6 +338,11 @@ async def update_kpi(
         kpi.is_joined = data.is_joined
     if data.joined_config is not None:
         kpi.joined_config = data.joined_config
+    
+    fields_set = getattr(data, "model_fields_set", None) or getattr(data, "__fields_set__", set())
+    if "report_header_id" in fields_set:
+        kpi.report_header_id = data.report_header_id
+        
     await db.flush()
     if data.domain_ids is not None:
         await _sync_kpi_domains(db, kpi_id, org_id, data.domain_ids)

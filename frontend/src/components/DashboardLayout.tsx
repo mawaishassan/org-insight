@@ -845,6 +845,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     Reports
                   </Link>
                   <Link
+                    href={`/dashboard/reports/headers?organization_id=${selectedOrgId}`}
+                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Report Headers
+                  </Link>
+                  <Link
                     href={`/dashboard/custom-reports?organization_id=${selectedOrgId}`}
                     style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
                     onClick={() => setMenuOpen(false)}

@@ -213,6 +213,13 @@ interface KpiInfo {
   domain_tags?: DomainTagRef[];
   category_tags?: CategoryTagRef[];
   used_in_reports?: UsedInReportRef[];
+  report_header_id?: number | null;
+  report_header?: {
+    id: number;
+    name: string;
+    main_heading: string;
+    sub_heading?: string | null;
+  } | null;
 }
 
 const createSchema = z.object({
@@ -252,6 +259,7 @@ const kpiUpdateSchema = z.object({
   organization_tag_ids: z.array(z.number().int()).optional(),
   is_joined: z.boolean().optional(),
   joined_config: z.any().optional(),
+  report_header_id: z.union([z.coerce.number().int(), z.literal("none"), z.literal(""), z.null()]).optional(),
 });
 
 const TIME_DIMENSION_ORDER = ["yearly", "half_yearly", "quarterly", "monthly"] as const;
@@ -275,6 +283,7 @@ export default function KpiFieldsPage() {
   const [kpi, setKpi] = useState<KpiInfo | null>(null);
   const [orgTags, setOrgTags] = useState<OrgTagRef[]>([]);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
+  const [customHeaders, setCustomHeaders] = useState<Array<{ id: number; name: string }>>([]);
   const [list, setList] = useState<KpiField[]>([]);
   const [sections, setSections] = useState<KpiSection[]>([]);
   const [newSectionName, setNewSectionName] = useState("");
@@ -501,6 +510,7 @@ export default function KpiFieldsPage() {
       organization_tag_ids: [],
       is_joined: false,
       joined_config: null,
+      report_header_id: "none",
     },
   });
 
@@ -517,9 +527,10 @@ export default function KpiFieldsPage() {
         organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
         is_joined: kpi.is_joined ?? false,
         joined_config: kpi.joined_config ?? null,
+        report_header_id: kpi.report_header_id ?? "none",
       });
     }
-  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.carry_forward_data, kpi?.organization_tags, kpi?.is_joined, kpi?.joined_config, orgIdFromUrl]);
+  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.carry_forward_data, kpi?.organization_tags, kpi?.is_joined, kpi?.joined_config, kpi?.report_header_id, orgIdFromUrl]);
 
   useEffect(() => {
     if (!token) return;
@@ -538,6 +549,13 @@ export default function KpiFieldsPage() {
   }, [token, kpiId, userRole, orgIdFromUrl]);
 
   const orgId = kpi?.organization_id ?? kpiOrgId ?? orgIdFromUrl ?? null;
+
+  useEffect(() => {
+    if (!token || userRole !== "SUPER_ADMIN" || orgId == null) return;
+    api<Array<{ id: number; name: string }>>(`/reports/headers?organization_id=${orgId}`, { token })
+      .then(setCustomHeaders)
+      .catch(() => setCustomHeaders([]));
+  }, [token, userRole, orgId]);
   const fieldsQuery = (o?: number) => {
     const id = o ?? orgId;
     return id != null ? `kpi_id=${kpiId}&organization_id=${id}` : `kpi_id=${kpiId}`;
@@ -1572,6 +1590,7 @@ export default function KpiFieldsPage() {
           organization_tag_ids: data.organization_tag_ids ?? [],
           is_joined: !!data.is_joined,
           joined_config: data.joined_config,
+          report_header_id: data.report_header_id === "none" || data.report_header_id === "" ? null : Number(data.report_header_id),
         }),
       });
       setKpi(updated);
@@ -1850,6 +1869,30 @@ export default function KpiFieldsPage() {
                 <label>Description</label>
                 <textarea {...kpiEditForm.register("description")} rows={2} />
               </div>
+              {userRole === "SUPER_ADMIN" && (
+                <div className="form-group" style={{ marginTop: "1rem" }}>
+                  <label>Report Header</label>
+                  <select {...kpiEditForm.register("report_header_id")}>
+                    <option value="none">No Header</option>
+                    {customHeaders.map((h) => (
+                      <option key={h.id} value={h.id}>
+                        {h.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: "0.25rem" }}>
+                    Select custom report header (logo & titles) to show on generated PDF/Word reports.
+                  </p>
+                </div>
+              )}
+              {userRole !== "SUPER_ADMIN" && kpi?.report_header && (
+                <div className="form-group" style={{ marginTop: "1rem" }}>
+                  <label>Report Header</label>
+                  <div style={{ padding: "0.5rem", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--bg-subtle)", fontSize: "0.9rem" }}>
+                    <strong>{kpi.report_header.name}</strong> ({kpi.report_header.main_heading})
+                  </div>
+                </div>
+              )}
               {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
               <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
                 <button

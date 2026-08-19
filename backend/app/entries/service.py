@@ -1050,6 +1050,18 @@ async def can_view_kpi_for_user(
             return False
         effective_org = org_id if org_id is not None else getattr(user, "organization_id", None)
         return effective_org is not None and kpi_org == effective_org
+    # 1) Direct user KPI assignment?
+    kpi_assign_res = await db.execute(
+        select(KPIAssignment)
+        .where(
+            KPIAssignment.user_id == user_id,
+            KPIAssignment.kpi_id == kpi_id,
+        )
+    )
+    if kpi_assign_res.scalar_one_or_none() is not None:
+        return True
+
+    # 2) KPI-level Role assignment?
     kpi_role_res = await db.execute(
         select(KpiRoleAssignment)
         .join(
@@ -2069,9 +2081,52 @@ async def recompute_formula_fields_for_entry(
     return True
 
 
+def extract_all_referenced_kpi_ids(expr: str) -> set[int]:
+    """Helper to parse a formula expression and extract all cross-KPI referenced KPI IDs."""
+    import ast
+    import re
+    referenced_ids = set()
+    if not expr or not expr.strip():
+        return referenced_ids
+    
+    expr_str = expr.strip()
+    if "GROUP_BY" in expr_str and "=" in expr_str:
+        expr_str = re.sub(r'(\b\w+\b)\s*(?<![!=><])=\s*(?![=])(CurrentRow\.\w+|"[^"]*"|\w+)', r'\1 == \2', expr_str)
+    
+    try:
+        tree = ast.parse(expr_str)
+    except Exception:
+        # Fallback to simple regex if AST parsing fails (e.g. due to syntax)
+        pattern = r"\b(KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE|KPI_GROUP_BY|GROUP_BY_KPI)\s*\(\s*(\d+)\s*,"
+        for m in re.finditer(pattern, expr_str):
+            referenced_ids.add(int(m.group(2)))
+        return referenced_ids
+        
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            func_name = node.func.id
+            if func_name in (
+                "SUM_KPI_ITEMS", "AVG_KPI_ITEMS", "COUNT_KPI_ITEMS", "MIN_KPI_ITEMS", "MAX_KPI_ITEMS",
+                "SUM_KPI_ITEMS_WHERE", "AVG_KPI_ITEMS_WHERE", "COUNT_KPI_ITEMS_WHERE", "MIN_KPI_ITEMS_WHERE", "MAX_KPI_ITEMS_WHERE",
+                "KPI_FIELD", "KPI_GROUP_BY", "GROUP_BY_KPI"
+            ):
+                if len(node.args) >= 2:
+                    arg0 = node.args[0]
+                    kpi_id = None
+                    if isinstance(arg0, ast.Constant):
+                        kpi_id = arg0.value
+                    elif isinstance(arg0, ast.Num):
+                        kpi_id = arg0.n
+                    
+                    if isinstance(kpi_id, int):
+                        referenced_ids.add(kpi_id)
+                    elif isinstance(kpi_id, str) and kpi_id.isdigit():
+                        referenced_ids.add(int(kpi_id))
+    return referenced_ids
+
+
 async def propagate_formula_recalculations(db: AsyncSession, entry_id: int, org_id: int) -> None:
     """Recursively propagate formula recalculations to all dependent KPI entries."""
-    import re
     from sqlalchemy import or_, and_
     
     queue = [entry_id]
@@ -2107,18 +2162,21 @@ async def propagate_formula_recalculations(db: AsyncSession, entry_id: int, org_
                 continue
             depends = False
             for f in (k.fields or []):
+                # 1. Check KPI-level formula fields
                 if f.field_type == FieldType.formula and f.formula_expression:
-                    pattern = rf"\b(KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE)\s*\(\s*{curr_kpi_id}\s*,"
-                    if re.search(pattern, f.formula_expression):
+                    referenced_ids = extract_all_referenced_kpi_ids(f.formula_expression)
+                    if curr_kpi_id in referenced_ids:
                         depends = True
                         break
+                # 2. Check subfields under multi-line items fields
                 for sf in (f.sub_fields or []):
-                    if sf.field_type == FieldType.formula:
+                    sf_type = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
+                    if sf_type == "formula":
                         cfg = sf.config or {}
                         expr = cfg.get("formula_expression") if isinstance(cfg, dict) else None
                         if expr:
-                            pattern = rf"\b(KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE)\s*\(\s*{curr_kpi_id}\s*,"
-                            if re.search(pattern, expr):
+                            referenced_ids = extract_all_referenced_kpi_ids(expr)
+                            if curr_kpi_id in referenced_ids:
                                 depends = True
                                 break
                 if depends:
@@ -2140,9 +2198,35 @@ async def propagate_formula_recalculations(db: AsyncSession, entry_id: int, org_
                 
             dep_entry_res = await db.execute(q)
             dep_entry = dep_entry_res.scalar_one_or_none()
+            if not dep_entry:
+                # Auto-create the entry with matching is_draft status so calculations are performed and persisted
+                dep_entry = KPIEntry(
+                    organization_id=org_id,
+                    kpi_id=dk.id,
+                    user_id=user_id or 1,
+                    year=year,
+                    period_key=period_key or "",
+                    is_draft=is_draft,
+                    is_modified_after_submission=False
+                )
+                db.add(dep_entry)
+                await db.flush()
+                # Copy carry-forward from previous period
+                await _copy_carry_forward_from_previous(db, org_id, dk.id, dep_entry, year, period_key or "")
+
             if dep_entry and dep_entry.id not in visited:
                 visited.add(dep_entry.id)
                 queue.append(dep_entry.id)
+
+
+    # Invalidate all custom report caches since KPI entries / data changed, forcing recalculated values to show up on page refresh
+    try:
+        from app.reports.custom_service import CUSTOM_REPORT_CACHE
+        CUSTOM_REPORT_CACHE.invalidate_all()
+    except Exception as e:
+        print(f"Failed to invalidate custom report cache: {e}")
+
+
 
 
 async def recompute_formula_fields_for_kpi(
@@ -3352,52 +3436,64 @@ async def recompute_mli_formula_subfields(
                 .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
             )
             rows_orm = list(rows_res.scalars().all())
+            rows_orm = sorted(rows_orm, key=lambda x: x.row_index)
 
-            for r in rows_orm:
-                # Construct working row data from existing cells
-                working_row: dict[str, Any] = {}
-                cells_by_sub_id: dict[int, KpiMultiLineCell] = {}
+            # Ensure multi_line_items_data is initialized and matching rows
+            if f.key not in multi_line_items_data or not isinstance(multi_line_items_data[f.key], list):
+                multi_line_items_data[f.key] = []
+            while len(multi_line_items_data[f.key]) < len(rows_orm):
+                multi_line_items_data[f.key].append({})
+
+            # Populate working rows with existing cell values (if not already present)
+            cells_by_row_and_sub: dict[int, dict[int, KpiMultiLineCell]] = {}
+            for idx, r in enumerate(rows_orm):
+                cells_by_row_and_sub[r.id] = {}
+                working_row = multi_line_items_data[f.key][idx]
                 for cell in getattr(r, "cells", None) or []:
-                    sf = getattr(cell, "sub_field", None)
-                    if sf:
-                        working_row[sf.key] = _ml_cell_raw(cell)
-                        cells_by_sub_id[sf.id] = cell
-                # Compute formula subfields in topological order
-                for sf in sorted_subs:
-                    sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
-                    if sf_type_s == "formula":
-                        cfg = sf.config or {}
-                        if hasattr(cfg, "get"):
-                            expr = cfg.get("formula_expression")
-                        elif isinstance(cfg, dict):
-                            expr = cfg.get("formula_expression")
-                        else:
-                            expr = None
-                        if not expr:
-                            computed = None
-                        else:
-                            computed = evaluate_formula(
-                                expr,
-                                value_by_key,
-                                multi_line_items_data,
-                                other_kpi_values,
-                                current_row=working_row,
-                                other_kpi_multi_line_data=other_kpi_mli_data,
-                            )
+                    sf_ref = getattr(cell, "sub_field", None)
+                    if sf_ref:
+                        cells_by_row_and_sub[r.id][sf_ref.id] = cell
+                        if sf_ref.key not in working_row:
+                            working_row[sf_ref.key] = _ml_cell_raw(cell)
+
+            # Compute formula subfields: outer loop over fields (topological order), inner loop over rows
+            for sf in sorted_subs:
+                sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
+                if sf_type_s == "formula":
+                    cfg = sf.config or {}
+                    if hasattr(cfg, "get"):
+                        expr = cfg.get("formula_expression")
+                    elif isinstance(cfg, dict):
+                        expr = cfg.get("formula_expression")
+                    else:
+                        expr = None
+                    if not expr:
+                        continue
+
+                    for idx, r in enumerate(rows_orm):
+                        working_row = multi_line_items_data[f.key][idx]
+                        computed = evaluate_formula(
+                            expr,
+                            value_by_key,
+                            multi_line_items_data,
+                            other_kpi_values,
+                            current_row=working_row,
+                            other_kpi_multi_line_data=other_kpi_mli_data,
+                        )
 
                         cond_logic = cfg.get("conditional_logic") if isinstance(cfg, dict) else None
                         if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
                             computed = apply_conditional_logic(computed, cond_logic)
 
-                        # Update working_row
+                        # Update working_row in-place
                         working_row[sf.key] = computed
 
                         # Persist cell value
-                        cell = cells_by_sub_id.get(sf.id)
+                        cell = cells_by_row_and_sub[r.id].get(sf.id)
                         if cell is None:
                             cell = KpiMultiLineCell(row_id=r.id, sub_field_id=sf.id)
                             db.add(cell)
-                            cells_by_sub_id[sf.id] = cell
+                            cells_by_row_and_sub[r.id][sf.id] = cell
 
                         cell.value_text = None
                         cell.value_number = None
@@ -3413,6 +3509,7 @@ async def recompute_mli_formula_subfields(
                                 cell.value_number = float(computed)
                             else:
                                 cell.value_text = str(computed)
+
         await db.flush()
     finally:
         if not is_sqlite:

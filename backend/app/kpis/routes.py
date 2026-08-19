@@ -50,6 +50,7 @@ from app.kpis.schemas import (
     KpiSectionUpdate,
     KpiSectionResponse,
     KpiSectionFieldIdsBody,
+    KPIReportHeaderRef,
 )
 from app.kpis.service import (
     create_kpi,
@@ -169,10 +170,21 @@ def _kpi_to_response(k):
                     organization_id=rt.organization_id,
                 )
             )
+    rh = getattr(k, "report_header", None)
+    report_header_ref = KPIReportHeaderRef(
+        id=rh.id,
+        name=rh.name,
+        main_heading=rh.main_heading,
+        sub_heading=getattr(rh, "sub_heading", None),
+        font_family=getattr(rh, "font_family", None),
+        font_size=getattr(rh, "font_size", None),
+        text_color=getattr(rh, "text_color", None),
+    ) if rh is not None else None
     return KPIResponse(
         id=k.id,
         organization_id=k.organization_id,
         domain_id=k.domain_id,
+        report_header_id=getattr(k, "report_header_id", None),
         name=k.name,
         description=k.description,
         year=getattr(k, "year", None),
@@ -191,6 +203,7 @@ def _kpi_to_response(k):
         used_in_reports=used_in_reports,
         is_joined=getattr(k, "is_joined", False),
         joined_config=getattr(k, "joined_config", None),
+        report_header=report_header_ref,
     )
 
 
@@ -1663,6 +1676,9 @@ class KpiReportGenerateBody(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     kpi_name_override: Optional[str] = None
+    kpi_name_color: Optional[str] = None
+    kpi_name_font_size: Optional[int] = None
+    kpi_name_font_family: Optional[str] = None
     custom_header: Optional[str] = None
     custom_subheader: Optional[str] = None
     organization_info: Optional[str] = None
@@ -1673,6 +1689,7 @@ class KpiReportGenerateBody(BaseModel):
     excluded_multi_line_fields: Optional[list[str]] = None
     ordered_scalar_fields: Optional[list[str]] = None
     format: Optional[str] = "pdf"
+
 
     class Config:
         extra = "allow"
@@ -1685,31 +1702,40 @@ async def generate_kpi_report_route(
     background_tasks: BackgroundTasks,
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_org_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    """Start background KPI report generation. Org admin only."""
+    """Start background KPI report generation."""
     org_id = _org_id(current_user, organization_id)
+    if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
+        from app.entries.service import user_can_view_kpi
+        can_view = await user_can_view_kpi(db, current_user.id, kpi_id, org_id)
+        if not can_view:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
     
     # Verify KPI exists
     kpi = await get_kpi(db, kpi_id, org_id)
     if not kpi:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
         
-    # Verify entry exists for year and period_key
+    # Verify entry exists for year and period_key (published or user's own draft)
     from app.core.models import KPIEntry, KpiReportJob
+    from sqlalchemy import or_, and_
     entry_stmt = select(KPIEntry).where(
         KPIEntry.organization_id == org_id,
         KPIEntry.kpi_id == kpi_id,
         KPIEntry.year == body.year,
         KPIEntry.period_key == body.period_key,
-        KPIEntry.is_draft == False
+        or_(
+            KPIEntry.is_draft == False,
+            and_(KPIEntry.is_draft == True, KPIEntry.user_id == current_user.id)
+        )
     )
     entry_res = await db.execute(entry_stmt)
     entry = entry_res.scalar_one_or_none()
     if not entry:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"No published KPI entry found for year {body.year} and period '{body.period_key}'"
+            detail=f"No KPI entry found for year {body.year} and period '{body.period_key}'"
         )
         
     # Create job
@@ -1751,10 +1777,15 @@ async def get_kpi_report_job_route(
     job_id: str,
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_org_admin),
+    current_user: User = Depends(get_current_user),
 ):
     """Check status of a background report generation job."""
     org_id = _org_id(current_user, organization_id)
+    if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
+        from app.entries.service import user_can_view_kpi
+        can_view = await user_can_view_kpi(db, current_user.id, kpi_id, org_id)
+        if not can_view:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
     from app.core.models import KpiReportJob
     job_stmt = select(KpiReportJob).where(
         KpiReportJob.id == job_id,

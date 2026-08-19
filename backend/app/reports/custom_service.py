@@ -1,4 +1,5 @@
 import datetime
+import html
 import logging
 from collections import defaultdict
 from sqlalchemy import select, delete, func
@@ -28,6 +29,50 @@ from app.reports.custom_schemas import (
     CustomReportAttachmentLayout
 )
 from app.formula_engine.evaluator import evaluate_formula
+
+
+from decimal import Decimal
+
+def clean_numeric_value_string(val) -> str:
+    if val is None:
+        return "—"
+    if isinstance(val, (int, float, Decimal)):
+        if float(val).is_integer():
+            return str(int(float(val)))
+        return str(val)
+    if isinstance(val, str):
+        try:
+            if "." in val:
+                f_val = float(val)
+                if f_val.is_integer():
+                    return str(int(f_val))
+        except ValueError:
+            pass
+    return str(val)
+
+
+def _parse_year_int(year_val: float | int | str | None) -> int:
+    if year_val is None:
+        return datetime.date.today().year
+    try:
+        return int(year_val)
+    except (ValueError, TypeError):
+        import re
+        match = re.search(r'\d{4}', str(year_val))
+        return int(match.group(0)) if match else datetime.date.today().year
+
+
+def calc_auto_header_font_size(text: str, available_w: float = 390.0, desired_size: float = 16.0) -> float:
+    if not text:
+        return float(desired_size)
+    length = len(text.strip())
+    if length <= 0:
+        return float(desired_size)
+    target_w = max(available_w - 8.0, 180.0)
+    calc_size = target_w / (length * 0.44)
+    max_limit = max(float(desired_size), 18.5)
+    return round(max(12.0, min(calc_size, max_limit)), 1)
+
 from app.reports.service import (
     _load_multi_line_items_rows_batch,
     _formulas_need_other_kpi_values,
@@ -58,7 +103,13 @@ async def create_custom_report(db: AsyncSession, org_id: int, data: CustomReport
     report = CustomReport(
         organization_id=org_id,
         name=data.name,
-        description=data.description
+        description=data.description,
+        report_header_id=data.report_header_id,
+        show_report_name=data.show_report_name,
+        branding_title=data.branding_title,
+        show_odoo_button=data.show_odoo_button,
+        odoo_sync_kpi_ids=data.odoo_sync_kpi_ids,
+
     )
     db.add(report)
     await db.flush()
@@ -101,6 +152,17 @@ async def update_custom_report(db: AsyncSession, id: int, org_id: int, data: Cus
         report.fetch_data_with_date = data.fetch_data_with_date
     if getattr(data, "date_fetching_config", None) is not None:
         report.date_fetching_config = data.date_fetching_config
+    if getattr(data, "report_header_id", None) is not None:
+        report.report_header_id = data.report_header_id
+    if getattr(data, "show_report_name", None) is not None:
+        report.show_report_name = data.show_report_name
+    if getattr(data, "branding_title", None) is not None:
+        report.branding_title = data.branding_title
+    if getattr(data, "show_odoo_button", None) is not None:
+        report.show_odoo_button = data.show_odoo_button
+    if getattr(data, "odoo_sync_kpi_ids", None) is not None:
+        report.odoo_sync_kpi_ids = data.odoo_sync_kpi_ids
+
     await db.flush()
     CUSTOM_REPORT_CACHE.invalidate_report(id)
     return report
@@ -125,7 +187,13 @@ async def duplicate_custom_report(db: AsyncSession, id: int, org_id: int) -> Cus
     new_report = CustomReport(
         organization_id=org_id,
         name=f"Copy of {orig.name}",
-        description=orig.description
+        description=orig.description,
+        report_header_id=orig.report_header_id,
+        show_report_name=orig.show_report_name,
+        branding_title=orig.branding_title,
+        show_odoo_button=orig.show_odoo_button,
+        odoo_sync_kpi_ids=orig.odoo_sync_kpi_ids,
+
     )
     db.add(new_report)
     await db.flush()
@@ -163,7 +231,16 @@ async def save_custom_report_layout(
     sections: list[CustomReportSectionLayout],
     attachments: list[CustomReportAttachmentLayout] | None = None,
     fetch_data_with_date: bool | None = None,
-    date_fetching_config: dict | None = None
+    date_fetching_config: dict | None = None,
+    report_header_id: int | None = None,
+    show_report_name: bool | None = None,
+    branding_title: str | None = None,
+    scalar_bold: bool | None = None,
+    scalar_font_size: int | None = None,
+    mli_font_size: int | None = None,
+    show_odoo_button: bool | None = None,
+    odoo_sync_kpi_ids: list[int] | None = None,
+
 ) -> bool:
     report = await get_custom_report(db, id, org_id)
     if not report:
@@ -173,6 +250,27 @@ async def save_custom_report_layout(
         report.fetch_data_with_date = fetch_data_with_date
     if date_fetching_config is not None:
         report.date_fetching_config = date_fetching_config
+    if report_header_id is not None:
+        report.report_header_id = report_header_id
+    elif "report_header_id" in locals() or True:
+        report.report_header_id = report_header_id
+    if show_report_name is not None:
+        report.show_report_name = show_report_name
+    if branding_title is not None:
+        report.branding_title = branding_title
+    if scalar_bold is not None:
+        report.scalar_bold = scalar_bold
+    if scalar_font_size is not None:
+        report.scalar_font_size = scalar_font_size
+    if mli_font_size is not None:
+        report.mli_font_size = mli_font_size
+    if show_odoo_button is not None:
+        report.show_odoo_button = show_odoo_button
+    # odoo_sync_kpi_ids can be set to empty list or None explicitly
+    if odoo_sync_kpi_ids is not None:
+        report.odoo_sync_kpi_ids = odoo_sync_kpi_ids
+
+
 
     # Delete all existing sections, fields, and attachments
     await db.execute(delete(CustomReportSection).where(CustomReportSection.custom_report_id == id))
@@ -296,13 +394,15 @@ async def generate_custom_report_data(
             except Exception:
                 pass
 
-    yr = year if year is not None else datetime.date.today().year
+    yr = _parse_year_int(year)
 
     # 1. Identify all referenced KPIs and Attachment fields
     referenced_kpi_ids = set()
     attachment_kpi_field_ids = set()
     if getattr(custom_report, "attachments", None):
         for att in custom_report.attachments:
+            if att.kpi_id:
+                referenced_kpi_ids.add(att.kpi_id)
             if att.kpi_field_id:
                 attachment_kpi_field_ids.add(att.kpi_field_id)
 
@@ -310,6 +410,8 @@ async def generate_custom_report_data(
         referenced_kpi_ids.add(sec.kpi_id)
         for f in sec.fields:
             referenced_kpi_ids.add(f.kpi_field.kpi_id)
+
+    unique_kpi_count = len(referenced_kpi_ids)
 
     if not referenced_kpi_ids:
         # Empty report
@@ -320,8 +422,12 @@ async def generate_custom_report_data(
             "custom_report_name": custom_report.name,
             "custom_report_description": custom_report.description,
             "organization_id": custom_report.organization_id,
+            "report_header_id": custom_report.report_header_id,
+            "show_report_name": custom_report.show_report_name,
+            "branding_title": custom_report.branding_title,
             "year": yr,
             "sections": [],
+            "unique_kpi_count": unique_kpi_count,
         }
 
     if on_progress:
@@ -604,6 +710,23 @@ async def generate_custom_report_data(
                                 filtered_value_items.append(r)
                     else:
                         filtered_value_items = all_value_items
+
+                # Sort rows in memory if specified
+                sort_col = cfg.get("sort_column")
+                sort_dir = cfg.get("sort_direction") or "asc"
+                if sort_col and filtered_value_items:
+                    reverse = sort_dir == "desc"
+                    def sort_key(row: dict):
+                        v = row.get(sort_col)
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            return str(v) if v is not None else ""
+                    try:
+                        filtered_value_items = sorted(filtered_value_items, key=sort_key, reverse=reverse)
+                    except Exception:
+                        pass
+
                 
                 # Query total count of rows
                 from sqlalchemy import func
@@ -656,9 +779,19 @@ async def generate_custom_report_data(
         "template_name": custom_report.name,
         "custom_report_description": custom_report.description,
         "organization_id": custom_report.organization_id,
+        "report_header_id": custom_report.report_header_id,
+        "show_report_name": custom_report.show_report_name,
+        "branding_title": custom_report.branding_title,
+        "show_odoo_button": custom_report.show_odoo_button,
+        "odoo_sync_kpi_ids": custom_report.odoo_sync_kpi_ids or [],
+
+        "scalar_bold": custom_report.scalar_bold,
+        "scalar_font_size": custom_report.scalar_font_size,
+        "mli_font_size": custom_report.mli_font_size,
         "year": yr,
         "sections": sections_out,
         "attachments": attachments_out,
+        "unique_kpi_count": unique_kpi_count,
     }
 
 
@@ -679,60 +812,158 @@ async def render_custom_report_html(
     if not data:
         return None
 
+    # Load custom report header if present
+    custom_header_model = None
+    if data.get("report_header_id"):
+        from app.core.models import CustomReportHeader
+        custom_header_model = await db.get(CustomReportHeader, data["report_header_id"])
+
     # Compile the sections and fields into styled HTML matching Simple Reports styling
     out = []
-    out.append('<div class="custom-report" style="color: #111;">')
+    
+    font_family = "Helvetica, Arial, sans-serif"
+    if custom_header_model and custom_header_model.font_family:
+        font_family = f"'{custom_header_model.font_family}', Helvetica, Arial, sans-serif"
+
+    out.append(f'<div class="custom-report" style="color: #111; font-family: {font_family};">')
+
+    # Render Header at the top
+    if custom_header_model:
+        from app.storage.service import get_file_stream as storage_get_file_stream
+        import base64
+        import mimetypes
+
+        logo1_src = None
+        if custom_header_model.logo_path:
+            try:
+                lbytes = await storage_get_file_stream(db, custom_header_model.organization_id, custom_header_model.logo_path)
+                ctype, _ = mimetypes.guess_type(custom_header_model.logo_path)
+                ctype = ctype or "image/png"
+                b64 = base64.b64encode(lbytes).decode("utf-8")
+                logo1_src = f"data:{ctype};base64,{b64}"
+            except Exception:
+                logo1_src = f"/api/reports/headers/{custom_header_model.id}/logo"
+
+        logo2_src = None
+        if custom_header_model.logo_path_2:
+            try:
+                lbytes2 = await storage_get_file_stream(db, custom_header_model.organization_id, custom_header_model.logo_path_2)
+                ctype2, _ = mimetypes.guess_type(custom_header_model.logo_path_2)
+                ctype2 = ctype2 or "image/png"
+                b64_2 = base64.b64encode(lbytes2).decode("utf-8")
+                logo2_src = f"data:{ctype2};base64,{b64_2}"
+            except Exception:
+                logo2_src = f"/api/reports/headers/{custom_header_model.id}/logo2"
+
+        out.append('<div class="report-header-container" style="display: flex; justify-content: space-between; align-items: center; width: 100%; margin-bottom: 2rem; border-bottom: 2px solid #e5e7eb; padding-bottom: 1rem;">')
+        
+        # Left Logo Slot (Pinned Left)
+        out.append('<div style="flex: 0 0 auto; display: flex; justify-content: flex-start; align-items: center;">')
+        if logo1_src:
+            out.append(f'<img src="{logo1_src}" style="max-height: 70px; max-width: 140px; object-fit: contain;" alt="Logo 1" />')
+        out.append('</div>')
+
+        # Middle Heading Text Slot
+        align = (custom_header_model.text_align or "center").lower()
+        desired_fs = custom_header_model.font_size or 18
+        main_fs_pt = calc_auto_header_font_size(custom_header_model.main_heading, 500.0, desired_fs)
+        main_fs_px = round(main_fs_pt * 1.25, 1)
+        main_color = custom_header_model.text_color or "#1e3a8a"
+
+        out.append(f'<div style="flex: 1 1 auto; text-align: {align}; padding: 0 0.5rem;">')
+        out.append(f'<h1 style="margin: 0; font-size: {main_fs_px}px; color: {main_color}; font-weight: bold; font-family: {font_family}; text-align: {align}; white-space: nowrap;">{html.escape(custom_header_model.main_heading)}</h1>')
+        if custom_header_model.sub_heading:
+            sub_fs = custom_header_model.sub_font_size or 11
+            sub_color = custom_header_model.sub_text_color or "#4b5563"
+            sub_align = (custom_header_model.sub_text_align or align).lower()
+            sub_ff = f"'{custom_header_model.sub_font_family}', Helvetica, Arial, sans-serif" if custom_header_model.sub_font_family else font_family
+            out.append(f'<div style="margin-top: 0.25rem; font-size: {sub_fs}px; color: {sub_color}; text-align: {sub_align}; font-family: {sub_ff}; font-style: italic;">{html.escape(custom_header_model.sub_heading)}</div>')
+        out.append('</div>')
+
+        # Right Logo Slot (Pinned Right)
+        out.append('<div style="flex: 0 0 auto; display: flex; justify-content: flex-end; align-items: center;">')
+        if logo2_src:
+            out.append(f'<img src="{logo2_src}" style="max-height: 70px; max-width: 140px; object-fit: contain;" alt="Logo 2" />')
+        out.append('</div>')
+
+        out.append('</div>')
+
+    # Configurable report name just below header (only if more than 1 KPI)
+    if data.get("unique_kpi_count", 0) > 1 and data.get("show_report_name", True):
+        rname_color = custom_header_model.kpi_name_color if (custom_header_model and custom_header_model.kpi_name_color) else "#1e3a8a"
+        out.append(f'<div style="text-align: center; margin-bottom: 1.5rem;">')
+        out.append(f'<h2 style="margin: 0; font-size: 1.4rem; color: {rname_color}; font-weight: bold;">{data.get("custom_report_name", "Custom Report")}</h2>')
+        if year:
+            out.append(f'<div style="font-size: 0.9rem; color: #4b5563; margin-top: 0.25rem; font-style: italic;">Academic Year: {year}</div>')
+        out.append('</div>')
+
+    scalar_bold = data.get("scalar_bold", True)
+    if scalar_bold is None:
+        scalar_bold = True
+    scalar_font_size = data.get("scalar_font_size", 11) or 11
+    mli_font_size = data.get("mli_font_size", 10) or 10
+
     for sec in data["sections"]:
+        h1_color = custom_header_model.kpi_name_color if (custom_header_model and custom_header_model.kpi_name_color) else "#1e3a8a"
         out.append('<section style="margin-bottom: 1.5rem;">')
         out.append(
-            f'<h2 style="font-size: 1.15rem; margin-bottom: 0.5rem; color: #1f2937; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.25rem;">'
-            f'{sec["number"]} {sec["custom_header"]}'
+            f'<h2 style="font-size: 1.2rem; margin-bottom: 0.5rem; color: {h1_color}; border-bottom: 2px solid {h1_color}; padding-bottom: 0.25rem; font-weight: bold;">'
+            f'{sec["number"]}. {sec["custom_header"]}'
             f'</h2>'
         )
-        out.append('<div style="margin-left: 1rem; margin-bottom: 0.75rem;">')
+        out.append('<div style="margin-left: 0.5rem; margin-bottom: 0.75rem;">')
         for f in sec["fields"]:
+            h2_color = "#374151"
             if f["field_type"] != "multi_line_items":
-                val = f["value"]
-                if val is None:
-                    val = "—"
-                out.append('<div style="display: flex; gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.95rem;">')
-                out.append(f'<strong style="min-width: 180px; color: #4b5563;">{f["number"]} {f["field_name"]}:</strong>')
-                out.append(f'<span style="color: #111827;">{val}</span>')
+                val = clean_numeric_value_string(f["value"])
+                out.append('<div class="report-field-block" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #e5e7eb; padding-bottom: 0.25rem; margin-bottom: 0.75rem; margin-right: 2rem;">')
+                out.append(
+                    f'<h3 style="font-size: 1.0rem; margin: 0; color: {h2_color}; font-weight: 600;">'
+                    f'{f["number"]}. {f["field_name"]}'
+                    f'</h3>'
+                )
+                bold_style = "font-weight: bold;" if scalar_bold else "font-weight: normal;"
+                out.append(f'<span style="color: #111827; {bold_style} font-size: {scalar_font_size}pt;">{val}</span>')
                 out.append('</div>')
             else:
-                out.append('<div style="margin-bottom: 1rem; font-size: 0.95rem;">')
-                out.append(f'<strong style="display: block; margin-bottom: 0.35rem; color: #4b5563;">{f["number"]} {f["field_name"]}:</strong>')
+                out.append('<div class="report-field-block" style="margin-bottom: 1.25rem;">')
+                out.append(
+                    f'<h3 style="font-size: 1.0rem; margin-top: 0.75rem; margin-bottom: 0.35rem; color: {h2_color}; font-weight: 600;">'
+                    f'{f["number"]}. {f["field_name"]}'
+                    f'</h3>'
+                )
+                out.append('<div style="margin-left: 0.5rem;">')
                 if f.get("value_items"):
                     total_cnt = f.get("total_count", len(f["value_items"]))
                     if total_cnt > len(f["value_items"]):
                         out.append(f'<div style="margin-bottom: 0.5rem; font-style: italic; color: #4b5563; font-size: 0.85rem; font-weight: 500;">Showing first {len(f["value_items"])} rows of {total_cnt} records.</div>')
                     out.append('<table style="border-collapse: collapse; width: 100%; border: 1px solid #d1d5db; margin-top: 0.25rem; margin-bottom: 0.5rem;">')
                     out.append('<thead>')
-                    out.append('<tr style="background-color: #f9fafb; border-bottom: 2px solid #d1d5db;">')
-                    out.append('<th style="border: 1px solid #d1d5db; padding: 8px; text-align: left; font-size: 0.85rem; font-weight: 600; color: #374151;">S.No</th>')
+                    out.append(f'<tr style="background-color: {h1_color}; color: #ffffff; border-bottom: 2px solid {h1_color}; font-size: {mli_font_size}pt;">')
+                    out.append(f'<th style="border: 1px solid #d1d5db; padding: 8px; text-align: left; font-weight: 600; color: #ffffff;">S.No</th>')
                     for sub in f["sub_fields"]:
-                        out.append(f'<th style="border: 1px solid #d1d5db; padding: 8px; text-align: left; font-size: 0.85rem; font-weight: 600; color: #374151;">{sub["name"]}</th>')
+                        out.append(f'<th style="border: 1px solid #d1d5db; padding: 8px; text-align: left; font-weight: 600; color: #ffffff;">{sub["name"]}</th>')
                     out.append('</tr>')
                     out.append('</thead>')
                     out.append('<tbody>')
                     for r_idx, row in enumerate(f["value_items"]):
                         bg = ' style="background-color: #f9fafb;"' if r_idx % 2 == 1 else ''
-                        out.append(f'<tr{bg}>')
-                        out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; font-size: 0.85rem; color: #4b5563;">{r_idx + 1}</td>')
+                        out.append(f'<tr{bg} style="font-size: {mli_font_size}pt;">')
+                        out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #4b5563;">{r_idx + 1}</td>')
                         for sub in f["sub_fields"]:
-                            rval = row.get(sub["key"])
-                            if rval is None:
-                                rval = "—"
-                            out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; font-size: 0.85rem; color: #111827;">{rval}</td>')
+                            rval = clean_numeric_value_string(row.get(sub["key"]))
+                            out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #111827;">{rval}</td>')
                         out.append('</tr>')
                     out.append('</tbody>')
                     out.append('</table>')
                 else:
                     out.append('<span style="color: #9ca3af; font-style: italic; font-size: 0.9rem;">No data entered</span>')
                 out.append('</div>')
+                out.append('</div>')
         out.append('</div>')
         out.append('</section>')
     out.append('</div>')
+    return "\n".join(out)
     return "\n".join(out)
 
 
@@ -821,8 +1052,13 @@ async def export_custom_report_file(
 
                 if sub_fields:
                     # Headers
+                    sr_c = ws.cell(row=row_num, column=1, value="Sr. No.")
+                    sr_c.font = header_font
+                    sr_c.fill = header_fill
+                    sr_c.alignment = Alignment(horizontal="center", vertical="center")
+
                     for col_idx, sf in enumerate(sub_fields):
-                        c = ws.cell(row=row_num, column=col_idx+1, value=sf.get("name") or sf.get("key"))
+                        c = ws.cell(row=row_num, column=col_idx+2, value=sf.get("name") or sf.get("key"))
                         c.font = header_font
                         c.fill = header_fill
                         c.alignment = Alignment(horizontal="center", vertical="center")
@@ -830,10 +1066,15 @@ async def export_custom_report_file(
                     row_num += 1
 
                     # Body
-                    for item in value_items:
+                    for item_idx, item in enumerate(value_items):
+                        sr_val_c = ws.cell(row=row_num, column=1, value=item_idx + 1)
+                        sr_val_c.font = normal_font
+                        sr_val_c.border = thin_border
+                        sr_val_c.alignment = Alignment(horizontal="center", vertical="center")
+
                         for col_idx, sf in enumerate(sub_fields):
                             val = item.get(sf.get("key"))
-                            c = ws.cell(row=row_num, column=col_idx+1, value=val if val is not None else "—")
+                            c = ws.cell(row=row_num, column=col_idx+2, value=val if val is not None else "—")
                             c.font = normal_font
                             c.border = thin_border
                         ws.row_dimensions[row_num].height = 18
@@ -857,6 +1098,19 @@ async def export_custom_report_file(
         from docx import Document
         from docx.shared import Pt, Inches, RGBColor
         from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from app.core.models import Organization, OrganizationBranding
+
+        scalar_bold = data.get("scalar_bold", True)
+        if scalar_bold is None:
+            scalar_bold = True
+        scalar_font_size = data.get("scalar_font_size", 11) or 11
+        mli_font_size = data.get("mli_font_size", 10) or 10
+
+        # Fetch custom header model
+        custom_header = None
+        if data.get("report_header_id"):
+            from app.core.models import CustomReportHeader
+            custom_header = await db.get(CustomReportHeader, data["report_header_id"])
 
         doc = Document()
         for section in doc.sections:
@@ -865,68 +1119,255 @@ async def export_custom_report_file(
             section.left_margin = Inches(0.8)
             section.right_margin = Inches(0.8)
 
-        # Title
-        p_title = doc.add_paragraph()
-        r_title = p_title.add_run(report_name)
-        r_title.font.size = Pt(22)
-        r_title.font.name = "Calibri"
-        r_title.font.bold = True
-        r_title.font.color.rgb = RGBColor(30, 58, 138)
-        p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Set docx font family based on custom header
+        docx_font = "Calibri"
+        if custom_header and custom_header.font_family:
+            font_family_lower = custom_header.font_family.lower()
+            if font_family_lower in ("times-roman", "times new roman", "times"):
+                docx_font = "Times New Roman"
+            elif font_family_lower in ("courier", "courier new"):
+                docx_font = "Courier New"
+            elif font_family_lower == "arial":
+                docx_font = "Arial"
+            elif font_family_lower == "georgia":
+                docx_font = "Georgia"
+            elif font_family_lower == "verdana":
+                docx_font = "Verdana"
+            elif font_family_lower == "calibri":
+                docx_font = "Calibri"
+            elif font_family_lower == "garamond":
+                docx_font = "Garamond"
 
-        # Subtitle
-        p_sub = doc.add_paragraph()
-        r_sub = p_sub.add_run(f"Academic Year: {year}")
-        r_sub.font.size = Pt(11)
-        r_sub.font.name = "Calibri"
-        r_sub.font.italic = True
-        p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Footer branding title logic
+        org = await db.get(Organization, org_id)
+        org_branding = (await db.execute(
+            select(OrganizationBranding).where(OrganizationBranding.organization_id == org_id)
+        )).scalar_one_or_none()
+
+        footer_label = "Confidential Document"
+        if data.get("branding_title"):
+            footer_label = data["branding_title"]
+        elif org_branding and org_branding.footer_label:
+            footer_label = org_branding.footer_label
+        else:
+            if org and getattr(org, "name", None):
+                footer_label += f" | {org.name}"
+
+        # Apply footer to docx
+        section = doc.sections[0]
+        footer = section.footer
+        p_ftr = footer.paragraphs[0]
+        p_ftr.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run_ftr = p_ftr.add_run(footer_label)
+        run_ftr.font.size = Pt(8)
+        run_ftr.font.name = docx_font
+        run_ftr.font.color.rgb = RGBColor(0x6b, 0x72, 0x80)
+
+        # Render Header logo + headings if present
+        if custom_header:
+            from app.storage.service import get_file_stream as storage_get_file_stream
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+            
+            header_table = doc.add_table(rows=1, cols=3)
+            header_table.autofit = False
+            header_table.columns[0].width = Inches(1.1)
+            header_table.columns[1].width = Inches(4.3)
+            header_table.columns[2].width = Inches(1.1)
+            cell_logo = header_table.cell(0, 0)
+            cell_text = header_table.cell(0, 1)
+            cell_logo2 = header_table.cell(0, 2)
+
+            # Logo 1 (Aligned Right against text)
+            p_logo = cell_logo.paragraphs[0]
+            p_logo.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            try:
+                logo_bytes = await storage_get_file_stream(db, org_id, custom_header.logo_path)
+                p_logo.add_run().add_picture(io.BytesIO(logo_bytes), width=Inches(1.1))
+            except Exception:
+                pass
+
+            # Logo 2 (Aligned Left against text)
+            if cell_logo2:
+                p_logo2 = cell_logo2.paragraphs[0]
+                p_logo2.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                try:
+                    logo_bytes2 = await storage_get_file_stream(db, org_id, custom_header.logo_path_2)
+                    p_logo2.add_run().add_picture(io.BytesIO(logo_bytes2), width=Inches(1.1))
+                except Exception:
+                    pass
+
+            header_align_str = (custom_header.text_align or "center").lower()
+            if header_align_str == "left":
+                align_wd = WD_ALIGN_PARAGRAPH.LEFT
+            elif header_align_str == "right":
+                align_wd = WD_ALIGN_PARAGRAPH.RIGHT
+            elif header_align_str == "justify":
+                align_wd = WD_ALIGN_PARAGRAPH.JUSTIFY
+            else:
+                align_wd = WD_ALIGN_PARAGRAPH.CENTER
+
+            p_head = cell_text.paragraphs[0]
+            p_head.alignment = align_wd
+            p_head.paragraph_format.space_before = Pt(4)
+            run_main = p_head.add_run(custom_header.main_heading)
+            run_main.bold = True
+            run_main.font.name = docx_font
+            run_main.font.size = Pt(custom_header.font_size or 16)
+            
+            # Apply color
+            color_hex = (custom_header.text_color or "#1e3a8a").lstrip("#")
+            try:
+                r = int(color_hex[0:2], 16)
+                g = int(color_hex[2:4], 16)
+                b = int(color_hex[4:6], 16)
+            except Exception:
+                r, g, b = 0x1e, 0x3a, 0x8a
+            run_main.font.color.rgb = RGBColor(r, g, b)
+
+            # Apply font mapping to oxml
+            r_elem = run_main._r.get_or_add_rPr()
+            rFonts = OxmlElement('w:rFonts')
+            rFonts.set(qn('w:ascii'), docx_font)
+            rFonts.set(qn('w:hAnsi'), docx_font)
+            r_elem.append(rFonts)
+
+            if custom_header.sub_heading:
+                p_sub = cell_text.add_paragraph()
+                sub_align_str = (custom_header.sub_text_align or custom_header.text_align or "center").lower()
+                if sub_align_str == "left":
+                    sub_align_wd = WD_ALIGN_PARAGRAPH.LEFT
+                elif sub_align_str == "right":
+                    sub_align_wd = WD_ALIGN_PARAGRAPH.RIGHT
+                elif sub_align_str == "justify":
+                    sub_align_wd = WD_ALIGN_PARAGRAPH.JUSTIFY
+                else:
+                    sub_align_wd = WD_ALIGN_PARAGRAPH.CENTER
+
+                p_sub.alignment = sub_align_wd
+                p_sub.paragraph_format.space_before = Pt(2)
+                run_sub = p_sub.add_run(custom_header.sub_heading)
+                run_sub.italic = True
+                run_sub.font.name = docx_font
+                run_sub.font.size = Pt(custom_header.sub_font_size or 11)
+
+                sub_color_hex = (custom_header.sub_text_color or "#4b5563").lstrip("#")
+                try:
+                    sr = int(sub_color_hex[0:2], 16)
+                    sg = int(sub_color_hex[2:4], 16)
+                    sb = int(sub_color_hex[4:6], 16)
+                except Exception:
+                    sr, sg, sb = 0x4b, 0x55, 0x63
+                run_sub.font.color.rgb = RGBColor(sr, sg, sb)
+
+                r_elem_sub = run_sub._r.get_or_add_rPr()
+                rFonts_sub = OxmlElement('w:rFonts')
+                rFonts_sub.set(qn('w:ascii'), docx_font)
+                rFonts_sub.set(qn('w:hAnsi'), docx_font)
+                r_elem_sub.append(rFonts_sub)
+
+            # Spacer
+            doc.add_paragraph()
+
+        # Configurable report name just below header (only if more than 1 KPI)
+        if data.get("unique_kpi_count", 0) > 1 and data.get("show_report_name", True):
+            p_title = doc.add_paragraph()
+            p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_title = p_title.add_run(report_name)
+            r_title.font.size = Pt(20)
+            r_title.font.name = docx_font
+            r_title.font.bold = True
+            
+            kn_color_hex = (custom_header.kpi_name_color if (custom_header and custom_header.kpi_name_color) else "#1e3a8a").lstrip("#")
+            try:
+                kr = int(kn_color_hex[0:2], 16)
+                kg = int(kn_color_hex[2:4], 16)
+                kb = int(kn_color_hex[4:6], 16)
+            except Exception:
+                kr, kg, kb = 0x1e, 0x3a, 0x8a
+            r_title.font.color.rgb = RGBColor(kr, kg, kb)
+
+            p_sub = doc.add_paragraph()
+            p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_sub = p_sub.add_run(f"Academic Year: {year}")
+            r_sub.font.size = Pt(11)
+            r_sub.font.name = docx_font
+            r_sub.font.italic = True
 
         for s_idx, sec in enumerate(data.get("sections", [])):
             sec_name = sec.get("custom_header") or sec.get("kpi_name", f"Section {s_idx+1}")
             h = doc.add_heading(level=1)
-            r_h = h.add_run(f"{s_idx+1}. {sec_name}")
-            r_h.font.size = Pt(14)
+            r_h = h.add_run(f"{sec['number']}. {sec_name}")
+            r_h.font.name = docx_font
+            r_h.font.size = Pt(13)
             r_h.font.bold = True
-            r_h.font.color.rgb = RGBColor(31, 41, 55)
+            
+            # Apply heading 1 color
+            h1_color_hex = (custom_header.kpi_name_color if (custom_header and custom_header.kpi_name_color) else "#1e3a8a").lstrip("#")
+            try:
+                hr = int(h1_color_hex[0:2], 16)
+                hg = int(h1_color_hex[2:4], 16)
+                hb = int(h1_color_hex[4:6], 16)
+            except Exception:
+                hr, hg, hb = 0x1e, 0x3a, 0x8a
+            r_h.font.color.rgb = RGBColor(hr, hg, hb)
 
-            scalars = [f for f in sec.get("fields", []) if f.get("field_type") != "multi_line_items"]
-            mlis = [f for f in sec.get("fields", []) if f.get("field_type") == "multi_line_items"]
+            for f in sec.get("fields", []):
+                if f.get("field_type") != "multi_line_items":
+                    h2 = doc.add_heading(level=2)
+                    from docx.enum.text import WD_TAB_ALIGNMENT
+                    from docx.shared import Inches
+                    h2.paragraph_format.tab_stops.add_tab_stop(Inches(6.0), alignment=WD_TAB_ALIGNMENT.RIGHT)
+                    
+                    r_f = h2.add_run(f"{f['number']}. {f.get('field_name')}\t")
+                    r_f.font.name = docx_font
+                    r_f.font.size = Pt(11)
+                    r_f.font.bold = True
+                    r_f.font.color.rgb = RGBColor(0x37, 0x41, 0x55)
+                    
+                    val_str = clean_numeric_value_string(f.get("value"))
+                    r_val = h2.add_run(val_str)
+                    r_val.font.name = docx_font
+                    r_val.font.size = Pt(scalar_font_size)
+                    r_val.font.bold = scalar_bold
+                    r_val.font.color.rgb = RGBColor(0x11, 0x18, 0x27)
+                else:
+                    h2 = doc.add_heading(level=2)
+                    r_f = h2.add_run(f"{f['number']}. {f.get('field_name')}")
+                    r_f.font.name = docx_font
+                    r_f.font.size = Pt(11)
+                    r_f.font.bold = True
+                    r_f.font.color.rgb = RGBColor(0x37, 0x41, 0x55)
+                    
+                    sub_fields = f.get("sub_fields", [])
+                    value_items = f.get("value_items", [])
 
-            if scalars:
-                p_scal = doc.add_paragraph()
-                for f in scalars:
-                    r_lbl = p_scal.add_run(f"\n{f.get('field_name')}: ")
-                    r_lbl.bold = True
-                    r_lbl.font.size = Pt(10)
-                    r_val = p_scal.add_run(str(f.get("value") if f.get("value") is not None else "—"))
-                    r_val.font.size = Pt(10)
+                    if sub_fields:
+                        table = doc.add_table(rows=1, cols=len(sub_fields) + 1)
+                        table.style = 'Light Shading Accent 1'
+                        hdr_cells = table.rows[0].cells
+                        
+                        hdr_cells[0].text = "Sr. No."
+                        hdr_cells[0].paragraphs[0].runs[0].font.bold = True
+                        hdr_cells[0].paragraphs[0].runs[0].font.size = Pt(mli_font_size)
+                        hdr_cells[0].paragraphs[0].runs[0].font.name = docx_font
 
-            for f in mlis:
-                doc.add_paragraph()
-                p_f = doc.add_paragraph()
-                r_f = p_f.add_run(f.get("field_name"))
-                r_f.bold = True
-                r_f.font.size = Pt(11)
-                r_f.font.color.rgb = RGBColor(30, 58, 138)
-
-                sub_fields = f.get("sub_fields", [])
-                value_items = f.get("value_items", [])
-
-                if sub_fields:
-                    table = doc.add_table(rows=1, cols=len(sub_fields))
-                    table.style = 'Light Shading Accent 1'
-                    hdr_cells = table.rows[0].cells
-                    for col_idx, sf in enumerate(sub_fields):
-                        hdr_cells[col_idx].text = sf.get("name") or sf.get("key")
-                        hdr_cells[col_idx].paragraphs[0].runs[0].font.bold = True
-                        hdr_cells[col_idx].paragraphs[0].runs[0].font.size = Pt(9.5)
-
-                    for item in value_items:
-                        row_cells = table.add_row().cells
                         for col_idx, sf in enumerate(sub_fields):
-                            row_cells[col_idx].text = str(item.get(sf.get("key")) if item.get(sf.get("key")) is not None else "—")
-                            row_cells[col_idx].paragraphs[0].runs[0].font.size = Pt(9.5)
+                            hdr_cells[col_idx + 1].text = sf.get("name") or sf.get("key")
+                            hdr_cells[col_idx + 1].paragraphs[0].runs[0].font.bold = True
+                            hdr_cells[col_idx + 1].paragraphs[0].runs[0].font.size = Pt(mli_font_size)
+                            hdr_cells[col_idx + 1].paragraphs[0].runs[0].font.name = docx_font
+
+                        for item_idx, item in enumerate(value_items):
+                            row_cells = table.add_row().cells
+                            row_cells[0].text = str(item_idx + 1)
+                            row_cells[0].paragraphs[0].runs[0].font.size = Pt(mli_font_size)
+                            row_cells[0].paragraphs[0].runs[0].font.name = docx_font
+
+                            for col_idx, sf in enumerate(sub_fields):
+                                row_cells[col_idx + 1].text = clean_numeric_value_string(item.get(sf.get("key")))
+                                row_cells[col_idx + 1].paragraphs[0].runs[0].font.size = Pt(mli_font_size)
+                                row_cells[col_idx + 1].paragraphs[0].runs[0].font.name = docx_font
 
         out_io = io.BytesIO()
         doc.save(out_io)
@@ -936,24 +1377,94 @@ async def export_custom_report_file(
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import letter
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from app.reports.service import NumberedCanvas
+        from app.core.models import Organization, OrganizationBranding
+
+        scalar_bold = data.get("scalar_bold", True)
+        if scalar_bold is None:
+            scalar_bold = True
+        scalar_font_size = data.get("scalar_font_size", 11) or 11
+        mli_font_size = data.get("mli_font_size", 10) or 10
+
+        # Fetch custom header model
+        custom_header = None
+        if data.get("report_header_id"):
+            from app.core.models import CustomReportHeader
+            custom_header = await db.get(CustomReportHeader, data["report_header_id"])
 
         out_io = io.BytesIO()
-        pdf_doc = SimpleDocTemplate(out_io, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+        pdf_doc = SimpleDocTemplate(out_io, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=72)
         story = []
 
+        # Setup custom fonts and styles
         styles = getSampleStyleSheet()
+        
+        font_name_bold = "Helvetica-Bold"
+        font_name_regular = "Helvetica"
+        font_name_italic = "Helvetica-Oblique"
+        if custom_header:
+            font_family = custom_header.font_family or "Helvetica"
+            font_family_lower = font_family.lower()
+            if font_family_lower in ("times-roman", "times new roman", "times"):
+                font_name_bold = "Times-Bold"
+                font_name_regular = "Times-Roman"
+                font_name_italic = "Times-Italic"
+            elif font_family_lower in ("courier", "courier new"):
+                font_name_bold = "Courier-Bold"
+                font_name_regular = "Courier"
+                font_name_italic = "Courier-Oblique"
+            elif font_family_lower == "helvetica":
+                font_name_bold = "Helvetica-Bold"
+                font_name_regular = "Helvetica"
+                font_name_italic = "Helvetica-Oblique"
+            else:
+                from app.reports.service import register_extra_fonts
+                register_extra_fonts()
+                from reportlab.pdfbase import pdfmetrics
+                registered = pdfmetrics.getRegisteredFontNames()
+                chosen_font = "Helvetica"
+                if font_family in registered:
+                    chosen_font = font_family
+                elif font_family_lower == "arial" and "Arial" in registered:
+                    chosen_font = "Arial"
+                elif font_family_lower == "georgia" and "Georgia" in registered:
+                    chosen_font = "Georgia"
+                elif font_family_lower == "verdana" and "Verdana" in registered:
+                    chosen_font = "Verdana"
+                elif font_family_lower == "calibri" and "Calibri" in registered:
+                    chosen_font = "Calibri"
+                elif font_family_lower == "garamond" and "Garamond" in registered:
+                    chosen_font = "Garamond"
+                
+                font_name_regular = chosen_font
+                font_name_bold = chosen_font
+                if f"{chosen_font}-Bold" in registered:
+                    font_name_bold = f"{chosen_font}-Bold"
+                else:
+                    font_name_bold = "Helvetica-Bold"
+                
+                font_name_italic = chosen_font
+                if f"{chosen_font}-Italic" in registered:
+                    font_name_italic = f"{chosen_font}-Italic"
+                else:
+                    font_name_italic = "Helvetica-Oblique"
+
+        h1_color_hex = (custom_header.kpi_name_color if (custom_header and custom_header.kpi_name_color) else "#1e3a8a")
+
         title_style = ParagraphStyle(
             "CustomTitleStyle",
             parent=styles["Title"],
+            fontName=font_name_bold,
             fontSize=20,
-            textColor=colors.HexColor("#1E3A8A"),
+            textColor=colors.HexColor(h1_color_hex),
             spaceAfter=10
         )
         subtitle_style = ParagraphStyle(
             "CustomSubtitleStyle",
             parent=styles["Normal"],
+            fontName=font_name_italic,
             fontSize=11,
             alignment=TA_CENTER,
             textColor=colors.HexColor("#4B5563"),
@@ -962,106 +1473,316 @@ async def export_custom_report_file(
         h1_style = ParagraphStyle(
             "CustomHeading1Style",
             parent=styles["Heading1"],
+            fontName=font_name_bold,
             fontSize=13,
-            textColor=colors.HexColor("#1F2937"),
+            textColor=colors.HexColor(h1_color_hex),
             spaceBefore=12,
             spaceAfter=6
         )
         h2_style = ParagraphStyle(
             "CustomHeading2Style",
             parent=styles["Heading2"],
+            fontName=font_name_bold,
             fontSize=11,
-            textColor=colors.HexColor("#1E3A8A"),
+            textColor=colors.HexColor("#374151"),
             spaceBefore=8,
             spaceAfter=4
+        )
+        h2_right_style = ParagraphStyle(
+            "CustomHeading2RightStyle",
+            parent=h2_style,
+            fontName=font_name_bold if scalar_bold else font_name_regular,
+            fontSize=scalar_font_size,
+            alignment=2
         )
         body_style = ParagraphStyle(
             "CustomBodyStyle",
             parent=styles["Normal"],
+            fontName=font_name_regular,
             fontSize=9.5,
             textColor=colors.HexColor("#111111"),
             leading=13
         )
-        bold_body_style = ParagraphStyle(
-            "CustomBoldBodyStyle",
-            parent=body_style,
-            fontName="Helvetica-Bold"
-        )
         table_hdr_style = ParagraphStyle(
             "CustomTableHdrStyle",
             parent=styles["Normal"],
-            fontSize=8.5,
-            fontName="Helvetica-Bold",
+            fontName=font_name_bold,
+            fontSize=mli_font_size,
+            leading=mli_font_size + 3,
             textColor=colors.white
         )
         table_body_style = ParagraphStyle(
             "CustomTableBodyStyle",
             parent=styles["Normal"],
-            fontSize=8.5
+            fontName=font_name_regular,
+            fontSize=mli_font_size,
+            leading=mli_font_size + 3
         )
 
-        story.append(Paragraph(report_name, title_style))
-        story.append(Paragraph(f"Academic Year: {year}", subtitle_style))
+        # Render Header logo + headings if present
+        if custom_header:
+            from app.storage.service import get_file_stream as storage_get_file_stream
+            from reportlab.platypus import Image
+            from reportlab.lib.units import inch
+            
+            img = ""
+            logo_w = 0
+            try:
+                logo_bytes = await storage_get_file_stream(db, org_id, custom_header.logo_path)
+                from reportlab.lib.utils import ImageReader
+                reader = ImageReader(io.BytesIO(logo_bytes))
+                w, h = reader.getSize()
+                aspect = float(h) / float(w) if w else 1.0
+                logo_w = 1.2 * inch
+                logo_h = logo_w * aspect
+                if logo_h > 0.6 * inch:
+                    logo_h = 0.6 * inch
+                    logo_w = logo_h / aspect
+                img = Image(io.BytesIO(logo_bytes), width=logo_w, height=logo_h)
+            except Exception as ex:
+                import logging
+                logging.getLogger("custom_service").error(f"Failed to load logo 1: {ex}")
+                pass
+
+            img2 = ""
+            logo_w2 = 0
+            if custom_header.logo_path_2:
+                try:
+                    logo_bytes2 = await storage_get_file_stream(db, org_id, custom_header.logo_path_2)
+                    from reportlab.lib.utils import ImageReader
+                    reader2 = ImageReader(io.BytesIO(logo_bytes2))
+                    w2, h2 = reader2.getSize()
+                    aspect2 = float(h2) / float(w2) if w2 else 1.0
+                    logo_w2 = 1.2 * inch
+                    logo_h2 = logo_w2 * aspect2
+                    if logo_h2 > 0.6 * inch:
+                        logo_h2 = 0.6 * inch
+                        logo_w2 = logo_h2 / aspect2
+                    img2 = Image(io.BytesIO(logo_bytes2), width=logo_w2, height=logo_h2)
+                except Exception as ex:
+                    import logging
+                    logging.getLogger("custom_service").error(f"Failed to load logo 2: {ex}")
+                    pass
+
+            header_align_str = (custom_header.text_align or "center").lower()
+            if header_align_str == "left":
+                align_code = TA_LEFT
+            elif header_align_str == "right":
+                align_code = TA_RIGHT
+            elif header_align_str == "justify":
+                align_code = TA_JUSTIFY
+            else:
+                align_code = TA_CENTER
+
+            desired_p_fs = custom_header.font_size or 16
+            w1 = (logo_w + 4) if img else 0
+            w2 = (logo_w2 + 4) if img2 else 0
+            mid_w = 540 - w1 - w2
+            pdf_main_fs = calc_auto_header_font_size(custom_header.main_heading, mid_w, desired_p_fs)
+
+            heading_paragraph_style = ParagraphStyle(
+                "CustomHeaderHeadings",
+                parent=styles["Normal"],
+                leading=int(pdf_main_fs * 1.25),
+                alignment=align_code
+            )
+
+            sub_align_str = (custom_header.sub_text_align or custom_header.text_align or "center").lower()
+            if sub_align_str == "left":
+                sub_align_code = TA_LEFT
+            elif sub_align_str == "right":
+                sub_align_code = TA_RIGHT
+            elif sub_align_str == "justify":
+                sub_align_code = TA_JUSTIFY
+            else:
+                sub_align_code = TA_CENTER
+
+            sub_font_family = custom_header.sub_font_family or "Helvetica"
+            sub_font_lower = sub_font_family.lower()
+            sub_font_name_italic = "Helvetica-Oblique"
+            if sub_font_lower in ("times-roman", "times new roman", "times"):
+                sub_font_name_italic = "Times-Italic"
+            elif sub_font_lower in ("courier", "courier new"):
+                sub_font_name_italic = "Courier-Oblique"
+            elif sub_font_lower == "helvetica":
+                sub_font_name_italic = "Helvetica-Oblique"
+            else:
+                from reportlab.pdfbase import pdfmetrics
+                registered = pdfmetrics.getRegisteredFontNames()
+                chosen_sub = "Helvetica"
+                if sub_font_family in registered:
+                    chosen_sub = sub_font_family
+                elif sub_font_lower == "arial" and "Arial" in registered:
+                    chosen_sub = "Arial"
+                sub_font_name_italic = chosen_sub
+                if f"{chosen_sub}-Italic" in registered:
+                    sub_font_name_italic = f"{chosen_sub}-Italic"
+                else:
+                    sub_font_name_italic = "Helvetica-Oblique"
+
+            sub_font_size = custom_header.sub_font_size or max(9, int(pdf_main_fs * 0.65))
+            sub_color_hex = custom_header.sub_text_color or "#4b5563"
+
+            sub_heading_paragraph_style = ParagraphStyle(
+                "CustomHeaderSubHeadings",
+                parent=styles["Normal"],
+                leading=int(sub_font_size * 1.25),
+                alignment=sub_align_code,
+                spaceBefore=2
+            )
+
+            main_p = Paragraph(f"<font face='{font_name_bold}' size='{pdf_main_fs}' color='{custom_header.text_color or '#1e3a8a'}'><b>{html.escape(custom_header.main_heading)}</b></font>", heading_paragraph_style)
+            
+            header_elements = [main_p]
+            if custom_header.sub_heading:
+                sub_p = Paragraph(f"<font face='{sub_font_name_italic}' size='{sub_font_size}' color='{sub_color_hex}'><i>{html.escape(custom_header.sub_heading)}</i></font>", sub_heading_paragraph_style)
+                header_elements.append(sub_p)
+
+            if img and img2:
+                header_table = Table(
+                    [[img, header_elements, img2]],
+                    colWidths=[w1, mid_w, w2],
+                    hAlign='CENTER'
+                )
+                header_table.setStyle(TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ALIGN", (0, 0), (0, 0), "LEFT"),
+                    ("ALIGN", (2, 0), (2, 0), "RIGHT"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 1),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 1),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ]))
+            elif img:
+                w1 = logo_w + 8
+                mid_w = 540 - w1
+                header_table = Table(
+                    [[img, header_elements]],
+                    colWidths=[w1, mid_w],
+                    hAlign='CENTER'
+                )
+                header_table.setStyle(TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ALIGN", (0, 0), (0, 0), "RIGHT"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ]))
+            elif img2:
+                w2 = logo_w2 + 8
+                mid_w = 540 - w2
+                header_table = Table(
+                    [[header_elements, img2]],
+                    colWidths=[mid_w, w2],
+                    hAlign='CENTER'
+                )
+                header_table.setStyle(TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ALIGN", (1, 0), (1, 0), "LEFT"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ]))
+            else:
+                header_table = Table(
+                    [[header_elements]],
+                    colWidths=[540],
+                    hAlign='CENTER'
+                )
+            story.append(header_table)
+            story.append(Spacer(1, 10))
+
+        # Configurable report name just below header (only if more than 1 KPI)
+        if data.get("unique_kpi_count", 0) > 1 and data.get("show_report_name", True):
+            story.append(Paragraph(report_name, title_style))
+            story.append(Paragraph(f"Academic Year: {year}", subtitle_style))
 
         for s_idx, sec in enumerate(data.get("sections", [])):
             sec_name = sec.get("custom_header") or sec.get("kpi_name", f"Section {s_idx+1}")
-            story.append(Paragraph(f"{s_idx+1}. {sec_name}", h1_style))
+            story.append(Paragraph(f"{sec['number']}. {sec_name}", h1_style))
+            story.append(Spacer(1, 4))
 
-            scalars = [f for f in sec.get("fields", []) if f.get("field_type") != "multi_line_items"]
-            mlis = [f for f in sec.get("fields", []) if f.get("field_type") == "multi_line_items"]
+            for f in sec.get("fields", []):
+                if f.get("field_type") != "multi_line_items":
+                    val = f.get("value")
+                    val_str = clean_numeric_value_string(val)
+                    from reportlab.platypus import Table, TableStyle
+                    t = Table(
+                        [[Paragraph(f"{f['number']}. {f.get('field_name')}", h2_style), Paragraph(f"<b>{val_str}</b>", h2_right_style)]],
+                        colWidths=[450, 90]
+                    )
+                    t.setStyle(TableStyle([
+                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                        ('ALIGN', (0,0), (0,0), 'LEFT'),
+                        ('ALIGN', (1,0), (1,0), 'RIGHT'),
+                        ('BOTTOMPADDING', (0,0), (-1,-1), 1),
+                        ('TOPPADDING', (0,0), (-1,-1), 1),
+                        ('LEFTPADDING', (0,0), (-1,-1), 0),
+                        ('RIGHTPADDING', (0,0), (-1,-1), 0),
+                        ('RIGHTPADDING', (1,0), (1,0), 25),
+                        ('LINEBELOW', (0,0), (-1,-1), 0.5, colors.HexColor("#e5e7eb")),
+                    ]))
+                    story.append(t)
+                    story.append(Spacer(1, 6))
+                else:
+                    # Fields as Heading 2s
+                    story.append(Paragraph(f"{f['number']}. {f.get('field_name')}", h2_style))
+                    story.append(Spacer(1, 2))
+                    sub_fields = f.get("sub_fields", [])
+                    value_items = f.get("value_items", [])
 
-            if scalars:
-                scalar_data = []
-                for f in scalars:
-                    scalar_data.append([
-                        Paragraph(f.get("field_name"), bold_body_style),
-                        Paragraph(str(f.get("value") if f.get("value") is not None else "—"), body_style)
-                    ])
-                t = Table(scalar_data, colWidths=[200, 340])
-                t.setStyle(TableStyle([
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                ]))
-                story.append(t)
-                story.append(Spacer(1, 8))
+                    if sub_fields:
+                        col_widths = [40] + [(500 / len(sub_fields))] * len(sub_fields)
+                        hdr_row = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style) for sf in sub_fields]
+                        pdf_table_data = [hdr_row]
 
-            for f in mlis:
-                story.append(Paragraph(f.get("field_name"), h2_style))
-                sub_fields = f.get("sub_fields", [])
-                value_items = f.get("value_items", [])
-
-                if sub_fields:
-                    col_widths = [540 / len(sub_fields)] * len(sub_fields)
-                    hdr_row = [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style) for sf in sub_fields]
-                    pdf_table_data = [hdr_row]
-
-                    for item in value_items:
-                        row = []
-                        for sf in sub_fields:
-                            val = item.get(sf.get("key"))
-                            if val is not None:
-                                val_str = str(val)
+                        for item_idx, item in enumerate(value_items):
+                            row = [Paragraph(str(item_idx + 1), table_body_style)]
+                            for sf in sub_fields:
+                                val = item.get(sf.get("key"))
+                                val_str = clean_numeric_value_string(val)
                                 if len(val_str) > 250:
                                     val_str = val_str[:250] + "..."
-                            else:
-                                val_str = "—"
-                            row.append(Paragraph(val_str, table_body_style))
-                        pdf_table_data.append(row)
+                                row.append(Paragraph(val_str, table_body_style))
+                            pdf_table_data.append(row)
 
-                    t_mli = Table(pdf_table_data, colWidths=col_widths)
-                    t_mli.setStyle(TableStyle([
-                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
-                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
-                        ("TOPPADDING", (0, 0), (-1, -1), 3),
-                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                    ]))
-                    story.append(t_mli)
-                    story.append(Spacer(1, 8))
+                        t_mli = Table(pdf_table_data, colWidths=col_widths)
+                        t_mli.setStyle(TableStyle([
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(h1_color_hex)),
+                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
+                            ("TOPPADDING", (0, 0), (-1, -1), 3),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                        ]))
+                        story.append(t_mli)
+                        story.append(Spacer(1, 8))
 
-        pdf_doc.build(story)
+        # Fetch organization and custom branding
+        org = await db.get(Organization, org_id)
+        org_branding = (await db.execute(
+            select(OrganizationBranding).where(OrganizationBranding.organization_id == org_id)
+        )).scalar_one_or_none()
+
+        footer_confidentiality = "Confidential Document"
+        is_custom_brand = False
+        if data.get("branding_title"):
+            footer_confidentiality = data["branding_title"]
+            is_custom_brand = True
+        elif org_branding and org_branding.footer_label:
+            footer_confidentiality = org_branding.footer_label
+            is_custom_brand = True
+
+        def make_canvas(*args, **kwargs):
+            c = NumberedCanvas(*args, **kwargs)
+            c.organization_name = org.name if org else ""
+            c.include_date = True
+            c.confidentiality_text = footer_confidentiality
+            c.is_custom_branding = is_custom_brand
+            return c
+
+        pdf_doc.build(story, canvasmaker=make_canvas)
         return out_io.getvalue(), f"{clean_report_name}_{year}.pdf", "application/pdf"
 
     raise ValueError("Invalid format: " + format)
@@ -1159,7 +1880,7 @@ async def stream_custom_report_data(
             except Exception:
                 pass
 
-    yr = year if year is not None else datetime.date.today().year
+    yr = _parse_year_int(year)
 
     # Yield metadata
     yield {
@@ -1558,6 +2279,23 @@ async def stream_custom_report_data(
                     else:
                         filtered_chunk_rows = chunk_rows
 
+                # Sort rows in memory if specified
+                sort_col = cfg.get("sort_column")
+                sort_dir = cfg.get("sort_direction") or "asc"
+                if sort_col and filtered_chunk_rows:
+                    reverse = sort_dir == "desc"
+                    def sort_key(row: dict):
+                        v = row.get(sort_col)
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            return str(v) if v is not None else ""
+                    try:
+                        filtered_chunk_rows = sorted(filtered_chunk_rows, key=sort_key, reverse=reverse)
+                    except Exception:
+                        pass
+
+
                 yield {
                     "type": "table_rows",
                     "field_id": f.id,
@@ -1604,7 +2342,7 @@ async def export_custom_report_attachments(
 
     # Generate file for each attachment
     files = [] # list of (filename, bytes)
-    yr = year if year is not None else datetime.date.today().year
+    yr = _parse_year_int(year)
 
     for att in attachments:
         # Load entries for this KPI
@@ -1661,7 +2399,48 @@ async def export_custom_report_attachments(
                 chunk_rows.append(cells_by_row.get(rid, {}))
 
         # Build Document
-        sub_fields = [{"key": sf.key, "name": sf.name or sf.key} for sf in getattr(kfield, "sub_fields", [])]
+        # Column selection filtering for attachment
+        if att.selected_columns:
+            sf_map = {sf.key: sf for sf in getattr(kfield, "sub_fields", [])}
+            sub_fields = [{"key": k, "name": (sf_map[k].name if sf_map[k].name else k)} for k in att.selected_columns if k in sf_map]
+        else:
+            sub_fields = [{"key": sf.key, "name": sf.name or sf.key} for sf in getattr(kfield, "sub_fields", [])]
+
+        # Row filtering for attachment
+        raw_filters = att.filters or {}
+        filtered_rows = []
+        if chunk_rows:
+            if raw_filters and raw_filters.get("conditions"):
+                from app.entries.multi_item_filters import row_passes_filters
+                from app.entries.reference_filter_resolve import build_reference_resolution_map
+                conds = raw_filters.get("conditions")
+                resolution_maps = await build_reference_resolution_map(
+                    db, org_id, yr, kfield, conds, chunk_rows
+                )
+                reference_field_types = {sf.key: sf.field_type.value if hasattr(sf.field_type, "value") else sf.field_type for sf in kfield.sub_fields}
+                for r in chunk_rows:
+                    if row_passes_filters(r, raw_filters, resolution_maps=resolution_maps, reference_field_types=reference_field_types):
+                        filtered_rows.append(r)
+            else:
+                filtered_rows = chunk_rows
+
+        # Row sorting for attachment
+        sort_col = raw_filters.get("sort_column")
+        sort_dir = raw_filters.get("sort_direction") or "asc"
+        if sort_col and filtered_rows:
+            reverse = sort_dir == "desc"
+            def sort_key(row: dict):
+                v = row.get(sort_col)
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return str(v) if v is not None else ""
+            try:
+                filtered_rows = sorted(filtered_rows, key=sort_key, reverse=reverse)
+            except Exception:
+                pass
+        chunk_rows = filtered_rows
+
         clean_title = re.sub(r'[^\w\s-]', '', att.title).strip().replace(' ', '_')
         
         if format == "xlsx":
@@ -1675,14 +2454,18 @@ async def export_custom_report_attachments(
             header_fill = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
             
             # Headers
+            sr_c = ws.cell(row=1, column=1, value="Sr. No.")
+            sr_c.font = header_font
+            sr_c.fill = header_fill
             for col_idx, sf in enumerate(sub_fields):
-                c = ws.cell(row=1, column=col_idx+1, value=sf["name"])
+                c = ws.cell(row=1, column=col_idx+2, value=sf["name"])
                 c.font = header_font
                 c.fill = header_fill
             
             for r_idx, item in enumerate(chunk_rows):
+                ws.cell(row=r_idx+2, column=1, value=r_idx + 1)
                 for col_idx, sf in enumerate(sub_fields):
-                    ws.cell(row=r_idx+2, column=col_idx+1, value=str(item.get(sf["key"], "")))
+                    ws.cell(row=r_idx+2, column=col_idx+2, value=str(item.get(sf["key"], "")))
             
             out_io = io.BytesIO()
             wb.save(out_io)
@@ -1694,12 +2477,12 @@ async def export_custom_report_attachments(
             from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
             
             out_io = io.BytesIO()
-            num_cols = len(sub_fields) if sub_fields else 1
+            num_cols = (len(sub_fields) + 1) if sub_fields else 1
             
             page_width = max(612, num_cols * 65)
             pagesize = (page_width, 792)
-            col_width = max(35, (page_width - 54) / num_cols)
-            col_widths = [col_width] * num_cols
+            col_width = max(35, (page_width - 54 - 35) / max(1, len(sub_fields)))
+            col_widths = [35] + [col_width] * len(sub_fields)
 
             pdf_doc = SimpleDocTemplate(out_io, pagesize=pagesize, leftMargin=27, rightMargin=27, topMargin=27, bottomMargin=27)
             story = []
@@ -1732,9 +2515,9 @@ async def export_custom_report_attachments(
                     story.append(Paragraph(f"<i>Note: PDF attachment limited to first 3,000 rows of {len(chunk_rows)} total records. For full raw data, export as Excel (.xlsx).</i>", styles["Italic"]))
                     story.append(Spacer(1, 8))
 
-                table_data = [[Paragraph(sf["name"], cell_header_style) for sf in sub_fields]]
-                for item in pdf_rows:
-                    row = [Paragraph(str(item.get(sf["key"], "") or ""), cell_body_style) for sf in sub_fields]
+                table_data = [[Paragraph("Sr. No.", cell_header_style)] + [Paragraph(sf["name"], cell_header_style) for sf in sub_fields]]
+                for r_idx, item in enumerate(pdf_rows):
+                    row = [Paragraph(str(r_idx + 1), cell_body_style)] + [Paragraph(str(item.get(sf["key"], "") or ""), cell_body_style) for sf in sub_fields]
                     table_data.append(row)
                 
                 t = Table(table_data, colWidths=col_widths)
@@ -1759,16 +2542,18 @@ async def export_custom_report_attachments(
             doc.add_heading(att.title, level=1)
             
             if sub_fields and chunk_rows:
-                table = doc.add_table(rows=1, cols=len(sub_fields))
+                table = doc.add_table(rows=1, cols=len(sub_fields) + 1)
                 table.style = 'Light Shading Accent 1'
                 hdr_cells = table.rows[0].cells
+                hdr_cells[0].text = "Sr. No."
                 for col_idx, sf in enumerate(sub_fields):
-                    hdr_cells[col_idx].text = sf["name"]
+                    hdr_cells[col_idx + 1].text = sf["name"]
                 
-                for item in chunk_rows:
+                for r_idx, item in enumerate(chunk_rows):
                     row_cells = table.add_row().cells
+                    row_cells[0].text = str(r_idx + 1)
                     for col_idx, sf in enumerate(sub_fields):
-                        row_cells[col_idx].text = str(item.get(sf["key"], ""))
+                        row_cells[col_idx + 1].text = str(item.get(sf["key"], ""))
             else:
                 doc.add_paragraph("No data available.")
                 

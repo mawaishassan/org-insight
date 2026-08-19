@@ -138,6 +138,9 @@ export default function KpiReportBuilder() {
   // Report Form States
   const [pdfTitle, setPdfTitle] = useState("");
   const [pdfDescription, setPdfDescription] = useState("");
+  const [kpiHeadingColor, setKpiHeadingColor] = useState("#1e3a8a");
+  const [kpiHeadingFontSize, setKpiHeadingFontSize] = useState("16");
+  const [kpiHeadingFontFamily, setKpiHeadingFontFamily] = useState("Helvetica");
   const [scalarFieldOverrides, setScalarFieldOverrides] = useState<Record<string, string>>({});
   const [excludedScalarFields, setExcludedScalarFields] = useState<string[]>([]);
   const [editingScalarFieldId, setEditingScalarFieldId] = useState<number | null>(null);
@@ -154,6 +157,8 @@ export default function KpiReportBuilder() {
     table_subheader: string;
     filters: { conditions: any[]; _version: number };
     sort_order?: number | "" | null;
+    sort_column?: string;
+    sort_direction?: string;
   }>>({});
 
   // Background PDF Job states
@@ -188,10 +193,6 @@ export default function KpiReportBuilder() {
         const r = me.role;
         const roleStr = typeof r === "string" ? r : r?.value ?? null;
         setMeRole(roleStr);
-        if (roleStr !== "ORG_ADMIN") {
-          setError("Access Denied: Only Organizational Admins can access this KPI Report Builder page.");
-          setLoading(false);
-        }
       })
       .catch(() => {
         router.push("/auth/login");
@@ -200,7 +201,7 @@ export default function KpiReportBuilder() {
 
   // Load KPI definitions
   useEffect(() => {
-    if (!token || !kpiId || !effectiveOrgId || meRole !== "ORG_ADMIN") return;
+    if (!token || !kpiId || !effectiveOrgId || !meRole) return;
 
     setLoading(true);
     setError(null);
@@ -256,7 +257,9 @@ export default function KpiReportBuilder() {
               table_heading: f.name || "",
               table_subheader: "Performance Metrics & Details",
               filters: { conditions: [], _version: 2 },
-              sort_order: ""
+              sort_order: "",
+              sort_column: "",
+              sort_direction: "asc"
             };
             drafts[f.key] = [emptyMultiFilterRow()];
             initialExpanded[f.key] = true;
@@ -318,6 +321,9 @@ export default function KpiReportBuilder() {
           period_key: periodKeyFromUrl || "",
           title: pdfTitle,
           description: pdfDescription,
+          kpi_name_color: kpiHeadingColor,
+          kpi_name_font_size: Number(kpiHeadingFontSize),
+          kpi_name_font_family: kpiHeadingFontFamily,
           scalar_fields: scalarFieldOverrides,
           excluded_scalar_fields: excludedScalarFields,
           excluded_multi_line_fields: excludedMultiLineFields,
@@ -607,6 +613,53 @@ export default function KpiReportBuilder() {
                       );
                     })
                   )}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
+              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.25rem", color: "var(--text-secondary)" }}>
+                Sort Rows
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label style={{ fontSize: "0.7rem", color: "var(--muted)" }}>Sort Column</label>
+                  <select
+                    value={cfg.sort_column || ""}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setMultiLineConfig((prev) => ({
+                        ...prev,
+                        [f.key]: { ...prev[f.key], sort_column: val }
+                      }));
+                    }}
+                    style={{ padding: "0.3rem 0.5rem", fontSize: "0.8rem", width: "100%", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                  >
+                    <option value="">Default (No Sorting)</option>
+                    {f.sub_fields?.map((sf) => (
+                      <option key={sf.key} value={sf.key}>
+                        {sf.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label style={{ fontSize: "0.7rem", color: "var(--muted)" }}>Direction</label>
+                  <select
+                    value={cfg.sort_direction || "asc"}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setMultiLineConfig((prev) => ({
+                        ...prev,
+                        [f.key]: { ...prev[f.key], sort_direction: val }
+                      }));
+                    }}
+                    disabled={!cfg.sort_column}
+                    style={{ padding: "0.3rem 0.5rem", fontSize: "0.8rem", width: "100%", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                  >
+                    <option value="asc">Ascending (A-Z / 0-9)</option>
+                    <option value="desc">Descending (Z-A / 9-0)</option>
+                  </select>
                 </div>
               </div>
             </div>
@@ -1012,6 +1065,67 @@ export default function KpiReportBuilder() {
                   resize: "vertical"
                 }}
               />
+            </div>
+
+            {/* KPI Heading Color, Size & Font Style options */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginTop: "0.5rem" }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>
+                  KPI Heading Font Style
+                </label>
+                <select
+                  value={kpiHeadingFontFamily}
+                  onChange={(e) => setKpiHeadingFontFamily(e.target.value)}
+                  style={{ width: "100%", padding: "0.4rem 0.6rem", fontSize: "0.85rem" }}
+                >
+                  <option value="Helvetica">Helvetica (Sans-Serif)</option>
+                  <option value="Times-Roman">Times New Roman (Serif)</option>
+                  <option value="Courier">Courier New (Monospace)</option>
+                  <option value="Arial">Arial (Sans-Serif)</option>
+                  <option value="Georgia">Georgia (Serif)</option>
+                  <option value="Verdana">Verdana (Sans-Serif)</option>
+                  <option value="Calibri">Calibri (Sans-Serif)</option>
+                  <option value="Garamond">Garamond (Serif)</option>
+                </select>
+              </div>
+
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label style={{ fontWeight: 600, display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>
+                  KPI Heading Text Size
+                </label>
+                <select
+                  value={kpiHeadingFontSize}
+                  onChange={(e) => setKpiHeadingFontSize(e.target.value)}
+                  style={{ width: "100%", padding: "0.4rem 0.6rem", fontSize: "0.85rem" }}
+                >
+                  {Array.from({ length: 29 }, (_, i) => i + 8).map((sz) => (
+                    <option key={sz} value={String(sz)}>
+                      {sz}pt{sz === 16 ? " (Default)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="form-group" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
+              <label style={{ fontWeight: 600, display: "block", marginBottom: "0.25rem", fontSize: "0.85rem" }}>
+                KPI Heading Color
+              </label>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <input
+                  type="color"
+                  value={kpiHeadingColor}
+                  onChange={(e) => setKpiHeadingColor(e.target.value)}
+                  style={{ width: "40px", height: "35px", border: "1px solid var(--border)", cursor: "pointer", padding: "1px", borderRadius: "4px" }}
+                />
+                <input
+                  type="text"
+                  value={kpiHeadingColor}
+                  onChange={(e) => setKpiHeadingColor(e.target.value)}
+                  placeholder="#1e3a8a"
+                  style={{ flex: 1, padding: "0.4rem 0.6rem", fontSize: "0.85rem" }}
+                />
+              </div>
             </div>
           </div>
 

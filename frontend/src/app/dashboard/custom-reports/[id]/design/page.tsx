@@ -97,6 +97,28 @@ export default function CustomReportDesignPage() {
   const [dateFetchingConfig, setDateFetchingConfig] = useState<any>({});
   const [reportSettingsOpen, setReportSettingsOpen] = useState(false);
 
+  const [reportHeaderId, setReportHeaderId] = useState<number | null>(null);
+  const [showReportName, setShowReportName] = useState<boolean>(true);
+  const [brandingTitle, setBrandingTitle] = useState<string>("");
+  const [scalarBold, setScalarBold] = useState<boolean>(true);
+  const [scalarFontSize, setScalarFontSize] = useState<number>(11);
+  const [mliFontSize, setMliFontSize] = useState<number>(10);
+  const [showOdooButton, setShowOdooButton] = useState<boolean>(false);
+  const [customReportHeaders, setCustomReportHeaders] = useState<any[]>([]);
+
+  const [localReportHeaderId, setLocalReportHeaderId] = useState<number | null>(null);
+  const [localShowReportName, setLocalShowReportName] = useState<boolean>(true);
+  const [localBrandingTitle, setLocalBrandingTitle] = useState<string>("");
+  const [localScalarBold, setLocalScalarBold] = useState<boolean>(true);
+  const [localScalarFontSize, setLocalScalarFontSize] = useState<number>(11);
+  const [localMliFontSize, setLocalMliFontSize] = useState<number>(10);
+  const [localShowOdooButton, setLocalShowOdooButton] = useState<boolean>(false);
+  const [odooSyncKpiIds, setOdooSyncKpiIds] = useState<number[]>([]);
+  const [localOdooSyncKpiIds, setLocalOdooSyncKpiIds] = useState<number[]>([]);
+  const [odooConfiguredKpis, setOdooConfiguredKpis] = useState<{id: number; name: string}[]>([]);
+
+
+
   // Live Preview properties
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
   const [previewYear, setPreviewYear] = useState(() => new Date().getFullYear());
@@ -157,8 +179,18 @@ export default function CustomReportDesignPage() {
       setLocalDateBasedFetching(fetchDataWithDate);
       setLocalDateColumn(dateFetchingConfig?.date_column || "");
       setLocalMliDateCols(dateFetchingConfig?.mli_date_cols || {});
+      setLocalReportHeaderId(reportHeaderId);
+      setLocalShowReportName(showReportName);
+      setLocalBrandingTitle(brandingTitle);
+      setLocalScalarBold(scalarBold);
+      setLocalScalarFontSize(scalarFontSize);
+      setLocalMliFontSize(mliFontSize);
+      setLocalShowOdooButton(showOdooButton);
+      setLocalOdooSyncKpiIds(odooSyncKpiIds);
+
     }
-  }, [reportSettingsOpen, fetchDataWithDate, dateFetchingConfig]);
+  }, [reportSettingsOpen, fetchDataWithDate, dateFetchingConfig, reportHeaderId, showReportName, brandingTitle, scalarBold, scalarFontSize, mliFontSize, showOdooButton, odooSyncKpiIds]);
+
 
   const customPeriods = useMemo(() => {
     if (!organization) return [];
@@ -224,7 +256,16 @@ export default function CustomReportDesignPage() {
       })),
       fetch_data_with_date: fetchDataWithDate,
       date_fetching_config: dateFetchingConfig,
+      report_header_id: reportHeaderId,
+      show_report_name: showReportName,
+      branding_title: brandingTitle,
+      scalar_bold: scalarBold,
+      scalar_font_size: scalarFontSize,
+      mli_font_size: mliFontSize,
+      show_odoo_button: showOdooButton,
+      odoo_sync_kpi_ids: odooSyncKpiIds,
     };
+
     const reportLayout = {
       sections: report.sections.map(s => ({
         kpi_id: s.kpi_id,
@@ -246,9 +287,19 @@ export default function CustomReportDesignPage() {
       })) || [],
       fetch_data_with_date: report.fetch_data_with_date ?? false,
       date_fetching_config: report.date_fetching_config ?? {},
+      report_header_id: (report as any).report_header_id ?? null,
+      show_report_name: (report as any).show_report_name ?? true,
+      branding_title: (report as any).branding_title ?? "",
+      scalar_bold: (report as any).scalar_bold ?? true,
+      scalar_font_size: (report as any).scalar_font_size ?? 11,
+      mli_font_size: (report as any).mli_font_size ?? 10,
+      show_odoo_button: (report as any).show_odoo_button ?? false,
+      odoo_sync_kpi_ids: (report as any).odoo_sync_kpi_ids ?? [],
     };
+
     return JSON.stringify(currentLayout) !== JSON.stringify(reportLayout);
-  }, [report, sections, attachments, fetchDataWithDate, dateFetchingConfig]);
+  }, [report, sections, attachments, fetchDataWithDate, dateFetchingConfig, reportHeaderId, showReportName, brandingTitle, scalarBold, scalarFontSize, mliFontSize, showOdooButton, odooSyncKpiIds]);
+
 
   // Column Selection & Reordering + Row Filtering States for MLIs
   const [editingFieldLoc, setEditingFieldLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
@@ -256,6 +307,8 @@ export default function CustomReportDesignPage() {
     selected_columns: string[];
     filters: { conditions: any[]; _version: number };
     custom_sub_field_labels?: Record<string, string>;
+    sort_column?: string;
+    sort_direction?: string;
   } | null>(null);
 
   const [editingAttachmentIdx, setEditingAttachmentIdx] = useState<number | null>(null);
@@ -264,7 +317,7 @@ export default function CustomReportDesignPage() {
     kpi_field_id: number;
     title: string;
     selected_columns: string[];
-    filters: { conditions: any[]; _version: number };
+    filters: { conditions: any[]; _version: number; sort_column?: string; sort_direction?: string };
   } | null>(null);
 
   const [openFilterFieldKey, setOpenFilterFieldKey] = useState<boolean>(false);
@@ -329,7 +382,6 @@ export default function CustomReportDesignPage() {
     });
   };
 
-  // Fetch report details and KPIs list
   useEffect(() => {
     const token = getAccessToken();
     if (!token || !id || !orgId) return;
@@ -339,13 +391,27 @@ export default function CustomReportDesignPage() {
       api<CustomReportDetail>(`/custom-reports/${id}/detail?organization_id=${orgId}`, { token }),
       api<any[]>(`/kpis?organization_id=${orgId}`, { token }),
       api<KPIField[]>(`/fields?organization_id=${orgId}`, { token }),
+      api<any[]>(`/reports/headers?organization_id=${orgId}`, { token }).catch(() => []),
+      api<{id: number; name: string}[]>(`/custom-reports/odoo-configured-kpis?organization_id=${orgId}`, { token }).catch(() => []),
     ])
-      .then(([detail, kpisData, allFields]) => {
+      .then(([detail, kpisData, allFields, headersData, odooKpis]) => {
+
         setReport(detail);
         setSections(detail.sections.sort((a, b) => a.sort_order - b.sort_order));
         setAttachments((detail as any).attachments || []);
         setFetchDataWithDate(detail.fetch_data_with_date ?? false);
         setDateFetchingConfig(detail.date_fetching_config ?? {});
+        setReportHeaderId((detail as any).report_header_id ?? null);
+        setShowReportName((detail as any).show_report_name ?? true);
+        setBrandingTitle((detail as any).branding_title ?? "");
+        setScalarBold((detail as any).scalar_bold ?? true);
+        setScalarFontSize((detail as any).scalar_font_size ?? 11);
+        setMliFontSize((detail as any).mli_font_size ?? 10);
+        setShowOdooButton((detail as any).show_odoo_button ?? false);
+        setOdooSyncKpiIds((detail as any).odoo_sync_kpi_ids || []);
+        setOdooConfiguredKpis(odooKpis || []);
+
+        setCustomReportHeaders(headersData || []);
 
         // Group fields by kpi_id in memory
         const fieldsByKpi = (allFields || []).reduce((acc, f) => {
@@ -701,7 +767,16 @@ export default function CustomReportDesignPage() {
         })),
         fetch_data_with_date: fetchDataWithDate,
         date_fetching_config: dateFetchingConfig,
+        report_header_id: reportHeaderId,
+        show_report_name: showReportName,
+        branding_title: brandingTitle,
+        scalar_bold: scalarBold,
+        scalar_font_size: scalarFontSize,
+        mli_font_size: mliFontSize,
+        show_odoo_button: showOdooButton,
+        odoo_sync_kpi_ids: odooSyncKpiIds,
       };
+
 
       await api(`/custom-reports/${id}/layout?organization_id=${orgId}`, {
         method: "PUT",
@@ -715,7 +790,16 @@ export default function CustomReportDesignPage() {
         attachments: attachments,
         fetch_data_with_date: fetchDataWithDate,
         date_fetching_config: dateFetchingConfig,
+        report_header_id: reportHeaderId,
+        show_report_name: showReportName,
+        branding_title: brandingTitle,
+        scalar_bold: scalarBold,
+        scalar_font_size: scalarFontSize,
+        mli_font_size: mliFontSize,
+        show_odoo_button: showOdooButton,
+        odoo_sync_kpi_ids: odooSyncKpiIds,
       } : null);
+
 
       toast.success("Report layout saved successfully");
       fetchPreview(previewYear);
@@ -816,9 +900,206 @@ export default function CustomReportDesignPage() {
             {reportSettingsOpen && (
               <div className="card" style={{ padding: "0.75rem", display: "grid", gap: "0.75rem", marginBottom: "1rem", background: "var(--bg-muted, #fcfcfc)", border: "1px dashed var(--border)", borderRadius: "8px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Report Date-Fetching Settings</span>
+                  <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Report Settings & Branding</span>
                   <button type="button" className="btn btn-secondary btn-sm" style={{ padding: "0.1rem 0.35rem", fontSize: "0.7rem" }} onClick={() => setReportSettingsOpen(false)}>Close</button>
                 </div>
+
+                <div style={{ display: "grid", gap: "0.75rem", borderBottom: "1px solid var(--border)", paddingBottom: "0.75rem" }}>
+                  <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Report Header & Branding</span>
+                  
+                  {/* Select Report Header template */}
+                  <div style={{ display: "grid", gap: "0.25rem" }}>
+                    <label style={{ fontSize: "0.8rem", fontWeight: 600 }}>Report Header Template</label>
+                    <select
+                      value={localReportHeaderId ?? ""}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setLocalReportHeaderId(val ? Number(val) : null);
+                      }}
+                      style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
+                    >
+                      <option value="">No Header Template</option>
+                      {customReportHeaders.map((h) => (
+                        <option key={h.id} value={h.id}>
+                          {h.name} ({h.main_heading})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Show Report Name Option (only if more than 1 KPI is added) */}
+                  {referencedKpiIds.length > 1 && (
+                    <div style={{ display: "grid", gap: "0.35rem" }}>
+                      <span style={{ fontSize: "0.8rem", fontWeight: 600 }}>Show Report Name as Header</span>
+                      <div style={{ display: "flex", gap: "1rem" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.8rem", cursor: "pointer", margin: 0 }}>
+                          <input
+                            type="radio"
+                            name="showReportNameRadio"
+                            checked={localShowReportName === true}
+                            onChange={() => setLocalShowReportName(true)}
+                          />
+                          Yes
+                        </label>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.8rem", cursor: "pointer", margin: 0 }}>
+                          <input
+                            type="radio"
+                            name="showReportNameRadio"
+                            checked={localShowReportName === false}
+                            onChange={() => setLocalShowReportName(false)}
+                          />
+                          No
+                        </label>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Branding/Footer label Override */}
+                  <div style={{ display: "grid", gap: "0.25rem" }}>
+                    <label style={{ fontSize: "0.8rem", fontWeight: 600 }}>Custom Footer Branding Label</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Confidential | Org Name"
+                      value={localBrandingTitle}
+                      onChange={(e) => setLocalBrandingTitle(e.target.value)}
+                      style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
+                    />
+                    <p style={{ margin: 0, fontSize: "0.7rem", color: "var(--muted)" }}>
+                      Overrides the default organization footer branding label in the PDF footer.
+                    </p>
+                  </div>
+
+                  {/* Typography & Font Sizes */}
+                  <div style={{ display: "grid", gap: "0.6rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
+                    <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>Typography & Font Sizes</span>
+                    
+                    {/* Scalar values bold or not */}
+                    <div style={{ display: "grid", gap: "0.25rem" }}>
+                      <span style={{ fontSize: "0.8rem", fontWeight: 600 }}>Bold Scalar Field Values</span>
+                      <div style={{ display: "flex", gap: "1rem" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.8rem", cursor: "pointer", margin: 0 }}>
+                          <input
+                            type="radio"
+                            name="scalarBoldRadio"
+                            checked={localScalarBold === true}
+                            onChange={() => setLocalScalarBold(true)}
+                          />
+                          Yes (Bold)
+                        </label>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.8rem", cursor: "pointer", margin: 0 }}>
+                          <input
+                            type="radio"
+                            name="scalarBoldRadio"
+                            checked={localScalarBold === false}
+                            onChange={() => setLocalScalarBold(false)}
+                          />
+                          No (Regular)
+                        </label>
+                      </div>
+                    </div>
+
+                    {/* Scalar field values font size */}
+                    <div style={{ display: "grid", gap: "0.25rem" }}>
+                      <label style={{ fontSize: "0.8rem", fontWeight: 600 }}>Scalar Field Font Size (pt)</label>
+                      <input
+                        type="number"
+                        min={6}
+                        max={24}
+                        value={localScalarFontSize}
+                        onChange={(e) => setLocalScalarFontSize(Number(e.target.value))}
+                        style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
+                      />
+                    </div>
+
+                    {/* MLI table cells font size */}
+                    <div style={{ display: "grid", gap: "0.25rem" }}>
+                      <label style={{ fontSize: "0.8rem", fontWeight: 600 }}>Table Cell Font Size (pt)</label>
+                      <input
+                        type="number"
+                        min={6}
+                        max={24}
+                        value={localMliFontSize}
+                        onChange={(e) => setLocalMliFontSize(Number(e.target.value))}
+                        style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* LMS Integration */}
+                <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
+                  <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>LMS Integration</span>
+                  <div style={{ display: "grid", gap: "0.3rem" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontWeight: 600, fontSize: "0.85rem", cursor: "pointer", margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={localShowOdooButton}
+                        onChange={(e) => setLocalShowOdooButton(e.target.checked)}
+                      />
+                      Show &quot;Load Data from LMS&quot; Button
+
+                    </label>
+                    <p style={{ margin: 0, fontSize: "0.75rem", color: "var(--muted)" }}>
+                      When enabled, a button will appear at the top of the report. Only KPIs selected below will be synced when clicked.
+                    </p>
+                  </div>
+
+                  {localShowOdooButton && (
+                    <div style={{ display: "grid", gap: "0.5rem", background: "var(--surface-2, #f8fafc)", border: "1px solid var(--border)", borderRadius: 8, padding: "0.75rem" }}>
+                      <span style={{ fontWeight: 600, fontSize: "0.82rem", color: "var(--text)" }}>
+                        Select KPIs to sync from LMS:
+
+                      </span>
+                      {odooConfiguredKpis.length === 0 ? (
+                        <p style={{ margin: 0, fontSize: "0.75rem", color: "var(--muted)", fontStyle: "italic" }}>
+                          No Odoo-configured KPIs found in this organization. Configure Odoo for KPIs first.
+                        </p>
+                      ) : (
+                        <>
+                          <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.25rem" }}>
+                            <button
+                              type="button"
+                              onClick={() => setLocalOdooSyncKpiIds(odooConfiguredKpis.map(k => k.id))}
+                              style={{ fontSize: "0.72rem", padding: "0.15rem 0.5rem", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface)", cursor: "pointer", color: "var(--text)" }}
+                            >Select All</button>
+                            <button
+                              type="button"
+                              onClick={() => setLocalOdooSyncKpiIds([])}
+                              style={{ fontSize: "0.72rem", padding: "0.15rem 0.5rem", borderRadius: 4, border: "1px solid var(--border)", background: "var(--surface)", cursor: "pointer", color: "var(--text)" }}
+                            >Deselect All</button>
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem", maxHeight: 200, overflowY: "auto" }}>
+                            {odooConfiguredKpis.map(kpi => {
+                              const isChecked = localOdooSyncKpiIds.includes(kpi.id);
+                              return (
+                                <label key={kpi.id} style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.82rem", cursor: "pointer", margin: 0, fontWeight: 500 }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        setLocalOdooSyncKpiIds(prev => [...prev, kpi.id]);
+                                      } else {
+                                        setLocalOdooSyncKpiIds(prev => prev.filter(k => k !== kpi.id));
+                                      }
+                                    }}
+                                  />
+                                  {kpi.name}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
+                      <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.73rem", color: "var(--muted)" }}>
+                        Only selected KPIs will be synced when the &quot;Load Data from LMS&quot; button is pressed.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+
+
                 
                 <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
                   <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Report Date-Fetching Configuration</span>
@@ -912,6 +1193,14 @@ export default function CustomReportDesignPage() {
                       };
                       setFetchDataWithDate(localDateBasedFetching);
                       setDateFetchingConfig(nextConfig);
+                      setReportHeaderId(localReportHeaderId);
+                      setShowReportName(localShowReportName);
+                      setBrandingTitle(localBrandingTitle);
+                      setScalarBold(localScalarBold);
+                      setScalarFontSize(localScalarFontSize);
+                      setMliFontSize(localMliFontSize);
+                      setShowOdooButton(localShowOdooButton);
+                      setOdooSyncKpiIds(localOdooSyncKpiIds);
 
                       const tok = getAccessToken();
                       if (!tok || !id) return;
@@ -937,7 +1226,16 @@ export default function CustomReportDesignPage() {
                           })),
                           fetch_data_with_date: localDateBasedFetching,
                           date_fetching_config: nextConfig,
+                          report_header_id: localReportHeaderId,
+                          show_report_name: localShowReportName,
+                          branding_title: localBrandingTitle,
+                          scalar_bold: localScalarBold,
+                          scalar_font_size: localScalarFontSize,
+                          mli_font_size: localMliFontSize,
+                          show_odoo_button: localShowOdooButton,
+                          odoo_sync_kpi_ids: localOdooSyncKpiIds,
                         };
+
 
                         await api(`/custom-reports/${id}/layout?organization_id=${orgId}`, {
                           method: "PUT",
@@ -951,7 +1249,16 @@ export default function CustomReportDesignPage() {
                           attachments: attachments,
                           fetch_data_with_date: localDateBasedFetching,
                           date_fetching_config: nextConfig,
+                          report_header_id: localReportHeaderId,
+                          show_report_name: localShowReportName,
+                          branding_title: localBrandingTitle,
+                          scalar_bold: localScalarBold,
+                          scalar_font_size: localScalarFontSize,
+                          mli_font_size: localMliFontSize,
+                          show_odoo_button: localShowOdooButton,
+                          odoo_sync_kpi_ids: localOdooSyncKpiIds,
                         } : null);
+
 
                         toast.success("Configuration saved successfully.");
                         fetchPreview(previewYear);
@@ -1318,10 +1625,13 @@ export default function CustomReportDesignPage() {
                                               const subFields = kpiField?.sub_fields || [];
                                               setEditingFieldLoc({ secIdx: sIdx, fieldIdx: fIdx });
                                               setEditingFieldConfig({
-                                                selected_columns: f.config?.selected_columns || subFields.map(sf => sf.key).slice(0, 5),
-                                                filters: (f.config?.filters || { conditions: [], _version: 2 }) as any
+                                                selected_columns: (f.config as any)?.selected_columns || subFields.map(sf => sf.key).slice(0, 5),
+                                                filters: ((f.config as any)?.filters || { conditions: [], _version: 2 }) as any,
+                                                sort_column: (f.config as any)?.sort_column || "",
+                                                sort_direction: (f.config as any)?.sort_direction || "asc"
                                               });
-                                              setFilterDraft(payloadToFilterDraft((f.config?.filters || { conditions: [], _version: 2 }) as any));
+
+                                              setFilterDraft(payloadToFilterDraft(((f.config as any)?.filters || { conditions: [], _version: 2 }) as any));
                                               setOpenFilterFieldKey(false);
                                               setOpenFieldMenuLoc(null);
                                             }}
@@ -1438,9 +1748,10 @@ export default function CustomReportDesignPage() {
                       kpi_field_id: 0,
                       title: "New Attachment",
                       selected_columns: [],
-                      filters: { conditions: [], _version: 2 },
+                      filters: { conditions: [], _version: 2, sort_column: "", sort_direction: "asc" },
                       sort_order: attachments.length
                     };
+
                     setAttachments(prev => [...prev, newAtt]);
                     setEditingAttachmentIdx(attachments.length);
                     setEditingAttachmentConfig(newAtt);
@@ -1526,8 +1837,9 @@ export default function CustomReportDesignPage() {
                                 kpi_field_id: att.kpi_field_id,
                                 title: att.title,
                                 selected_columns: att.selected_columns || [],
-                                filters: att.filters || { conditions: [], _version: 2 }
+                                filters: att.filters || { conditions: [], _version: 2, sort_column: "", sort_direction: "asc" }
                               });
+
                               setFilterDraft(payloadToFilterDraft(att.filters || { conditions: [], _version: 2 }));
                               setOpenFilterFieldKey(false);
                             }}
@@ -1768,7 +2080,50 @@ export default function CustomReportDesignPage() {
                     </div>
                   </div>
 
+                  {/* Sort Rows Section */}
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem", marginBottom: "1.5rem" }}>
+                    <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+                      Sort Rows
+                    </label>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <label style={{ fontSize: "0.75rem", color: "var(--muted)", display: "block", marginBottom: "0.25rem" }}>Sort Column</label>
+                        <select
+                          value={(editingFieldConfig as any).sort_column || ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditingFieldConfig((prev) => prev ? { ...prev, sort_column: val } : null);
+                          }}
+                          style={{ padding: "0.4rem 0.6rem", fontSize: "0.8rem", width: "100%", borderRadius: "4px", border: "1px solid var(--border)", background: "white", color: "var(--text)" }}
+                        >
+                          <option value="">Default (No Sorting)</option>
+                          {subFields.map((sf) => (
+                            <option key={sf.key} value={sf.key}>
+                              {sf.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <label style={{ fontSize: "0.75rem", color: "var(--muted)", display: "block", marginBottom: "0.25rem" }}>Direction</label>
+                        <select
+                          value={(editingFieldConfig as any).sort_direction || "asc"}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditingFieldConfig((prev) => prev ? { ...prev, sort_direction: val } : null);
+                          }}
+                          disabled={!(editingFieldConfig as any).sort_column}
+                          style={{ padding: "0.4rem 0.6rem", fontSize: "0.8rem", width: "100%", borderRadius: "4px", border: "1px solid var(--border)", background: "white", color: "var(--text)" }}
+                        >
+                          <option value="asc">Ascending (A-Z / 0-9)</option>
+                          <option value="desc">Descending (Z-A / 9-0)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Advanced Filters Builder Section */}
+
                   <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem", marginBottom: "1.5rem" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
                       <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Row Filters</label>
@@ -2116,7 +2471,62 @@ export default function CustomReportDesignPage() {
                     </div>
                   </div>
 
+                  {/* Sort Rows Section */}
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem", marginBottom: "1.5rem" }}>
+                    <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+                      Sort Rows
+                    </label>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <label style={{ fontSize: "0.75rem", color: "var(--muted)", display: "block", marginBottom: "0.25rem" }}>Sort Column</label>
+                        <select
+                          value={editingAttachmentConfig.filters?.sort_column || ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditingAttachmentConfig({
+                              ...editingAttachmentConfig,
+                              filters: {
+                                ...editingAttachmentConfig.filters,
+                                sort_column: val
+                              }
+                            });
+                          }}
+                          style={{ padding: "0.4rem 0.6rem", fontSize: "0.8rem", width: "100%", borderRadius: "4px", border: "1px solid var(--border)", background: "white", color: "var(--text)" }}
+                        >
+                          <option value="">Default (No Sorting)</option>
+                          {subFields.map((sf) => (
+                            <option key={sf.key} value={sf.key}>
+                              {sf.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <label style={{ fontSize: "0.75rem", color: "var(--muted)", display: "block", marginBottom: "0.25rem" }}>Direction</label>
+                        <select
+                          value={editingAttachmentConfig.filters?.sort_direction || "asc"}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditingAttachmentConfig({
+                              ...editingAttachmentConfig,
+                              filters: {
+                                ...editingAttachmentConfig.filters,
+                                sort_direction: val
+                              }
+                            });
+                          }}
+                          disabled={!editingAttachmentConfig.filters?.sort_column}
+                          style={{ padding: "0.4rem 0.6rem", fontSize: "0.8rem", width: "100%", borderRadius: "4px", border: "1px solid var(--border)", background: "white", color: "var(--text)" }}
+                        >
+                          <option value="asc">Ascending (A-Z / 0-9)</option>
+                          <option value="desc">Descending (Z-A / 9-0)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Filters section */}
+
                   <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem", marginBottom: "1.5rem" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
                       <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Row Filters</label>

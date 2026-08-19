@@ -467,6 +467,51 @@ class KPICategory(Base):
     category = relationship("Category", back_populates="kpi_categories")
 
 
+class CustomReportHeader(Base):
+    """Customizable report header template containing a logo and titles."""
+
+    __tablename__ = "custom_report_headers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(255), nullable=False)
+    logo_path = Column(String(1024), nullable=False)
+    logo_path_2 = Column(String(1024), nullable=True)  # optional second logo (right side)
+    main_heading = Column(String(512), nullable=False)
+    sub_heading = Column(String(512), nullable=True)
+    font_family = Column(String(50), nullable=True, default="Helvetica")
+    font_size = Column(Integer, nullable=True, default=16)
+    text_color = Column(String(10), nullable=True, default="#1e3a8a")
+    text_align = Column(String(20), nullable=True, default="center")  # left, center, right, justify
+    sub_font_family = Column(String(50), nullable=True, default="Helvetica")
+    sub_font_size = Column(Integer, nullable=True, default=11)
+    sub_text_color = Column(String(10), nullable=True, default="#4b5563")
+    sub_text_align = Column(String(20), nullable=True, default="center")
+    kpi_name_color = Column(String(10), nullable=True, default="#1e3a8a")  # color for KPI name below header
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    organization = relationship("Organization")
+
+
+class OrganizationBranding(Base):
+    """One branding label per organization, set by Super Admin. Used in report footer."""
+
+    __tablename__ = "organization_brandings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True, unique=True
+    )
+    footer_label = Column(String(512), nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    organization = relationship("Organization")
+
+
 class KPI(Base):
     """KPI definition; belongs to an organization, optionally to a primary domain (can attach domains later)."""
 
@@ -478,6 +523,9 @@ class KPI(Base):
     )
     domain_id = Column(
         Integer, ForeignKey("domains.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    report_header_id = Column(
+        Integer, ForeignKey("custom_report_headers.id", ondelete="SET NULL"), nullable=True, index=True
     )
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
@@ -517,6 +565,7 @@ class KPI(Base):
         uselist=False,
         lazy="selectin",
     )
+    report_header = relationship("CustomReportHeader", lazy="joined")
 
 
 class KpiOdooConfig(Base):
@@ -1265,8 +1314,21 @@ class CustomReport(Base):
     description = Column(Text, nullable=True)
     fetch_data_with_date = Column(Boolean, default=False, nullable=False, server_default="false")
     date_fetching_config = Column(JSON, nullable=True)
+    report_header_id = Column(
+        Integer, ForeignKey("custom_report_headers.id", ondelete="SET NULL"), nullable=True
+    )
+    show_report_name = Column(Boolean, default=True, nullable=False, server_default="true")
+    branding_title = Column(String(255), nullable=True)
+    scalar_bold = Column(Boolean, default=True, nullable=False, server_default="true")
+    scalar_font_size = Column(Integer, default=11, nullable=False, server_default="11")
+    mli_font_size = Column(Integer, default=10, nullable=False, server_default="10")
+    show_odoo_button = Column(Boolean, default=False, nullable=False, server_default="false")
+    odoo_sync_kpi_ids = Column(JSON, nullable=True)  # List of KPI IDs to sync when button clicked (None = all odoo KPIs in report)
+
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    report_header = relationship("CustomReportHeader", lazy="joined")
 
     organization = relationship("Organization")
     sections = relationship(

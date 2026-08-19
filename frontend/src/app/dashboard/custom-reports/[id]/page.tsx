@@ -65,6 +65,7 @@ export default function CustomReportViewPage() {
   const [printLoading, setPrintLoading] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<number[]>([]);
+  const [odooSyncing, setOdooSyncing] = useState(false);
 
   useEffect(() => {
     if (!token) {
@@ -144,7 +145,7 @@ export default function CustomReportViewPage() {
   }, [periodOptions, selectedPeriod]);
 
   useEffect(() => {
-    if (!id || !token || !orgId) return;
+    if (!id || !token || !orgId || !template) return;
     if (template?.fetch_data_with_date && !selectedPeriod) return;
 
     setLoading(true);
@@ -363,6 +364,84 @@ export default function CustomReportViewPage() {
           </div>
         </div>
       </div>
+
+      {/* Load Data from LMS Button */}
+      {template?.show_odoo_button && (
+        <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: "1rem" }}>
+          <button
+            type="button"
+            disabled={odooSyncing || loading}
+            onClick={async () => {
+              if (!token) return;
+              setOdooSyncing(true);
+              const toastId = toast.loading("Syncing data from LMS...");
+
+              try {
+                const yr = template?.fetch_data_with_date ? selectedPeriod : reportYear;
+                const res = await api<any>(
+                  `/custom-reports/${id}/sync-odoo?year=${yr}&organization_id=${orgId}`,
+                  { method: "POST", token }
+                );
+                if (res.errors && res.errors.length > 0) {
+                  toast.success(`Synced ${res.synced_kpis} KPI(s) with ${res.errors.length} warning(s)`, { id: toastId });
+                } else {
+                  toast.success(res.message || `Successfully synced ${res.synced_kpis} KPI(s) from LMS`, { id: toastId });
+
+                }
+                // Re-fetch report data with cache-buster to get fresh MLI values
+                setLoading(true);
+                // Small delay to let backend DB commit propagate fully
+                await new Promise(resolve => setTimeout(resolve, 300));
+                const cacheBuster = Date.now();
+                const freshUrl = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}&preview=true&_t=${cacheBuster}`;
+                const freshData = await api<any>(freshUrl, { token });
+                setMetadata({
+                  name: freshData.custom_report_name || freshData.template_name || "Custom Report",
+                  description: freshData.custom_report_description || null,
+                  year: freshData.year || reportYear,
+                });
+                setSections(freshData.sections || []);
+                setAttachments(freshData.attachments || []);
+                setLoading(false);
+
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Failed to sync from LMS", { id: toastId });
+
+              } finally {
+                setOdooSyncing(false);
+              }
+            }}
+            style={{
+              padding: "0.5rem 1.25rem",
+              fontSize: "0.9rem",
+              fontWeight: 600,
+              background: odooSyncing ? "#9ca3af" : "#2563eb",
+              color: "white",
+              border: "none",
+              borderRadius: 8,
+              cursor: odooSyncing ? "not-allowed" : "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem",
+              boxShadow: "0 2px 4px rgba(37, 99, 235, 0.3)",
+              transition: "background 0.2s",
+
+            }}
+          >
+            {odooSyncing ? (
+              <>
+                <span style={{ display: "inline-block", width: 16, height: 16, border: "2px solid white", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                Syncing from LMS...
+
+              </>
+            ) : (
+              <>🔄 Load Data from LMS</>
+
+            )}
+          </button>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
 
       {/* Progressive Streaming Loading Bar */}
       {loading && (
