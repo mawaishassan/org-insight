@@ -7,7 +7,7 @@ import os
 import time
 from collections import defaultdict
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, or_
 from sqlalchemy.orm import selectinload
 
 from app.core.models import (
@@ -33,6 +33,7 @@ from app.core.models import (
     period_key_sort_order,
 )
 from app.reports.schemas import ReportTemplateCreate, ReportTemplateUpdate, ReportTemplateKPIAdd
+from app.formula_engine.evaluator import evaluate_formula, apply_conditional_logic
 
 
 def _parse_year_int(year_val: float | int | str | None) -> int:
@@ -228,13 +229,18 @@ async def _load_multi_line_items_rows_batch(
                     KpiMultiLineCell.sub_field_id == sf_id
                 )
             ).where(
-                and_(
-                    KpiMultiLineCell.value_date >= start_date,
-                    KpiMultiLineCell.value_date < end_date,
-                    KpiMultiLineCell.value_text.isnot(None),
-                    func.lower(func.trim(KpiMultiLineCell.value_text)).notin_([
-                        "false", "none", "null", "undefined", ""
-                    ])
+                or_(
+                    and_(
+                        KpiMultiLineCell.value_date.isnot(None),
+                        KpiMultiLineCell.value_date >= start_date,
+                        KpiMultiLineCell.value_date < end_date,
+                    ),
+                    and_(
+                        KpiMultiLineCell.value_text.isnot(None),
+                        KpiMultiLineCell.value_text != "",
+                        KpiMultiLineCell.value_text >= start_date.isoformat(),
+                        KpiMultiLineCell.value_text < end_date.isoformat(),
+                    )
                 )
             )
     if limit is not None:
@@ -1863,12 +1869,94 @@ def _report_period_display(year: int, period_key: str, dimension: TimeDimension)
     return f"{year} {period_key}"
 
 
+def _parse_kpi_formula_dependencies(formula_expression: str) -> list[int]:
+    if not formula_expression:
+        return []
+    import re
+    pattern = r'\b(?:KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|KPI_GROUP_BY|UNIQUE_COUNT_KPI_ITEMS|COUNT_UNIQUE_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|COUNT_UNIQUE_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE)\s*\(\s*(\d+)'
+    matches = re.findall(pattern, formula_expression, re.IGNORECASE)
+    return [int(m) for m in matches]
+
+
+def _topological_sort_report_kpis(kpis: list[KPI]) -> list[KPI]:
+    adj: dict[int, set[int]] = {}
+    in_degree: dict[int, int] = {}
+    kpi_map = {k.id: k for k in kpis}
+
+    for k in kpis:
+        adj[k.id] = set()
+        in_degree[k.id] = 0
+
+    for k in kpis:
+        for f in getattr(k, "fields", []) or []:
+            ft = getattr(f, "field_type", None)
+            ft_str = ft.value if hasattr(ft, "value") else str(ft)
+            exprs = []
+            if ft_str == "formula":
+                exprs.append(getattr(f, "formula_expression", "") or "")
+            elif ft_str == "multi_line_items":
+                for sf in getattr(f, "sub_fields", []) or []:
+                    cfg = getattr(sf, "config", None) or {}
+                    expr = cfg.get("formula_expression") or getattr(sf, "formula_expression", None)
+                    if expr:
+                        exprs.append(expr)
+            for expr in exprs:
+                for dep_id in _parse_kpi_formula_dependencies(expr):
+                    if dep_id in kpi_map and dep_id != k.id:
+                        if k.id not in adj[dep_id]:
+                            adj[dep_id].add(k.id)
+                            in_degree[k.id] += 1
+
+    from collections import deque
+    queue = deque([kid for kid, deg in in_degree.items() if deg == 0])
+    order = []
+    while queue:
+        u = queue.popleft()
+        order.append(u)
+        for v in adj[u]:
+            in_degree[v] -= 1
+            if in_degree[v] == 0:
+                queue.append(v)
+
+    if len(order) != len(kpis):
+        return kpis
+
+    return [kpi_map[kid] for kid in order]
+
+
+def _sort_formula_subfields(formula_sfs: list) -> list:
+    sorted_sfs = []
+    visited = set()
+    sfs_dict = {item[0]: item for item in formula_sfs}
+    
+    def visit(sf_key):
+        if sf_key in visited:
+            return
+        visited.add(sf_key)
+        item = sfs_dict.get(sf_key)
+        if not item:
+            return
+        expr = item[1]
+        if expr:
+            for other_key in sfs_dict:
+                if other_key != sf_key and other_key in expr:
+                    visit(other_key)
+        sorted_sfs.append(item)
+
+    for sf_key in sfs_dict:
+        visit(sf_key)
+    return sorted_sfs
+
+
 async def generate_report_data(
     db: AsyncSession,
     template_id: int,
     org_id: int,
     year: str | int | None = None,
     include_drafts: bool = False,
+    by_default: bool = False,
+    period_type: str | None = None,
+    bypass_cache: bool = False,
 ) -> dict | None:
     """
     Compile report data from KPI entries for the template.
@@ -1882,24 +1970,27 @@ async def generate_report_data(
 
     selected_period = year
     date_range = None
-    if rt and getattr(rt, "fetch_data_with_date", False) and selected_period:
+    entry_start_year: int | None = None  # calendar start year of the period (e.g. 2026 for "2026/27")
+    if rt and getattr(rt, "fetch_data_with_date", False) and selected_period and not by_default:
         org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
         if org:
             try:
                 from app.widget_data.service import get_widget_date_col_key, resolve_date_range_for_period
-                start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
-                year = start_year
+                start_date, end_date, entry_year = resolve_date_range_for_period(org, str(selected_period), period_type)
+                entry_start_year = start_date.year  # e.g. 2026 for July-2026 to June-2027
+                year = entry_year  # e.g. 2027 (the year entries are stored under)
                 date_range = (start_date, end_date)
             except Exception:
                 pass
 
     yr = _parse_year_int(year)
     t0 = time.perf_counter()
-    cache_key = (template_id, org_id, int(yr), bool(include_drafts), "v3")
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        _prof(f"CACHE HIT key={cache_key}")
-        return cached
+    cache_key = (template_id, org_id, int(yr), bool(include_drafts), by_default, selected_period, period_type, "v4")
+    if not bypass_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            _prof(f"CACHE HIT key={cache_key}")
+            return cached
 
     # Collect requested reference-derived columns for multi-line items from designer blocks.
     # Frontend encodes a reference-derived column key as "__ref__{subKey}__{encodedChain}" where encodedChain is
@@ -1999,6 +2090,61 @@ async def generate_report_data(
             fts = sorted(list(kpi.fields or []), key=lambda f: (f.sort_order, f.id))
             kpi_worklist.append((kpi, fts))
 
+    # Expand kpi_worklist to include formula dependencies and configured date-fetching KPIs
+    existing_worklist_ids = {kp.id for kp, _ in kpi_worklist}
+    extra_kpi_ids = set()
+    rt_config = getattr(rt, "date_fetching_config", None) or {}
+    for c_kid in (rt_config.get("configured_kpi_ids") or []):
+        try:
+            extra_kpi_ids.add(int(c_kid))
+        except (ValueError, TypeError):
+            pass
+
+    resolved_kpi_ids = set()
+    referenced_kpi_ids = existing_worklist_ids | extra_kpi_ids
+    kpis_by_id = {kp.id: kp for kp, _ in kpi_worklist}
+    
+    while True:
+        unresolved_ids = referenced_kpi_ids - resolved_kpi_ids
+        if not unresolved_ids:
+            break
+            
+        missing_kpi_ids = unresolved_ids - set(kpis_by_id.keys())
+        if missing_kpi_ids:
+            missing_res = await db.execute(
+                select(KPI)
+                .where(KPI.organization_id == org_id, KPI.id.in_(missing_kpi_ids))
+                .options(selectinload(KPI.fields).selectinload(KPIField.sub_fields))
+            )
+            for mkpi in missing_res.scalars().unique().all():
+                kpis_by_id[mkpi.id] = mkpi
+                mfts = sorted(list(mkpi.fields or []), key=lambda f: (f.sort_order, f.id))
+                kpi_worklist.append((mkpi, mfts))
+                
+        new_deps = set()
+        for kid in unresolved_ids:
+            kpi = kpis_by_id.get(kid)
+            if not kpi:
+                continue
+            fields_to_scan = sorted(list(kpi.fields or []), key=lambda f: (f.sort_order, f.id))
+            for f in fields_to_scan:
+                ft = f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type)
+                if ft == "formula" and f.formula_expression:
+                    for dep_id in _parse_kpi_formula_dependencies(f.formula_expression):
+                        new_deps.add(dep_id)
+                elif ft == "multi_line_items":
+                    sub_fields = getattr(f, "sub_fields", []) or []
+                    for sf in sub_fields:
+                        sft = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
+                        sf_cfg = getattr(sf, "config", None) or {}
+                        expr = sf_cfg.get("formula_expression")
+                        if (sft == "formula" or expr) and expr:
+                            for dep_id in _parse_kpi_formula_dependencies(expr):
+                                new_deps.add(dep_id)
+                                
+        resolved_kpi_ids.update(unresolved_ids)
+        referenced_kpi_ids.update(new_deps)
+
     template_kpis = [kp for kp, _ in kpi_worklist]
     _prof(
         f"loaded_kpis={len(template_kpis)} rtk={len(rtk_list)} ms={(time.perf_counter()-t_kpis0)*1000:.1f}"
@@ -2049,11 +2195,19 @@ async def generate_report_data(
     org = await db.get(Organization, org_id)
     org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
 
+    # Sort kpi_worklist in topological order so formula dependencies are computed in correct sequence
+    sorted_kpis = _topological_sort_report_kpis([kp for kp, _ in kpi_worklist])
+    sorted_order = {kp.id: idx for idx, kp in enumerate(sorted_kpis)}
+    kpi_worklist.sort(key=lambda item: sorted_order.get(item[0].id, 9999))
+
     total_entries_loaded = 0
     total_ml_rows = 0
     total_entries_query_ms = 0.0
     total_ml_load_ms = 0.0
     total_ref_col_ms = 0.0
+
+    recalculated_kpi_values: dict[tuple[int, str], float | int] = {}
+    recalculated_kpi_mli_data: dict[tuple[int, str], list[dict]] = {}
 
     for kpi, fields_to_include in kpi_worklist:
         t_kpi0 = time.perf_counter()
@@ -2079,23 +2233,54 @@ async def generate_report_data(
         all_entries = list(entries_result.scalars().all())
         
         if date_range:
-            real_entry = next((e for e in all_entries if e.year == yr), None)
+            # Count multi-line rows for these entries to prioritize populated entries
+            entry_ids = [e.id for e in all_entries]
+            mli_counts = {}
+            if entry_ids:
+                counts_res = await db.execute(
+                    select(KpiMultiLineRow.entry_id, func.count(KpiMultiLineRow.id))
+                    .where(KpiMultiLineRow.entry_id.in_(entry_ids))
+                    .group_by(KpiMultiLineRow.entry_id)
+                )
+                mli_counts = {r[0]: r[1] for r in counts_res.all()}
+
+            real_entry = None
+            if all_entries:
+                def _score_entry(e):
+                    # Check if entry has any populated multi-line rows
+                    rows_count = mli_counts.get(e.id, 0)
+                    # Check if entry has any populated scalar field values
+                    has_scalar_data = False
+                    for fv in (e.field_values or []):
+                        if (fv.value_number is not None and fv.value_number != 0) or \
+                           (fv.value_text is not None and fv.value_text != "") or \
+                           fv.value_boolean is not None or \
+                           fv.value_date is not None or \
+                           fv.value_json is not None:
+                            has_scalar_data = True
+                            break
+                    
+                    data_score = 1 if (rows_count > 0 or has_scalar_data) else 0
+                    
+                    if e.year == yr:
+                        year_score = 3
+                    elif entry_start_year is not None and e.year == entry_start_year:
+                        year_score = 2
+                    else:
+                        year_score = 1 - abs(e.year - yr) * 0.1
+                        
+                    return (data_score, year_score, e.year)
+
+                all_entries_sorted = sorted(
+                    all_entries,
+                    key=_score_entry,
+                    reverse=True
+                )
+                real_entry = all_entries_sorted[0]
             if real_entry:
                 entries_sorted = [real_entry]
             else:
-                if all_entries:
-                    mock_entry = KPIEntry(
-                        id=0,
-                        organization_id=org_id,
-                        kpi_id=kpi.id,
-                        year=yr,
-                        period_key="",
-                        is_draft=False,
-                        field_values=[]
-                    )
-                    entries_sorted = [mock_entry]
-                else:
-                    entries_sorted = []
+                entries_sorted = []
         else:
             # Sort by period (e.g. Q1, Q2, Q3, Q4) so "latest" filter returns last; report can show all or one period
             entries_sorted = sorted(
@@ -2116,11 +2301,18 @@ async def generate_report_data(
                 ]
 
         need_cross_kpi = _formulas_need_other_kpi_values(fields_to_include)
+        # For cross-KPI formula lookup, use the year of the actual entry found (not necessarily yr)
+        cross_kpi_year = yr
+        if date_range and entries_sorted:
+            cross_kpi_year = entries_sorted[0].year
         other_kpi_values = (
-            await _load_other_kpi_values(db, yr, org_id, kpi.id)
+            await _load_other_kpi_values(db, cross_kpi_year, org_id, kpi.id)
             if entries_sorted and need_cross_kpi
             else {}
         )
+        # Merge recalculated values from previously computed KPIs in topological order
+        for (kid, fkey), rval in recalculated_kpi_values.items():
+            other_kpi_values[(kid, fkey)] = rval
         entry_ids_sorted = [e.id for e in entries_sorted]
         total_entries_loaded += len(entry_ids_sorted)
         ml_fields = [f for f in fields_to_include if f.field_type == FieldType.multi_line_items]
@@ -2136,19 +2328,59 @@ async def generate_report_data(
                     start_date, end_date = date_range
                     mf_date_range = (start_date, end_date, str(date_col_key))
 
-            target_entry_ids = [e.id for e in all_entries if e.id] if date_range else entry_ids_sorted
+            target_entry_ids = [e.id for e in all_entries if e.id] if (date_range and mf_date_range) else entry_ids_sorted
             batch_res = await _load_multi_line_items_rows_batch(
                 db, entry_ids=target_entry_ids, field=mf, current_user_id=current_user_id, date_range=mf_date_range
             )
             
+            # Re-evaluate any formula subfields on MLI rows
+            sub_fields_orm = getattr(mf, "sub_fields", []) or []
+            formula_sfs = []
+            for sf in sub_fields_orm:
+                cfg = getattr(sf, "config", None) or {}
+                expr = cfg.get("formula_expression")
+                cond_logic = cfg.get("conditional_logic")
+                sft = getattr(sf.field_type, "value", str(sf.field_type))
+                if sft == "formula" or expr:
+                    formula_sfs.append((sf.key, expr, cond_logic))
+
+            recalculated_batch = {}
+            for eid, rows_list in batch_res.items():
+                if formula_sfs:
+                    sorted_formula_sfs = _sort_formula_subfields(formula_sfs)
+                    current_rows = [dict(r) for r in rows_list]
+                    for sf_key, expr, cond_logic in sorted_formula_sfs:
+                        for r_copy in current_rows:
+                            if expr:
+                                new_val = evaluate_formula(
+                                    expr,
+                                    {},
+                                    {mf.key: current_rows},
+                                    other_kpi_values,
+                                    current_row=r_copy,
+                                    other_kpi_multi_line_data=recalculated_kpi_mli_data,
+                                )
+                                if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
+                                    new_val = apply_conditional_logic(new_val, cond_logic)
+                                r_copy[sf_key] = new_val if new_val is not None else 0
+                    recalculated_batch[eid] = current_rows
+                else:
+                    recalculated_batch[eid] = rows_list
+
             if date_range:
                 target_eid = entries_sorted[0].id if entries_sorted else 0
                 combined_rows = []
-                for rows_list in batch_res.values():
+                for rows_list in recalculated_batch.values():
                     combined_rows.extend(rows_list)
                 ml_rows_by_field_id[mf.id] = {target_eid: combined_rows}
+                recalculated_kpi_mli_data[(kpi.id, mf.key)] = combined_rows
             else:
-                ml_rows_by_field_id[mf.id] = batch_res
+                ml_rows_by_field_id[mf.id] = recalculated_batch
+                all_rows = []
+                for rlist in recalculated_batch.values():
+                    if isinstance(rlist, list):
+                        all_rows.extend(rlist)
+                recalculated_kpi_mli_data[(kpi.id, mf.key)] = all_rows
                 
             total_ml_load_ms += (time.perf_counter() - t_ml0) * 1000.0
             for _eid, _rows in ml_rows_by_field_id[mf.id].items():
@@ -2242,6 +2474,10 @@ async def generate_report_data(
                             val = fv.value_boolean
                         if f.field_type == FieldType.number and fv.value_number is not None:
                             value_by_key[f.key] = fv.value_number
+                            try:
+                                recalculated_kpi_values[(kpi.id, f.key)] = float(fv.value_number)
+                            except (TypeError, ValueError):
+                                pass
                         if f.field_type == FieldType.multi_line_items:
                             # Multi-line items are stored relationally (loaded in batch per KPI above).
                             rows_items = ml_rows_by_field_id.get(f.id, {}).get(entry.id, [])
@@ -2312,6 +2548,10 @@ async def generate_report_data(
                     field_values_out.append(field_payload)
                     if val is not None and f.field_type == FieldType.number:
                         value_by_key[f.key] = val
+                        try:
+                            recalculated_kpi_values[(kpi.id, f.key)] = float(val)
+                        except (TypeError, ValueError):
+                            pass
 
                 # Seed existing stored formula values as baseline for dependencies.
                 # This mirrors entries.service.recompute_formula_fields_for_kpi and prevents
@@ -2335,6 +2575,7 @@ async def generate_report_data(
                             value_by_key,
                             multi_line_items_data,
                             other_kpi_values,
+                            other_kpi_multi_line_data=recalculated_kpi_mli_data,
                         )
                         # If evaluation fails (returns None), fall back to the stored formula value
                         # so reports can still display existing computed values.
@@ -2353,6 +2594,10 @@ async def generate_report_data(
                         })
                         if computed is not None:
                             value_by_key[f.key] = computed
+                            try:
+                                recalculated_kpi_values[(kpi.id, f.key)] = float(computed)
+                            except (TypeError, ValueError):
+                                pass
                 rows.append({
                     "entry_id": entry.id,
                     "fields": field_values_out,
@@ -2467,6 +2712,9 @@ async def render_report_html(
     year: str | int | None = None,
     include_drafts: bool = False,
     report_data: dict | None = None,
+    by_default: bool = False,
+    period_type: str | None = None,
+    bypass_cache: bool = False,
 ) -> str | None:
     """
     Render report using the template's body_template or body_blocks and
@@ -2491,6 +2739,9 @@ async def render_report_html(
         body_template_override=body_template,
         include_drafts=include_drafts,
         report_data=report_data,
+        by_default=by_default,
+        period_type=period_type,
+        bypass_cache=bypass_cache,
     )
 
 
@@ -2502,6 +2753,9 @@ async def render_report_html_with_template(
     body_template_override: str | None = None,
     include_drafts: bool = False,
     report_data: dict | None = None,
+    by_default: bool = False,
+    period_type: str | None = None,
+    bypass_cache: bool = False,
 ) -> str | None:
     """
     Render report with given template string (for live preview) or from DB.
@@ -2517,6 +2771,9 @@ async def render_report_html_with_template(
             org_id,
             year=year,
             include_drafts=include_drafts,
+            by_default=by_default,
+            period_type=period_type,
+            bypass_cache=bypass_cache,
         )
     if not data:
         return None
@@ -2676,7 +2933,7 @@ class NumberedCanvas(canvas.Canvas):
         # Running Footer
         self.setStrokeColor(colors.HexColor("#e5e7eb"))
         self.setLineWidth(0.5)
-        self.line(54, 55, 612 - 54, 55)
+        self.line(54, 55, self._pagesize[0] - 54, 55)
         self.setFont("Helvetica", 8)
         self.setFillColor(colors.HexColor("#6b7280"))
         
@@ -2689,7 +2946,7 @@ class NumberedCanvas(canvas.Canvas):
         if self.include_date:
             date_str = f"Generated on {datetime.date.today().strftime('%B %d, %Y')} | "
         footer_right = f"{date_str}Page {self._pageNumber} of {page_count}"
-        self.drawRightString(612 - 54, 40, footer_right)
+        self.drawRightString(self._pagesize[0] - 54, 40, footer_right)
         self.restoreState()
 
 
@@ -2806,7 +3063,7 @@ async def generate_kpi_pdf_report(
     from io import BytesIO
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
-    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     
@@ -2873,6 +3130,25 @@ async def generate_kpi_pdf_report(
             values_by_field_id[val.field_id] = val.value_json
         else:
             values_by_field_id[val.field_id] = val.value_text
+
+    fields_by_id = {f.id: f for f in kpi.fields}
+    excluded_ml_keys = configuration.get("excluded_multi_line_fields") or []
+    excluded_ml_set = {str(item) for item in excluded_ml_keys}
+    use_landscape = False
+    for f in kpi.fields:
+        if f.field_type == FieldType.multi_line_items:
+            if not is_field_visible(f, fields_by_id, values_by_field_id):
+                continue
+            is_excluded = (f.key in excluded_ml_set) or (str(f.id) in excluded_ml_set)
+            if is_excluded:
+                continue
+            field_config = configuration.get("multi_line_fields", {}).get(f.key, {})
+            selected_column_keys = field_config.get("selected_columns")
+            if not selected_column_keys:
+                selected_column_keys = [sf.key for sf in f.sub_fields]
+            if len(selected_column_keys) > 8:
+                use_landscape = True
+                break
 
     # 4. Extract Configuration
     title = (configuration.get("report_header") or configuration.get("title") or "").strip() or f"{kpi.name} Report"
@@ -3149,7 +3425,8 @@ async def generate_kpi_pdf_report(
         desired_p_fs = font_size
         w1 = (logo_w + 4) if img else 0
         w2 = (logo_w2 + 4) if img2 else 0
-        mid_width = 540 - w1 - w2
+        header_w = 720 if use_landscape else 540
+        mid_width = header_w - w1 - w2
         from app.reports.custom_service import calc_auto_header_font_size
         pdf_main_fs = calc_auto_header_font_size(kpi.report_header.main_heading, mid_width, desired_p_fs)
 
@@ -3184,7 +3461,7 @@ async def generate_kpi_pdf_report(
             ]))
         elif img:
             w1 = logo_w + 4
-            mid_width = 540 - w1
+            mid_width = header_w - w1
             header_table = Table(
                 [[img, header_elements]],
                 colWidths=[w1, mid_width],
@@ -3198,7 +3475,7 @@ async def generate_kpi_pdf_report(
             ]))
         elif img2:
             w2 = logo_w2 + 4
-            mid_width = 540 - w2
+            mid_width = header_w - w2
             header_table = Table(
                 [[header_elements, img2]],
                 colWidths=[mid_width, w2],
@@ -3213,7 +3490,7 @@ async def generate_kpi_pdf_report(
         else:
             header_table = Table(
                 [[header_elements]],
-                colWidths=[540],
+                colWidths=[header_w],
                 hAlign='CENTER'
             )
         
@@ -3315,13 +3592,10 @@ async def generate_kpi_pdf_report(
 
     # 6. Build the field tree and recursive rendering flow
     roots = build_field_tree(kpi.fields)
-    fields_by_id = {f.id: f for f in kpi.fields}
     
     # Excluded fields sets
     excluded_fields = configuration.get("excluded_scalar_fields") or []
-    excluded_ml_keys = configuration.get("excluded_multi_line_fields") or []
     excluded_set = {str(item) for item in excluded_fields}
-    excluded_ml_set = {str(item) for item in excluded_ml_keys}
     custom_labels = configuration.get("scalar_fields", {})
     
     # Sort roots
@@ -3549,11 +3823,25 @@ async def generate_kpi_pdf_report(
                 )
                 t_td_sr_style = ParagraphStyle(f"KpiTD_Sr_{f.key}", parent=t_td_style, alignment=TA_CENTER)
 
-                available_width = max(100, 504 - table_indent)
+                available_width = max(100, (684 if use_landscape else 504) - table_indent)
                 sr_no_width = 24
 
                 sample_rows = filtered_rows[:200]
-                col_chars = [len(h) for h in headers]
+                col_chars = []
+                for idx, col in enumerate(selected_column_keys):
+                    h = headers[idx]
+                    k_lower = col.lower() if col else ""
+                    if len(selected_column_keys) > 8:
+                        if "faculty_who_submitted" in k_lower or "faculty_who" in k_lower:
+                            w = 16
+                        elif "department" in k_lower or "name" in k_lower:
+                            w = 18
+                        else:
+                            w = min(len(h), 12)
+                    else:
+                        w = min(len(h), 25)
+                    col_chars.append(w)
+
                 for r in sample_rows:
                     for idx, col in enumerate(selected_column_keys):
                         sf = key_to_sf.get(col)
@@ -3562,7 +3850,8 @@ async def generate_kpi_pdf_report(
                         else:
                             ft = getattr(sf, "field_type", None) if sf else None
                             raw_cell = _display_string_for_pdf_export(r.get(col), ft) if r.get(col) is not None else ""
-                        col_chars[idx] = max(col_chars[idx], min(len(raw_cell), 60))
+                        max_val_len = 15 if len(selected_column_keys) > 8 else 60
+                        col_chars[idx] = max(col_chars[idx], min(len(raw_cell), max_val_len))
 
                 total_chars = sum(col_chars) or len(selected_column_keys)
                 raw_widths = [max(min_col_width, (available_width - sr_no_width) * (c / total_chars)) for c in col_chars]
@@ -3571,8 +3860,6 @@ async def generate_kpi_pdf_report(
                 col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
 
                 def get_header_text(h: str) -> str:
-                    if max_char_limit and len(h) > max_char_limit:
-                        return h[:max_char_limit] + "..."
                     return h
 
                 table_data = [
@@ -3650,7 +3937,7 @@ async def generate_kpi_pdf_report(
     margin = 54
     doc = SimpleDocTemplate(
         buf,
-        pagesize=letter,
+        pagesize=landscape(letter) if use_landscape else letter,
         leftMargin=margin,
         rightMargin=margin,
         topMargin=margin,

@@ -321,6 +321,9 @@ async def generate_report(
   year: str | int | None = Query(None),
   format: str = Query("json", pattern="^(json|csv)$"),
   organization_id: int | None = Query(None),
+  by_default: bool = Query(False),
+  period_type: str | None = Query(None),
+  _t: str | None = Query(None),
   db: AsyncSession = Depends(get_db),
   current_user: User = Depends(get_current_user),
 ):
@@ -332,13 +335,14 @@ async def generate_report(
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
-    data = await generate_report_data(db, template_id, rt.organization_id, year=year, include_drafts=False)
+    bypass = (_t is not None)
+    data = await generate_report_data(db, template_id, rt.organization_id, year=year, include_drafts=False, by_default=by_default, period_type=period_type, bypass_cache=bypass)
     # If the template has a body_template or body_blocks (visual builder), render HTML
     # so the report view shows the same content as the design live preview.
     can_render = bool(rt.body_template or getattr(rt, "body_blocks", None))
     if format == "json" and can_render:
         html = await render_report_html(
-            db, template_id, rt.organization_id, year=year, include_drafts=False, report_data=data
+            db, template_id, rt.organization_id, year=year, include_drafts=False, report_data=data, by_default=by_default, period_type=period_type, bypass_cache=bypass
         )
         if html is not None:
             data["rendered_html"] = html

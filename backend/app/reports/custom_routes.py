@@ -231,7 +231,9 @@ async def get_report_details(
         "show_odoo_button": report.show_odoo_button,
         "odoo_sync_kpi_ids": report.odoo_sync_kpi_ids or [],
         "sections": sections_data,
-        "attachments": attachments_data
+        "attachments": attachments_data,
+        "fetch_data_with_date": getattr(report, "fetch_data_with_date", False),
+        "date_fetching_config": getattr(report, "date_fetching_config", None) or {},
     }
 
 
@@ -563,6 +565,8 @@ async def generate_report(
     organization_id: int | None = Query(None),
     preview: bool = Query(True),
     include_attachments: bool = Query(True),
+    by_default: bool = Query(False),
+    period_type: str | None = Query(None),
     _t: str | None = Query(None),  # cache-buster: when present, skip cache
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -578,7 +582,7 @@ async def generate_report(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
 
 
-    cache_key = (id, org_id, year or "current", "preview" if preview else "full", include_attachments)
+    cache_key = (id, org_id, year or "current", "preview" if preview else "full", include_attachments, by_default, period_type, "v2")
 
     # Skip cache when _t (cache-buster) is present — used after LMS/Odoo sync
     if _t is None:
@@ -587,7 +591,7 @@ async def generate_report(
             return cached
 
     data = await generate_custom_report_data(
-        db, id, org_id, year=year, include_drafts=False, preview=preview, include_attachments=include_attachments
+        db, id, org_id, year=year, include_drafts=False, preview=preview, include_attachments=include_attachments, by_default=by_default, period_type=period_type
     )
     if not data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
@@ -699,6 +703,7 @@ async def export_custom_report(
     format: str = Query("pdf"), # "pdf" | "docx" | "xlsx"
     organization_id: int | None = Query(None),
     attachment_ids: str | None = Query(None),
+    by_default: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -720,7 +725,7 @@ async def export_custom_report(
         else:
             from app.reports.custom_service import export_custom_report_file
             file_bytes, filename, content_type = await export_custom_report_file(
-                db, id, org_id, year, format
+                db, id, org_id, year, format, by_default=by_default
             )
     except Exception as e:
         import traceback
@@ -743,8 +748,9 @@ async def export_custom_report(
 
 async def sync_odoo_for_custom_report(
     id: int,
-    year: int = Query(...),
+    year: str = Query(...),
     organization_id: int | None = Query(None),
+    period_type: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -763,11 +769,29 @@ async def sync_odoo_for_custom_report(
         mark_entry_modified,
         propagate_formula_recalculations,
     )
-    from app.core.models import KPIField, KPI, KPIEntry, KpiOdooConfig, FieldType
+    from app.core.models import KPIField, KPI, KPIEntry, KpiOdooConfig, FieldType, Organization
     from sqlalchemy.orm import selectinload
     from sqlalchemy import delete
 
     org_id = _org_id(current_user, organization_id)
+
+    # Resolve year from period string (e.g. "2024/25" -> 2025)
+    parsed_year = None
+    org = await db.get(Organization, org_id)
+    if org:
+        try:
+            from app.widget_data.service import resolve_date_range_for_period
+            _, _, entry_year = resolve_date_range_for_period(org, str(year), period_type)
+            parsed_year = entry_year
+        except Exception:
+            pass
+            
+    if parsed_year is None:
+        try:
+            parsed_year = int(str(year).split("/")[0])
+        except Exception:
+            from datetime import datetime
+            parsed_year = datetime.now().year
 
     # 1. Access check
     if not await check_custom_report_access(db, current_user, id, "view"):
@@ -780,7 +804,7 @@ async def sync_odoo_for_custom_report(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Odoo sync is not enabled for this report")
 
     # 2. Sync Odoo data internally
-    res = await sync_odoo_data_for_report_internal(db, report, org_id, year, current_user.id)
+    res = await sync_odoo_data_for_report_internal(db, report, org_id, parsed_year, current_user.id)
     if res.get("status") == "no_kpis":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

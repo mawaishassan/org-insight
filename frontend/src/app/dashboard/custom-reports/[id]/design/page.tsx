@@ -160,6 +160,8 @@ export default function CustomReportDesignPage() {
   const [localDateBasedFetching, setLocalDateBasedFetching] = useState<boolean>(false);
   const [localDateColumn, setLocalDateColumn] = useState<string>("");
   const [localMliDateCols, setLocalMliDateCols] = useState<Record<string, string>>({});
+  const [localConfiguredKpiIds, setLocalConfiguredKpiIds] = useState<number[]>([]);
+  const [localKpiMlis, setLocalKpiMlis] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const token = getAccessToken();
@@ -179,6 +181,8 @@ export default function CustomReportDesignPage() {
       setLocalDateBasedFetching(fetchDataWithDate);
       setLocalDateColumn(dateFetchingConfig?.date_column || "");
       setLocalMliDateCols(dateFetchingConfig?.mli_date_cols || {});
+      setLocalConfiguredKpiIds(dateFetchingConfig?.configured_kpi_ids || []);
+      setLocalKpiMlis(dateFetchingConfig?.kpi_mlis || {});
       setLocalReportHeaderId(reportHeaderId);
       setLocalShowReportName(showReportName);
       setLocalBrandingTitle(brandingTitle);
@@ -190,6 +194,7 @@ export default function CustomReportDesignPage() {
 
     }
   }, [reportSettingsOpen, fetchDataWithDate, dateFetchingConfig, reportHeaderId, showReportName, brandingTitle, scalarBold, scalarFontSize, mliFontSize, showOdooButton, odooSyncKpiIds]);
+
 
 
   const customPeriods = useMemo(() => {
@@ -1119,67 +1124,112 @@ export default function CustomReportDesignPage() {
                   </div>
 
                   {localDateBasedFetching && (
-                    <div style={{ display: "grid", gap: "0.6rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
-                      <div style={{ display: "grid", gap: "0.5rem" }}>
-                        <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Configure Date Column per Multi-Line Field</label>
-                        {customReportMliFields.length === 0 ? (
-                          <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
-                            No multi-line fields are used in this report. Add fields that are multi-line fields to configure date columns.
-                          </p>
-                        ) : (
-                          <div style={{ display: "grid", gap: "0.75rem" }}>
-                            {customReportMliFields.map((item) => {
-                              const key = `${item.kpiId}_${item.field.key}`;
-                              return (
-                                <div key={key} style={{ padding: "0.75rem", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--surface)", display: "grid", gap: "0.5rem" }}>
-                                  <div style={{ fontSize: "0.82rem", fontWeight: 650 }}>
-                                    <span style={{ color: "var(--muted)" }}>KPI:</span> {item.kpiName} <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>Field:</span> {item.field.name}
+                    <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <label style={{ fontSize: "0.85rem", fontWeight: 650 }}>Configure Date-Based Filtering KPIs</label>
+                        <select
+                          value=""
+                          onChange={(e) => {
+                            const kid = Number(e.target.value);
+                            if (kid && !localConfiguredKpiIds.includes(kid)) {
+                              setLocalConfiguredKpiIds(prev => [...prev, kid]);
+                            }
+                            e.target.value = "";
+                          }}
+                          style={{ padding: "0.25rem 0.5rem", fontSize: "0.8rem", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                        >
+                          <option value="">+ Add KPI for Date Filtering...</option>
+                          {allKpis
+                            .filter(k => !localConfiguredKpiIds.includes(k.id))
+                            .map(k => (
+                              <option key={k.id} value={k.id}>
+                                {k.name || `KPI #${k.id}`}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+
+                      {localConfiguredKpiIds.length === 0 ? (
+                        <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
+                          No KPIs selected for date-based filtering. Select a KPI above to map its MLI and Date sub-field.
+                        </p>
+                      ) : (
+                        <div style={{ display: "grid", gap: "0.75rem" }}>
+                          {localConfiguredKpiIds.map((kpiId) => {
+                            const kpiObj = allKpis.find(k => k.id === kpiId);
+                            const kpiName = kpiObj?.name || `KPI #${kpiId}`;
+                            const mliFields = (kpiObj?.fields || []).filter((f: any) => f.field_type === "multi_line_items");
+                            const selectedMliKey = localKpiMlis[String(kpiId)] || (mliFields[0]?.key || "");
+                            const selectedMliField = mliFields.find((f: any) => f.key === selectedMliKey);
+                            const dateSubFields = (selectedMliField?.sub_fields || []).filter(
+                              (sf: any) => sf.field_type === "date" || sf.field_type === "datetime"
+                            );
+                            const mliDateKey = `${kpiId}_${selectedMliKey}`;
+
+                            return (
+                              <div key={kpiId} style={{ padding: "0.75rem", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--surface)", display: "grid", gap: "0.5rem" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                  <div style={{ fontSize: "0.85rem", fontWeight: 650 }}>
+                                    <span style={{ color: "var(--muted)" }}>KPI:</span> {kpiName}
                                   </div>
-                                  <div style={{ display: "grid", gap: "0.35rem" }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setLocalConfiguredKpiIds(prev => prev.filter(id => id !== kpiId));
+                                    }}
+                                    style={{ border: "none", background: "transparent", color: "#ef4444", fontSize: "0.8rem", cursor: "pointer", fontWeight: 600 }}
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                                  <div>
+                                    <label style={{ fontSize: "0.75rem", color: "var(--muted)", display: "block", marginBottom: "0.2rem" }}>Select MLI Field:</label>
                                     <select
-                                      value={localMliDateCols[key] || ""}
+                                      value={selectedMliKey}
                                       onChange={(e) => {
-                                        const val = e.target.value;
-                                        setLocalMliDateCols(prev => ({
-                                          ...prev,
-                                          [key]: val
-                                        }));
+                                        const mliKey = e.target.value;
+                                        setLocalKpiMlis(prev => ({ ...prev, [String(kpiId)]: mliKey }));
                                       }}
                                       style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", width: "100%" }}
                                     >
-                                      <option value="">Select date column...</option>
-                                      {item.field.sub_fields?.map((sf: any) => (
+                                      {mliFields.length === 0 ? (
+                                        <option value="">No MLI fields available</option>
+                                      ) : (
+                                        mliFields.map((f: any) => (
+                                          <option key={f.key} value={f.key}>
+                                            {f.name || f.key}
+                                          </option>
+                                        ))
+                                      )}
+                                    </select>
+                                  </div>
+
+                                  <div>
+                                    <label style={{ fontSize: "0.75rem", color: "var(--muted)", display: "block", marginBottom: "0.2rem" }}>Select Date Sub-field:</label>
+                                    <select
+                                      value={localMliDateCols[mliDateKey] || ""}
+                                      onChange={(e) => {
+                                        const dateSubKey = e.target.value;
+                                        setLocalMliDateCols(prev => ({ ...prev, [mliDateKey]: dateSubKey }));
+                                      }}
+                                      style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", width: "100%" }}
+                                    >
+                                      <option value="">Select Date column...</option>
+                                      {dateSubFields.map((sf: any) => (
                                         <option key={sf.key} value={sf.key}>
                                           {sf.name || sf.key} ({sf.field_type})
                                         </option>
                                       ))}
-                                      {localMliDateCols[key] &&
-                                        !item.field.sub_fields?.some((sf: any) => sf.key === localMliDateCols[key]) && (
-                                          <option value={localMliDateCols[key]}>
-                                            {localMliDateCols[key]} (Custom)
-                                          </option>
-                                        )}
                                     </select>
-                                    <input
-                                      type="text"
-                                      placeholder="Or type custom date column key..."
-                                      value={localMliDateCols[key] || ""}
-                                      onChange={(e) => {
-                                        const val = e.target.value;
-                                        setLocalMliDateCols(prev => ({
-                                          ...prev,
-                                          [key]: val
-                                        }));
-                                      }}
-                                      style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)" }}
-                                    />
                                   </div>
                                 </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1189,6 +1239,8 @@ export default function CustomReportDesignPage() {
                     onClick={async () => {
                       const nextConfig = {
                         ...dateFetchingConfig,
+                        configured_kpi_ids: localConfiguredKpiIds,
+                        kpi_mlis: localKpiMlis,
                         mli_date_cols: localMliDateCols,
                       };
                       setFetchDataWithDate(localDateBasedFetching);
@@ -1977,10 +2029,6 @@ export default function CustomReportDesignPage() {
                                   if (isChecked) {
                                     nextCols = nextCols.filter(c => c !== sf.key);
                                   } else {
-                                    if (nextCols.length >= 8) {
-                                      toast.error("Maximum of 8 columns can be selected. Please unselect another column first.");
-                                      return;
-                                    }
                                     nextCols = [...nextCols, sf.key];
                                   }
                                   setEditingFieldConfig(prev => prev ? { ...prev, selected_columns: nextCols } : null);
@@ -2387,10 +2435,6 @@ export default function CustomReportDesignPage() {
                                   if (isChecked) {
                                     nextCols = nextCols.filter(c => c !== sf.key);
                                   } else {
-                                    if (nextCols.length >= 8) {
-                                      toast.error("Maximum of 8 columns can be selected. Please unselect another column first.");
-                                      return;
-                                    }
                                     nextCols = [...nextCols, sf.key];
                                   }
                                   setEditingAttachmentConfig({ ...editingAttachmentConfig, selected_columns: nextCols });

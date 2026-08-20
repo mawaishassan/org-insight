@@ -130,6 +130,33 @@ function enqueueDashboardCardBatch(req: Omit<PendingCard, "resolve" | "reject">)
     pendingCardBatches.set(key, cur);
   });
 }
+
+/**
+ * Global in-flight request deduplication cache.
+ * Key = stable fingerprint of (type + dashboardId + widgetId + overrides + requestGeneration).
+ * A second caller with the same key receives the same Promise instead of a new network request.
+ * The entry is removed when the Promise settles.
+ */
+const inFlightRequests = new Map<string, Promise<any>>();
+
+function getRequestFingerprint(
+  type: "chart" | "card",
+  dashboardId: number,
+  widgetId: string,
+  overrides: Record<string, unknown> | undefined,
+  generation: number
+): string {
+  return `${type}::${dashboardId}::${widgetId}::${generation}::${JSON.stringify(overrides ?? {})}`;
+}
+
+function deduplicatedRequest<T>(key: string, factory: () => Promise<T>): Promise<T> {
+  const existing = inFlightRequests.get(key);
+  if (existing) return existing as Promise<T>;
+  const p = factory().finally(() => inFlightRequests.delete(key));
+  inFlightRequests.set(key, p);
+  return p;
+}
+
 export type WidgetDesignMenuActions = {
   onEdit: () => void;
   onDelete: () => void;
@@ -961,39 +988,70 @@ function KpiCardSingleValueWidget({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
-  const { selectedPeriod } = useDashboardCustomization();
-  const overrides = selectedPeriod ? { year: selectedPeriod } : undefined;
+  const { selectedPeriod, selectedPeriodType, requestGeneration } = useDashboardCustomization();
+  const isByDefault = selectedPeriodType === "by_default";
+  // Sanitize year: in Default Mode only send plain 4-digit year to prevent stale
+  // custom period strings (e.g. "2025/26") from reaching the backend during React's
+  // two-phase state update when switching period types.
+  const sanitizedCardYear = isByDefault
+    ? (selectedPeriod && /^\d{4}$/.test(String(selectedPeriod)) ? selectedPeriod : undefined)
+    : selectedPeriod;
+  const overrides = sanitizedCardYear
+    ? { year: sanitizedCardYear, by_default: isByDefault }
+    : isByDefault ? { by_default: true } : undefined;
   const [value, setValue] = useState<string>("");
+  // Keep previous value to show while refreshing (avoids blank flash)
+  const previousValueRef = useRef<string>("");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!token) return;
-    setLoading(true);
+    // Capture generation at the start of this effect so we can validate the response
+    // belongs to the currently selected configuration.
+    const gen = requestGeneration;
+    const hasPrevious = !!previousValueRef.current;
+    if (hasPrevious) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     setError(null);
 
     if (widget.source_mode === "static") {
       const raw = widget.static_value;
       const n = toNumeric(raw);
-      if (n != null) setValue(formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
-      else setValue(raw == null ? "" : String(raw));
+      const formatted = n != null
+        ? formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep })
+        : raw == null ? "" : String(raw);
+      previousValueRef.current = formatted;
+      setValue(formatted);
       setLoading(false);
+      setRefreshing(false);
       return;
     }
 
     if (isWidgetDataBundleEnabled()) {
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
+      const widgetId = String((w as any)?.id ?? "");
+      const fp = dashboardId != null
+        ? getRequestFingerprint("card", dashboardId, widgetId, overrides, gen)
+        : null;
       const bundleReq =
-        dashboardId != null && widget.source_mode === "field"
-          ? enqueueDashboardCardBatch({
-              token,
-              organizationId,
-              dashboardId,
-              widgetId: String((w as any)?.id ?? ""),
-              widget: w,
-              overrides,
-            }).then((r) => ({
+        dashboardId != null && (widget.source_mode === "field" || widget.source_mode === "multi_line_agg")
+          ? deduplicatedRequest(
+              fp!,
+              () => enqueueDashboardCardBatch({
+                token,
+                organizationId,
+                dashboardId,
+                widgetId,
+                widget: w,
+                overrides,
+              })
+            ).then((r) => ({
               version: 1,
               widget_type: "kpi_card_single_value",
               meta: r.meta ?? {},
@@ -1013,27 +1071,38 @@ function KpiCardSingleValueWidget({
             );
       bundleReq
         .then((res) => {
+          if (ac.signal.aborted) return;
+          // Discard response if configuration changed since this effect started
+          if (requestGeneration !== gen) return;
           const d = res.data;
+          let formatted = "";
           if (d.source_mode === "field" || (!d.source_mode && widget.source_mode === "field")) {
             const raw = d.raw;
             const n = toNumeric(raw);
-            if (n != null) setValue(formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
-            else setValue(raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw));
-            return;
-          }
-          if (d.source_mode === "multi_line_agg" || (!d.source_mode && widget.source_mode === "multi_line_agg")) {
+            formatted = n != null
+              ? formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep })
+              : raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+          } else if (d.source_mode === "multi_line_agg" || (!d.source_mode && widget.source_mode === "multi_line_agg")) {
             const n = toNumeric(d.numeric);
-            setValue(n == null ? "" : formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
-            return;
+            formatted = n == null ? "" : formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep });
           }
-          setValue("");
+          previousValueRef.current = formatted;
+          setValue(formatted);
         })
         .catch((e) => {
+          if (ac.signal.aborted) return;
           if (isLikelyAbortError(e)) return;
-          setError(e instanceof Error ? e.message : "Failed to load KPI value");
+          if (requestGeneration !== gen) return;
+          // On error, keep the previous value if available
+          if (!previousValueRef.current) {
+            setError(e instanceof Error ? e.message : "Failed to load KPI value");
+          }
         })
         .finally(() => {
-          if (!ac.signal.aborted) setLoading(false);
+          if (!ac.signal.aborted && requestGeneration === gen) {
+            setLoading(false);
+            setRefreshing(false);
+          }
         });
       return () => ac.abort();
     }
@@ -1054,20 +1123,26 @@ function KpiCardSingleValueWidget({
         : Promise.resolve(null),
     ])
       .then(([map, entry, multiLineRows]) => {
+        // Legacy path - no generation needed as these requests don't batch
         if (widget.source_mode === "field") {
           const key = widget.field_key || "";
           const fid = key ? map.idByKey[key] : undefined;
           const raw = fid ? rawFieldFromEntry(entry, fid) : null;
           const n = toNumeric(raw);
-          if (n != null) setValue(formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
-          else setValue(raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw));
+          const formatted = n != null
+            ? formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep })
+            : raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+          previousValueRef.current = formatted;
+          setValue(formatted);
           return;
         }
         if (widget.source_mode === "multi_line_agg") {
           const items = Array.isArray(multiLineRows) ? multiLineRows : [];
           const agg = widget.agg ?? "sum";
           const n = aggregateSingleValue(items, { agg, valueKey: widget.value_sub_field_key });
-          setValue(n == null ? "" : formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep }));
+          const formatted = n == null ? "" : formatNumberForCard(n, { decimals: widget.decimals, thousandSep: widget.thousand_sep });
+          previousValueRef.current = formatted;
+          setValue(formatted);
           return;
         }
         setValue("");
@@ -1089,7 +1164,11 @@ function KpiCardSingleValueWidget({
     widget.decimals,
     widget.thousand_sep,
     JSON.stringify(widget.filters ?? null),
+    // requestGeneration is the primary trigger — changes whenever selectedPeriod/Type changes.
+    // selectedPeriod and selectedPeriodType are kept for immediate abort-controller invalidation.
+    requestGeneration,
     selectedPeriod,
+    selectedPeriodType,
   ]);
 
   const theme = useMemo(() => KPI_CARD_THEMES.find((t) => t.id === (widget.theme || "")) ?? KPI_CARD_THEMES[0], [widget.theme]);
@@ -1110,11 +1189,16 @@ function KpiCardSingleValueWidget({
   const display = value ? `${prefix}${value}${suffix}` : "";
   const bgStyle = bg.startsWith("linear-gradient") ? ({ backgroundImage: bg } as const) : ({ background: bg } as const);
 
+  // Show skeleton only when genuinely no data yet; keep previous value dimmed while refreshing
+  const showSkeleton = loading && !previousValueRef.current;
+  const showRefreshing = refreshing || (loading && !!previousValueRef.current);
+
+
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
-      {loading ? (
-        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
-      ) : error ? (
+      {showSkeleton ? (
+        <div className="widget-skeleton" />
+      ) : error && !previousValueRef.current ? (
         <p className="form-error">{error}</p>
       ) : (
         <div
@@ -1127,7 +1211,11 @@ function KpiCardSingleValueWidget({
             alignContent: "center",
             gap: "0.35rem",
             textAlign: align as any,
-            border: bg === "#ffffff" ? "1px solid var(--border)" : "1px solid rgba(0,0,0,0.04)",
+            border: showRefreshing
+              ? "1.5px solid rgba(99,102,241,0.4)"
+              : bg === "#ffffff" ? "1px solid var(--border)" : "1px solid rgba(0,0,0,0.04)",
+            opacity: showRefreshing ? 0.75 : 1,
+            transition: "opacity 0.25s ease, border-color 0.25s ease",
             ...bgStyle,
           }}
         >
@@ -1141,6 +1229,7 @@ function KpiCardSingleValueWidget({
     </WidgetSettingsShell>
   );
 }
+
 
 function KpiLineChartWidget({
   widget,
@@ -1536,7 +1625,7 @@ function KpiBarChartWidgetInner({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
-  const { getDisplayLabel, registerWidgetLabels, fetchDataWithDate, periodOptions, selectedPeriod } = useDashboardCustomization();
+  const { getDisplayLabel, registerWidgetLabels, fetchDataWithDate, periodOptions, selectedPeriod, selectedPeriodType, requestGeneration } = useDashboardCustomization();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const [viewerYear, setViewerYear] = useState<any>(() => {
@@ -1644,21 +1733,38 @@ function KpiBarChartWidgetInner({
 
   useEffect(() => {
     if (!token) return;
+    // Capture the configuration generation at effect start.
+    // Any .then() or .catch() that sees a different generation belongs to a stale request.
+    const gen = requestGeneration;
     setLoading(true);
     setError(null);
     if (isWidgetDataBundleEnabled()) {
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
+      const widgetId = String((w as any)?.id ?? "");
+      const sanitizedYear = selectedPeriodType === "by_default"
+        ? (/^\d{4}$/.test(String(viewerYear)) ? viewerYear : undefined)
+        : viewerYear;
+      const chartOverrides = {
+        year: sanitizedYear,
+        by_default: selectedPeriodType === "by_default"
+      };
+      const fp = dashboardId != null
+        ? getRequestFingerprint("chart", dashboardId, widgetId, chartOverrides, gen)
+        : null;
       const bundleReq =
         dashboardId != null
-          ? enqueueDashboardChartBatch({
-              token,
-              organizationId,
-              dashboardId,
-              widgetId: String((w as any)?.id ?? ""),
-              widget: w,
-              overrides: { year: viewerYear },
-            }).then((r) => ({
+          ? deduplicatedRequest(
+              fp!,
+              () => enqueueDashboardChartBatch({
+                token,
+                organizationId,
+                dashboardId,
+                widgetId,
+                widget: w,
+                overrides: chartOverrides,
+              })
+            ).then((r) => ({
               version: 1,
               widget_type: "kpi_bar_chart",
               meta: r.meta ?? {},
@@ -1672,12 +1778,15 @@ function KpiBarChartWidgetInner({
                 organization_id: organizationId,
                 ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
                 widget: w,
-                overrides: { year: viewerYear },
+                overrides: chartOverrides,
               },
               { signal: ac.signal }
             );
       bundleReq
         .then((res) => {
+          if (ac.signal.aborted) return;
+          // Discard if the configuration changed while this request was in flight
+          if (requestGeneration !== gen) return;
           const d = res.data;
           const mode = (d.mode as string) || (widget.mode || "fields");
           if (mode === "multi_line_items") {
@@ -1760,10 +1869,11 @@ function KpiBarChartWidgetInner({
         })
         .catch((e) => {
           if (isLikelyAbortError(e)) return;
+          if (requestGeneration !== gen) return;
           setError(e instanceof Error ? e.message : "Failed to load chart data");
         })
         .finally(() => {
-          if (!ac.signal.aborted) setLoading(false);
+          if (!ac.signal.aborted && requestGeneration === gen) setLoading(false);
         });
       return () => ac.abort();
     }
@@ -1839,6 +1949,9 @@ function KpiBarChartWidgetInner({
     widget.filter_sub_field_key,
     JSON.stringify(widget.filters ?? null),
     dashboardId,
+    // requestGeneration is the primary trigger — changes whenever selectedPeriod/Type changes.
+    requestGeneration,
+    selectedPeriodType,
   ]);
 
   useEffect(() => {

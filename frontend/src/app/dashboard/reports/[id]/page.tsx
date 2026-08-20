@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
@@ -43,7 +43,7 @@ export default function ReportViewPage() {
     api<any>(`/reports/templates/${id}`, { token })
       .then((t) => {
         setTemplate(t);
-        if (t.fetch_data_with_date && t.organization_id) {
+        if (t.organization_id) {
           api<any>(`/organizations/${t.organization_id}`, { token })
             .then((orgData) => {
               setOrg(orgData);
@@ -73,13 +73,13 @@ export default function ReportViewPage() {
     return [];
   }, [org]);
 
+  const requestGenRef = useRef(0);
+
   useEffect(() => {
-    if (customPeriods.length > 0) {
-      if (!selectedPeriodType || !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType)) {
-        setSelectedPeriodType(customPeriods[0].custom_period_name);
-      }
-    } else {
-      setSelectedPeriodType("");
+    if (!selectedPeriodType) {
+      setSelectedPeriodType("by_default");
+    } else if (selectedPeriodType !== "by_default" && customPeriods.length > 0 && !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType)) {
+      setSelectedPeriodType("by_default");
     }
   }, [customPeriods, selectedPeriodType]);
 
@@ -93,8 +93,10 @@ export default function ReportViewPage() {
   }, [activePeriodConfig]);
 
   useEffect(() => {
-    if (periodOptions.length > 0) {
-      if (!selectedPeriod || !periodOptions.some(opt => opt.value === selectedPeriod)) {
+    if (selectedPeriodType === "by_default") {
+      setSelectedPeriod("by_default");
+    } else if (periodOptions.length > 0) {
+      if (!selectedPeriod || selectedPeriod === "by_default" || !periodOptions.some(opt => opt.value === selectedPeriod)) {
         const curYearStr = String(new Date().getFullYear());
         const match = periodOptions.find((opt) => opt.value.includes(curYearStr)) || periodOptions[0];
         setSelectedPeriod(match.value);
@@ -102,27 +104,45 @@ export default function ReportViewPage() {
     } else {
       setSelectedPeriod("");
     }
-  }, [periodOptions, selectedPeriod]);
+  }, [periodOptions, selectedPeriod, selectedPeriodType]);
 
   useEffect(() => {
     if (!id || !token) return;
-    if (template?.fetch_data_with_date && !selectedPeriod) return;
+    if (template?.fetch_data_with_date && selectedPeriodType !== "by_default" && !selectedPeriod) return;
 
+    const currentGen = ++requestGenRef.current;
     setLoading(true);
     setError(null);
-    const yr = template?.fetch_data_with_date ? selectedPeriod : reportYear;
-    const url = `/reports/templates/${id}/generate?format=json&year=${yr}`;
+    const isByDefault = selectedPeriodType === "by_default";
+    const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
+    let url = `/reports/templates/${id}/generate?format=json&year=${yr}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`;
+    if (template?.organization_id) {
+      url += `&organization_id=${template.organization_id}`;
+    }
     api<ReportData>(url, { token, cache: "no-store" })
-      .then(setData)
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load report"))
-      .finally(() => setLoading(false));
-  }, [id, reportYear, selectedPeriod, template, token]);
+      .then((res) => {
+        if (currentGen === requestGenRef.current) {
+          setData(res);
+        }
+      })
+      .catch((e) => {
+        if (currentGen === requestGenRef.current) {
+          setError(e instanceof Error ? e.message : "Failed to load report");
+        }
+      })
+      .finally(() => {
+        if (currentGen === requestGenRef.current) {
+          setLoading(false);
+        }
+      });
+  }, [id, reportYear, selectedPeriod, selectedPeriodType, template, token]);
 
   const handlePrint = () => {
     if (!data || !token) return;
     setPopupBlockedMsg(null);
     setPrintLoading(true);
-    const yr = template?.fetch_data_with_date ? selectedPeriod : reportYear;
+    const isByDefault = selectedPeriodType === "by_default";
+    const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
     const useCached = String(data.year) === String(yr);
     const run = (reportData: ReportData) => {
       const doc = buildReportPrintDocument(reportData);
@@ -137,7 +157,10 @@ export default function ReportViewPage() {
       }
       return;
     }
-    const url = `/reports/templates/${id}/generate?format=json&year=${yr}`;
+    let url = `/reports/templates/${id}/generate?format=json&year=${yr}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`;
+    if (template?.organization_id) {
+      url += `&organization_id=${template.organization_id}`;
+    }
     api<ReportData>(url, { token, cache: "no-store" })
       .then(run)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load report"))
@@ -155,17 +178,56 @@ export default function ReportViewPage() {
     <div style={{ padding: "0 1rem 1rem" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem" }}>
         <h1 style={{ fontSize: "1.5rem", margin: 0 }}>Report</h1>
-        {template?.fetch_data_with_date ? (
+        {(template?.fetch_data_with_date || customPeriods.length > 0) ? (
           <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-            {customPeriods.length === 0 ? (
-              <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontStyle: "italic" }}>No periods configured</span>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Period Type:</label>
+              <select
+                value={selectedPeriodType}
+                onChange={(e) => setSelectedPeriodType(e.target.value)}
+                style={{
+                  padding: "0.35rem 0.5rem",
+                  borderRadius: "4px",
+                  border: "1px solid var(--border)",
+                  fontSize: "0.875rem",
+                  background: "var(--surface)"
+                }}
+              >
+                <option value="by_default">Default</option>
+                {customPeriods.map((cp: any) => (
+                  <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                    {cp.custom_period_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {selectedPeriodType === "by_default" ? (
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Year</label>
+                <select
+                  value={reportYear}
+                  onChange={(e) => setReportYear(Number(e.target.value))}
+                  style={{
+                    padding: "0.35rem 0.5rem",
+                    borderRadius: "4px",
+                    border: "1px solid var(--border)",
+                    fontSize: "0.875rem",
+                    background: "var(--surface)"
+                  }}
+                >
+                  {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </div>
             ) : (
-              <>
+              periodOptions.length > 0 && (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Period Type:</label>
+                  <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Reporting Period:</label>
                   <select
-                    value={selectedPeriodType}
-                    onChange={(e) => setSelectedPeriodType(e.target.value)}
+                    value={selectedPeriod}
+                    onChange={(e) => setSelectedPeriod(e.target.value)}
                     style={{
                       padding: "0.35rem 0.5rem",
                       borderRadius: "4px",
@@ -174,37 +236,14 @@ export default function ReportViewPage() {
                       background: "var(--surface)"
                     }}
                   >
-                    {customPeriods.map((cp: any) => (
-                      <option key={cp.custom_period_name} value={cp.custom_period_name}>
-                        {cp.custom_period_name}
+                    {periodOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
                       </option>
                     ))}
                   </select>
                 </div>
-
-                {periodOptions.length > 0 && (
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Reporting Period:</label>
-                    <select
-                      value={selectedPeriod}
-                      onChange={(e) => setSelectedPeriod(e.target.value)}
-                      style={{
-                        padding: "0.35rem 0.5rem",
-                        borderRadius: "4px",
-                        border: "1px solid var(--border)",
-                        fontSize: "0.875rem",
-                        background: "var(--surface)"
-                      }}
-                    >
-                      {periodOptions.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-              </>
+              )
             )}
           </div>
         ) : (

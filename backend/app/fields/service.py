@@ -134,7 +134,7 @@ async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> K
                 key=sub.key,
                 field_type=sub.field_type,
                 is_required=sub.is_required,
-                sort_order=sub.sort_order if sub.sort_order else i,
+                sort_order=sub.sort_order if getattr(sub, "sort_order", None) is not None else i,
                 config=sub.config if hasattr(sub, "config") else None,
             )
         )

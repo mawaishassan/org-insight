@@ -77,7 +77,14 @@ def get_widget_date_col_key(config: dict, kpi_id: int, source_key: str, field_de
                 return date_subfields[0].key
         return None
 
-    return None
+def _clean_by_default_overrides(mod_overrides: dict[str, Any], by_default_bypass: bool) -> None:
+    if by_default_bypass:
+        y_val = mod_overrides.get("year")
+        if y_val is not None:
+            try:
+                int(str(y_val))
+            except ValueError:
+                mod_overrides.pop("year", None)
 
 
 async def resolve_dashboard_chart_widget_data_batch(
@@ -141,9 +148,20 @@ async def resolve_dashboard_chart_widget_data_batch(
         
         mod_overrides = dict(overrides) if overrides else {}
         date_range = None
-        if is_date_fetching and org:
+        
+        # Pop "by_default" override so it doesn't contaminate the merged widget year
+        by_default_bypass = False
+        if mod_overrides.get("year") in ("by_default", "By Default"):
+            by_default_bypass = True
+            mod_overrides.pop("year", None)
+        if mod_overrides.get("by_default") is True:
+            by_default_bypass = True
+            mod_overrides.pop("by_default", None)
+        _clean_by_default_overrides(mod_overrides, by_default_bypass)
+
+        if is_date_fetching and org and not by_default_bypass:
             selected_period = (overrides or {}).get("year") or w.get("year")
-            if selected_period:
+            if selected_period and selected_period != "by_default" and selected_period != "By Default":
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
                     mod_overrides["year"] = start_year
@@ -590,7 +608,9 @@ def _get_config_val(config: Any, key: str, default: Any = None) -> Any:
     return default
 
 
-def resolve_date_range_for_period(config: Any, selected_period: str) -> tuple[datetime.date, datetime.date, int]:
+def resolve_date_range_for_period(config: Any, selected_period: str, period_type: str | None = None) -> tuple[datetime.date, datetime.date, int]:
+    if selected_period == "by_default" or selected_period == "By Default":
+        raise ValueError("Cannot resolve date range for default period")
     import datetime as dt
     import calendar
     import re
@@ -600,40 +620,46 @@ def resolve_date_range_for_period(config: Any, selected_period: str) -> tuple[da
     custom_periods = _get_config_val(config, "custom_periods")
     if custom_periods and isinstance(custom_periods, list):
         matched_config = None
-        for cp in custom_periods:
-            if not isinstance(cp, dict):
-                continue
-            # Get prefix, suffix, and display format for this configuration
-            prefix = _get_config_val(cp, "custom_period_prefix") or ""
-            suffix = _get_config_val(cp, "custom_period_suffix") or ""
-            display_format = _get_config_val(cp, "custom_period_display_format") or "YYYY"
-            
-            val = selected_period
-            if prefix and not val.startswith(prefix):
-                continue
-            if suffix and not val.endswith(suffix):
-                continue
+        if period_type:
+            for cp in custom_periods:
+                if isinstance(cp, dict) and _get_config_val(cp, "custom_period_name") == period_type:
+                    matched_config = cp
+                    break
+        if not matched_config:
+            for cp in custom_periods:
+                if not isinstance(cp, dict):
+                    continue
+                # Get prefix, suffix, and display format for this configuration
+                prefix = _get_config_val(cp, "custom_period_prefix") or ""
+                suffix = _get_config_val(cp, "custom_period_suffix") or ""
+                display_format = _get_config_val(cp, "custom_period_display_format") or "YYYY"
                 
-            if prefix:
-                val = val[len(prefix):]
-            if suffix:
-                val = val[:-len(suffix)] if len(suffix) > 0 else val
-            val = val.strip()
-            
-            # Check pattern matching based on display format
-            matched = False
-            if display_format == "YYYY":
-                matched = bool(re.match(r'^\d{4}$', val))
-            elif display_format in ("YYYY/YY", "YYYY-YY", "YYYY-YYYY", "YYYY–YYYY"):
-                matched = bool(re.match(r'^\d{4}[/\-–]\d{2,4}$', val))
-            elif display_format == "YY/YYYY":
-                matched = bool(re.match(r'^\d{2}/\d{4}$', val))
-            else:
-                matched = bool(re.search(r'\b\d{4}\b', val))
+                val = selected_period
+                if prefix and not val.startswith(prefix):
+                    continue
+                if suffix and not val.endswith(suffix):
+                    continue
+                    
+                if prefix:
+                    val = val[len(prefix):]
+                if suffix:
+                    val = val[:-len(suffix)] if len(suffix) > 0 else val
+                val = val.strip()
                 
-            if matched:
-                matched_config = cp
-                break
+                # Check pattern matching based on display format
+                matched = False
+                if display_format == "YYYY":
+                    matched = bool(re.match(r'^\d{4}$', val))
+                elif display_format in ("YYYY/YY", "YYYY-YY", "YYYY-YYYY", "YYYY–YYYY"):
+                    matched = bool(re.match(r'^\d{4}[/\-–]\d{2,4}$', val))
+                elif display_format == "YY/YYYY":
+                    matched = bool(re.match(r'^\d{2}/\d{4}$', val))
+                else:
+                    matched = bool(re.search(r'\b\d{4}\b', val))
+                    
+                if matched:
+                    matched_config = cp
+                    break
         
         if matched_config:
             config = matched_config
@@ -712,7 +738,7 @@ async def preprocess_dashboard_date_fetching(
         return merged, overrides, None
         
     selected_period = (overrides or {}).get("year") or w.get("year")
-    if not selected_period:
+    if not selected_period or selected_period == "by_default" or selected_period == "By Default":
         return merged, overrides, None
         
     try:
@@ -752,6 +778,8 @@ async def resolve_date_context_for_dashboard(
     selected_period: Any
 ) -> tuple[datetime.date, datetime.date, int, dict] | None:
     if dashboard_id is None or not selected_period:
+        return None
+    if selected_period == "by_default" or selected_period == "By Default":
         return None
     dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
     if not dashboard or not getattr(dashboard, "fetch_data_with_date", False):
@@ -1874,7 +1902,16 @@ async def resolve_dashboard_chart_widget_data(
     """
     date_ctx = await resolve_date_context_for_dashboard(db, org_id, dashboard_id, (overrides or {}).get("year") or widget.get("year"))
     mod_overrides = dict(overrides) if overrides else {}
-    if date_ctx:
+    by_default_bypass = False
+    if mod_overrides.get("year") in ("by_default", "By Default"):
+        by_default_bypass = True
+        mod_overrides.pop("year", None)
+    if mod_overrides.get("by_default") is True:
+        by_default_bypass = True
+        mod_overrides.pop("by_default", None)
+    _clean_by_default_overrides(mod_overrides, by_default_bypass)
+
+    if date_ctx and not by_default_bypass:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
 
@@ -2015,7 +2052,6 @@ async def _dashboard_card_payload(
             if eid and fid:
                 fvm = await get_field_values_for_field_ids(db, entry_id=int(eid), field_ids=[int(fid)], current_user_id=user.id if user else None)
                 raw = raw_field_from_fv_map(fvm, int(fid))
-                
         n = to_numeric(raw)
         return (
             {
@@ -2094,9 +2130,21 @@ async def resolve_dashboard_card_widget_data(
     widget: dict[str, Any],
     overrides: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
-    date_ctx = await resolve_date_context_for_dashboard(db, org_id, dashboard_id, (overrides or {}).get("year") or widget.get("year"))
     mod_overrides = dict(overrides) if overrides else {}
-    if date_ctx:
+    by_default_bypass = False
+    if mod_overrides.get("year") in ("by_default", "By Default"):
+        by_default_bypass = True
+        mod_overrides.pop("year", None)
+    if mod_overrides.get("by_default") is True:
+        by_default_bypass = True
+        mod_overrides.pop("by_default", None)
+    _clean_by_default_overrides(mod_overrides, by_default_bypass)
+
+    date_ctx = None
+    if not by_default_bypass:
+        date_ctx = await resolve_date_context_for_dashboard(db, org_id, dashboard_id, (overrides or {}).get("year") or widget.get("year"))
+
+    if date_ctx and not by_default_bypass:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
 
@@ -2113,7 +2161,7 @@ async def resolve_dashboard_card_widget_data(
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
 
     date_range = None
-    if date_ctx and (merged.get("source_mode") == "multi_line_agg" or merged.get("source_mode") == "field"):
+    if date_ctx and not by_default_bypass and (merged.get("source_mode") == "multi_line_agg" or merged.get("source_mode") == "field"):
         start_date, end_date, start_year, config = date_ctx
         source_key = (merged.get("source_field_key") or merged.get("field_key") or "").strip()
         f_def = None
@@ -2175,9 +2223,20 @@ async def resolve_dashboard_card_widget_data_batch(
         
         mod_overrides = dict(overrides) if overrides else {}
         date_range = None
-        if is_date_fetching and org:
+        
+        # Pop "by_default" override so it doesn't contaminate the merged widget year
+        by_default_bypass = False
+        if mod_overrides.get("year") in ("by_default", "By Default"):
+            by_default_bypass = True
+            mod_overrides.pop("year", None)
+        if mod_overrides.get("by_default") is True:
+            by_default_bypass = True
+            mod_overrides.pop("by_default", None)
+        _clean_by_default_overrides(mod_overrides, by_default_bypass)
+
+        if is_date_fetching and org and not by_default_bypass:
             selected_period = (overrides or {}).get("year") or w.get("year")
-            if selected_period:
+            if selected_period and selected_period != "by_default" and selected_period != "By Default":
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
                     mod_overrides["year"] = start_year
@@ -2712,9 +2771,7 @@ async def resolve_dashboard_table_rows_widget_data(
                     dc.c.value_date >= start_date,
                     dc.c.value_date < end_date,
                     dc.c.value_text.isnot(None),
-                    func.lower(func.trim(dc.c.value_text)).notin_([
-                        "false", "none", "null", "undefined", ""
-                    ])
+                    dc.c.value_text != "",
                 )
             )
 
@@ -2994,8 +3051,11 @@ async def resolve_dashboard_line_widget_data(
     is_date_fetching = False
     org = None
     if dashboard and getattr(dashboard, "fetch_data_with_date", False):
-        is_date_fetching = True
-        org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+        selected_period = (overrides or {}).get("year")
+        by_default_mode = selected_period in ("by_default", "By Default") or (overrides or {}).get("by_default") is True
+        if not by_default_mode:
+            is_date_fetching = True
+            org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
 
     def _map_period_to_year(val: Any) -> Any:
         if not is_date_fetching or not org or not val:
@@ -3007,6 +3067,15 @@ async def resolve_dashboard_line_widget_data(
             return val
 
     mod_overrides = dict(overrides) if overrides else {}
+    by_default_bypass = False
+    if mod_overrides.get("year") in ("by_default", "By Default"):
+        by_default_bypass = True
+        mod_overrides.pop("year", None)
+    if mod_overrides.get("by_default") is True:
+        by_default_bypass = True
+        mod_overrides.pop("by_default", None)
+    _clean_by_default_overrides(mod_overrides, by_default_bypass)
+
     if is_date_fetching and org:
         if "start_year" in mod_overrides:
             mod_overrides["start_year"] = _map_period_to_year(mod_overrides["start_year"])
@@ -3117,8 +3186,11 @@ async def resolve_dashboard_trend_widget_data(
     is_date_fetching = False
     org = None
     if dashboard and getattr(dashboard, "fetch_data_with_date", False):
-        is_date_fetching = True
-        org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
+        selected_period = (overrides or {}).get("year")
+        by_default_mode = selected_period in ("by_default", "By Default") or (overrides or {}).get("by_default") is True
+        if not by_default_mode:
+            is_date_fetching = True
+            org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
 
     def _map_period_to_year(val: Any) -> Any:
         if not is_date_fetching or not org or not val:
@@ -3130,6 +3202,15 @@ async def resolve_dashboard_trend_widget_data(
             return val
 
     mod_overrides = dict(overrides) if overrides else {}
+    by_default_bypass = False
+    if mod_overrides.get("year") in ("by_default", "By Default"):
+        by_default_bypass = True
+        mod_overrides.pop("year", None)
+    if mod_overrides.get("by_default") is True:
+        by_default_bypass = True
+        mod_overrides.pop("by_default", None)
+    _clean_by_default_overrides(mod_overrides, by_default_bypass)
+
     if is_date_fetching and org:
         if "start_year" in mod_overrides:
             mod_overrides["start_year"] = _map_period_to_year(mod_overrides["start_year"])

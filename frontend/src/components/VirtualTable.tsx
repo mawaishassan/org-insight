@@ -13,6 +13,14 @@ interface VirtualTableProps {
   totalCount?: number;
 }
 
+const getColWidth = (key: string) => {
+  const k = key.toLowerCase();
+  if (k.includes("department") || k.includes("name") || k.includes("title")) {
+    return 260;
+  }
+  return 150;
+};
+
 export function VirtualTable({
   columns,
   rows,
@@ -52,7 +60,7 @@ export function VirtualTable({
         <div style={{ display: "flex", background: "#f8fafc", borderBottom: "2px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", width: "max-content", minWidth: "100%" }}>
           <div style={{ width: 60, padding: "0.75rem 1rem", borderRight: "1px solid var(--border)", textAlign: "center", flexShrink: 0 }}>S.No</div>
           {columns.map((col) => (
-            <div key={col.key} style={{ flex: 1, padding: "0.75rem 1rem", minWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <div key={col.key} style={{ width: getColWidth(col.key), padding: "0.75rem 1rem", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {col.name}
             </div>
           ))}
@@ -77,6 +85,13 @@ export function VirtualTable({
           </div>
         ) : (
           <div style={{ height: totalHeight, width: "max-content", minWidth: "100%", position: "relative" }}>
+            {/* Dummy row to establish max-content width of the parent container for absolute positioned children */}
+            <div style={{ display: "flex", height: 0, visibility: "hidden", overflow: "hidden" }}>
+              <div style={{ width: 60, flexShrink: 0 }}>S.No</div>
+              {columns.map((col) => (
+                <div key={col.key} style={{ width: getColWidth(col.key), flexShrink: 0 }}></div>
+              ))}
+            </div>
             {visibleRows.map(({ row, index }) => (
               <div
                 key={index}
@@ -103,9 +118,9 @@ export function VirtualTable({
                     <div
                       key={col.key}
                       style={{
-                        flex: 1,
+                        width: getColWidth(col.key),
                         padding: "0 1rem",
-                        minWidth: 150,
+                        flexShrink: 0,
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",

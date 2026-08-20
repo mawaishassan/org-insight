@@ -2,6 +2,7 @@ import datetime
 import html
 import logging
 from collections import defaultdict
+from typing import Callable, Any
 from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, noload
@@ -28,7 +29,7 @@ from app.reports.custom_schemas import (
     CustomReportSectionLayout,
     CustomReportAttachmentLayout
 )
-from app.formula_engine.evaluator import evaluate_formula
+from app.formula_engine.evaluator import evaluate_formula, apply_conditional_logic
 
 
 from decimal import Decimal
@@ -365,16 +366,97 @@ async def list_custom_report_assignments(db: AsyncSession, custom_report_id: int
     return list(result.scalars().all())
 
 
+def _parse_kpi_formula_dependencies(formula_expression: str) -> list[int]:
+    if not formula_expression:
+        return []
+    import re
+    pattern = r'\b(?:KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|KPI_GROUP_BY|UNIQUE_COUNT_KPI_ITEMS|COUNT_UNIQUE_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|COUNT_UNIQUE_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE)\s*\(\s*(\d+)'
+    matches = re.findall(pattern, formula_expression, re.IGNORECASE)
+    return [int(m) for m in matches]
+
+
+def _topological_sort_report_kpis(kpis: list[KPI]) -> list[KPI]:
+    adj: dict[int, set[int]] = {}
+    in_degree: dict[int, int] = {}
+    kpi_map = {k.id: k for k in kpis}
+
+    for k in kpis:
+        adj[k.id] = set()
+        in_degree[k.id] = 0
+
+    for k in kpis:
+        for f in getattr(k, "fields", []) or []:
+            ft = getattr(f, "field_type", None)
+            ft_str = ft.value if hasattr(ft, "value") else str(ft)
+            exprs = []
+            if ft_str == "formula":
+                exprs.append(getattr(f, "formula_expression", "") or "")
+            elif ft_str == "multi_line_items":
+                for sf in getattr(f, "sub_fields", []) or []:
+                    cfg = getattr(sf, "config", None) or {}
+                    expr = cfg.get("formula_expression") or getattr(sf, "formula_expression", None)
+                    if expr:
+                        exprs.append(expr)
+            for expr in exprs:
+                for dep_id in _parse_kpi_formula_dependencies(expr):
+                    if dep_id in kpi_map and dep_id != k.id:
+                        if k.id not in adj[dep_id]:
+                            adj[dep_id].add(k.id)
+                            in_degree[k.id] += 1
+
+    from collections import deque
+    queue = deque([kid for kid, deg in in_degree.items() if deg == 0])
+    order = []
+    while queue:
+        u = queue.popleft()
+        order.append(u)
+        for v in adj[u]:
+            in_degree[v] -= 1
+            if in_degree[v] == 0:
+                queue.append(v)
+
+    if len(order) != len(kpis):
+        return kpis
+
+    return [kpi_map[kid] for kid in order]
+
+
+def _sort_formula_subfields(formula_sfs: list) -> list:
+    sorted_sfs = []
+    visited = set()
+    sfs_dict = {item[0]: item for item in formula_sfs}
+    
+    def visit(sf_key):
+        if sf_key in visited:
+            return
+        visited.add(sf_key)
+        item = sfs_dict.get(sf_key)
+        if not item:
+            return
+        expr = item[1]
+        if expr:
+            for other_key in sfs_dict:
+                if other_key != sf_key and other_key in expr:
+                    visit(other_key)
+        sorted_sfs.append(item)
+
+    for sf_key in sfs_dict:
+        visit(sf_key)
+    return sorted_sfs
+
+
 async def generate_custom_report_data(
     db: AsyncSession,
     id: int,
     org_id: int,
     year: str | int | None = None,
     include_drafts: bool = False,
+    on_progress: Callable[[int], None] | None = None,
     preview: bool = False,
     include_attachments: bool = True,
-    on_progress=None
-) -> dict | None:
+    by_default: bool = False,
+    period_type: str | None = None,
+) -> dict[str, Any] | None:
     if on_progress:
         on_progress(10)
     custom_report = await get_custom_report(db, id, org_id)
@@ -383,13 +465,15 @@ async def generate_custom_report_data(
 
     selected_period = year
     date_range = None
-    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period:
+    entry_start_year: int | None = None  # calendar start year of the period (e.g. 2026 for "2026/27")
+    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period and not by_default:
         org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
         if org:
             try:
                 from app.widget_data.service import get_widget_date_col_key, resolve_date_range_for_period
-                start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
-                year = start_year
+                start_date, end_date, entry_year = resolve_date_range_for_period(org, str(selected_period), period_type)
+                entry_start_year = start_date.year  # e.g. 2026 for July-2026 to June-2027
+                year = entry_year  # e.g. 2027 (the year entries are stored under)
                 date_range = (start_date, end_date)
             except Exception:
                 pass
@@ -445,6 +529,60 @@ async def generate_custom_report_data(
     )
     kpis_by_id = {k.id: k for k in kpis_result.scalars().unique().all()}
 
+    # Expand referenced_kpi_ids to include formula dependencies and configured date-fetching KPIs
+    config = getattr(custom_report, "date_fetching_config", None) or {}
+    configured_kpis = config.get("configured_kpi_ids") or []
+    for c_kid in configured_kpis:
+        try:
+            referenced_kpi_ids.add(int(c_kid))
+        except (ValueError, TypeError):
+            pass
+
+    resolved_kpi_ids = set()
+    while True:
+        unresolved_ids = referenced_kpi_ids - resolved_kpi_ids
+        if not unresolved_ids:
+            break
+            
+        missing_ids = unresolved_ids - set(kpis_by_id.keys())
+        if missing_ids:
+            add_result = await db.execute(
+                select(KPI)
+                .where(KPI.id.in_(missing_ids))
+                .options(
+                    selectinload(KPI.fields).selectinload(KPIField.sub_fields),
+                    noload(KPI.organization),
+                    noload(KPI.domain)
+                )
+            )
+            for k in add_result.scalars().unique().all():
+                kpis_by_id[k.id] = k
+                
+        new_deps = set()
+        for kid in unresolved_ids:
+            kpi = kpis_by_id.get(kid)
+            if not kpi:
+                continue
+            for f in kpi.fields or []:
+                ft = f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type)
+                # Direct formula field
+                if ft == "formula" and f.formula_expression:
+                    for dep_id in _parse_kpi_formula_dependencies(f.formula_expression):
+                        new_deps.add(dep_id)
+                # Subfields of multi-line field
+                elif ft == "multi_line_items":
+                    sub_fields = getattr(f, "sub_fields", []) or []
+                    for sf in sub_fields:
+                        sft = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
+                        sf_cfg = getattr(sf, "config", None) or {}
+                        expr = sf_cfg.get("formula_expression")
+                        if (sft == "formula" or expr) and expr:
+                            for dep_id in _parse_kpi_formula_dependencies(expr):
+                                new_deps.add(dep_id)
+                                
+        resolved_kpi_ids.update(unresolved_ids)
+        referenced_kpi_ids.update(new_deps)
+
     # 3. Load Org Config
     org = await db.get(Organization, org_id)
     org_td = TimeDimension(getattr(org, "time_dimension", None) or "yearly") if org else TimeDimension.YEARLY
@@ -466,6 +604,18 @@ async def generate_custom_report_data(
     )
     all_entries_list = list(entries_result.scalars().all())
 
+    # Fetch counts of multi-line rows for all these entries to prioritize populated entries
+    entry_ids = [e.id for e in all_entries_list]
+    mli_counts = {}
+    if entry_ids:
+        from sqlalchemy import func
+        counts_res = await db.execute(
+            select(KpiMultiLineRow.entry_id, func.count(KpiMultiLineRow.id))
+            .where(KpiMultiLineRow.entry_id.in_(entry_ids))
+            .group_by(KpiMultiLineRow.entry_id)
+        )
+        mli_counts = {r[0]: r[1] for r in counts_res.all()}
+
     # Group entries by kpi_id
     entries_by_kpi = {}
     for entry in all_entries_list:
@@ -476,9 +626,17 @@ async def generate_custom_report_data(
     if on_progress:
         on_progress(30)
 
-    # 4. Fetch entries and evaluate formulas for each referenced KPI
-    total_kpis = len(kpis_by_id)
-    for idx, (kid, kpi) in enumerate(kpis_by_id.items()):
+    # 4. Fetch entries and evaluate formulas for each referenced KPI (topologically sorted)
+    sorted_kpis_list = _topological_sort_report_kpis(list(kpis_by_id.values()))
+    total_kpis = len(sorted_kpis_list)
+
+    recalculated_kpi_values: dict[tuple[int, str], float | int] = {}
+    recalculated_kpi_mli_data: dict[tuple[int, str], list[dict]] = {}
+
+    print(f"DEBUG: date_range={date_range}, sorted_kpis={[k.id for k in sorted_kpis_list]}")
+
+    for idx, kpi in enumerate(sorted_kpis_list):
+        kid = kpi.id
         fields_to_include = sorted(list(kpi.fields or []), key=lambda f: (f.sort_order, f.id))
         kpi_td_raw = getattr(kpi, "time_dimension", None)
         kpi_td = TimeDimension(kpi_td_raw) if kpi_td_raw else None
@@ -486,23 +644,43 @@ async def generate_custom_report_data(
 
         all_entries = entries_by_kpi.get(kpi.id, [])
         if date_range:
-            real_entry = next((e for e in all_entries if e.year == yr), None)
+            real_entry = None
+            if all_entries:
+                def _score_entry(e):
+                    # Check if entry has any populated multi-line rows
+                    rows_count = mli_counts.get(e.id, 0)
+                    # Check if entry has any populated scalar field values
+                    has_scalar_data = False
+                    for fv in (e.field_values or []):
+                        if (fv.value_number is not None and fv.value_number != 0) or \
+                           (fv.value_text is not None and fv.value_text != "") or \
+                           fv.value_boolean is not None or \
+                           fv.value_date is not None or \
+                           fv.value_json is not None:
+                            has_scalar_data = True
+                            break
+                    
+                    data_score = 1 if (rows_count > 0 or has_scalar_data) else 0
+                    
+                    if e.year == yr:
+                        year_score = 3
+                    elif entry_start_year is not None and e.year == entry_start_year:
+                        year_score = 2
+                    else:
+                        year_score = 1 - abs(e.year - yr) * 0.1
+                        
+                    return (data_score, year_score, e.year)
+
+                all_entries_sorted = sorted(
+                    all_entries,
+                    key=_score_entry,
+                    reverse=True
+                )
+                real_entry = all_entries_sorted[0]
             if real_entry:
                 entries_sorted = [real_entry]
             else:
-                if all_entries:
-                    mock_entry = KPIEntry(
-                        id=0,
-                        organization_id=org_id,
-                        kpi_id=kpi.id,
-                        year=yr,
-                        period_key="",
-                        is_draft=False,
-                        field_values=[]
-                    )
-                    entries_sorted = [mock_entry]
-                else:
-                    entries_sorted = []
+                entries_sorted = []
         else:
             entries_sorted = sorted(
                 all_entries,
@@ -512,11 +690,18 @@ async def generate_custom_report_data(
                 entries_sorted = [entries_sorted[-1]]
 
         need_cross_kpi = _formulas_need_other_kpi_values(fields_to_include)
+        # For cross-KPI formula lookup, use the year of the actual entry found (not necessarily yr)
+        cross_kpi_year = yr
+        if date_range and entries_sorted:
+            cross_kpi_year = entries_sorted[0].year
         other_kpi_values = (
-            await _load_other_kpi_values(db, yr, org_id, kpi.id)
+            await _load_other_kpi_values(db, cross_kpi_year, org_id, kpi.id)
             if entries_sorted and need_cross_kpi
             else {}
         )
+        for (r_kid, r_fkey), rval in recalculated_kpi_values.items():
+            other_kpi_values[(r_kid, r_fkey)] = rval
+
         entry_ids_sorted = [e.id for e in entries_sorted]
 
         # Load multi-line rows
@@ -526,7 +711,7 @@ async def generate_custom_report_data(
             if mf.id in attachment_kpi_field_ids:
                 limit_val = 50
             else:
-                limit_val = 100 if preview else 200
+                limit_val = None
                 
             mf_date_range = None
             if date_range:
@@ -536,18 +721,58 @@ async def generate_custom_report_data(
                     start_date, end_date = date_range
                     mf_date_range = (start_date, end_date, str(date_col_key))
 
-            target_entry_ids = [e.id for e in all_entries if e.id] if date_range else entry_ids_sorted
+            target_entry_ids = [e.id for e in all_entries if e.id] if (date_range and mf_date_range) else entry_ids_sorted
             batch_res = await _load_multi_line_items_rows_batch(
                 db, entry_ids=target_entry_ids, field=mf, limit=limit_val, date_range=mf_date_range
             )
+            # Re-evaluate any formula subfields on MLI rows
+            sub_fields_orm = getattr(mf, "sub_fields", []) or []
+            formula_sfs = []
+            for sf in sub_fields_orm:
+                cfg = getattr(sf, "config", None) or {}
+                expr = cfg.get("formula_expression")
+                cond_logic = cfg.get("conditional_logic")
+                sft = getattr(sf.field_type, "value", str(sf.field_type))
+                if sft == "formula" or expr:
+                    formula_sfs.append((sf.key, expr, cond_logic))
+
+            recalculated_batch = {}
+            for eid, rows_list in batch_res.items():
+                if formula_sfs:
+                    sorted_formula_sfs = _sort_formula_subfields(formula_sfs)
+                    current_rows = [dict(r) for r in rows_list]
+                    for sf_key, expr, cond_logic in sorted_formula_sfs:
+                        for r_copy in current_rows:
+                            if expr:
+                                new_val = evaluate_formula(
+                                    expr,
+                                    {},
+                                    {mf.key: current_rows},
+                                    other_kpi_values,
+                                    current_row=r_copy,
+                                    other_kpi_multi_line_data=recalculated_kpi_mli_data,
+                                )
+                                if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
+                                    new_val = apply_conditional_logic(new_val, cond_logic)
+                                r_copy[sf_key] = new_val if new_val is not None else 0
+                    recalculated_batch[eid] = current_rows
+                else:
+                    recalculated_batch[eid] = rows_list
+
             if date_range:
                 target_eid = entries_sorted[0].id if entries_sorted else 0
                 combined_rows = []
-                for rows_list in batch_res.values():
+                for rows_list in recalculated_batch.values():
                     combined_rows.extend(rows_list)
                 ml_rows_by_field_id[mf.id] = {target_eid: combined_rows}
+                recalculated_kpi_mli_data[(kpi.id, mf.key)] = combined_rows
             else:
-                ml_rows_by_field_id[mf.id] = batch_res
+                ml_rows_by_field_id[mf.id] = recalculated_batch
+                all_rows = []
+                for rlist in recalculated_batch.values():
+                    if isinstance(rlist, list):
+                        all_rows.extend(rlist)
+                recalculated_kpi_mli_data[(kpi.id, mf.key)] = all_rows
 
         if on_progress:
             on_progress(int(30 + 50 * (idx + 1) / total_kpis))
@@ -600,6 +825,10 @@ async def generate_custom_report_data(
 
                     if f.field_type == FieldType.number and fv.value_number is not None:
                         value_by_key[f.key] = fv.value_number
+                        try:
+                            recalculated_kpi_values[(kpi.id, f.key)] = float(fv.value_number)
+                        except (TypeError, ValueError):
+                            pass
 
                 field_payload = {
                     "field_key": f.key,
@@ -615,6 +844,10 @@ async def generate_custom_report_data(
                 evaluated_fields[f.key] = field_payload
                 if val is not None and f.field_type == FieldType.number:
                     value_by_key[f.key] = val
+                    try:
+                        recalculated_kpi_values[(kpi.id, f.key)] = float(val)
+                    except (TypeError, ValueError):
+                        pass
 
             # Seed formula values
             for f in fields_to_include:
@@ -636,6 +869,7 @@ async def generate_custom_report_data(
                         value_by_key,
                         multi_line_items_data,
                         other_kpi_values,
+                        other_kpi_multi_line_data=recalculated_kpi_mli_data,
                     )
                     if computed is None:
                         fv_formula = fv_by_field.get(f.id)
@@ -648,6 +882,12 @@ async def generate_custom_report_data(
                         "field_type": f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type),
                     }
                     evaluated_fields[f.key] = field_payload
+                    if computed is not None:
+                        value_by_key[f.key] = computed
+                        try:
+                            recalculated_kpi_values[(kpi.id, f.key)] = float(computed)
+                        except (TypeError, ValueError):
+                            pass
 
         kpi_evaluated_data[kpi.id] = evaluated_fields
 
@@ -690,7 +930,14 @@ async def generate_custom_report_data(
                     visible_keys = [sf["key"] for sf in all_sub_fields][:5]
 
                 sf_map = {sf["key"]: sf for sf in all_sub_fields}
-                filtered_sub_fields = [sf_map[k] for k in visible_keys if k in sf_map]
+                custom_sub_labels = cfg.get("custom_sub_field_labels") or {}
+                filtered_sub_fields = []
+                for k in visible_keys:
+                    if k in sf_map:
+                        sf_copy = dict(sf_map[k])
+                        if k in custom_sub_labels and custom_sub_labels[k]:
+                            sf_copy["name"] = custom_sub_labels[k]
+                        filtered_sub_fields.append(sf_copy)
                 filtered_sub_field_keys = [sf["key"] for sf in filtered_sub_fields]
                 
                 # Row filtering
@@ -973,18 +1220,31 @@ async def export_custom_report_file(
     org_id: int,
     year: str | int,
     format: str,
+    by_default: bool = False,
 ) -> tuple[bytes, str, str]:
     """Export custom report as PDF, DOCX, or XLSX bytes, with name and content-type."""
     import re
     import io
 
     # Generate custom report data
-    data = await generate_custom_report_data(db, custom_report_id, org_id, year=year, include_drafts=False)
+    data = await generate_custom_report_data(db, custom_report_id, org_id, year=year, include_drafts=False, by_default=by_default)
     if not data:
         raise ValueError("Report data generation failed")
     report_name = data.get("template_name", "Custom Report")
     # Clean filename
     clean_report_name = re.sub(r'[^\w\s-]', '', report_name).strip().replace(' ', '_')
+
+    # Determine page orientation based on MLI columns
+    use_landscape = False
+    for sec in data.get("sections", []):
+        for f in sec.get("fields", []):
+            if f.get("field_type") == "multi_line_items":
+                sub_fields = f.get("sub_fields", [])
+                if len(sub_fields) > 8:
+                    use_landscape = True
+                    break
+        if use_landscape:
+            break
 
     if format == "xlsx":
         import openpyxl
@@ -1114,6 +1374,11 @@ async def export_custom_report_file(
 
         doc = Document()
         for section in doc.sections:
+            if use_landscape:
+                section.page_width = Inches(11)
+                section.page_height = Inches(8.5)
+                from docx.enum.section import WD_ORIENT
+                section.orientation = WD_ORIENT.LANDSCAPE
             section.top_margin = Inches(0.8)
             section.bottom_margin = Inches(0.8)
             section.left_margin = Inches(0.8)
@@ -1172,7 +1437,7 @@ async def export_custom_report_file(
             header_table = doc.add_table(rows=1, cols=3)
             header_table.autofit = False
             header_table.columns[0].width = Inches(1.1)
-            header_table.columns[1].width = Inches(4.3)
+            header_table.columns[1].width = Inches(7.2 if use_landscape else 4.3)
             header_table.columns[2].width = Inches(1.1)
             cell_logo = header_table.cell(0, 0)
             cell_text = header_table.cell(0, 1)
@@ -1375,12 +1640,14 @@ async def export_custom_report_file(
 
     elif format == "pdf":
         from reportlab.lib import colors
-        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.pagesizes import letter, landscape
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
         from app.reports.service import NumberedCanvas
         from app.core.models import Organization, OrganizationBranding
+
+        available_width = 720 if use_landscape else 540
 
         scalar_bold = data.get("scalar_bold", True)
         if scalar_bold is None:
@@ -1395,7 +1662,7 @@ async def export_custom_report_file(
             custom_header = await db.get(CustomReportHeader, data["report_header_id"])
 
         out_io = io.BytesIO()
-        pdf_doc = SimpleDocTemplate(out_io, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=72)
+        pdf_doc = SimpleDocTemplate(out_io, pagesize=landscape(letter) if use_landscape else letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=72)
         story = []
 
         # Setup custom fonts and styles
@@ -1577,7 +1844,7 @@ async def export_custom_report_file(
             desired_p_fs = custom_header.font_size or 16
             w1 = (logo_w + 4) if img else 0
             w2 = (logo_w2 + 4) if img2 else 0
-            mid_w = 540 - w1 - w2
+            mid_w = available_width - w1 - w2
             pdf_main_fs = calc_auto_header_font_size(custom_header.main_heading, mid_w, desired_p_fs)
 
             heading_paragraph_style = ParagraphStyle(
@@ -1655,7 +1922,7 @@ async def export_custom_report_file(
                 ]))
             elif img:
                 w1 = logo_w + 8
-                mid_w = 540 - w1
+                mid_w = available_width - w1
                 header_table = Table(
                     [[img, header_elements]],
                     colWidths=[w1, mid_w],
@@ -1671,7 +1938,7 @@ async def export_custom_report_file(
                 ]))
             elif img2:
                 w2 = logo_w2 + 8
-                mid_w = 540 - w2
+                mid_w = available_width - w2
                 header_table = Table(
                     [[header_elements, img2]],
                     colWidths=[mid_w, w2],
@@ -1688,7 +1955,7 @@ async def export_custom_report_file(
             else:
                 header_table = Table(
                     [[header_elements]],
-                    colWidths=[540],
+                    colWidths=[available_width],
                     hAlign='CENTER'
                 )
             story.append(header_table)
@@ -1734,7 +2001,36 @@ async def export_custom_report_file(
                     value_items = f.get("value_items", [])
 
                     if sub_fields:
-                        col_widths = [40] + [(500 / len(sub_fields))] * len(sub_fields)
+                        sr_no_width = 40
+                        available_table_w = available_width - sr_no_width
+                        min_col_width = 25 if len(sub_fields) > 15 else (35 if len(sub_fields) > 8 else 45)
+                        
+                        col_chars = []
+                        for sf in sub_fields:
+                            name = sf.get("name") or sf.get("key")
+                            k_lower = sf.get("key", "").lower()
+                            if len(sub_fields) > 8:
+                                if "faculty_who_submitted" in k_lower or "faculty_who" in k_lower:
+                                    w = 16
+                                elif "department" in k_lower or "name" in k_lower:
+                                    w = 18
+                                else:
+                                    w = min(len(name), 12)
+                            else:
+                                w = min(len(name), 25)
+                            col_chars.append(w)
+
+                        for item in value_items:
+                            for idx, sf in enumerate(sub_fields):
+                                val = item.get(sf.get("key"))
+                                val_str = clean_numeric_value_string(val)
+                                max_val_len = 15 if len(sub_fields) > 8 else 60
+                                col_chars[idx] = max(col_chars[idx], min(len(val_str), max_val_len))
+                                
+                        total_chars = sum(col_chars) or len(sub_fields)
+                        raw_widths = [max(min_col_width, available_table_w * (c / total_chars)) for c in col_chars]
+                        scale = available_table_w / sum(raw_widths) if sum(raw_widths) > available_table_w else 1.0
+                        col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
                         hdr_row = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style) for sf in sub_fields]
                         pdf_table_data = [hdr_row]
 
@@ -1861,6 +2157,8 @@ async def stream_custom_report_data(
     id: int,
     org_id: int,
     year: str | int | None = None,
+    by_default: bool = False,
+    period_type: str | None = None,
 ):
     custom_report = await get_custom_report(db, id, org_id)
     if not custom_report:
@@ -1869,13 +2167,15 @@ async def stream_custom_report_data(
 
     selected_period = year
     date_range = None
-    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period:
+    entry_start_year: int | None = None  # calendar start year of the period (e.g. 2026 for "2026/27")
+    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period and not by_default:
         org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
         if org:
             try:
                 from app.widget_data.service import get_widget_date_col_key, resolve_date_range_for_period
-                start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period))
-                year = start_year
+                start_date, end_date, entry_year = resolve_date_range_for_period(org, str(selected_period), period_type)
+                entry_start_year = start_date.year  # e.g. 2026 for July-2026 to June-2027
+                year = entry_year  # e.g. 2027 (the year entries are stored under)
                 date_range = (start_date, end_date)
             except Exception:
                 pass
@@ -1931,6 +2231,18 @@ async def stream_custom_report_data(
     )
     all_entries_list = list(entries_result.scalars().all())
 
+    # Fetch counts of multi-line rows for all these entries to prioritize populated entries
+    entry_ids = [e.id for e in all_entries_list]
+    mli_counts = {}
+    if entry_ids:
+        from sqlalchemy import func
+        counts_res = await db.execute(
+            select(KpiMultiLineRow.entry_id, func.count(KpiMultiLineRow.id))
+            .where(KpiMultiLineRow.entry_id.in_(entry_ids))
+            .group_by(KpiMultiLineRow.entry_id)
+        )
+        mli_counts = {r[0]: r[1] for r in counts_res.all()}
+
     entries_by_kpi = {}
     for entry in all_entries_list:
         entries_by_kpi.setdefault(entry.kpi_id, []).append(entry)
@@ -1945,23 +2257,43 @@ async def stream_custom_report_data(
 
         all_entries = entries_by_kpi.get(kpi.id, [])
         if date_range:
-            real_entry = next((e for e in all_entries if e.year == yr), None)
+            real_entry = None
+            if all_entries:
+                def _score_entry(e):
+                    # Check if entry has any populated multi-line rows
+                    rows_count = mli_counts.get(e.id, 0)
+                    # Check if entry has any populated scalar field values
+                    has_scalar_data = False
+                    for fv in (e.field_values or []):
+                        if (fv.value_number is not None and fv.value_number != 0) or \
+                           (fv.value_text is not None and fv.value_text != "") or \
+                           fv.value_boolean is not None or \
+                           fv.value_date is not None or \
+                           fv.value_json is not None:
+                            has_scalar_data = True
+                            break
+                    
+                    data_score = 1 if (rows_count > 0 or has_scalar_data) else 0
+                    
+                    if e.year == yr:
+                        year_score = 3
+                    elif entry_start_year is not None and e.year == entry_start_year:
+                        year_score = 2
+                    else:
+                        year_score = 1 - abs(e.year - yr) * 0.1
+                        
+                    return (data_score, year_score, e.year)
+
+                all_entries_sorted = sorted(
+                    all_entries,
+                    key=_score_entry,
+                    reverse=True
+                )
+                real_entry = all_entries_sorted[0]
             if real_entry:
                 entries_sorted = [real_entry]
             else:
-                if all_entries:
-                    mock_entry = KPIEntry(
-                        id=0,
-                        organization_id=org_id,
-                        kpi_id=kpi.id,
-                        year=yr,
-                        period_key="",
-                        is_draft=False,
-                        field_values=[]
-                    )
-                    entries_sorted = [mock_entry]
-                else:
-                    entries_sorted = []
+                entries_sorted = []
         else:
             entries_sorted = sorted(
                 all_entries,
@@ -1971,8 +2303,11 @@ async def stream_custom_report_data(
                 entries_sorted = [entries_sorted[-1]]
 
         need_cross_kpi = _formulas_need_other_kpi_values(fields_to_include)
+        cross_kpi_year = yr
+        if date_range and entries_sorted:
+            cross_kpi_year = entries_sorted[0].year
         other_kpi_values = (
-            await _load_other_kpi_values(db, yr, org_id, kpi.id)
+            await _load_other_kpi_values(db, cross_kpi_year, org_id, kpi.id)
             if entries_sorted and need_cross_kpi
             else {}
         )
@@ -2006,11 +2341,11 @@ async def stream_custom_report_data(
                         start_date, end_date = date_range
                         mf_date_range = (start_date, end_date, str(date_col_key))
 
-                target_entry_ids = [e.id for e in all_entries if e.id] if date_range else [entry.id]
+                target_entry_ids = [e.id for e in all_entries if e.id] if (date_range and mf_date_range) else [entry.id]
                 ml_rows = await _load_multi_line_items_rows_batch(
                     db, entry_ids=target_entry_ids, field=mf, date_range=mf_date_range
                 )
-                if date_range:
+                if date_range and mf_date_range:
                     combined_rows = []
                     for rows_list in ml_rows.values():
                         combined_rows.extend(rows_list)
@@ -2165,7 +2500,7 @@ async def stream_custom_report_data(
                     start_date, end_date = date_range
                     mf_date_range = (start_date, end_date, str(date_col_key))
 
-            if date_range:
+            if date_range and mf_date_range:
                 target_entry_ids = [e.id for e in all_entries if e.id]
                 batch_res = await _load_multi_line_items_rows_batch(
                     db, entry_ids=target_entry_ids, field=kfield, date_range=mf_date_range
