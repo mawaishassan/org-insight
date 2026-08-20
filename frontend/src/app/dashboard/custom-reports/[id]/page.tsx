@@ -550,6 +550,7 @@ export default function CustomReportViewPage() {
                     columns={cols}
                     rows={f.value_items || []}
                     totalCount={f.total_count}
+                    mergedHeaders={f.config?.merged_headers}
                   />
                 </div>
               );

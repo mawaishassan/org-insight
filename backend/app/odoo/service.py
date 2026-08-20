@@ -508,7 +508,7 @@ async def download_and_store_odoo_attachments(
     downloaded_objects: list[dict[str, Any]] = []
     errors: list[str] = []
 
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
         for att_id in att_ids:
             target_url = (
                 attachment_url_template.replace("{ATTACHMENT_ID}", str(att_id))

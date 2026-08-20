@@ -2,6 +2,8 @@
  * API client: base URL and fetch with JWT.
  */
 
+import { clearTokens } from "./auth";
+
 /**
  * Base URL for API requests (no trailing slash).
  * - In the browser, when `NEXT_PUBLIC_API_URL` or `NEXT_PUBLIC_BACKEND_URL` is set, requests go
@@ -235,11 +237,10 @@ export async function api<T>(
       const res = await fetch(url, { ...init, body, headers });
       if (!res.ok) {
         if (res.status === 401 && typeof window !== "undefined") {
-          import("./auth").then(({ clearTokens }) => {
-            clearTokens();
-            window.location.href = "/login";
-          });
-          throw new Error("Unauthorized: Session expired. Redirecting to login...");
+          clearTokens();
+          window.location.href = "/login";
+          // Suspend promise chain so we don't throw errors or trigger catches while redirecting
+          await new Promise(() => {});
         }
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         const message = Array.isArray(err.detail)

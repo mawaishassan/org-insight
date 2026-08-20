@@ -578,7 +578,7 @@ async def sync_dashboard_odoo_data(
                     import asyncio
                     
                     sem = asyncio.Semaphore(8)
-                    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                         async def fetch_one(att_id):
                             async with sem:
                                 target_url = (

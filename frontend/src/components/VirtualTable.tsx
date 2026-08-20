@@ -5,12 +5,19 @@ interface Column {
   name: string;
 }
 
+interface MergedHeader {
+  title: string;
+  start_key: string;
+  end_key: string;
+}
+
 interface VirtualTableProps {
   columns: Column[];
   rows: Record<string, any>[];
   maxHeight?: number;
   rowHeight?: number;
   totalCount?: number;
+  mergedHeaders?: MergedHeader[];
 }
 
 const getColWidth = (key: string) => {
@@ -27,6 +34,7 @@ export function VirtualTable({
   maxHeight = 400,
   rowHeight = 42,
   totalCount,
+  mergedHeaders,
 }: VirtualTableProps) {
   const [scrollTop, setScrollTop] = useState(0);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -53,17 +61,94 @@ export function VirtualTable({
     }));
   }, [rows, startIndex, endIndex]);
 
+  const parsedHeaderCells = useMemo(() => {
+    if (!mergedHeaders || mergedHeaders.length === 0) return null;
+
+    const cells: { title: string; width: number; isGroup: boolean }[] = [];
+    cells.push({ title: "S.No", width: 60, isGroup: false });
+
+    const colKeys = columns.map(c => c.key);
+    const colIndices = new Map(colKeys.map((k, idx) => [k, idx]));
+
+    let i = 0;
+    while (i < columns.length) {
+      const col = columns[i];
+      const group = mergedHeaders.find(g => g.start_key === col.key);
+      if (group && colIndices.has(group.end_key)) {
+        const endIdx = colIndices.get(group.end_key)!;
+        if (endIdx >= i) {
+          let groupWidth = 0;
+          for (let k = i; k <= endIdx; k++) {
+            groupWidth += getColWidth(columns[k].key);
+          }
+          cells.push({ title: group.title, width: groupWidth, isGroup: true });
+          i = endIdx + 1;
+          continue;
+        }
+      }
+      cells.push({ title: col.name, width: getColWidth(col.key), isGroup: false });
+      i++;
+    }
+    return cells;
+  }, [columns, mergedHeaders]);
+
+  const coveredKeys = useMemo(() => {
+    const set = new Set<string>();
+    if (!mergedHeaders) return set;
+    const colKeys = columns.map(c => c.key);
+    const colIndices = new Map(colKeys.map((k, idx) => [k, idx]));
+
+    for (const group of mergedHeaders) {
+      if (colIndices.has(group.start_key) && colIndices.has(group.end_key)) {
+        const startIdx = colIndices.get(group.start_key)!;
+        const endIdx = colIndices.get(group.end_key)!;
+        for (let k = startIdx; k <= endIdx; k++) {
+          set.add(columns[k].key);
+        }
+      }
+    }
+    return set;
+  }, [columns, mergedHeaders]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", border: "1px solid var(--border)", borderRadius: 8, background: "white", overflow: "hidden", margin: "0.5rem 0" }}>
       {/* Header Container (hidden scrollbar, synced via JS) */}
       <div ref={headerRef} style={{ overflow: "hidden" }}>
+        {parsedHeaderCells && (
+          <div style={{ display: "flex", background: "#f8fafc", borderBottom: "1px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", width: "max-content", minWidth: "100%" }}>
+            {parsedHeaderCells.map((cell, idx) => (
+              <div
+                key={idx}
+                style={{
+                  width: cell.width,
+                  padding: "0.75rem 1rem",
+                  borderRight: "1px solid var(--border)",
+                  textAlign: "center",
+                  flexShrink: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  color: cell.isGroup ? "#1e40af" : "var(--muted)",
+                  background: cell.isGroup ? "#eff6ff" : "transparent",
+                }}
+              >
+                {cell.title}
+              </div>
+            ))}
+          </div>
+        )}
         <div style={{ display: "flex", background: "#f8fafc", borderBottom: "2px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", width: "max-content", minWidth: "100%" }}>
-          <div style={{ width: 60, padding: "0.75rem 1rem", borderRight: "1px solid var(--border)", textAlign: "center", flexShrink: 0 }}>S.No</div>
-          {columns.map((col) => (
-            <div key={col.key} style={{ width: getColWidth(col.key), padding: "0.75rem 1rem", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {col.name}
-            </div>
-          ))}
+          <div style={{ width: 60, padding: "0.75rem 1rem", borderRight: "1px solid var(--border)", textAlign: "center", flexShrink: 0 }}>
+            {parsedHeaderCells ? "" : "S.No"}
+          </div>
+          {columns.map((col) => {
+            const showTitle = !parsedHeaderCells || coveredKeys.has(col.key);
+            return (
+              <div key={col.key} style={{ width: getColWidth(col.key), padding: "0.75rem 1rem", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderRight: "1px solid var(--border)" }}>
+                {showTitle ? col.name : ""}
+              </div>
+            );
+          })}
         </div>
       </div>
 

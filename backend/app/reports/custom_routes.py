@@ -372,6 +372,17 @@ async def sync_odoo_data_for_report_internal(
     if not org_odoo:
         return {"synced_kpis": 0, "status": "no_config"}
 
+    # Authenticate with Odoo once per sync operation
+    try:
+        session_id = await odoo_authenticate(org_odoo)
+    except ValueError as e:
+        return {
+            "synced_kpis": 0,
+            "status": "auth_failed",
+            "message": f"Odoo authentication failed: {str(e)}",
+            "errors": [f"Odoo authentication failed: {str(e)}"]
+        }
+
     synced_kpis = []
     errors = []
     all_synced_entry_ids = set()
@@ -408,13 +419,6 @@ async def sync_odoo_data_for_report_internal(
         entry, _ = await get_or_create_entry(db, user_id, org_id, kpi_id, year, "")
         if not entry:
             errors.append(f"Could not get/create entry for KPI {kpi_id}")
-            continue
-
-        # Authenticate with Odoo (once per KPI)
-        try:
-            session_id = await odoo_authenticate(org_odoo)
-        except ValueError as e:
-            errors.append(f"Odoo auth failed for KPI {kpi_id}: {str(e)}")
             continue
 
         for field in odoo_fields:
@@ -478,7 +482,7 @@ async def sync_odoo_data_for_report_internal(
                         import httpx
                         import asyncio
                         sem = asyncio.Semaphore(5)
-                        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                             async def fetch_one(att_id):
                                 async with sem:
                                     target_url = (
@@ -814,6 +818,11 @@ async def sync_odoo_for_custom_report(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Odoo/LMS is not configured for this organization"
+        )
+    elif res.get("status") == "auth_failed":
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=res.get("message")
         )
 
     # Update last sync time upon manual sync trigger to respect the cooldown
