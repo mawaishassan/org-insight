@@ -117,15 +117,12 @@ async def load_multi_line_row_dicts(
                     KpiMultiLineCell.sub_field_id == sf_id,
                 )
             )
-            from sqlalchemy import func
             q_rows = q_rows.where(
                 and_(
                     KpiMultiLineCell.value_date >= start_date,
                     KpiMultiLineCell.value_date < end_date,
                     KpiMultiLineCell.value_text.isnot(None),
-                    func.lower(func.trim(KpiMultiLineCell.value_text)).notin_([
-                        "false", "none", "null", "undefined", ""
-                    ])
+                    KpiMultiLineCell.value_text != "",
                 )
             )
 

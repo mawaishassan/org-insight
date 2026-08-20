@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
@@ -83,15 +83,14 @@ export default function CustomReportViewPage() {
     api<any>(`/custom-reports/${id}/detail?organization_id=${orgId}`, { token })
       .then((t) => {
         setTemplate(t);
-        if (t.fetch_data_with_date) {
-          api<any>(`/organizations/${orgId}`, { token })
-            .then((orgData) => {
-              setOrg(orgData);
-            })
-            .catch((e) => console.error("Failed to load org details", e));
-        }
       })
       .catch((e) => console.error("Failed to load custom report details", e));
+
+    api<any>(`/organizations/${orgId}`, { token })
+      .then((orgData) => {
+        setOrg(orgData);
+      })
+      .catch((e) => console.error("Failed to load org details", e));
   }, [id, orgId, token]);
 
   const customPeriods = useMemo(() => {
@@ -113,13 +112,13 @@ export default function CustomReportViewPage() {
     return [];
   }, [org]);
 
+  const requestGenRef = useRef(0);
+
   useEffect(() => {
-    if (customPeriods.length > 0) {
-      if (!selectedPeriodType || !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType)) {
-        setSelectedPeriodType(customPeriods[0].custom_period_name);
-      }
-    } else {
-      setSelectedPeriodType("");
+    if (!selectedPeriodType) {
+      setSelectedPeriodType("by_default");
+    } else if (selectedPeriodType !== "by_default" && customPeriods.length > 0 && !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType)) {
+      setSelectedPeriodType("by_default");
     }
   }, [customPeriods, selectedPeriodType]);
 
@@ -133,8 +132,10 @@ export default function CustomReportViewPage() {
   }, [activePeriodConfig]);
 
   useEffect(() => {
-    if (periodOptions.length > 0) {
-      if (!selectedPeriod || !periodOptions.some(opt => opt.value === selectedPeriod)) {
+    if (selectedPeriodType === "by_default") {
+      setSelectedPeriod("by_default");
+    } else if (periodOptions.length > 0) {
+      if (!selectedPeriod || selectedPeriod === "by_default" || !periodOptions.some(opt => opt.value === selectedPeriod)) {
         const curYearStr = String(new Date().getFullYear());
         const match = periodOptions.find((opt) => opt.value.includes(curYearStr)) || periodOptions[0];
         setSelectedPeriod(match.value);
@@ -142,29 +143,41 @@ export default function CustomReportViewPage() {
     } else {
       setSelectedPeriod("");
     }
-  }, [periodOptions, selectedPeriod]);
+  }, [periodOptions, selectedPeriod, selectedPeriodType]);
 
   useEffect(() => {
     if (!id || !token || !orgId || !template) return;
-    if (template?.fetch_data_with_date && !selectedPeriod) return;
+    if (template?.fetch_data_with_date && selectedPeriodType !== "by_default" && !selectedPeriod) return;
 
+    const currentGen = ++requestGenRef.current;
     setLoading(true);
     setError(null);
-    const yr = template?.fetch_data_with_date ? selectedPeriod : reportYear;
-    const url = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}`;
+    const isByDefault = selectedPeriodType === "by_default";
+    const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
+    const url = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`;
     api<any>(url, { token, cache: "no-store" })
       .then((res) => {
-        setMetadata({
-          name: res.custom_report_name || res.template_name || "Custom Report",
-          description: res.custom_report_description || null,
-          year: res.year || reportYear,
-        });
-        setSections(res.sections || []);
-        setAttachments(res.attachments || []);
+        if (currentGen === requestGenRef.current) {
+          setMetadata({
+            name: res.custom_report_name || res.template_name || "Custom Report",
+            description: res.custom_report_description || null,
+            year: res.year || reportYear,
+          });
+          setSections(res.sections || []);
+          setAttachments(res.attachments || []);
+        }
       })
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load custom report"))
-      .finally(() => setLoading(false));
-  }, [id, reportYear, selectedPeriod, template, token, orgId]);
+      .catch((e) => {
+        if (currentGen === requestGenRef.current) {
+          setError(e instanceof Error ? e.message : "Failed to load custom report");
+        }
+      })
+      .finally(() => {
+        if (currentGen === requestGenRef.current) {
+          setLoading(false);
+        }
+      });
+  }, [id, reportYear, selectedPeriod, selectedPeriodType, template, token, orgId]);
 
   const handleExport = async (format: "pdf" | "docx" | "xlsx") => {
     if (!token) return;
@@ -172,8 +185,9 @@ export default function CustomReportViewPage() {
     setExportModalOpen(false);
     const toastId = toast.loading(`Exporting as ${format.toUpperCase()}...`);
     try {
-      const yr = template?.fetch_data_with_date ? selectedPeriod : reportYear;
-      let url = getApiUrl(`/custom-reports/${id}/export?year=${yr}&format=${format}&organization_id=${orgId}`);
+      const isByDefault = selectedPeriodType === "by_default";
+      const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
+      let url = getApiUrl(`/custom-reports/${id}/export?year=${yr}&format=${format}&organization_id=${orgId}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}`);
       if (selectedAttachmentIds.length > 0) {
         url += `&attachment_ids=${selectedAttachmentIds.join(",")}`;
       }
@@ -216,8 +230,10 @@ export default function CustomReportViewPage() {
     if (!token) return;
     setPrintLoading(true);
     try {
+      const isByDefault = selectedPeriodType === "by_default";
+      const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
       const res = await api<{ rendered_html?: string }>(
-        `/custom-reports/${id}/generate?year=${reportYear}&organization_id=${orgId}&preview=false`,
+        `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}&preview=false${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}`,
         { token, useCache: true }
       );
       if (!res.rendered_html) {
@@ -268,45 +284,55 @@ export default function CustomReportViewPage() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-          {/* Year selector */}
-          {template?.fetch_data_with_date ? (
+          {/* Period & Year selector */}
+          {(template?.fetch_data_with_date || customPeriods.length > 0) ? (
             <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-              {customPeriods.length === 0 ? (
-                <span style={{ fontSize: "0.85rem", color: "#93c5fd", fontStyle: "italic" }}>No periods configured</span>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Period Type:</label>
+                <select
+                  value={selectedPeriodType}
+                  onChange={(e) => setSelectedPeriodType(e.target.value)}
+                  style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: "pointer", fontWeight: 500 }}
+                >
+                  <option value="by_default">Default</option>
+                  {customPeriods.map((cp: any) => (
+                    <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                      {cp.custom_period_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {selectedPeriodType === "by_default" ? (
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Year</label>
+                  <select
+                    value={reportYear}
+                    onChange={(e) => setReportYear(Number(e.target.value))}
+                    style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: "pointer", fontWeight: 500 }}
+                  >
+                    {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
               ) : (
-                <>
+                periodOptions.length > 0 && (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Period Type:</label>
+                    <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Reporting Period:</label>
                     <select
-                      value={selectedPeriodType}
-                      onChange={(e) => setSelectedPeriodType(e.target.value)}
+                      value={selectedPeriod}
+                      onChange={(e) => setSelectedPeriod(e.target.value)}
                       style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: "pointer", fontWeight: 500 }}
                     >
-                      {customPeriods.map((cp: any) => (
-                        <option key={cp.custom_period_name} value={cp.custom_period_name}>
-                          {cp.custom_period_name}
+                      {periodOptions.map((opt: any) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
                         </option>
                       ))}
                     </select>
                   </div>
-
-                  {periodOptions.length > 0 && (
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Reporting Period:</label>
-                      <select
-                        value={selectedPeriod}
-                        onChange={(e) => setSelectedPeriod(e.target.value)}
-                        style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: "pointer", fontWeight: 500 }}
-                      >
-                        {periodOptions.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                </>
+                )
               )}
             </div>
           ) : (
@@ -377,9 +403,11 @@ export default function CustomReportViewPage() {
               const toastId = toast.loading("Syncing data from LMS...");
 
               try {
-                const yr = template?.fetch_data_with_date ? selectedPeriod : reportYear;
+                const isByDefault = selectedPeriodType === "by_default";
+                const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
+                const pTypeParam = isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`;
                 const res = await api<any>(
-                  `/custom-reports/${id}/sync-odoo?year=${yr}&organization_id=${orgId}`,
+                  `/custom-reports/${id}/sync-odoo?year=${yr}&organization_id=${orgId}${pTypeParam}`,
                   { method: "POST", token }
                 );
                 if (res.errors && res.errors.length > 0) {
@@ -393,7 +421,7 @@ export default function CustomReportViewPage() {
                 // Small delay to let backend DB commit propagate fully
                 await new Promise(resolve => setTimeout(resolve, 300));
                 const cacheBuster = Date.now();
-                const freshUrl = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}&preview=true&_t=${cacheBuster}`;
+                const freshUrl = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}&preview=true${pTypeParam}&_t=${cacheBuster}`;
                 const freshData = await api<any>(freshUrl, { token });
                 setMetadata({
                   name: freshData.custom_report_name || freshData.template_name || "Custom Report",

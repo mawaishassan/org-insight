@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useMemo, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 import { getAccessToken } from "@/lib/auth";
 import toast from "react-hot-toast";
@@ -28,7 +28,7 @@ function hslToHex(h: number, s: number, l: number): string {
 interface DashboardCustomizationContextProps {
   globalCustomizations: Record<string, string>;
   widgetCustomizations: Record<string, Record<string, string>>;
-  isOrgAdmin: boolean; // Renamed locally to represent edit authorization (which is SUPER_ADMIN)
+  isOrgAdmin: boolean;
   loading: boolean;
   registerWidgetLabels: (widgetId: string, labels: string[]) => void;
   getDisplayLabel: (originalLabel: string, widgetId?: string) => string;
@@ -43,6 +43,10 @@ interface DashboardCustomizationContextProps {
   fetchDataWithDate?: boolean;
   periodOptions?: any[];
   selectedPeriod?: string;
+  selectedPeriodType?: string;
+  /** Increments every time selectedPeriod or selectedPeriodType changes. Widgets use this
+   *  to associate requests with a configuration and discard stale responses. */
+  requestGeneration: number;
 }
 
 const DashboardCustomizationContext = createContext<DashboardCustomizationContextProps | null>(null);
@@ -68,6 +72,7 @@ export function useDashboardCustomization() {
       fetchDataWithDate: false,
       periodOptions: [],
       selectedPeriod: "",
+      requestGeneration: 0,
     };
   }
   return context;
@@ -82,6 +87,7 @@ export function DashboardCustomizationProvider({
   fetchDataWithDate = false,
   periodOptions = [],
   selectedPeriod = "",
+  selectedPeriodType = "",
 }: {
   children: React.ReactNode;
   dashboardId: number;
@@ -91,12 +97,25 @@ export function DashboardCustomizationProvider({
   fetchDataWithDate?: boolean;
   periodOptions?: any[];
   selectedPeriod?: string;
+  selectedPeriodType?: string;
 }) {
   const token = getAccessToken();
   const [globalCustomizations, setGlobalCustomizations] = useState<Record<string, string>>({});
   const [widgetCustomizations, setWidgetCustomizations] = useState<Record<string, Record<string, string>>>({});
-  const [isOrgAdmin, setIsOrgAdmin] = useState(false); // Controls if user is Super Admin
+  const [isOrgAdmin, setIsOrgAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Monotonically increasing counter — increments on every period/type change so widgets
+  // can detect and discard stale in-flight responses.
+  const [requestGeneration, setRequestGeneration] = useState(0);
+  const prevConfigRef = useRef("");
+
+  useEffect(() => {
+    const key = `${selectedPeriodType}::${selectedPeriod}`;
+    if (prevConfigRef.current !== key) {
+      prevConfigRef.current = key;
+      setRequestGeneration((g) => g + 1);
+    }
+  }, [selectedPeriodType, selectedPeriod]);
 
   const DEFAULT_COLORS = useMemo(() => [
     "#4E79A7", // Blue
@@ -339,6 +358,8 @@ export function DashboardCustomizationProvider({
         fetchDataWithDate,
         periodOptions,
         selectedPeriod,
+        selectedPeriodType,
+        requestGeneration,
       }}
     >
       {children}

@@ -2593,7 +2593,7 @@ export default function KpiFieldsPage() {
                               <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (reference / multi reference)</th>
                               <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Section (UI)</th>
                               <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
-                              <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
+                              <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Order / Actions</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -2709,7 +2709,31 @@ export default function KpiFieldsPage() {
                                     />
                                     {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
                                   </td>
-                                  <td style={{ padding: "0.4rem 0.5rem" }}>
+                                  <td style={{ padding: "0.4rem 0.5rem", textAlign: "center", whiteSpace: "nowrap" }}>
+                                    <button
+                                      type="button"
+                                      className="btn"
+                                      title="Move Up"
+                                      disabled={idx === 0}
+                                      onClick={() => setCreateSubFields((prev) => {
+                                        const next = [...prev];
+                                        [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                                        return next.map((x, i) => ({ ...x, sort_order: i }));
+                                      })}
+                                      style={{ fontSize: "0.8rem", padding: "0.15rem 0.4rem", marginRight: "2px" }}
+                                    >↑</button>
+                                    <button
+                                      type="button"
+                                      className="btn"
+                                      title="Move Down"
+                                      disabled={idx === createSubFields.length - 1}
+                                      onClick={() => setCreateSubFields((prev) => {
+                                        const next = [...prev];
+                                        [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+                                        return next.map((x, i) => ({ ...x, sort_order: i }));
+                                      })}
+                                      style={{ fontSize: "0.8rem", padding: "0.15rem 0.4rem", marginRight: "2px" }}
+                                    >↓</button>
                                     <button type="button" className="btn" onClick={() => setCreateSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
                                   </td>
                                 </tr>
@@ -6553,7 +6577,7 @@ function FieldEditForm({
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source (reference / multi reference)</th>
                   <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Section (UI)</th>
                   <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
-                  <th style={{ width: "80px", padding: "0.5rem", borderBottom: "2px solid var(--border)" }} />
+                  <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Order / Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -6670,7 +6694,31 @@ function FieldEditForm({
                           />
                           {s.is_required && <span style={{ marginLeft: "0.35rem", color: "var(--warning)", fontSize: "0.8rem", fontWeight: 600 }}>Yes</span>}
                         </td>
-                        <td style={{ padding: "0.4rem 0.5rem" }}>
+                        <td style={{ padding: "0.4rem 0.5rem", textAlign: "center", whiteSpace: "nowrap" }}>
+                          <button
+                            type="button"
+                            className="btn"
+                            title="Move Up"
+                            disabled={idx === 0}
+                            onClick={() => setEditSubFields((prev) => {
+                              const next = [...prev];
+                              [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                              return next.map((x, i) => ({ ...x, sort_order: i }));
+                            })}
+                            style={{ fontSize: "0.8rem", padding: "0.15rem 0.4rem", marginRight: "2px" }}
+                          >↑</button>
+                          <button
+                            type="button"
+                            className="btn"
+                            title="Move Down"
+                            disabled={idx === editSubFields.length - 1}
+                            onClick={() => setEditSubFields((prev) => {
+                              const next = [...prev];
+                              [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+                              return next.map((x, i) => ({ ...x, sort_order: i }));
+                            })}
+                            style={{ fontSize: "0.8rem", padding: "0.15rem 0.4rem", marginRight: "2px" }}
+                          >↓</button>
                           <button type="button" className="btn" onClick={() => setEditSubFields((prev) => prev.filter((_, i) => i !== idx))} style={{ fontSize: "0.85rem" }}>Delete</button>
                         </td>
                       </tr>

@@ -198,6 +198,7 @@ async def post_dashboard_chart_widget_data_batch(
         results = await resolve_dashboard_chart_widget_data_batch(
             db, current_user, org_id, body.dashboard_id, [it for it in items if isinstance(it, dict)]
         )
+
         dt = (time.perf_counter() - t0) * 1000.0
         print(f"[widget-data] END /chart/batch dashboard_id={body.dashboard_id} ({dt:.1f}ms) items={len(results)}")
         return {"version": 1, "results": results}

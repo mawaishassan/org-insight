@@ -127,11 +127,11 @@ export default function DashboardViewPage() {
 
   useEffect(() => {
     if (customPeriods.length > 0) {
-      if (!selectedPeriodType || !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType)) {
+      if (!selectedPeriodType || (selectedPeriodType !== "by_default" && !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType))) {
         setSelectedPeriodType(customPeriods[0].custom_period_name);
       }
     } else {
-      setSelectedPeriodType("");
+      setSelectedPeriodType("by_default");
     }
   }, [customPeriods, selectedPeriodType]);
 
@@ -140,9 +140,17 @@ export default function DashboardViewPage() {
   }, [customPeriods, selectedPeriodType]);
 
   const periodOptions = useMemo(() => {
+    if (selectedPeriodType === "by_default") {
+      const currentYear = new Date().getFullYear();
+      const years: any[] = [];
+      for (let y = currentYear + 1; y >= 2020; y--) {
+        years.push({ value: String(y), label: String(y) });
+      }
+      return years;
+    }
     if (!activePeriodConfig) return [];
     return generatePeriodOptions(activePeriodConfig);
-  }, [activePeriodConfig]);
+  }, [activePeriodConfig, selectedPeriodType]);
 
   const findDefaultPeriod = (opts: any[]) => {
     if (!opts || opts.length === 0) return "";
@@ -172,13 +180,13 @@ export default function DashboardViewPage() {
 
   useEffect(() => {
     if (periodOptions.length > 0) {
-      if (!selectedPeriod || !periodOptions.some(opt => opt.value === selectedPeriod)) {
+      if (!selectedPeriod || (selectedPeriodType !== "by_default" && selectedPeriod === "by_default") || !periodOptions.some(opt => opt.value === selectedPeriod)) {
         setSelectedPeriod(findDefaultPeriod(periodOptions));
       }
     } else {
       setSelectedPeriod("");
     }
-  }, [periodOptions, selectedPeriod]);
+  }, [periodOptions, selectedPeriod, selectedPeriodType]);
 
   const handleSync = async () => {
     if (!id || !token || syncing) return;
@@ -223,6 +231,7 @@ export default function DashboardViewPage() {
       fetchDataWithDate={!!dashboard.fetch_data_with_date}
       periodOptions={periodOptions}
       selectedPeriod={selectedPeriod}
+      selectedPeriodType={selectedPeriodType}
     >
       <DashboardViewContent
         dashboard={dashboard}
@@ -286,7 +295,7 @@ function DashboardViewContent({
             </p>
           )}
         </div>        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-          {dashboard.fetch_data_with_date && customPeriods.length > 0 && (
+          {dashboard.fetch_data_with_date && (
             <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>Period Type:</span>
@@ -307,6 +316,7 @@ function DashboardViewContent({
                       {cp.custom_period_name}
                     </option>
                   ))}
+                  <option value="by_default">By Default</option>
                 </select>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>

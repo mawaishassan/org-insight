@@ -259,3 +259,27 @@ textarea {
   background: var(--accent, #2563eb);
   transition: width 0.15s ease-out;
 }
+
+/* ===== Widget skeleton / shimmer loading ===== */
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.widget-skeleton {
+  border-radius: 14px;
+  min-height: 120px;
+  background: linear-gradient(
+    90deg,
+    var(--border, #e2e8f0) 25%,
+    var(--bg, #f8fafc)    50%,
+    var(--border, #e2e8f0) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite linear;
+}
+
+.widget-skeleton--chart {
+  border-radius: 10px;
+  min-height: 220px;
+}

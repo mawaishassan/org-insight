@@ -923,6 +923,8 @@ export default function ReportDesignPage() {
   const [localDateBasedFetching, setLocalDateBasedFetching] = useState<boolean>(false);
   const [localDateColumn, setLocalDateColumn] = useState<string>("");
   const [localMliDateCols, setLocalMliDateCols] = useState<Record<string, string>>({});
+  const [localConfiguredKpiIds, setLocalConfiguredKpiIds] = useState<number[]>([]);
+  const [localKpiMlis, setLocalKpiMlis] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!token || !detail?.organization_id) return;
@@ -941,8 +943,11 @@ export default function ReportDesignPage() {
       setLocalDateBasedFetching(fetchDataWithDate);
       setLocalDateColumn(dateFetchingConfig?.date_column || "");
       setLocalMliDateCols(dateFetchingConfig?.mli_date_cols || {});
+      setLocalConfiguredKpiIds(dateFetchingConfig?.configured_kpi_ids || []);
+      setLocalKpiMlis(dateFetchingConfig?.kpi_mlis || {});
     }
   }, [reportSettingsOpen, fetchDataWithDate, dateFetchingConfig]);
+
 
   const customPeriods = useMemo(() => {
     if (!organization) return [];
@@ -1577,59 +1582,107 @@ export default function ReportDesignPage() {
 
               {localDateBasedFetching && (
                 <div style={{ display: "grid", gap: "0.6rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
-                  <div style={{ display: "grid", gap: "0.5rem" }}>
-                    <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Configure Date Column per Multi-Line Field</label>
-                    {reportMliFields.length === 0 ? (
+                  <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <label style={{ fontSize: "0.85rem", fontWeight: 650 }}>Configure Date-Based Filtering KPIs</label>
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          const kid = Number(e.target.value);
+                          if (kid && !localConfiguredKpiIds.includes(kid)) {
+                            setLocalConfiguredKpiIds(prev => [...prev, kid]);
+                          }
+                          e.target.value = "";
+                        }}
+                        style={{ padding: "0.25rem 0.5rem", fontSize: "0.8rem", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                      >
+                        <option value="">+ Add KPI for Date Filtering...</option>
+                        {(detail?.kpis_from_domains || [])
+                          .filter(k => !localConfiguredKpiIds.includes(k.kpi_id))
+                          .map(k => (
+                            <option key={k.kpi_id} value={k.kpi_id}>
+                              {k.kpi_name || `KPI #${k.kpi_id}`}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+
+                    {localConfiguredKpiIds.length === 0 ? (
                       <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
-                        No multi-line fields are used in this report. Add sections using multi-line fields to configure date columns.
+                        No KPIs selected for date-based filtering. Select a KPI above to map its MLI and Date sub-field.
                       </p>
                     ) : (
                       <div style={{ display: "grid", gap: "0.75rem" }}>
-                        {reportMliFields.map((item) => {
-                          const key = `${item.kpiId}_${item.field.key}`;
+                        {localConfiguredKpiIds.map((kpiId) => {
+                          const kpiObj = detail?.kpis_from_domains?.find(k => k.kpi_id === kpiId);
+                          const kpiName = kpiObj?.kpi_name || `KPI #${kpiId}`;
+                          const kpiFields = fieldsByKpiId[kpiId] || [];
+                          const mliFields = kpiFields.filter((f: any) => f.field_type === "multi_line_items");
+                          const selectedMliKey = localKpiMlis[String(kpiId)] || (mliFields[0]?.key || "");
+                          const selectedMliField = mliFields.find((f: any) => f.key === selectedMliKey);
+                          const dateSubFields = (selectedMliField?.sub_fields || []).filter(
+                            (sf: any) => sf.field_type === "date" || sf.field_type === "datetime"
+                          );
+                          const mliDateKey = `${kpiId}_${selectedMliKey}`;
+
                           return (
-                            <div key={key} style={{ padding: "0.75rem", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--surface)", display: "grid", gap: "0.5rem" }}>
-                              <div style={{ fontSize: "0.82rem", fontWeight: 650 }}>
-                                <span style={{ color: "var(--muted)" }}>KPI:</span> {item.kpiName} <span style={{ color: "var(--muted)", marginLeft: "0.5rem" }}>Field:</span> {item.field.name}
-                              </div>
-                              <div style={{ display: "grid", gap: "0.35rem" }}>
-                                <select
-                                  value={localMliDateCols[key] || ""}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    setLocalMliDateCols(prev => ({
-                                      ...prev,
-                                      [key]: val
-                                    }));
+                            <div key={kpiId} style={{ padding: "0.75rem", border: "1px solid var(--border)", borderRadius: "6px", background: "var(--surface)", display: "grid", gap: "0.5rem" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                <div style={{ fontSize: "0.85rem", fontWeight: 650 }}>
+                                  <span style={{ color: "var(--muted)" }}>KPI:</span> {kpiName}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setLocalConfiguredKpiIds(prev => prev.filter(id => id !== kpiId));
                                   }}
-                                  style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", width: "100%" }}
+                                  style={{ border: "none", background: "transparent", color: "#ef4444", fontSize: "0.8rem", cursor: "pointer", fontWeight: 600 }}
                                 >
-                                  <option value="">Select date column...</option>
-                                  {item.field.sub_fields?.map((sf: any) => (
-                                    <option key={sf.key} value={sf.key}>
-                                      {sf.name || sf.key} ({sf.field_type})
-                                    </option>
-                                  ))}
-                                  {localMliDateCols[key] &&
-                                    !item.field.sub_fields?.some((sf: any) => sf.key === localMliDateCols[key]) && (
-                                      <option value={localMliDateCols[key]}>
-                                        {localMliDateCols[key]} (Custom)
-                                      </option>
+                                  Remove
+                                </button>
+                              </div>
+
+                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                                <div>
+                                  <label style={{ fontSize: "0.75rem", color: "var(--muted)", display: "block", marginBottom: "0.2rem" }}>Select MLI Field:</label>
+                                  <select
+                                    value={selectedMliKey}
+                                    onChange={(e) => {
+                                      const mliKey = e.target.value;
+                                      setLocalKpiMlis(prev => ({ ...prev, [String(kpiId)]: mliKey }));
+                                    }}
+                                    style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", width: "100%" }}
+                                  >
+                                    {mliFields.length === 0 ? (
+                                      <option value="">No MLI fields available</option>
+                                    ) : (
+                                      mliFields.map((f: any) => (
+                                        <option key={f.key} value={f.key}>
+                                          {f.name || f.key}
+                                        </option>
+                                      ))
                                     )}
-                                </select>
-                                <input
-                                  type="text"
-                                  placeholder="Or type custom date column key..."
-                                  value={localMliDateCols[key] || ""}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    setLocalMliDateCols(prev => ({
-                                      ...prev,
-                                      [key]: val
-                                    }));
-                                  }}
-                                  style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)" }}
-                                />
+                                  </select>
+                                </div>
+
+                                <div>
+                                  <label style={{ fontSize: "0.75rem", color: "var(--muted)", display: "block", marginBottom: "0.2rem" }}>Select Date Sub-field:</label>
+                                  <select
+                                    value={localMliDateCols[mliDateKey] || ""}
+                                    onChange={(e) => {
+                                      const dateSubKey = e.target.value;
+                                      setLocalMliDateCols(prev => ({ ...prev, [mliDateKey]: dateSubKey }));
+                                    }}
+                                    style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", width: "100%" }}
+                                  >
+                                    <option value="">Select Date column...</option>
+                                    {dateSubFields.map((sf: any) => (
+                                      <option key={sf.key} value={sf.key}>
+                                        {sf.name || sf.key} ({sf.field_type})
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
                               </div>
                             </div>
                           );
@@ -1646,6 +1699,8 @@ export default function ReportDesignPage() {
                 onClick={async () => {
                   const nextConfig = {
                     ...dateFetchingConfig,
+                    configured_kpi_ids: localConfiguredKpiIds,
+                    kpi_mlis: localKpiMlis,
                     mli_date_cols: localMliDateCols,
                   };
                   setFetchDataWithDate(localDateBasedFetching);
