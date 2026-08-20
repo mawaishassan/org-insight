@@ -822,7 +822,7 @@ async def _copy_entry_values(db: AsyncSession, src_id: int, dest_id: int) -> Non
     is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
     if not is_sqlite:
         await db.execute(
-            text("ALTER TABLE kpi_multi_line_cells DISABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
+            text("SET LOCAL app.disable_search_rebuild = 'on';")
         )
 
     try:
@@ -841,11 +841,7 @@ async def _copy_entry_values(db: AsyncSession, src_id: int, dest_id: int) -> Non
             {"src_id": src_id, "dest_id": dest_id},
         )
     finally:
-        # Re-enable trigger
-        if not is_sqlite:
-            await db.execute(
-                text("ALTER TABLE kpi_multi_line_cells ENABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
-            )
+        pass
 
     # 4. Copy row access records
     await db.execute(
@@ -3397,7 +3393,7 @@ async def recompute_mli_formula_subfields(
 
     if not is_sqlite:
         await db.execute(
-            text("ALTER TABLE kpi_multi_line_cells DISABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
+            text("SET LOCAL app.disable_search_rebuild = 'on';")
         )
 
 
@@ -3512,10 +3508,7 @@ async def recompute_mli_formula_subfields(
 
         await db.flush()
     finally:
-        if not is_sqlite:
-            await db.execute(
-                text("ALTER TABLE kpi_multi_line_cells ENABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
-            )
+        pass
 
     # Bulk refresh search_text for the parent rows in PostgreSQL
     if not is_sqlite and mli_fields:

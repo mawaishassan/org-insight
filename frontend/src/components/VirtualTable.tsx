@@ -144,7 +144,7 @@ export function VirtualTable({
           {columns.map((col) => {
             const showTitle = !parsedHeaderCells || coveredKeys.has(col.key);
             return (
-              <div key={col.key} style={{ width: getColWidth(col.key), padding: "0.75rem 1rem", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderRight: "1px solid var(--border)" }}>
+              <div key={col.key} style={{ width: getColWidth(col.key), padding: "0.75rem 1rem", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderRight: "1px solid var(--border)", textAlign: "center" }}>
                 {showTitle ? col.name : ""}
               </div>
             );
