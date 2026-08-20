@@ -1311,19 +1311,64 @@ async def export_custom_report_file(
                 value_items = f.get("value_items", [])
 
                 if sub_fields:
-                    # Headers
-                    sr_c = ws.cell(row=row_num, column=1, value="Sr. No.")
-                    sr_c.font = header_font
-                    sr_c.fill = header_fill
-                    sr_c.alignment = Alignment(horizontal="center", vertical="center")
+                    merged_headers = f.get("config", {}).get("merged_headers") or []
+                    
+                    def style_header_cell(cell):
+                        cell.font = header_font
+                        cell.fill = header_fill
+                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                        cell.border = thin_border
 
-                    for col_idx, sf in enumerate(sub_fields):
-                        c = ws.cell(row=row_num, column=col_idx+2, value=sf.get("name") or sf.get("key"))
-                        c.font = header_font
-                        c.fill = header_fill
-                        c.alignment = Alignment(horizontal="center", vertical="center")
-                    ws.row_dimensions[row_num].height = 20
-                    row_num += 1
+                    if merged_headers:
+                        cols_keys = [sf.get("key") for sf in sub_fields]
+                        col_indices = {key: idx + 2 for idx, key in enumerate(cols_keys)}
+                        covered_cols = set()
+
+                        # Pre-style all header cells in row_num and row_num+1
+                        for r_offset in [0, 1]:
+                            for c_idx in range(1, len(sub_fields) + 2):
+                                style_header_cell(ws.cell(row=row_num + r_offset, column=c_idx))
+
+                        # Vertical-merge Sr. No.
+                        ws.cell(row=row_num, column=1, value="Sr. No.")
+                        ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num+1, end_column=1)
+
+                        # Write grouped merged headers
+                        for group in merged_headers:
+                            title = group.get("title")
+                            start_key = group.get("start_key")
+                            end_key = group.get("end_key")
+                            if start_key in col_indices and end_key in col_indices:
+                                start_col = col_indices[start_key]
+                                end_col = col_indices[end_key]
+                                ws.cell(row=row_num, column=start_col, value=title)
+                                ws.merge_cells(start_row=row_num, start_column=start_col, end_row=row_num, end_column=end_col)
+                                for c in range(start_col, end_col + 1):
+                                    covered_cols.add(c)
+
+                        # Write column headers and vertical merge ungrouped columns
+                        for idx, sf in enumerate(sub_fields):
+                            c_idx = idx + 2
+                            col_name = sf.get("name") or sf.get("key")
+                            if c_idx not in covered_cols:
+                                ws.cell(row=row_num, column=c_idx, value=col_name)
+                                ws.merge_cells(start_row=row_num, start_column=c_idx, end_row=row_num+1, end_column=c_idx)
+                            else:
+                                ws.cell(row=row_num+1, column=c_idx, value=col_name)
+
+                        ws.row_dimensions[row_num].height = 20
+                        ws.row_dimensions[row_num+1].height = 20
+                        row_num += 2
+                    else:
+                        # Normal Headers
+                        sr_c = ws.cell(row=row_num, column=1, value="Sr. No.")
+                        style_header_cell(sr_c)
+
+                        for col_idx, sf in enumerate(sub_fields):
+                            c = ws.cell(row=row_num, column=col_idx+2, value=sf.get("name") or sf.get("key"))
+                            style_header_cell(c)
+                        ws.row_dimensions[row_num].height = 20
+                        row_num += 1
 
                     # Body
                     for item_idx, item in enumerate(value_items):
@@ -1608,20 +1653,68 @@ async def export_custom_report_file(
                     value_items = f.get("value_items", [])
 
                     if sub_fields:
-                        table = doc.add_table(rows=1, cols=len(sub_fields) + 1)
-                        table.style = 'Light Shading Accent 1'
-                        hdr_cells = table.rows[0].cells
-                        
-                        hdr_cells[0].text = "Sr. No."
-                        hdr_cells[0].paragraphs[0].runs[0].font.bold = True
-                        hdr_cells[0].paragraphs[0].runs[0].font.size = Pt(mli_font_size)
-                        hdr_cells[0].paragraphs[0].runs[0].font.name = docx_font
+                        merged_headers = f.get("config", {}).get("merged_headers") or []
 
-                        for col_idx, sf in enumerate(sub_fields):
-                            hdr_cells[col_idx + 1].text = sf.get("name") or sf.get("key")
-                            hdr_cells[col_idx + 1].paragraphs[0].runs[0].font.bold = True
-                            hdr_cells[col_idx + 1].paragraphs[0].runs[0].font.size = Pt(mli_font_size)
-                            hdr_cells[col_idx + 1].paragraphs[0].runs[0].font.name = docx_font
+                        def style_cell_run(cell):
+                            if cell.paragraphs and cell.paragraphs[0].runs:
+                                run = cell.paragraphs[0].runs[0]
+                                run.font.size = Pt(mli_font_size)
+                                run.font.name = docx_font
+                                run.font.bold = True
+
+                        if merged_headers:
+                            table = doc.add_table(rows=2, cols=len(sub_fields) + 1)
+                            table.style = 'Light Shading Accent 1'
+                            hdr_rows = table.rows
+                            
+                            cols_keys = [sf.get("key") for sf in sub_fields]
+                            col_indices = {key: idx + 1 for idx, key in enumerate(cols_keys)}
+                            covered_cols = set()
+
+                            # Vertical-merge Sr. No.
+                            c_sr = hdr_rows[0].cells[0]
+                            c_sr.text = "Sr. No."
+                            style_cell_run(c_sr)
+                            c_sr.merge(hdr_rows[1].cells[0])
+
+                            # Write grouped headers
+                            for group in merged_headers:
+                                title = group.get("title")
+                                start_key = group.get("start_key")
+                                end_key = group.get("end_key")
+                                if start_key in col_indices and end_key in col_indices:
+                                    start_col = col_indices[start_key]
+                                    end_col = col_indices[end_key]
+                                    cell_g = hdr_rows[0].cells[start_col]
+                                    cell_g.text = title
+                                    style_cell_run(cell_g)
+                                    cell_g.merge(hdr_rows[0].cells[end_col])
+                                    for c in range(start_col, end_col + 1):
+                                        covered_cols.add(c)
+
+                            # Vertical-merge ungrouped columns and set row 1 headers for grouped columns
+                            for idx, sf in enumerate(sub_fields):
+                                c_idx = idx + 1
+                                col_name = sf.get("name") or sf.get("key")
+                                if c_idx not in covered_cols:
+                                    cell_c = hdr_rows[0].cells[c_idx]
+                                    cell_c.text = col_name
+                                    style_cell_run(cell_c)
+                                    cell_c.merge(hdr_rows[1].cells[c_idx])
+                                else:
+                                    cell_c = hdr_rows[1].cells[c_idx]
+                                    cell_c.text = col_name
+                                    style_cell_run(cell_c)
+                        else:
+                            table = doc.add_table(rows=1, cols=len(sub_fields) + 1)
+                            table.style = 'Light Shading Accent 1'
+                            hdr_cells = table.rows[0].cells
+                            hdr_cells[0].text = "Sr. No."
+                            style_cell_run(hdr_cells[0])
+
+                            for col_idx, sf in enumerate(sub_fields):
+                                hdr_cells[col_idx + 1].text = sf.get("name") or sf.get("key")
+                                style_cell_run(hdr_cells[col_idx + 1])
 
                         for item_idx, item in enumerate(value_items):
                             row_cells = table.add_row().cells
@@ -1631,8 +1724,10 @@ async def export_custom_report_file(
 
                             for col_idx, sf in enumerate(sub_fields):
                                 row_cells[col_idx + 1].text = clean_numeric_value_string(item.get(sf.get("key")))
-                                row_cells[col_idx + 1].paragraphs[0].runs[0].font.size = Pt(mli_font_size)
-                                row_cells[col_idx + 1].paragraphs[0].runs[0].font.name = docx_font
+                                if row_cells[col_idx + 1].paragraphs and row_cells[col_idx + 1].paragraphs[0].runs:
+                                    run = row_cells[col_idx + 1].paragraphs[0].runs[0]
+                                    run.font.size = Pt(mli_font_size)
+                                    run.font.name = docx_font
 
         out_io = io.BytesIO()
         doc.save(out_io)
@@ -2031,8 +2126,55 @@ async def export_custom_report_file(
                         raw_widths = [max(min_col_width, available_table_w * (c / total_chars)) for c in col_chars]
                         scale = available_table_w / sum(raw_widths) if sum(raw_widths) > available_table_w else 1.0
                         col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
-                        hdr_row = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style) for sf in sub_fields]
-                        pdf_table_data = [hdr_row]
+                        merged_headers = f.get("config", {}).get("merged_headers") or []
+                        
+                        t_style_cmds = [
+                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
+                            ("TOPPADDING", (0, 0), (-1, -1), 3),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                        ]
+
+                        if merged_headers:
+                            cols_keys = [sf.get("key") for sf in sub_fields]
+                            col_indices = {key: idx + 1 for idx, key in enumerate(cols_keys)}
+                            covered_cols = set()
+
+                            row_0 = [Paragraph("", table_hdr_style) for _ in range(len(sub_fields) + 1)]
+                            row_1 = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style) for sf in sub_fields]
+                            
+                            t_style_cmds.append(("BACKGROUND", (0, 0), (-1, 1), colors.HexColor(h1_color_hex)))
+                            
+                            # Vertical merge Sr. No.
+                            row_0[0] = Paragraph("Sr. No.", table_hdr_style)
+                            t_style_cmds.append(("SPAN", (0, 0), (0, 1)))
+
+                            # Write grouped headers
+                            for group in merged_headers:
+                                title = group.get("title")
+                                start_key = group.get("start_key")
+                                end_key = group.get("end_key")
+                                if start_key in col_indices and end_key in col_indices:
+                                    start_col = col_indices[start_key]
+                                    end_col = col_indices[end_key]
+                                    row_0[start_col] = Paragraph(f"<b>{title}</b>", table_hdr_style)
+                                    t_style_cmds.append(("SPAN", (start_col, 0), (end_col, 0)))
+                                    t_style_cmds.append(("ALIGN", (start_col, 0), (end_col, 0), "CENTER"))
+                                    for c in range(start_col, end_col + 1):
+                                        covered_cols.add(c)
+
+                            # Vertical merge ungrouped columns
+                            for idx, sf in enumerate(sub_fields):
+                                c_idx = idx + 1
+                                if c_idx not in covered_cols:
+                                    row_0[c_idx] = Paragraph(sf.get("name") or sf.get("key"), table_hdr_style)
+                                    t_style_cmds.append(("SPAN", (c_idx, 0), (c_idx, 1)))
+
+                            pdf_table_data = [row_0, row_1]
+                        else:
+                            t_style_cmds.append(("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(h1_color_hex)))
+                            hdr_row = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style) for sf in sub_fields]
+                            pdf_table_data = [hdr_row]
 
                         for item_idx, item in enumerate(value_items):
                             row = [Paragraph(str(item_idx + 1), table_body_style)]
@@ -2045,13 +2187,7 @@ async def export_custom_report_file(
                             pdf_table_data.append(row)
 
                         t_mli = Table(pdf_table_data, colWidths=col_widths)
-                        t_mli.setStyle(TableStyle([
-                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(h1_color_hex)),
-                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
-                            ("TOPPADDING", (0, 0), (-1, -1), 3),
-                            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                        ]))
+                        t_mli.setStyle(TableStyle(t_style_cmds))
                         story.append(t_mli)
                         story.append(Spacer(1, 8))
 

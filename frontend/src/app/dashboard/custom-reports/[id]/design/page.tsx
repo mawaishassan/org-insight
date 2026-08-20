@@ -314,6 +314,7 @@ export default function CustomReportDesignPage() {
     custom_sub_field_labels?: Record<string, string>;
     sort_column?: string;
     sort_direction?: string;
+    merged_headers?: { title: string; start_key: string; end_key: string }[];
   } | null>(null);
 
   const [editingAttachmentIdx, setEditingAttachmentIdx] = useState<number | null>(null);
@@ -1680,7 +1681,8 @@ export default function CustomReportDesignPage() {
                                                 selected_columns: (f.config as any)?.selected_columns || subFields.map(sf => sf.key).slice(0, 5),
                                                 filters: ((f.config as any)?.filters || { conditions: [], _version: 2 }) as any,
                                                 sort_column: (f.config as any)?.sort_column || "",
-                                                sort_direction: (f.config as any)?.sort_direction || "asc"
+                                                sort_direction: (f.config as any)?.sort_direction || "asc",
+                                                merged_headers: (f.config as any)?.merged_headers || []
                                               });
 
                                               setFilterDraft(payloadToFilterDraft(((f.config as any)?.filters || { conditions: [], _version: 2 }) as any));
@@ -2124,6 +2126,102 @@ export default function CustomReportDesignPage() {
                             );
                           })
                         )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Merged Headers Section */}
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1rem", marginBottom: "1.5rem" }}>
+                    <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.25rem" }}>
+                      Grouped / Merged Headers
+                    </label>
+                    <p style={{ color: "var(--muted)", margin: "0 0 0.75rem 0", fontSize: "0.75rem" }}>
+                      Define secondary header titles merged across groups of columns (e.g. "Students" group for Name, Phone, City).
+                    </p>
+                    
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                      {(!editingFieldConfig.merged_headers || editingFieldConfig.merged_headers.length === 0) ? (
+                        <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)", fontStyle: "italic" }}>No merged headers defined.</p>
+                      ) : (
+                        editingFieldConfig.merged_headers.map((group, idx) => (
+                          <div key={idx} style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.5rem", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6 }}>
+                            <div style={{ flex: 2 }}>
+                              <input
+                                type="text"
+                                className="form-control"
+                                placeholder="Group Title (e.g. Students)"
+                                style={{ fontSize: "0.8rem", height: "30px", padding: "2px 8px" }}
+                                value={group.title}
+                                onChange={(e) => {
+                                  const nextGroups = [...(editingFieldConfig.merged_headers || [])];
+                                  nextGroups[idx] = { ...nextGroups[idx], title: e.target.value };
+                                  setEditingFieldConfig(prev => prev ? { ...prev, merged_headers: nextGroups } : null);
+                                }}
+                              />
+                            </div>
+                            <div style={{ flex: 1.5 }}>
+                              <select
+                                className="form-control"
+                                style={{ fontSize: "0.8rem", height: "30px", padding: "2px 8px" }}
+                                value={group.start_key}
+                                onChange={(e) => {
+                                  const nextGroups = [...(editingFieldConfig.merged_headers || [])];
+                                  nextGroups[idx] = { ...nextGroups[idx], start_key: e.target.value };
+                                  setEditingFieldConfig(prev => prev ? { ...prev, merged_headers: nextGroups } : null);
+                                }}
+                              >
+                                <option value="">Start Col...</option>
+                                {editingFieldConfig.selected_columns.map(c => {
+                                  const sf = subFields.find(s => s.key === c);
+                                  return <option key={c} value={c}>{sf?.name || c}</option>;
+                                })}
+                              </select>
+                            </div>
+                            <div style={{ flex: 1.5 }}>
+                              <select
+                                className="form-control"
+                                style={{ fontSize: "0.8rem", height: "30px", padding: "2px 8px" }}
+                                value={group.end_key}
+                                onChange={(e) => {
+                                  const nextGroups = [...(editingFieldConfig.merged_headers || [])];
+                                  nextGroups[idx] = { ...nextGroups[idx], end_key: e.target.value };
+                                  setEditingFieldConfig(prev => prev ? { ...prev, merged_headers: nextGroups } : null);
+                                }}
+                              >
+                                <option value="">End Col...</option>
+                                {editingFieldConfig.selected_columns.map(c => {
+                                  const sf = subFields.find(s => s.key === c);
+                                  return <option key={c} value={c}>{sf?.name || c}</option>;
+                                })}
+                              </select>
+                            </div>
+                            <button
+                              type="button"
+                              className="btn btn-danger"
+                              style={{ padding: "0 0.5rem", height: "30px", fontSize: "0.85rem", display: "flex", alignItems: "center" }}
+                              onClick={() => {
+                                const nextGroups = (editingFieldConfig.merged_headers || []).filter((_, gIdx) => gIdx !== idx);
+                                setEditingFieldConfig(prev => prev ? { ...prev, merged_headers: nextGroups } : null);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        ))
+                      )}
+                      
+                      <div>
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{ fontSize: "0.8rem", padding: "0.25rem 0.75rem", border: "1px dashed var(--border)", background: "white" }}
+                          onClick={() => {
+                            const nextGroups = [...(editingFieldConfig.merged_headers || []), { title: "", start_key: "", end_key: "" }];
+                            setEditingFieldConfig(prev => prev ? { ...prev, merged_headers: nextGroups } : null);
+                          }}
+                        >
+                          + Add Grouped Header
+                        </button>
                       </div>
                     </div>
                   </div>
