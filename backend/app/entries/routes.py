@@ -356,7 +356,7 @@ async def _replace_multi_line_rows_from_dicts(
     is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
     if not is_sqlite:
         await db.execute(
-            text("ALTER TABLE kpi_multi_line_cells DISABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
+            text("SET LOCAL app.disable_search_rebuild = 'on';")
         )
 
     try:
@@ -364,11 +364,7 @@ async def _replace_multi_line_rows_from_dicts(
             await db.execute(insert(KpiMultiLineCell), cell_rows[i : i + cell_chunk])
         await db.flush()
     finally:
-        # Re-enable trigger
-        if not is_sqlite:
-            await db.execute(
-                text("ALTER TABLE kpi_multi_line_cells ENABLE TRIGGER tr_kpi_mline_cells_refresh_search_text;")
-            )
+        pass
 
     # Bulk refresh search_text for the parent rows in PostgreSQL
     if not is_sqlite and cell_rows:

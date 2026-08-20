@@ -6,6 +6,7 @@ conditional group functions: SUM_ITEMS_WHERE(...), COUNT_ITEMS_WHERE(field_key, 
 and cross-KPI refs: KPI_FIELD(kpi_id, "field_key") for numeric fields from the same user's entry for another KPI (same org, same year).
 """
 
+import ast
 import datetime
 import re
 from typing import Any
@@ -21,6 +22,8 @@ MultiLineItemsData = dict[str, list[dict[str, Any]]]
 
 # Optional: (kpi_id, field_key) -> numeric value for KPI_FIELD(kpi_id, field_key) cross-KPI refs
 OtherKpiValues = dict[tuple[int, str], float]
+
+_AST_CACHE: dict[str, Any] = {}
 
 
 def _clean_num(val: Any) -> Any:
@@ -891,13 +894,15 @@ def _make_evaluator(
         s.names[field_key] = field_key
     sub_keys: set[str] = set()
     for rows in items_data.values():
-        for row in rows if isinstance(rows, list) else []:
+        if isinstance(rows, list) and rows:
+            row = rows[0]
             if isinstance(row, dict):
                 sub_keys.update(row.keys())
     if other_kpi_multi_line_data:
         for (k_id, f_key), rows in other_kpi_multi_line_data.items():
             s.names[f_key] = f_key
-            for row in rows if isinstance(rows, list) else []:
+            if isinstance(rows, list) and rows:
+                row = rows[0]
                 if isinstance(row, dict):
                     sub_keys.update(row.keys())
     for sk in sub_keys:
@@ -1298,6 +1303,18 @@ def evaluate_formula(
         expression = re.sub(r'(\b\w+\b)\s*(?<![!=><])=\s*(?![=])(CurrentRow\.\w+|"[^"]*"|\w+)', r'\1 == \2', expression)
     if not re.match(r"^[\w\s+\-*/().,\"\'&!=><]+$", expression):
         return None
+
+    parsed_ast = _AST_CACHE.get(expression)
+    if parsed_ast is None:
+        try:
+            parsed_ast = ast.parse(expression).body[0].value
+            _AST_CACHE[expression] = parsed_ast
+        except Exception:
+            _AST_CACHE[expression] = False  # Mark as invalid
+            return None
+    elif parsed_ast is False:
+        return None
+
     try:
         ev = _make_evaluator(
             field_values,
@@ -1306,7 +1323,7 @@ def evaluate_formula(
             current_row,
             other_kpi_multi_line_data,
         )
-        result = ev.eval(expression)
+        result = ev._eval(parsed_ast)
         if result is None:
             return None
         if isinstance(result, (int, float)):

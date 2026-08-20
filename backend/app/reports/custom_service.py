@@ -1187,9 +1187,9 @@ async def render_custom_report_html(
                     out.append('<table style="border-collapse: collapse; width: 100%; border: 1px solid #d1d5db; margin-top: 0.25rem; margin-bottom: 0.5rem;">')
                     out.append('<thead>')
                     out.append(f'<tr style="background-color: {h1_color}; color: #ffffff; border-bottom: 2px solid {h1_color}; font-size: {mli_font_size}pt;">')
-                    out.append(f'<th style="border: 1px solid #d1d5db; padding: 8px; text-align: left; font-weight: 600; color: #ffffff;">S.No</th>')
+                    out.append(f'<th style="border: 1px solid #d1d5db; padding: 8px; text-align: center; font-weight: 600; color: #ffffff;">S.No</th>')
                     for sub in f["sub_fields"]:
-                        out.append(f'<th style="border: 1px solid #d1d5db; padding: 8px; text-align: left; font-weight: 600; color: #ffffff;">{sub["name"]}</th>')
+                        out.append(f'<th style="border: 1px solid #d1d5db; padding: 8px; text-align: center; font-weight: 600; color: #ffffff;">{sub["name"]}</th>')
                     out.append('</tr>')
                     out.append('</thead>')
                     out.append('<tbody>')
@@ -1661,6 +1661,8 @@ async def export_custom_report_file(
                                 run.font.size = Pt(mli_font_size)
                                 run.font.name = docx_font
                                 run.font.bold = True
+                            if cell.paragraphs:
+                                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
                         if merged_headers:
                             table = doc.add_table(rows=2, cols=len(sub_fields) + 1)
@@ -1871,7 +1873,8 @@ async def export_custom_report_file(
             fontName=font_name_bold,
             fontSize=mli_font_size,
             leading=mli_font_size + 3,
-            textColor=colors.white
+            textColor=colors.white,
+            alignment=1
         )
         table_body_style = ParagraphStyle(
             "CustomTableBodyStyle",
