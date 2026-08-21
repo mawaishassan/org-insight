@@ -466,62 +466,12 @@ async def sync_odoo_data_for_report_internal(
                     )
                 ]
 
-                # Handle attachments if present
-                if att_sub_keys and (org_odoo.attachment_url_template or "").strip():
-                    att_template = org_odoo.attachment_url_template.strip()
-                    all_att_ids = []
+                # Skip attachment downloads during sync to prevent timeouts.
+                # Attachments are only fetched/maintained via manual Odoo bulk upload or forms.
+                if att_sub_keys:
                     for row in item_dicts:
                         for att_key in att_sub_keys:
-                            raw_att_val = row.get(att_key)
-                            if raw_att_val is not None and raw_att_val != "":
-                                all_att_ids.extend(extract_odoo_attachment_ids(raw_att_val))
-
-                    unique_att_ids = list(set(all_att_ids))
-                    downloaded_data = {}
-                    if unique_att_ids:
-                        import httpx
-                        import asyncio
-                        sem = asyncio.Semaphore(5)
-                        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                            async def fetch_one(att_id):
-                                async with sem:
-                                    target_url = (
-                                        att_template.replace("{ATTACHMENT_ID}", str(att_id))
-                                        .replace("{attachment_id}", str(att_id))
-                                        .replace("__ATTACHMENT_ID__", str(att_id))
-                                        .replace("{SESSION_ID}", session_id)
-                                        .replace("{session_id}", session_id)
-                                        .replace("__SESSION_ID__", session_id)
-                                    )
-                                    try:
-                                        resp = await client.get(target_url, cookies={"session_id": session_id})
-                                        if resp.status_code < 200 or resp.status_code >= 300:
-                                            return Exception(f"HTTP {resp.status_code}")
-                                        return att_id, resp.content, dict(resp.headers)
-                                    except Exception as ex:
-                                        return Exception(f"Download failed: {ex}")
-
-                            tasks = [fetch_one(aid) for aid in unique_att_ids]
-                            results = await asyncio.gather(*tasks, return_exceptions=True)
-                            for aid, res in zip(unique_att_ids, results):
-                                if isinstance(res, tuple) and len(res) == 3:
-                                    downloaded_data[aid] = (res[1], res[2])
-
-                    for row in item_dicts:
-                        for att_key in att_sub_keys:
-                            raw_att_val = row.get(att_key)
-                            if raw_att_val is not None and raw_att_val != "":
-                                converted, _ = await store_pre_downloaded_odoo_attachments(
-                                    db,
-                                    org_id=org_id,
-                                    kpi_id=kpi_id,
-                                    entry_id=entry.id,
-                                    year=year,
-                                    user_id=user_id,
-                                    raw_attachment_val=raw_att_val,
-                                    downloaded_data=downloaded_data,
-                                )
-                                row[att_key] = converted
+                            row[att_key] = None
 
                 # Replace rows using the entries routes helper
                 from app.entries.routes import _replace_multi_line_rows_from_dicts
@@ -538,9 +488,12 @@ async def sync_odoo_data_for_report_internal(
 
     # 5. Propagate formula recalculations for all synced entries
     for entry_id in all_synced_entry_ids:
-        await propagate_formula_recalculations(db, entry_id=entry_id, org_id=org_id)
+        try:
+            await propagate_formula_recalculations(db, entry_id=entry_id, org_id=org_id)
+            await db.flush()
+        except Exception as e:
+            errors.append(f"Failed to propagate formula recalculations for entry {entry_id}: {e}")
 
-    await db.flush()
     await db.commit()
 
     # 6. Invalidate report cache

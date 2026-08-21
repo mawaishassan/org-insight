@@ -238,6 +238,7 @@ async def _load_multi_line_items_rows_batch(
                     and_(
                         KpiMultiLineCell.value_text.isnot(None),
                         KpiMultiLineCell.value_text != "",
+                        ~KpiMultiLineCell.value_text.in_(["false", "null", "none", "False", "Null", "None"]),
                         KpiMultiLineCell.value_text >= start_date.isoformat(),
                         KpiMultiLineCell.value_text < end_date.isoformat(),
                     )
