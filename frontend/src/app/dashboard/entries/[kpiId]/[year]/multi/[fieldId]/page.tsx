@@ -2059,6 +2059,7 @@ export default function FullPageMultiItems() {
                   
                   const runSync = async () => {
                     setUploading(true);
+                    const startTime = Date.now();
                     const toastId = toast.loading("Syncing from Odoo...");
                     try {
                       const params = new URLSearchParams({
@@ -2094,6 +2095,7 @@ export default function FullPageMultiItems() {
                       await refreshRows();
                     } catch (e) {
                       toast.dismiss(toastId);
+                      const elapsed = (Date.now() - startTime) / 1000;
                       const msg = String(e instanceof Error ? e.message : e || "").toLowerCase();
                       const isTimeout =
                         msg.includes("socket hang up") ||
@@ -2107,10 +2109,45 @@ export default function FullPageMultiItems() {
                         msg.includes("504");
                       
                       if (isTimeout) {
+                        // Fetch the sync progress stage from the backend
+                        let stageInfo = "UNKNOWN";
+                        try {
+                          const progRes = await api<{ stage: string }>(
+                            `/entries/multi-items/sync-progress?entity_type=kpi_entry&entity_id=${entryId}`,
+                            { token }
+                          );
+                          if (progRes?.stage) {
+                            stageInfo = progRes.stage;
+                          }
+                        } catch (progErr) {
+                          console.error("Failed to fetch sync progress", progErr);
+                        }
+
+                        let diagnosis = "An unknown connection or timeout issue occurred.";
+                        let remedy = "Please try syncing again.";
+                        
+                        // Diagnose Node.js vs Nginx based on elapsed time
+                        if (elapsed >= 27 && elapsed <= 34) {
+                          diagnosis = `The sync request timed out after ${elapsed.toFixed(1)} seconds at the Next.js/Node.js rewrite proxy level (default limit is 30s). This happened during the '${stageInfo}' stage.`;
+                          remedy = "To resolve this, configure your live server Nginx configuration to bypass Next.js and proxy '/api/' requests directly to the FastAPI backend (port 8080).";
+                        } else if (elapsed >= 55 && elapsed <= 65) {
+                          diagnosis = `The sync request timed out after ${elapsed.toFixed(1)} seconds at the Nginx gateway level (default read limit is 60s). This happened during the '${stageInfo}' stage.`;
+                          remedy = "To resolve this, increase Nginx's 'proxy_read_timeout' to '600s' in your live server configuration block.";
+                        } else {
+                          diagnosis = `The sync request disconnected after ${elapsed.toFixed(1)} seconds during the '${stageInfo}' stage.`;
+                          remedy = "Verify your live server's proxy timeout settings and network connection.";
+                        }
+
                         toast((t) => (
-                          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                            <span style={{ fontSize: "0.9rem", color: "#374151" }}>
-                              The sync request timed out or connection was lost. This is often due to a weak internet connection or slow network response. Please try again.
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", maxWidth: "450px" }}>
+                            <span style={{ fontSize: "0.95rem", fontWeight: "bold", color: "#b91c1c" }}>
+                              Odoo Sync Timeout Diagnosed
+                            </span>
+                            <span style={{ fontSize: "0.85rem", color: "#374151" }}>
+                              <strong>Diagnosis:</strong> {diagnosis}
+                            </span>
+                            <span style={{ fontSize: "0.85rem", color: "#1e40af", background: "#eff6ff", padding: "0.4rem 0.6rem", borderRadius: 4 }}>
+                              <strong>Solution:</strong> {remedy}
                             </span>
                             <button
                               onClick={() => {
@@ -2133,7 +2170,7 @@ export default function FullPageMultiItems() {
                               Try Again
                             </button>
                           </div>
-                        ), { duration: 15000 });
+                        ), { duration: 25000 });
                       } else {
                         toast.error(e instanceof Error ? e.message : "Odoo sync failed");
                       }

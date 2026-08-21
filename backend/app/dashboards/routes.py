@@ -454,6 +454,8 @@ async def sync_dashboard_odoo_data(
 
     # Authenticate with Odoo once per organization
     org_odoo = syncable_fields[0][3]
+    from app.core.sync_progress import set_sync_stage
+    set_sync_stage("dashboard", dashboard_id, "AUTHENTICATING_ODOO")
     try:
         session_id = await odoo_authenticate(org_odoo)
     except (ValueError, Exception) as e:
@@ -533,6 +535,7 @@ async def sync_dashboard_odoo_data(
                 "field_id": field.id,
                 "field_key": field.key,
             }
+            set_sync_stage("dashboard", dashboard_id, f"FETCHING_FROM_ODOO (KPI {field.kpi_id})")
             raw_items = await odoo_fetch_items(org_odoo, kpi_odoo, session_id, context)
 
             sub_keys = {s.key for s in (field.sub_fields or [])}
@@ -566,6 +569,7 @@ async def sync_dashboard_odoo_data(
                     for att_key in att_sub_keys:
                         row[att_key] = None
 
+            set_sync_stage("dashboard", dashboard_id, f"SAVING_KPI_ENTRIES (KPI {field.kpi_id})")
             await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=item_dicts)
             await mark_entry_modified(db, entry, current_user.id)
             await db.execute(
@@ -589,11 +593,13 @@ async def sync_dashboard_odoo_data(
     # Propagate formula recalculations for all synced entries
     for entry_id in synced_entry_ids:
         try:
+            set_sync_stage("dashboard", dashboard_id, f"PROPAGATING_FORMULAS (KPI entry {entry_id})")
             await propagate_formula_recalculations(db, entry_id=entry_id, org_id=org_id)
             await db.flush()
         except Exception as e:
             errors.append(f"Failed to propagate formula recalculations for entry {entry_id}: {e}")
 
+    set_sync_stage("dashboard", dashboard_id, "COMPLETED")
     await db.commit()
 
     return {

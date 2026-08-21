@@ -373,6 +373,8 @@ async def sync_odoo_data_for_report_internal(
         return {"synced_kpis": 0, "status": "no_config"}
 
     # Authenticate with Odoo once per sync operation
+    from app.core.sync_progress import set_sync_stage
+    set_sync_stage("custom_report", report.id, "AUTHENTICATING_ODOO")
     try:
         session_id = await odoo_authenticate(org_odoo)
     except ValueError as e:
@@ -432,6 +434,7 @@ async def sync_odoo_data_for_report_internal(
                     "field_id": field.id,
                     "field_key": field.key,
                 }
+                set_sync_stage("custom_report", report.id, f"FETCHING_FROM_ODOO (KPI {kpi_id})")
                 raw_items = await odoo_fetch_items(org_odoo, kpi_odoo, session_id, context)
 
                 sub_keys = {s.key for s in (field.sub_fields or [])}
@@ -475,6 +478,7 @@ async def sync_odoo_data_for_report_internal(
 
                 # Replace rows using the entries routes helper
                 from app.entries.routes import _replace_multi_line_rows_from_dicts
+                set_sync_stage("custom_report", report.id, f"SAVING_KPI_ENTRIES (KPI {kpi_id})")
                 await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=item_dicts)
                 await mark_entry_modified(db, entry, user_id)
                 all_synced_entry_ids.add(entry.id)
@@ -489,6 +493,7 @@ async def sync_odoo_data_for_report_internal(
     # 5. Propagate formula recalculations for all synced entries
     for entry_id in all_synced_entry_ids:
         try:
+            set_sync_stage("custom_report", report.id, f"PROPAGATING_FORMULAS (KPI entry {entry_id})")
             await propagate_formula_recalculations(db, entry_id=entry_id, org_id=org_id)
             await db.flush()
         except Exception as e:
@@ -499,6 +504,7 @@ async def sync_odoo_data_for_report_internal(
     # 6. Invalidate report cache
     CUSTOM_REPORT_CACHE.invalidate_report(report.id)
 
+    set_sync_stage("custom_report", report.id, "COMPLETED")
     result = {
         "synced_kpis": len(synced_kpis),
         "synced_kpi_ids": synced_kpis,

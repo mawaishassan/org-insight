@@ -3455,6 +3455,16 @@ async def multi_items_import_capabilities(
     }
 
 
+@router.get("/multi-items/sync-progress")
+async def get_sync_progress(
+    entity_type: str = Query(...),
+    entity_id: int = Query(...),
+):
+    """Retrieve the in-memory sync progress for a KPI entry or dashboard sync task."""
+    from app.core.sync_progress import get_sync_stage
+    return get_sync_stage(entity_type, entity_id)
+
+
 @router.post("/multi-items/sync-from-odoo")
 async def sync_multi_items_from_odoo(
     entry_id: int = Query(...),
@@ -3549,6 +3559,8 @@ async def sync_multi_items_from_odoo(
             detail="Attachment Download URL Template must be configured in Organization Odoo settings before importing attachment fields.",
         )
 
+    from app.core.sync_progress import set_sync_stage
+    set_sync_stage("kpi_entry", entry.id, "AUTHENTICATING_ODOO")
     try:
         session_id = await odoo_authenticate(org_odoo)
         context = {
@@ -3559,6 +3571,7 @@ async def sync_multi_items_from_odoo(
             "field_id": field.id,
             "field_key": field.key,
         }
+        set_sync_stage("kpi_entry", entry.id, "FETCHING_FROM_ODOO")
         raw_items = await odoo_fetch_items(org_odoo, kpi_odoo, session_id, context)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
@@ -3601,6 +3614,7 @@ async def sync_multi_items_from_odoo(
         unique_att_ids = list(set(all_att_ids))
         
         # 2. Download all files in parallel with controlled concurrency
+        set_sync_stage("kpi_entry", entry.id, "DOWNLOADING_ATTACHMENTS")
         downloaded_data = {}
         if unique_att_ids:
             import httpx
@@ -3679,6 +3693,7 @@ async def sync_multi_items_from_odoo(
         rows_updated = 0
         rows_added = len(item_dicts)
 
+    set_sync_stage("kpi_entry", entry.id, "SAVING_KPI_ENTRIES")
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
     await mark_entry_modified(db, entry, current_user.id)
     await db.execute(
@@ -3691,12 +3706,14 @@ async def sync_multi_items_from_odoo(
         )
     )
     await db.flush()
+    set_sync_stage("kpi_entry", entry.id, "PROPAGATING_FORMULAS")
     try:
         await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
         await db.flush()
     except Exception as e:
         # Don't fail the sync if formula recalculation raises an error
         pass
+    set_sync_stage("kpi_entry", entry.id, "COMPLETED")
     await db.commit()
     out: dict = {"entry_id": entry.id, "field_id": field.id, "rows_imported": len(item_dicts)}
     if effective_mode == "upsert":
