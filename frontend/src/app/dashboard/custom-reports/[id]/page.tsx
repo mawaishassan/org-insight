@@ -322,6 +322,90 @@ export default function CustomReportViewPage() {
     }
   };
 
+  const handleOdooSync = async () => {
+    if (!token) return;
+    setOdooSyncing(true);
+    const toastId = toast.loading("Syncing data from LMS...");
+
+    try {
+      const isByDefault = selectedPeriodType === "by_default";
+      const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
+      const pTypeParam = isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`;
+      const res = await api<any>(
+        `/custom-reports/${id}/sync-odoo?year=${yr}&organization_id=${orgId}${pTypeParam}`,
+        { method: "POST", token }
+      );
+      if (res.errors && res.errors.length > 0) {
+        toast.success(`Synced ${res.synced_kpis} KPI(s) with ${res.errors.length} warning(s)`, { id: toastId });
+      } else {
+        toast.success(res.message || `Successfully synced ${res.synced_kpis} KPI(s) from LMS`, { id: toastId });
+      }
+      // Re-fetch report data with cache-buster to get fresh MLI values
+      setLoading(true);
+      // Small delay to let backend DB commit propagate fully
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const cacheBuster = Date.now();
+      const freshUrl = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}&preview=true${pTypeParam}&_t=${cacheBuster}`;
+      const freshData = await api<any>(freshUrl, { token });
+      setMetadata({
+        name: freshData.custom_report_name || freshData.template_name || "Custom Report",
+        description: freshData.custom_report_description || null,
+        year: freshData.year || reportYear,
+      });
+      setSections(freshData.sections || []);
+      setAttachments(freshData.attachments || []);
+      setLoading(false);
+
+    } catch (err) {
+      toast.dismiss(toastId);
+      const msg = String(err instanceof Error ? err.message : err || "").toLowerCase();
+      const isTimeout =
+        msg.includes("socket hang up") ||
+        msg.includes("hang up") ||
+        msg.includes("econnreset") ||
+        msg.includes("timeout") ||
+        msg.includes("abort") ||
+        msg.includes("failed to fetch") ||
+        msg.includes("network error") ||
+        msg.includes("502") ||
+        msg.includes("504");
+
+      if (isTimeout) {
+        toast((t) => (
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            <span style={{ fontSize: "0.9rem", color: "#374151" }}>
+              The sync request timed out or connection was lost. This is often due to a weak internet connection or slow network response. Please try again.
+            </span>
+            <button
+              onClick={() => {
+                toast.dismiss(t.id);
+                handleOdooSync();
+              }}
+              style={{
+                alignSelf: "flex-end",
+                padding: "0.3rem 0.8rem",
+                background: "#2563eb",
+                color: "white",
+                border: "none",
+                borderRadius: 6,
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                boxShadow: "0 1px 2px rgba(37, 99, 235, 0.2)"
+              }}
+            >
+              Try Again
+            </button>
+          </div>
+        ), { duration: 15000 });
+      } else {
+        toast.error(err instanceof Error ? err.message : "Failed to sync from LMS");
+      }
+    } finally {
+      setOdooSyncing(false);
+    }
+  };
+
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "1rem" }}>
       {/* Top Header Panel */}
@@ -453,48 +537,7 @@ export default function CustomReportViewPage() {
           <button
             type="button"
             disabled={odooSyncing || loading || isShiftingPeriod}
-            onClick={async () => {
-              if (!token) return;
-              setOdooSyncing(true);
-              const toastId = toast.loading("Syncing data from LMS...");
-
-              try {
-                const isByDefault = selectedPeriodType === "by_default";
-                const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
-                const pTypeParam = isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`;
-                const res = await api<any>(
-                  `/custom-reports/${id}/sync-odoo?year=${yr}&organization_id=${orgId}${pTypeParam}`,
-                  { method: "POST", token }
-                );
-                if (res.errors && res.errors.length > 0) {
-                  toast.success(`Synced ${res.synced_kpis} KPI(s) with ${res.errors.length} warning(s)`, { id: toastId });
-                } else {
-                  toast.success(res.message || `Successfully synced ${res.synced_kpis} KPI(s) from LMS`, { id: toastId });
-
-                }
-                // Re-fetch report data with cache-buster to get fresh MLI values
-                setLoading(true);
-                // Small delay to let backend DB commit propagate fully
-                await new Promise(resolve => setTimeout(resolve, 300));
-                const cacheBuster = Date.now();
-                const freshUrl = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}&preview=true${pTypeParam}&_t=${cacheBuster}`;
-                const freshData = await api<any>(freshUrl, { token });
-                setMetadata({
-                  name: freshData.custom_report_name || freshData.template_name || "Custom Report",
-                  description: freshData.custom_report_description || null,
-                  year: freshData.year || reportYear,
-                });
-                setSections(freshData.sections || []);
-                setAttachments(freshData.attachments || []);
-                setLoading(false);
-
-              } catch (err) {
-                toast.error(err instanceof Error ? err.message : "Failed to sync from LMS", { id: toastId });
-
-              } finally {
-                setOdooSyncing(false);
-              }
-            }}
+            onClick={handleOdooSync}
             style={{
               padding: "0.5rem 1.25rem",
               fontSize: "0.9rem",

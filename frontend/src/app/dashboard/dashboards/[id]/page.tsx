@@ -210,7 +210,49 @@ export default function DashboardViewPage() {
         window.location.reload();
       }, 800);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to sync LMS data");
+      const msg = String(e instanceof Error ? e.message : e || "").toLowerCase();
+      const isTimeout =
+        msg.includes("socket hang up") ||
+        msg.includes("hang up") ||
+        msg.includes("econnreset") ||
+        msg.includes("timeout") ||
+        msg.includes("abort") ||
+        msg.includes("failed to fetch") ||
+        msg.includes("network error") ||
+        msg.includes("502") ||
+        msg.includes("504");
+
+      if (isTimeout) {
+        toast((t) => (
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            <span style={{ fontSize: "0.9rem", color: "#374151" }}>
+              The sync request timed out or connection was lost. This is often due to a weak internet connection or slow network response. Please try again.
+            </span>
+            <button
+              onClick={() => {
+                toast.dismiss(t.id);
+                handleSync();
+              }}
+              style={{
+                alignSelf: "flex-end",
+                padding: "0.3rem 0.8rem",
+                background: "#2563eb",
+                color: "white",
+                border: "none",
+                borderRadius: 6,
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                boxShadow: "0 1px 2px rgba(37, 99, 235, 0.2)"
+              }}
+            >
+              Try Again
+            </button>
+          </div>
+        ), { duration: 15000 });
+      } else {
+        toast.error(e instanceof Error ? e.message : "Failed to sync LMS data");
+      }
     } finally {
       setSyncing(false);
     }

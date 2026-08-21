@@ -2056,42 +2056,93 @@ export default function FullPageMultiItems() {
                     toast.error("Select which sub-field to use for matching.");
                     return;
                   }
-                  setUploading(true);
-                  try {
-                    const params = new URLSearchParams({
-                      entry_id: String(entryId),
-                      field_id: String(fieldId),
-                      organization_id: String(effectiveOrgId),
-                      sync_mode: uploadOption,
-                    });
-                    if (uploadOption === "upsert") {
-                      params.set("match_sub_field_key", upsertMatchSubFieldKey.trim());
-                    }
-                    const res = await api<{
-                      rows_imported?: number;
-                      rows_updated?: number;
-                      rows_appended?: number;
-                      attachment_errors?: string[];
-                    }>(`/entries/multi-items/sync-from-odoo?${params.toString()}`, { method: "POST", token });
-                    if (uploadOption === "upsert") {
-                      toast.success(
-                        `Update or add: ${res?.rows_updated ?? 0} row(s) updated, ${res?.rows_appended ?? 0} new row(s) added`
-                      );
-                    } else {
-                      const n = res?.rows_imported ?? 0;
-                      toast.success(n > 0 ? `Imported ${n} record(s) from Odoo.` : "Odoo sync completed (no records imported).");
-                    }
-                    if (res?.attachment_errors && res.attachment_errors.length > 0) {
-                      for (const err of res.attachment_errors) {
-                        toast.error(err, { duration: 6000 });
+                  
+                  const runSync = async () => {
+                    setUploading(true);
+                    const toastId = toast.loading("Syncing from Odoo...");
+                    try {
+                      const params = new URLSearchParams({
+                        entry_id: String(entryId),
+                        field_id: String(fieldId),
+                        organization_id: String(effectiveOrgId),
+                        sync_mode: uploadOption,
+                      });
+                      if (uploadOption === "upsert") {
+                        params.set("match_sub_field_key", upsertMatchSubFieldKey.trim());
                       }
+                      const res = await api<{
+                        rows_imported?: number;
+                        rows_updated?: number;
+                        rows_appended?: number;
+                        attachment_errors?: string[];
+                      }>(`/entries/multi-items/sync-from-odoo?${params.toString()}`, { method: "POST", token });
+                      
+                      toast.dismiss(toastId);
+                      if (uploadOption === "upsert") {
+                        toast.success(
+                          `Update or add: ${res?.rows_updated ?? 0} row(s) updated, ${res?.rows_appended ?? 0} new row(s) added`
+                        );
+                      } else {
+                        const n = res?.rows_imported ?? 0;
+                        toast.success(n > 0 ? `Imported ${n} record(s) from Odoo.` : "Odoo sync completed (no records imported).");
+                      }
+                      if (res?.attachment_errors && res.attachment_errors.length > 0) {
+                        for (const err of res.attachment_errors) {
+                          toast.error(err, { duration: 6000 });
+                        }
+                      }
+                      await refreshRows();
+                    } catch (e) {
+                      toast.dismiss(toastId);
+                      const msg = String(e instanceof Error ? e.message : e || "").toLowerCase();
+                      const isTimeout =
+                        msg.includes("socket hang up") ||
+                        msg.includes("hang up") ||
+                        msg.includes("econnreset") ||
+                        msg.includes("timeout") ||
+                        msg.includes("abort") ||
+                        msg.includes("failed to fetch") ||
+                        msg.includes("network error") ||
+                        msg.includes("502") ||
+                        msg.includes("504");
+                      
+                      if (isTimeout) {
+                        toast((t) => (
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                            <span style={{ fontSize: "0.9rem", color: "#374151" }}>
+                              The sync request timed out or connection was lost. This is often due to a weak internet connection or slow network response. Please try again.
+                            </span>
+                            <button
+                              onClick={() => {
+                                toast.dismiss(t.id);
+                                runSync();
+                              }}
+                              style={{
+                                alignSelf: "flex-end",
+                                padding: "0.3rem 0.8rem",
+                                background: "#2563eb",
+                                color: "white",
+                                border: "none",
+                                borderRadius: 6,
+                                cursor: "pointer",
+                                fontSize: "0.8rem",
+                                fontWeight: 600,
+                                boxShadow: "0 1px 2px rgba(37, 99, 235, 0.2)"
+                              }}
+                            >
+                              Try Again
+                            </button>
+                          </div>
+                        ), { duration: 15000 });
+                      } else {
+                        toast.error(e instanceof Error ? e.message : "Odoo sync failed");
+                      }
+                    } finally {
+                      setUploading(false);
                     }
-                    await refreshRows();
-                  } catch (e) {
-                    toast.error(e instanceof Error ? e.message : "Odoo sync failed");
-                  } finally {
-                    setUploading(false);
-                  }
+                  };
+                  
+                  await runSync();
                 }}
               >
                 {uploading ? "Loading from Odoo…" : "Load data from Odoo"}

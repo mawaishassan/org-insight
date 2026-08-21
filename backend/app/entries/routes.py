@@ -3606,8 +3606,8 @@ async def sync_multi_items_from_odoo(
             import httpx
             import asyncio
             
-            sem = asyncio.Semaphore(5)
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            sem = asyncio.Semaphore(15)
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
                 async def fetch_one(att_id):
                     async with sem:
                         target_url = (
@@ -3691,7 +3691,12 @@ async def sync_multi_items_from_odoo(
         )
     )
     await db.flush()
-    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
+    try:
+        await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
+        await db.flush()
+    except Exception as e:
+        # Don't fail the sync if formula recalculation raises an error
+        pass
     await db.commit()
     out: dict = {"entry_id": entry.id, "field_id": field.id, "rows_imported": len(item_dicts)}
     if effective_mode == "upsert":
