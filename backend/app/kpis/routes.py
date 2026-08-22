@@ -1020,13 +1020,8 @@ async def _fetch_kpi_odoo_preview_items(
     preview_body = body.request_body if body and body.request_body is not None else None
     preview_path = (body.response_items_path or "").strip() if body else ""
     if preview_body is None:
-        if not saved_kpi_odoo:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Save the KPI Odoo request body first, or send request_body in the preview request",
-            )
-        request_body = saved_kpi_odoo.request_body
-        response_items_path = saved_kpi_odoo.response_items_path
+        request_body = saved_kpi_odoo.request_body if saved_kpi_odoo else None
+        response_items_path = saved_kpi_odoo.response_items_path if saved_kpi_odoo else None
     else:
         request_body = preview_body
         response_items_path = preview_path or (saved_kpi_odoo.response_items_path if saved_kpi_odoo else None)
@@ -1290,22 +1285,209 @@ async def upload_kpi_files(
     ]
 
 
-@router.get("/{kpi_id}/files/{file_id}/download")
-async def download_kpi_file(
+@router.get("/{kpi_id}/files/odoo/{attachment_id}")
+@router.get("/{kpi_id}/files/odoo_{attachment_id}/download")
+async def download_odoo_file_on_demand(
     kpi_id: int,
-    file_id: int,
+    attachment_id: int,
     download: bool = Query(False),
+    token: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ):
-    """Stream file content. Auth: Org Admin or user with view/data_entry for this KPI."""
-    if not credentials:
+    """Stream attachment file from Odoo on-demand, caching it in storage."""
+    token_str = None
+    if credentials:
+        token_str = credentials.credentials
+    elif token:
+        token_str = token
+
+    if not token_str:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    token_str = credentials.credentials
+
+    from app.core.security import decode_token
+    payload = decode_token(token_str)
+    if not payload or payload.get("type") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    from app.core.models import User, KpiFile
+    from sqlalchemy.orm import load_only, noload
+    user_result = await db.execute(
+        select(User).where(User.id == int(user_id)).options(noload("*"), load_only(User.id, User.organization_id, User.is_active, User.role))
+    )
+    current_user = user_result.scalar_one_or_none()
+    if not current_user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if not current_user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User inactive")
+
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+
+    org_id = current_user.organization_id
+
+    # 1. Check if the file is already cached/downloaded in KpiFile
+    cache_stmt = select(KpiFile).where(
+        KpiFile.kpi_id == kpi_id,
+        KpiFile.stored_path.like(f"%odoo_att_{attachment_id}%")
+    )
+    cache_res = await db.execute(cache_stmt)
+    kf = cache_res.scalar_one_or_none()
+
+    if kf:
+        from app.storage.service import get_file_stream as storage_get_file_stream
+        try:
+            content = await storage_get_file_stream(db, kf.organization_id, kf.stored_path)
+            
+            import mimetypes
+            c_type = kf.content_type
+            if not c_type or c_type in ("application/octet-stream", "binary/octet-stream"):
+                guessed, _ = mimetypes.guess_type(kf.original_filename)
+                if guessed:
+                    c_type = guessed
+                    
+            disposition = "attachment" if download else "inline"
+            return StreamingResponse(
+                iter([content]),
+                media_type=c_type or "application/octet-stream",
+                headers={"Content-Disposition": f'{disposition}; filename="{kf.original_filename}"'},
+            )
+        except FileNotFoundError:
+            pass
+
+    # 2. Cache miss: authenticate and download on-demand from Odoo
+    from app.odoo.config_service import get_org_odoo_config
+    org_odoo = await get_org_odoo_config(db, org_id)
+    if not org_odoo or not (org_odoo.attachment_url_template or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Odoo attachment download template is not configured for this organization"
+        )
+
+    from app.odoo.service import odoo_authenticate
+    try:
+        session_id = await odoo_authenticate(org_odoo)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Odoo authentication failed: {e}"
+        )
+
+    att_template = org_odoo.attachment_url_template.strip()
+    target_url = (
+        att_template.replace("{ATTACHMENT_ID}", str(attachment_id))
+        .replace("{attachment_id}", str(attachment_id))
+        .replace("__ATTACHMENT_ID__", str(attachment_id))
+        .replace("{SESSION_ID}", session_id)
+        .replace("{session_id}", session_id)
+        .replace("__SESSION_ID__", session_id)
+    )
+
+    import httpx
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        try:
+            resp = await client.get(target_url, cookies={"session_id": session_id})
+            if resp.status_code < 200 or resp.status_code >= 300:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Failed to download attachment from Odoo (HTTP {resp.status_code})"
+                )
+            content = resp.content
+            resp_headers = httpx.Headers(resp.headers)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Odoo attachment download failed: {e}"
+            )
+
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Odoo returned empty file content"
+        )
+
+    # 3. Process and store the downloaded file
+    from app.odoo.service import _extract_filename_from_headers
+    original_filename = _extract_filename_from_headers(resp_headers, attachment_id)
+    content_type = resp_headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+
+    import re
+    import uuid
+    base_name = re.sub(r"[^\w.\- ]", "_", original_filename).strip() or "file"
+    unique = f"{base_name[:100]}_{uuid.uuid4().hex[:8]}"
+    relative_path = f"org_{org_id}/kpi_{kpi_id}/odoo_att_{attachment_id}_{unique}"
+
+    from app.storage.service import upload_file as storage_upload_file
+    try:
+        stored_path = await storage_upload_file(db, org_id, relative_path, content, content_type)
+        
+        kf = KpiFile(
+            kpi_id=kpi_id,
+            organization_id=org_id,
+            original_filename=original_filename[:512],
+            stored_path=stored_path,
+            content_type=content_type[:255] if content_type else None,
+            size=len(content),
+            uploaded_by_user_id=None,
+        )
+        db.add(kf)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save downloaded attachment to local storage: {e}"
+        )
+
+    import mimetypes
+    disposition = "attachment" if download else "inline"
+    c_type = kf.content_type
+    if not c_type or c_type in ("application/octet-stream", "binary/octet-stream"):
+        guessed, _ = mimetypes.guess_type(kf.original_filename)
+        if guessed:
+            c_type = guessed
+
+    return StreamingResponse(
+        iter([content]),
+        media_type=c_type or "application/octet-stream",
+        headers={"Content-Disposition": f'{disposition}; filename="{kf.original_filename}"'},
+    )
+
+
+@router.get("/{kpi_id}/files/{file_id}/download")
+async def download_kpi_file(
+    kpi_id: int,
+    file_id: int,
+    download: bool = Query(False),
+    token: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+):
+    """Stream file content. Auth: Org Admin or user with view/data_entry for this KPI."""
+    token_str = None
+    if credentials:
+        token_str = credentials.credentials
+    elif token:
+        token_str = token
+
+    if not token_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     from app.core.security import decode_token
     from sqlalchemy.orm import noload, load_only

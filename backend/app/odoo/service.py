@@ -172,12 +172,22 @@ async def odoo_fetch_items(
         "field_id": context.get("field_id"),
         "field_key": context.get("field_key"),
     }
-    body = build_odoo_request_body(kpi_cfg.request_body, ctx)
-    if isinstance(body, dict) and "session_id" not in body and "__SESSION_ID__" not in json.dumps(kpi_cfg.request_body):
-        body["session_id"] = session_id
+    request_body_val = getattr(kpi_cfg, "request_body", None)
 
-    headers: dict[str, str] = {"Content-Type": "application/json"}
+    headers: dict[str, str] = {}
     cookies = {"session_id": session_id}
+    post_kwargs = {}
+
+    if request_body_val is not None:
+        headers["Content-Type"] = "application/json"
+        body = build_odoo_request_body(request_body_val, ctx)
+        try:
+            req_body_str = json.dumps(request_body_val)
+        except Exception:
+            req_body_str = ""
+        if isinstance(body, dict) and "session_id" not in body and "__SESSION_ID__" not in req_body_str:
+            body["session_id"] = session_id
+        post_kwargs["json"] = body if isinstance(body, (dict, list)) else {"payload": body}
 
     target_url = cfg.data_fetch_url
     if getattr(kpi_cfg, "endpoint", None) is not None:
@@ -190,9 +200,9 @@ async def odoo_fetch_items(
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
             target_url,
-            json=body if isinstance(body, (dict, list)) else {"payload": body},
             headers=headers,
             cookies=cookies,
+            **post_kwargs,
         )
     if resp.status_code < 200 or resp.status_code >= 300:
         raise ValueError(f"Odoo data fetch failed (HTTP {resp.status_code})")
@@ -651,3 +661,26 @@ async def store_pre_downloaded_odoo_attachments(
         return stored_objects[0], errors
 
     return stored_objects, errors
+
+
+def build_on_demand_attachment_placeholders(kpi_id: int, raw_attachment_val: Any) -> Any:
+    """
+    Extract attachment IDs from raw_attachment_val and return a JSON-serializable list/dict of placeholders
+    pointing to our on-demand download proxy.
+    """
+    att_ids = extract_odoo_attachment_ids(raw_attachment_val)
+    if not att_ids:
+        return None
+
+    placeholders = []
+    for att_id in att_ids:
+        placeholders.append({
+            "url": f"/api/kpis/{kpi_id}/files/odoo/{att_id}",
+            "filename": "Proof.pdf"
+        })
+
+    if not placeholders:
+        return None
+    if len(placeholders) == 1:
+        return placeholders[0]
+    return placeholders

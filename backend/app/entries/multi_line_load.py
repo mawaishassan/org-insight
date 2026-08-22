@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -118,11 +118,19 @@ async def load_multi_line_row_dicts(
                 )
             )
             q_rows = q_rows.where(
-                and_(
-                    KpiMultiLineCell.value_date >= start_date,
-                    KpiMultiLineCell.value_date < end_date,
-                    KpiMultiLineCell.value_text.isnot(None),
-                    KpiMultiLineCell.value_text != "",
+                or_(
+                    and_(
+                        KpiMultiLineCell.value_date.isnot(None),
+                        KpiMultiLineCell.value_date >= start_date,
+                        KpiMultiLineCell.value_date < end_date,
+                    ),
+                    and_(
+                        KpiMultiLineCell.value_text.isnot(None),
+                        KpiMultiLineCell.value_text != "",
+                        ~KpiMultiLineCell.value_text.in_(["false", "null", "none", "False", "Null", "None"]),
+                        KpiMultiLineCell.value_text >= start_date.isoformat(),
+                        KpiMultiLineCell.value_text < end_date.isoformat(),
+                    )
                 )
             )
 

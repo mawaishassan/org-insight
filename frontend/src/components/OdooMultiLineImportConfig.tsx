@@ -240,8 +240,10 @@ export function OdooMultiLineImportAdmin({
           if (c.odoo_endpoint_id != null) setOdooEndpointId(c.odoo_endpoint_id);
           if (c.request_body != null) {
             setRequestBodyText(JSON.stringify(c.request_body, null, 2));
-            setResponsePath(c.response_items_path || "");
+          } else {
+            setRequestBodyText("");
           }
+          setResponsePath(c.response_items_path || "");
         }
       })
       .catch(() => setKpiConfigured(false));
@@ -401,7 +403,10 @@ export function OdooMultiLineImportAdmin({
     }
     setSavingKpi(true);
     try {
-      const request_body = JSON.parse(requestBodyText);
+      let request_body = null;
+      if (requestBodyText.trim() !== "") {
+        request_body = JSON.parse(requestBodyText);
+      }
       await api(`/kpis/${kpiId}/odoo-config${oq}`, {
         method: "PUT",
         token,
@@ -425,10 +430,16 @@ export function OdooMultiLineImportAdmin({
     setFetchingPreview(true);
     try {
       let request_body: unknown | undefined;
-      try {
-        request_body = JSON.parse(requestBodyText);
-      } catch {
-        request_body = undefined;
+      if (requestBodyText.trim() === "") {
+        request_body = null;
+      } else {
+        try {
+          request_body = JSON.parse(requestBodyText);
+        } catch {
+          toast.error("Invalid JSON format in request body");
+          setFetchingPreview(false);
+          return;
+        }
       }
       const params = new URLSearchParams({
         field_id: String(fieldId),
@@ -484,10 +495,16 @@ export function OdooMultiLineImportAdmin({
     setDownloadingSample(true);
     try {
       let request_body: unknown | undefined;
-      try {
-        request_body = JSON.parse(requestBodyText);
-      } catch {
-        request_body = undefined;
+      if (requestBodyText.trim() === "") {
+        request_body = null;
+      } else {
+        try {
+          request_body = JSON.parse(requestBodyText);
+        } catch {
+          toast.error("Invalid JSON format in request body");
+          setDownloadingSample(false);
+          return;
+        }
       }
       const params = new URLSearchParams({
         field_id: String(fieldId),
@@ -703,7 +720,7 @@ export function OdooMultiLineImportAdmin({
         </div>
         <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.5rem" }}>
           JSON sent to your selected Odoo API endpoint. Placeholders: __SESSION_ID__, __YEAR__, __KPI_ID__,
-          __ORG_ID__, __ENTRY_ID__, __FIELD_ID__, __FIELD_KEY__.
+          __ORG_ID__, __ENTRY_ID__, __FIELD_ID__, __FIELD_KEY__. <strong>If left empty, a POST request will be made directly to the selected endpoint URL without a JSON body payload.</strong>
         </p>
         <textarea
           value={requestBodyText}

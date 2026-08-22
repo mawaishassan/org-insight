@@ -580,7 +580,7 @@ class KpiOdooConfig(Base):
     odoo_endpoint_id = Column(
         Integer, ForeignKey("odoo_endpoints.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    request_body = Column(JSON, nullable=False)
+    request_body = Column(JSON, nullable=True)
     response_items_path = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)

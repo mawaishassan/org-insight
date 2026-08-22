@@ -320,7 +320,7 @@ class KpiOdooConfigUpdate(BaseModel):
     """KPI-specific Odoo fetch request body (Super Admin only)."""
 
     odoo_endpoint_id: int | None = Field(None, description="ID of configured OdooEndpoint for this KPI")
-    request_body: dict | list = Field(..., description="JSON body sent to Odoo data fetch URL")
+    request_body: dict | list | None = Field(None, description="JSON body sent to Odoo data fetch URL")
     response_items_path: str | None = Field(
         None,
         max_length=255,

@@ -161,13 +161,19 @@ async def list_kpi_field_definitions(
     Use for read-heavy paths (e.g. widget-data) to avoid loading thousands of option/child rows
     that are not needed to build a key→id map.
     """
+    cache_key = ("fields", int(kpi_id), int(org_id))
+    if cache_key in db.info:
+        return db.info[cache_key]
+
     result = await db.execute(
         select(KPIField)
         .join(KPIField.kpi)
         .where(KPIField.kpi_id == kpi_id, KPI.organization_id == org_id)
         .order_by(KPIField.sort_order, KPIField.id)
     )
-    return list(result.scalars().all())
+    fields = list(result.scalars().all())
+    db.info[cache_key] = fields
+    return fields
 
 
 async def get_field_with_subfields_only(
@@ -176,13 +182,19 @@ async def get_field_with_subfields_only(
     """
     One field with sub_fields loaded; options excluded (faster than full get_field for multi-line work).
     """
+    cache_key = ("field_with_subs", int(field_id), int(org_id))
+    if cache_key in db.info:
+        return db.info[cache_key]
+
     result = await db.execute(
         select(KPIField)
         .join(KPIField.kpi)
         .where(KPIField.id == field_id, KPI.organization_id == org_id)
         .options(selectinload(KPIField.sub_fields))
     )
-    return result.scalar_one_or_none()
+    field = result.scalar_one_or_none()
+    db.info[cache_key] = field
+    return field
 
 
 async def list_fields(db: AsyncSession, kpi_id: int | None, org_id: int) -> list[KPIField]:

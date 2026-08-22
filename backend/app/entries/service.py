@@ -1680,6 +1680,72 @@ async def _load_other_kpi_values(
     return out
 
 
+
+async def bulk_load_org_kpi_values(
+    db: AsyncSession, year: int, org_id: int, period_key: str | None = None
+) -> OtherKpiValues:
+    """
+    Load numeric field values for ALL KPIs in the org in a single query.
+
+    This is the bulk equivalent of calling _load_other_kpi_values per KPI.
+    Use this before a per-KPI processing loop (e.g. custom report generation) to
+    avoid N full org-entry scans — one call here replaces N separate calls.
+
+    Returns:
+        {(kpi_id, field_key): float}  — same shape as OtherKpiValues / _load_other_kpi_values.
+    """
+    from collections import defaultdict
+    # Single query: all published entries for this org+year, with their numeric field values and field keys.
+    res = await db.execute(
+        select(
+            KPIEntry.kpi_id,
+            KPIEntry.period_key,
+            KPIEntry.id,
+            KPIField.key,
+            KPIFieldValue.value_number,
+            KPIField.field_type,
+        )
+        .select_from(KPIEntry)
+        .join(KPIFieldValue, KPIFieldValue.entry_id == KPIEntry.id)
+        .join(KPIField, KPIField.id == KPIFieldValue.field_id)
+        .where(
+            KPIEntry.organization_id == org_id,
+            KPIEntry.year == year,
+            KPIEntry.is_draft == False,
+            KPIFieldValue.value_number.isnot(None),
+            KPIField.field_type.in_([FieldType.number, FieldType.formula]),
+        )
+    )
+    rows = res.all()
+
+    # Group by kpi_id to pick the best matching entry per KPI (period_key match → default → first).
+    # Structure: {kpi_id: {period_key: {(kpi_id, field_key): float}}}
+    by_kpi: dict[int, dict] = defaultdict(lambda: defaultdict(dict))
+    for kpi_id, pk, _eid, fkey, fval, _ft in rows:
+        if fkey is None or fval is None:
+            continue
+        try:
+            by_kpi[int(kpi_id)][pk or ""][(int(kpi_id), str(fkey))] = float(fval)
+        except (TypeError, ValueError):
+            pass
+
+    out: OtherKpiValues = {}
+    target_pk = (period_key or "").strip()
+    for kpi_id, pk_dict in by_kpi.items():
+        # Priority: exact period_key match → empty/None period_key → first available
+        selected: dict | None = None
+        if target_pk and target_pk in pk_dict:
+            selected = pk_dict[target_pk]
+        if selected is None and "" in pk_dict:
+            selected = pk_dict[""]
+        if selected is None:
+            selected = next(iter(pk_dict.values()), None)
+        if selected:
+            out.update(selected)
+
+    return out
+
+
 def _is_subfield_satisfied_for_row(sf, row: dict, key_to_sf: dict) -> bool:
     """Check if a subfield's visibility condition is satisfied for a given row dict."""
     from app.fields.conditional import is_subfield_visible

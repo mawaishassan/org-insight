@@ -86,6 +86,7 @@ from app.reports.service import (
     period_key_sort_order,
     effective_kpi_time_dimension,
 )
+from app.entries.service import bulk_load_org_kpi_values
 
 logger = logging.getLogger(__name__)
 
@@ -633,7 +634,12 @@ async def generate_custom_report_data(
     recalculated_kpi_values: dict[tuple[int, str], float | int] = {}
     recalculated_kpi_mli_data: dict[tuple[int, str], list[dict]] = {}
 
-    print(f"DEBUG: date_range={date_range}, sorted_kpis={[k.id for k in sorted_kpis_list]}")
+    # ------------------------------------------------------------------
+    # Pre-fetch all numeric KPI field values for this org+year in ONE
+    # query, eliminating N separate _load_other_kpi_values calls inside
+    # the per-KPI loop below.
+    # ------------------------------------------------------------------
+    base_other_kpi_values = await bulk_load_org_kpi_values(db, yr, org_id)
 
     for idx, kpi in enumerate(sorted_kpis_list):
         kid = kpi.id
@@ -690,17 +696,18 @@ async def generate_custom_report_data(
                 entries_sorted = [entries_sorted[-1]]
 
         need_cross_kpi = _formulas_need_other_kpi_values(fields_to_include)
-        # For cross-KPI formula lookup, use the year of the actual entry found (not necessarily yr)
-        cross_kpi_year = yr
-        if date_range and entries_sorted:
-            cross_kpi_year = entries_sorted[0].year
-        other_kpi_values = (
-            await _load_other_kpi_values(db, cross_kpi_year, org_id, kpi.id)
-            if entries_sorted and need_cross_kpi
-            else {}
-        )
-        for (r_kid, r_fkey), rval in recalculated_kpi_values.items():
-            other_kpi_values[(r_kid, r_fkey)] = rval
+        # Build per-KPI other_kpi_values from the pre-fetched base dict.
+        # Overlay any values already recalculated earlier in this loop so
+        # that formula dependencies resolved in the correct topological order
+        # always see the freshly-computed value, not the stored DB value.
+        if need_cross_kpi:
+            other_kpi_values = dict(base_other_kpi_values)
+            for (r_kid, r_fkey), rval in recalculated_kpi_values.items():
+                other_kpi_values[(r_kid, r_fkey)] = rval
+        else:
+            # Still overlay recalculated values for formulas that only depend
+            # on sibling fields within the same KPI batch.
+            other_kpi_values = dict(recalculated_kpi_values)
 
         entry_ids_sorted = [e.id for e in entries_sorted]
 
@@ -742,19 +749,24 @@ async def generate_custom_report_data(
                     sorted_formula_sfs = _sort_formula_subfields(formula_sfs)
                     current_rows = [dict(r) for r in rows_list]
                     for sf_key, expr, cond_logic in sorted_formula_sfs:
+                        if not expr:
+                            continue
+                        # Build the multi-line context ONCE per formula subfield
+                        # (not once per row) — avoids rebuilding a potentially
+                        # large list reference on every iteration.
+                        ml_context = {mf.key: current_rows}
                         for r_copy in current_rows:
-                            if expr:
-                                new_val = evaluate_formula(
-                                    expr,
-                                    {},
-                                    {mf.key: current_rows},
-                                    other_kpi_values,
-                                    current_row=r_copy,
-                                    other_kpi_multi_line_data=recalculated_kpi_mli_data,
-                                )
-                                if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
-                                    new_val = apply_conditional_logic(new_val, cond_logic)
-                                r_copy[sf_key] = new_val if new_val is not None else 0
+                            new_val = evaluate_formula(
+                                expr,
+                                {},
+                                ml_context,
+                                other_kpi_values,
+                                current_row=r_copy,
+                                other_kpi_multi_line_data=recalculated_kpi_mli_data,
+                            )
+                            if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
+                                new_val = apply_conditional_logic(new_val, cond_logic)
+                            r_copy[sf_key] = new_val if new_val is not None else 0
                     recalculated_batch[eid] = current_rows
                 else:
                     recalculated_batch[eid] = rows_list

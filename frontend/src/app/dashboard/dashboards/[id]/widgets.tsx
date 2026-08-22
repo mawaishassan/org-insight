@@ -23,6 +23,7 @@ import {
   postDashboardTableWidgetRows,
   postDashboardTableWidgetData,
   postDashboardTrendWidgetData,
+  postDashboardUniversalBatch,
   postWidgetData,
 } from "@/lib/widgetData";
 
@@ -128,6 +129,69 @@ function enqueueDashboardCardBatch(req: Omit<PendingCard, "resolve" | "reject">)
       }, 0);
     }
     pendingCardBatches.set(key, cur);
+  });
+}
+
+/**
+ * Universal period-shift batch — coalesces ALL widget types into one POST.
+ *
+ * When the user shifts a reporting period, widgets call this instead of
+ * separate chart/batch + card/batch + individual line/trend/table endpoints.
+ * A single HTTP round-trip fetches data for the entire dashboard.
+ */
+type UniversalBatchKey = string;
+type PendingUniversal = {
+  token: string;
+  organizationId: number;
+  dashboardId: number;
+  widgetId: string;
+  widget: Record<string, unknown>;
+  overrides?: Record<string, unknown>;
+  resolve: (v: any) => void;
+  reject: (e: any) => void;
+};
+const pendingUniversalBatches = new Map<
+  UniversalBatchKey,
+  { timer: any; items: PendingUniversal[] }
+>();
+
+export function enqueueDashboardUniversalBatch(
+  req: Omit<PendingUniversal, "resolve" | "reject">
+): Promise<any> {
+  const key = `${req.token}::${req.organizationId}::${req.dashboardId}`;
+  return new Promise((resolve, reject) => {
+    const item: PendingUniversal = { ...req, resolve, reject };
+    const cur = pendingUniversalBatches.get(key) ?? { timer: null, items: [] as PendingUniversal[] };
+    cur.items.push(item);
+    if (!cur.timer) {
+      cur.timer = setTimeout(async () => {
+        const batch = pendingUniversalBatches.get(key);
+        if (!batch) return;
+        pendingUniversalBatches.delete(key);
+        const items = batch.items;
+        if (items.length === 0) return;
+        try {
+          const res = await postDashboardUniversalBatch(
+            req.token,
+            {
+              version: 1,
+              organization_id: req.organizationId,
+              dashboard_id: req.dashboardId,
+              items: items.map((x) => ({ widget: x.widget, overrides: x.overrides })),
+            }
+          );
+          items.forEach((x, idx) => {
+            const k = x.widgetId || `idx:${idx}`;
+            const r = res?.results?.[k] ?? res?.results?.[`idx:${idx}`];
+            if (r && r.ok) x.resolve(r);
+            else x.reject(new Error(r?.error || "Universal batch failed"));
+          });
+        } catch (e) {
+          items.forEach((x) => x.reject(e));
+        }
+      }, 0);
+    }
+    pendingUniversalBatches.set(key, cur);
   });
 }
 
@@ -1043,7 +1107,7 @@ function KpiCardSingleValueWidget({
         dashboardId != null && (widget.source_mode === "field" || widget.source_mode === "multi_line_agg")
           ? deduplicatedRequest(
               fp!,
-              () => enqueueDashboardCardBatch({
+              () => enqueueDashboardUniversalBatch({
                 token,
                 organizationId,
                 dashboardId,
@@ -1260,13 +1324,23 @@ function KpiLineChartWidget({
     if (isWidgetDataBundleEnabled()) {
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
+      const widgetId = String((w as any)?.id ?? "");
       const bundleReq =
         dashboardId != null
-          ? postDashboardLineWidgetData(
+          ? enqueueDashboardUniversalBatch({
               token,
-              { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
-              { signal: ac.signal }
-            )
+              organizationId,
+              dashboardId,
+              widgetId,
+              widget: w,
+              overrides: undefined,
+            }).then((r) => ({
+              version: 1,
+              widget_type: "kpi_line_chart",
+              meta: r.meta ?? {},
+              data: r.data ?? {},
+              entry_revision: r.entry_revision ?? null,
+            }))
           : postWidgetData(
               token,
               {
@@ -1279,6 +1353,7 @@ function KpiLineChartWidget({
             );
       bundleReq
         .then((res) => {
+          if (ac.signal.aborted) return;
           const pts = res.data.points as Array<{ year: number; value: unknown }> | undefined;
           if (Array.isArray(pts)) {
             setPoints(
@@ -1756,7 +1831,7 @@ function KpiBarChartWidgetInner({
         dashboardId != null
           ? deduplicatedRequest(
               fp!,
-              () => enqueueDashboardChartBatch({
+              () => enqueueDashboardUniversalBatch({
                 token,
                 organizationId,
                 dashboardId,
@@ -2691,19 +2766,24 @@ function KpiTrendWidgetInner({
     if (isWidgetDataBundleEnabled()) {
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
+      const widgetId = String((w as any)?.id ?? "");
+      const trendOverrides = { selected_years: selectedYears };
       const bundleReq =
         dashboardId != null
-          ? postDashboardTrendWidgetData(
+          ? enqueueDashboardUniversalBatch({
               token,
-              {
-                version: 1,
-                organization_id: organizationId,
-                dashboard_id: dashboardId,
-                widget: w,
-                overrides: { selected_years: selectedYears },
-              },
-              { signal: ac.signal }
-            )
+              organizationId,
+              dashboardId,
+              widgetId,
+              widget: w,
+              overrides: trendOverrides,
+            }).then((r) => ({
+              version: 1,
+              widget_type: "kpi_trend",
+              meta: r.meta ?? {},
+              data: r.data ?? {},
+              entry_revision: r.entry_revision ?? null,
+            }))
           : postWidgetData(
               token,
               {
@@ -2711,7 +2791,7 @@ function KpiTrendWidgetInner({
                 organization_id: organizationId,
                 ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
                 widget: w,
-                overrides: { selected_years: selectedYears },
+                overrides: trendOverrides,
               },
               { signal: ac.signal }
             );

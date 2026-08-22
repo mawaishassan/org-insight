@@ -65,7 +65,7 @@ async def get_kpi_odoo_config(db: AsyncSession, kpi_id: int) -> KpiOdooConfig | 
 async def upsert_kpi_odoo_config(
     db: AsyncSession,
     kpi_id: int,
-    request_body: dict | list,
+    request_body: dict | list | None,
     response_items_path: str | None,
     odoo_endpoint_id: int | None = None,
 ) -> KpiOdooConfig:
