@@ -2022,15 +2022,29 @@ export default function CustomReportDesignPage() {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}
-            <div style={{ borderBottom: "1px solid var(--border)", paddingBottom: "1rem", marginBottom: "1rem" }}>
-              <h3 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 600 }}>
-                Configure Columns & Filters: {
-                  sections[editingFieldLoc.secIdx].fields[editingFieldLoc.fieldIdx].field_name
-                }
-              </h3>
-              <p style={{ color: "var(--muted)", margin: "0.25rem 0 0 0", fontSize: "0.85rem" }}>
-                Select and order visible columns, and define filtering criteria for rows.
-              </p>
+            <div style={{ borderBottom: "1px solid var(--border)", paddingBottom: "1rem", marginBottom: "1rem", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 600 }}>
+                  Configure Columns & Filters: {
+                    sections[editingFieldLoc.secIdx].fields[editingFieldLoc.fieldIdx].field_name
+                  }
+                </h3>
+                <p style={{ color: "var(--muted)", margin: "0.25rem 0 0 0", fontSize: "0.85rem" }}>
+                  Select and order visible columns, and define filtering criteria for rows.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  const loc = editingFieldLoc;
+                  setEditingFieldLoc(null);
+                  setEditingWidthsLoc(loc);
+                }}
+                style={{ padding: "0.4rem 0.75rem", fontSize: "0.82rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "0.3rem", flexShrink: 0 }}
+              >
+                📐 Configure Column Widths
+              </button>
             </div>
 
             {/* Columns Selector & Ordering Section */}
