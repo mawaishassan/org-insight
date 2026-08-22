@@ -2172,21 +2172,29 @@ async def export_custom_report_file(
                     value_items = f.get("value_items", [])
 
                     if sub_fields:
-                        sr_no_width = 40
-                        available_table_w = available_width - sr_no_width
-                        min_col_width = 25 if len(sub_fields) > 15 else (35 if len(sub_fields) > 8 else 45)
+                        col_count = len(sub_fields)
+                        sr_no_width = 32 if col_count > 10 else 40
+                        
+                        # Expand printable table width into side margins for wide tables (> 10 columns)
+                        if col_count > 10:
+                            max_table_printable_w = 756 if use_landscape else 576
+                        else:
+                            max_table_printable_w = available_width
+
+                        available_table_w = max_table_printable_w - sr_no_width
+                        min_col_width = 28 if col_count > 14 else (35 if col_count > 8 else 45)
                         
                         col_chars = []
-                        for sf in sub_fields:
+                        for s_idx, sf in enumerate(sub_fields):
                             name = sf.get("name") or sf.get("key")
                             k_lower = sf.get("key", "").lower()
-                            if len(sub_fields) > 8:
+                            if s_idx == 0 or "department" in k_lower or "name" in k_lower or "title" in k_lower:
+                                w = 28 if col_count > 10 else 35
+                            elif col_count > 8:
                                 if "faculty_who_submitted" in k_lower or "faculty_who" in k_lower:
-                                    w = 16
-                                elif "department" in k_lower or "name" in k_lower:
                                     w = 18
                                 else:
-                                    w = min(len(name), 12)
+                                    w = max(10, min(len(name), 16))
                             else:
                                 w = min(len(name), 25)
                             col_chars.append(w)
@@ -2195,7 +2203,7 @@ async def export_custom_report_file(
                             for idx, sf in enumerate(sub_fields):
                                 val = item.get(sf.get("key"))
                                 val_str = clean_numeric_value_string(val)
-                                max_val_len = 15 if len(sub_fields) > 8 else 60
+                                max_val_len = 15 if col_count > 8 else 60
                                 col_chars[idx] = max(col_chars[idx], min(len(val_str), max_val_len))
                                 
                         custom_widths = f.get("config", {}).get("column_widths") or {}
@@ -2210,7 +2218,7 @@ async def export_custom_report_file(
                                     configured_cols.append(45.0)
                             col_widths = [configured_sr] + configured_cols
                         else:
-                            total_chars = sum(col_chars) or len(sub_fields)
+                            total_chars = sum(col_chars) or col_count
                             raw_widths = [max(min_col_width, available_table_w * (c / total_chars)) for c in col_chars]
                             scale = available_table_w / sum(raw_widths) if sum(raw_widths) > available_table_w else 1.0
                             col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
@@ -2277,7 +2285,7 @@ async def export_custom_report_file(
                                 row.append(Paragraph(val_str, cell_st))
                             pdf_table_data.append(row)
 
-                        t_mli = Table(pdf_table_data, colWidths=col_widths)
+                        t_mli = Table(pdf_table_data, colWidths=col_widths, hAlign='CENTER')
                         t_mli.setStyle(TableStyle(t_style_cmds))
                         story.append(t_mli)
                         story.append(Spacer(1, 8))
