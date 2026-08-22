@@ -99,7 +99,7 @@ async def create_odoo_endpoint(
     ep = OdooEndpoint(
         organization_id=org_id,
         name=name.strip(),
-        url=url.strip(),
+        url="".join((url or "").split()),
         description=(description or "").strip() or None,
         is_active=is_active,
     )
@@ -120,7 +120,7 @@ async def update_odoo_endpoint(
     if name is not None:
         endpoint.name = name.strip()
     if url is not None:
-        endpoint.url = url.strip()
+        endpoint.url = "".join((url or "").split())
     if description is not None:
         endpoint.description = description.strip() or None
     if is_active is not None:

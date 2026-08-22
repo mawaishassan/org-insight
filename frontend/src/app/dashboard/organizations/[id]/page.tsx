@@ -17,6 +17,7 @@ import {
   type ReportData,
 } from "@/app/dashboard/reports/reportPrint";
 import { ReportLoadProgress } from "@/app/dashboard/reports/ReportLoadProgress";
+import { MLISymbolsPanel } from "@/components/MLISymbolsPanel";
 
 const FIELD_TYPES = [
   "single_line_text",
@@ -69,7 +70,8 @@ type SettingsSubId =
   | "tags"
   | "organization"
   | "admin_user"
-  | "api_export";
+  | "api_export"
+  | "mli_symbols";
 
 interface SubFieldDef {
   id?: number;
@@ -369,6 +371,7 @@ const SETTINGS_SUB_IDS: SettingsSubId[] = [
   "organization",
   "admin_user",
   "api_export",
+  "mli_symbols",
 ];
 
 export default function OrganizationDetailPage() {
@@ -871,6 +874,7 @@ const SETTINGS_SUB_LABELS: Record<SettingsSubId, string> = {
   organization: "Organization",
   admin_user: "Admin user",
   api_export: "API export",
+  mli_symbols: "MLI Extraction Symbols",
 };
 
 interface UserResponse {
@@ -1414,6 +1418,12 @@ function SettingsPage({
         )}
         {settingsSub === "api_export" && (
           <ApiExportContent orgId={orgId} token={token} />
+        )}
+        {settingsSub === "mli_symbols" && (
+          <div>
+            <h2 style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>MLI Extraction Symbols</h2>
+            <MLISymbolsPanel token={token} />
+          </div>
         )}
       </div>
     </div>

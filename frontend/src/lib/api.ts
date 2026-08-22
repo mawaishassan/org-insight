@@ -30,11 +30,10 @@ export function getApiUrl(path: string): string {
 }
 
 /** Path under /api, e.g. kpis/12/files/34/download */
-function parseKpiFileDownloadPath(pathname: string): string | null {
-  const p = pathname.split("?")[0].replace(/\/+$/, "");
-  const withApi = /^\/api\/(kpis\/\d+\/files\/\d+\/download)$/.exec(p);
+function parseKpiFileDownloadPath(p: string): string | null {
+  const withApi = /^\/api\/(kpis\/\d+\/files\/(?:\d+\/download|odoo\/\d+))$/.exec(p);
   if (withApi) return withApi[1];
-  const noApi = /^\/(kpis\/\d+\/files\/\d+\/download)$/.exec(p);
+  const noApi = /^\/(kpis\/\d+\/files\/(?:\d+\/download|odoo\/\d+))$/.exec(p);
   if (noApi) return noApi[1];
   return null;
 }
@@ -104,6 +103,81 @@ function storedFileRefToFilename(ref: unknown): string {
   return "";
 }
 
+function displayBlobInBrowser(rawBlob: Blob, res: Response, ref: unknown, trimmedUrl: string): void {
+  const headerCt = res.headers.get("content-type") || "";
+  const headerCd = res.headers.get("content-disposition") || "";
+  
+  let filename = storedFileRefToFilename(ref);
+  if (!filename) {
+    const match = /filename\*?=['"]?(?:UTF-8'')?([^'";\n]+)['"]?/i.exec(headerCd);
+    if (match) {
+      try {
+        filename = decodeURIComponent(match[1]);
+      } catch {
+        filename = match[1];
+      }
+    }
+  }
+  if (!filename) {
+    const parts = trimmedUrl.split("/");
+    filename = parts[parts.length - 1] || "file";
+  }
+
+  let mimeType = headerCt.split(";")[0].trim().toLowerCase();
+  const lowerName = filename.toLowerCase();
+
+  if (!mimeType || mimeType === "application/octet-stream" || mimeType === "binary/octet-stream" || mimeType === "text/plain") {
+    if (lowerName.endsWith(".pdf")) {
+      mimeType = "application/pdf";
+    } else if (lowerName.endsWith(".docx")) {
+      mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    } else if (lowerName.endsWith(".doc")) {
+      mimeType = "application/msword";
+    } else if (lowerName.endsWith(".xlsx")) {
+      mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    } else if (lowerName.endsWith(".xls")) {
+      mimeType = "application/vnd.ms-excel";
+    } else if (lowerName.endsWith(".png")) {
+      mimeType = "image/png";
+    } else if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) {
+      mimeType = "image/jpeg";
+    }
+  }
+
+  const typedBlob = mimeType ? new Blob([rawBlob], { type: mimeType }) : rawBlob;
+  const blobUrl = URL.createObjectURL(typedBlob);
+
+  if (
+    lowerName.endsWith(".docx") ||
+    lowerName.endsWith(".doc") ||
+    lowerName.endsWith(".xlsx") ||
+    lowerName.endsWith(".xls") ||
+    lowerName.endsWith(".zip") ||
+    mimeType.includes("officedocument") ||
+    mimeType.includes("msword") ||
+    mimeType.includes("excel")
+  ) {
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    return;
+  }
+
+  const win = window.open(blobUrl, "_blank", "noopener,noreferrer");
+  if (!win) {
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+}
+
 /**
  * Open a KPI attachment stored as download URL (relative or absolute). Uses JWT for /api/kpis/.../files/.../download.
  * For other http(s) URLs, opens in a new tab without auth.
@@ -118,22 +192,20 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
   }
 
   const inner = resolveKpiFileDownloadApiPath(trimmed);
-  const url = inner ? getApiUrl(inner) : null;
+  const url = inner ? getApiUrl(inner) : (trimmed.startsWith("/api/") ? getApiUrl(trimmed.slice(5)) : null);
 
   if (url) {
-    try {
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) throw new Error("Failed to load file");
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      window.open(blobUrl, "_blank", "noopener,noreferrer");
-      return;
-    } catch (err) {
-      console.error(err);
-      throw new Error("Failed to open attachment");
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => null);
+      const msg = (errJson as { detail?: string })?.detail || `Failed to load file (HTTP ${res.status})`;
+      throw new Error(msg);
     }
+    const blob = await res.blob();
+    displayBlobInBrowser(blob, res, ref, trimmed);
+    return;
   }
 
   if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
@@ -143,19 +215,17 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
 
   const rel = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
   const origin = typeof window !== "undefined" ? window.location.origin : "";
-  try {
-    const fetchUrl = `${origin}${rel}`;
-    const res = await fetch(fetchUrl, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (!res.ok) throw new Error("Failed to load file");
-    const blob = await res.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    window.open(blobUrl, "_blank", "noopener,noreferrer");
-  } catch (err) {
-    const previewUrl = `${origin}${rel}${rel.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
-    window.open(previewUrl, "_blank", "noopener,noreferrer");
+  const fetchUrl = `${origin}${rel}`;
+  const res = await fetch(fetchUrl, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!res.ok) {
+    const errJson = await res.json().catch(() => null);
+    const msg = (errJson as { detail?: string })?.detail || `Failed to load file (HTTP ${res.status})`;
+    throw new Error(msg);
   }
+  const blob = await res.blob();
+  displayBlobInBrowser(blob, res, ref, trimmed);
 }
 
 export async function api<T>(
@@ -285,6 +355,19 @@ export async function api<T>(
 
   return run;
 }
+
+api.get = function <T>(path: string, options?: RequestInit & { token?: string; useCache?: boolean; cacheTTL?: number }): Promise<T> {
+  return api<T>(path, { ...options, method: "GET" });
+};
+api.post = function <T>(path: string, body?: any, options?: RequestInit & { token?: string }): Promise<T> {
+  return api<T>(path, { ...options, method: "POST", body: body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined });
+};
+api.put = function <T>(path: string, body?: any, options?: RequestInit & { token?: string }): Promise<T> {
+  return api<T>(path, { ...options, method: "PUT", body: body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined });
+};
+api.delete = function <T>(path: string, options?: RequestInit & { token?: string }): Promise<T> {
+  return api<T>(path, { ...options, method: "DELETE" });
+};
 
 const inflightRequests = new Map<string, Promise<unknown>>();
 const responseCache = new Map<string, { ts: number; data: unknown }>();

@@ -2379,6 +2379,20 @@ async def list_multi_items_rows(
                 raw = None
             row_data_by_index[idx][str(key)] = raw
 
+        # Apply extraction rules (in-memory, non-mutating)
+        from app.entries.multi_line_load import _fetch_rules_for_field
+        rules = await _fetch_rules_for_field(db, field.id)
+        if rules:
+            try:
+                from app.entries.mli_extraction import apply_extraction_rules
+                page_indices = [int(ridx) for _, ridx in page_rows]
+                row_list = [row_data_by_index.get(idx, {}) for idx in page_indices]
+                processed = apply_extraction_rules(row_list, rules)
+                for idx, proc in zip(page_indices, processed):
+                    row_data_by_index[idx] = proc
+            except ValueError as exc:
+                logger.warning("MLI extraction skipped (circular dependency): %s", exc)
+
         for rid, row_index in page_rows:
             orig_index = int(row_index)
             r = row_data_by_index.get(orig_index, {})

@@ -10,6 +10,8 @@ import { getAccessToken, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
 import { OdooMultiLineImportAdmin } from "@/components/OdooMultiLineImportConfig";
+import { MLIExtractionRulesPanel } from "@/components/MLIExtractionRulesPanel";
+import { MliFormulaBuilderModal } from "@/components/MliFormulaBuilderModal";
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
   return new URLSearchParams(
@@ -321,6 +323,12 @@ export default function KpiFieldsPage() {
   const [multiFieldEditingPanelById, setMultiFieldEditingPanelById] = useState<Record<number, "general" | "subfields" | null>>({});
   const [addSubFieldModal, setAddSubFieldModal] = useState<{ fieldId: number; activeSection: string } | null>(null);
   const [editSubFieldModal, setEditSubFieldModal] = useState<{ fieldId: number; subIndex: number } | null>(null);
+  const [formulaModal, setFormulaModal] = useState<{
+    fieldId: number;
+    subIndex: number;
+    subField: any;
+    allSubFields: any[];
+  } | null>(null);
   const [deleteSubFieldModal, setDeleteSubFieldModal] = useState<{ fieldId: number; subIndex: number; name: string; key: string } | null>(null);
   const [deleteSubFieldConfirm, setDeleteSubFieldConfirm] = useState<{ name: string; key: string }>({ name: "", key: "" });
   const [deleteFieldModal, setDeleteFieldModal] = useState<{ fieldId: number; name: string; key: string } | null>(null);
@@ -3388,6 +3396,26 @@ export default function KpiFieldsPage() {
                                                 <button
                                                   type="button"
                                                   className="btn"
+                                                  style={{
+                                                    marginLeft: "0.35rem",
+                                                    backgroundColor: (s as any).field_type === "formula" || (s as any).config?.is_formula ? "#e0e7ff" : undefined,
+                                                    color: (s as any).field_type === "formula" || (s as any).config?.is_formula ? "#3730a3" : undefined,
+                                                    borderColor: (s as any).field_type === "formula" || (s as any).config?.is_formula ? "#c7d2fe" : undefined,
+                                                  }}
+                                                  onClick={() => {
+                                                    setFormulaModal({
+                                                      fieldId: f.id,
+                                                      subIndex: i,
+                                                      subField: s,
+                                                      allSubFields: (f.sub_fields ?? []) as any[],
+                                                    });
+                                                  }}
+                                                >
+                                                  {(s as any).field_type === "formula" || (s as any).config?.is_formula ? "fx Formula" : "fx Formula"}
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  className="btn"
                                                   style={{ color: "var(--error)", marginLeft: "0.35rem" }}
                                                   onClick={() => {
                                                     const n = String((s as any).name ?? "");
@@ -3474,6 +3502,33 @@ export default function KpiFieldsPage() {
                   )}
                 </ul>
               )}
+
+              {/* MLI Text Extraction Rules Card */}
+              {superAdminFieldsTab.startsWith("multi:") && (() => {
+                const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
+                const activeParentFieldId = match ? Number(match[1]) : null;
+                const activeParentField = activeParentFieldId ? list.find((f) => f.id === activeParentFieldId) : null;
+                if (!activeParentField) return null;
+                const subFieldDefs = (activeParentField.sub_fields ?? []).map((s: any) => ({ key: s.key, name: s.name }));
+                return (
+                  <div
+                    style={{
+                      border: "1px solid var(--border)",
+                      borderRadius: 10,
+                      padding: "0.85rem 0.9rem",
+                      background: "var(--surface)",
+                      marginBottom: "0.75rem",
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, marginBottom: "0.65rem" }}>Text Extraction Rules</div>
+                    <MLIExtractionRulesPanel
+                      token={token ?? ""}
+                      fieldId={activeParentFieldId!}
+                      subFields={subFieldDefs}
+                    />
+                  </div>
+                );
+              })()}
 
               {/* Conditional Visibility Rules Card */}
               {(superAdminFieldsTab === "scalar" || superAdminFieldsTab.startsWith("multi:")) && (() => {
@@ -4797,6 +4852,96 @@ export default function KpiFieldsPage() {
             })()}
           </div>
         </div>
+      )}
+
+      {formulaModal && (
+        <MliFormulaBuilderModal
+          isOpen={!!formulaModal}
+          onClose={() => setFormulaModal(null)}
+          targetSubField={formulaModal.subField}
+          allSubFields={formulaModal.allSubFields}
+          onSave={async (updatedConfig) => {
+            const field = list.find((x) => x.id === formulaModal.fieldId);
+            if (!field) return;
+
+            const existingSubs = (field.sub_fields ?? []) as any[];
+            const nextSubs = existingSubs.map((sf, idx) => {
+              if (idx === formulaModal.subIndex) {
+                return {
+                  ...sf,
+                  field_type: updatedConfig.field_type,
+                  config: updatedConfig.config,
+                };
+              }
+              return sf;
+            });
+
+            try {
+              const body: any = {
+                name: field.name,
+                sub_fields: nextSubs.map((s, i) => ({
+                  name: s.name,
+                  key: s.key,
+                  field_type: s.field_type,
+                  is_required: s.is_required ?? false,
+                  sort_order: i,
+                  config: s.config || null,
+                })),
+              };
+
+              const updatedField = await api.put<KpiField>(`/api/kpis/fields/${field.id}`, body);
+              setList((prev) => prev.map((item) => (item.id === field.id ? updatedField : item)));
+              toast.success("Formula configuration saved successfully!");
+            } catch (err: any) {
+              toast.error(err?.detail || err?.message || "Failed to save formula configuration.");
+            }
+          }}
+        />
+      )}
+
+      {formulaModal && (
+        <MliFormulaBuilderModal
+          isOpen={!!formulaModal}
+          onClose={() => setFormulaModal(null)}
+          targetSubField={formulaModal.subField}
+          allSubFields={formulaModal.allSubFields}
+          onSave={async (updatedConfig) => {
+            const field = list.find((x) => x.id === formulaModal.fieldId);
+            if (!field) return;
+
+            const existingSubs = (field.sub_fields ?? []) as any[];
+            const nextSubs = existingSubs.map((sf, idx) => {
+              if (idx === formulaModal.subIndex) {
+                return {
+                  ...sf,
+                  field_type: updatedConfig.field_type,
+                  config: updatedConfig.config,
+                };
+              }
+              return sf;
+            });
+
+            try {
+              const body: any = {
+                name: field.name,
+                sub_fields: nextSubs.map((s, i) => ({
+                  name: s.name,
+                  key: s.key,
+                  field_type: s.field_type,
+                  is_required: s.is_required ?? false,
+                  sort_order: i,
+                  config: s.config || null,
+                })),
+              };
+
+              const updatedField = await api.put<KpiField>(`/api/kpis/fields/${field.id}`, body);
+              setList((prev) => prev.map((item) => (item.id === field.id ? updatedField : item)));
+              toast.success("Formula configuration saved successfully!");
+            } catch (err: any) {
+              toast.error(err?.detail || err?.message || "Failed to save formula configuration.");
+            }
+          }}
+        />
       )}
 
       {deleteSubFieldModal && (

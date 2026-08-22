@@ -408,6 +408,24 @@ export default function CustomReportViewPage() {
 
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "1rem" }}>
+      {/* Top Left Back Navigation */}
+      <div style={{ marginBottom: "1rem" }}>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            if (userRole === "SUPER_ADMIN") {
+              router.push(`/dashboard/custom-reports?organization_id=${orgId}`);
+            } else {
+              router.push("/dashboard/reports");
+            }
+          }}
+          style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+        >
+          ← Back
+        </button>
+      </div>
+
       {/* Top Header Panel */}
       <div style={{ display: "flex", justifySelf: "stretch", justifyContent: "space-between", alignItems: "center", gap: "1rem", flexWrap: "wrap", marginBottom: "1.5rem", background: "linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%)", padding: "1.25rem 1.5rem", borderRadius: 12, boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)", color: "white" }}>
         <div>
@@ -512,21 +530,6 @@ export default function CustomReportViewPage() {
             >
               {printLoading ? "Working..." : "Print / Export"}
             </button>
-
-            <button
-              type="button"
-              className="btn"
-              onClick={() => {
-                if (userRole === "SUPER_ADMIN") {
-                  router.push(`/dashboard/custom-reports?organization_id=${orgId}`);
-                } else {
-                  router.push("/dashboard/reports");
-                }
-              }}
-              style={{ padding: "0.4rem 0.8rem", fontSize: "0.9rem", background: "#ef4444", color: "white", border: "none", borderRadius: 8 }}
-            >
-              Back
-            </button>
           </div>
         </div>
       </div>
@@ -536,40 +539,22 @@ export default function CustomReportViewPage() {
         <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: "1rem" }}>
           <button
             type="button"
+            className="btn btn-primary"
             disabled={odooSyncing || loading || isShiftingPeriod}
             onClick={handleOdooSync}
             style={{
-              padding: "0.5rem 1.25rem",
+              padding: "0.45rem 1rem",
               fontSize: "0.9rem",
               fontWeight: 600,
-              background: (odooSyncing || loading || isShiftingPeriod) ? "#9ca3af" : "#2563eb",
-              color: "white",
-              border: "none",
-              borderRadius: 8,
               cursor: (odooSyncing || loading || isShiftingPeriod) ? "not-allowed" : "pointer",
               opacity: (odooSyncing || loading || isShiftingPeriod) ? 0.6 : 1,
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              boxShadow: "0 2px 4px rgba(37, 99, 235, 0.3)",
-              transition: "background 0.2s",
-
             }}
           >
-            {odooSyncing ? (
-              <>
-                <span style={{ display: "inline-block", width: 16, height: 16, border: "2px solid white", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-                Syncing from LMS...
-
-              </>
-            ) : (
-              <>🔄 Load Data from LMS</>
-
-            )}
+            {odooSyncing ? "Syncing from LMS..." : "Load Data from LMS"}
           </button>
-          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
       {/* Premium Loading Card (matches period shifting layout) */}
       {loading && !isShiftingPeriod && (
@@ -624,7 +609,8 @@ export default function CustomReportViewPage() {
         </div>
       )}
 
-      <div style={{ position: "relative", minHeight: (isShiftingPeriod || shiftError) ? "280px" : "auto" }}>
+      {!loading && (
+        <div style={{ position: "relative", minHeight: (isShiftingPeriod || shiftError) ? "280px" : "auto" }}>
         {/* Shifting period overlay */}
         {isShiftingPeriod && (
           <div style={{
@@ -813,6 +799,7 @@ export default function CustomReportViewPage() {
                         rows={f.value_items || []}
                         totalCount={f.total_count}
                         mergedHeaders={f.config?.merged_headers}
+                        columnWidths={f.config?.column_widths}
                       />
                     </div>
                   );
@@ -862,6 +849,7 @@ export default function CustomReportViewPage() {
           )}
         </div>
       </div>
+      )}
 
       {/* Print / Export Modal */}
       {exportModalOpen && (
@@ -891,38 +879,42 @@ export default function CustomReportViewPage() {
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
               <button
                 type="button"
-                className="btn btn-secondary"
+                className="btn"
                 onClick={handlePrint}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", padding: "0.6rem", fontWeight: 600, border: "1px solid #cbd5e1" }}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.6rem", padding: "0.65rem 1rem", fontWeight: 600, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
               >
-                🖨️ Print Report (PDF System Dialog)
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+                Print Report (PDF System Dialog)
               </button>
 
               <button
                 type="button"
-                className="btn btn-primary"
+                className="btn"
                 onClick={() => handleExport("pdf")}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", padding: "0.6rem", fontWeight: 600, background: "#ef4444" }}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.6rem", padding: "0.65rem 1rem", fontWeight: 600, background: "#fff5f5", color: "#991b1b", border: "1px solid #fca5a5" }}
               >
-                📄 Direct Download PDF (.pdf)
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                Direct Download PDF (.pdf)
               </button>
               
               <button
                 type="button"
                 className="btn"
                 onClick={() => handleExport("docx")}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", padding: "0.6rem", fontWeight: 600, backgroundColor: "#ebf5ff", color: "#1e40af", border: "1px solid #bfdbfe" }}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.6rem", padding: "0.65rem 1rem", fontWeight: 600, backgroundColor: "#eff6ff", color: "#1e40af", border: "1px solid #bfdbfe" }}
               >
-                📝 Export Word (.docx)
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                Export Word (.docx)
               </button>
               
               <button
                 type="button"
                 className="btn"
                 onClick={() => handleExport("xlsx")}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", padding: "0.6rem", fontWeight: 600, backgroundColor: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0" }}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.6rem", padding: "0.65rem 1rem", fontWeight: 600, backgroundColor: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0" }}
               >
-                📊 Export Excel (.xlsx)
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>
+                Export Excel (.xlsx)
               </button>
             </div>
           </div>

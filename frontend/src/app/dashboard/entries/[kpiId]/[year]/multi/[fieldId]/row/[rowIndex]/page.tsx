@@ -1293,7 +1293,8 @@ export default function MultiItemRowDetail() {
                             {compactFields.map((sf) => {
                 const key = sf.key;
                 const val = editData[key];
-                const canEdit = sf.can_edit !== false && sf.field_type !== "formula" && isRowEditable;
+                const isFormulaField = sf.field_type === "formula" || Boolean(sf.config?.is_formula);
+                const canEdit = sf.can_edit !== false && !isFormulaField && isRowEditable;
                 const displayVal =
                   sf.field_type === "boolean"
                     ? Boolean(val) ? "Yes" : "No"
