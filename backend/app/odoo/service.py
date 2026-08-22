@@ -92,8 +92,20 @@ def _extract_session_id(data: dict, cookies: httpx.Cookies) -> str | None:
     return None
 
 
-async def odoo_authenticate(cfg: OrganizationOdooConfig) -> str:
-    """Authenticate with Odoo login URL; return session id for the fetch step."""
+_SESSION_CACHE: dict[int, tuple[str, float]] = {}
+
+
+async def odoo_authenticate(cfg: OrganizationOdooConfig, force_refresh: bool = False) -> str:
+    """Authenticate with Odoo login URL; return session id for the fetch step, reusing cached session when valid."""
+    import time
+    org_id = getattr(cfg, "organization_id", None) or getattr(cfg, "id", None)
+    now = time.time()
+
+    if not force_refresh and org_id and org_id in _SESSION_CACHE:
+        cached_sid, expiry = _SESSION_CACHE[org_id]
+        if now < expiry:
+            return cached_sid
+
     db_name = (cfg.odoo_db or "").strip() or "OBE"
     payload = {
         "jsonrpc": "2.0",
@@ -104,9 +116,10 @@ async def odoo_authenticate(cfg: OrganizationOdooConfig) -> str:
         },
         "id": None,
     }
+    login_url = "".join((cfg.login_url or "").split())
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(cfg.login_url, json=payload)
+            resp = await client.post(login_url, json=payload)
     except httpx.HTTPError as e:
         raise ValueError(f"Odoo server connection failed: {e}") from e
     except Exception as e:
@@ -131,28 +144,52 @@ async def odoo_authenticate(cfg: OrganizationOdooConfig) -> str:
             session_id = str(uid)
         else:
             raise ValueError("Odoo login succeeded but no session id was returned")
+
+    if org_id:
+        _SESSION_CACHE[org_id] = (session_id, now + 1800.0)
     return session_id
+
+
+def _extract_list_from_dict(d: dict) -> list | None:
+    for candidate in ("data", "items", "records", "rows", "values", "results", "payload"):
+        val = d.get(candidate)
+        if isinstance(val, list):
+            return val
+    list_vals = [v for v in d.values() if isinstance(v, list)]
+    if len(list_vals) == 1:
+        return list_vals[0]
+    return None
 
 
 def _get_by_path(data: Any, path: str | None) -> Any:
     if path is None or path.strip() == "":
-        for candidate in ("items", "data", "records", "rows"):
-            if isinstance(data, dict) and candidate in data:
-                return data[candidate]
-        if isinstance(data, dict) and "result" in data:
-            res = data["result"]
-            if isinstance(res, list):
-                return res
-            if isinstance(res, dict):
-                for candidate in ("items", "data", "records", "rows"):
-                    if candidate in res:
-                        return res[candidate]
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            extracted = _extract_list_from_dict(data)
+            if extracted is not None:
+                return extracted
+            if "result" in data:
+                res = data["result"]
+                if isinstance(res, list):
+                    return res
+                if isinstance(res, dict):
+                    extracted_res = _extract_list_from_dict(res)
+                    if extracted_res is not None:
+                        return extracted_res
         return None
+
     cur = data
     for part in path.strip().split("."):
         if not isinstance(cur, dict):
             return None
         cur = cur.get(part)
+
+    if isinstance(cur, dict):
+        extracted = _extract_list_from_dict(cur)
+        if extracted is not None:
+            return extracted
+
     return cur
 
 
@@ -172,12 +209,19 @@ async def odoo_fetch_items(
         "field_id": context.get("field_id"),
         "field_key": context.get("field_key"),
     }
-    body = build_odoo_request_body(kpi_cfg.request_body, ctx)
-    if isinstance(body, dict) and "session_id" not in body and "__SESSION_ID__" not in json.dumps(kpi_cfg.request_body):
-        body["session_id"] = session_id
+    request_body_val = getattr(kpi_cfg, "request_body", None)
 
     headers: dict[str, str] = {"Content-Type": "application/json"}
     cookies = {"session_id": session_id}
+    post_kwargs = {}
+
+    if request_body_val is not None and (not isinstance(request_body_val, str) or request_body_val.strip() != ""):
+        body = build_odoo_request_body(request_body_val, ctx)
+        if isinstance(body, dict) and "jsonrpc" in body and "params" not in body:
+            body["params"] = {}
+        post_kwargs["json"] = body if isinstance(body, (dict, list)) else {"payload": body}
+    else:
+        post_kwargs["json"] = {"jsonrpc": "2.0", "method": "call", "params": {}}
 
     target_url = cfg.data_fetch_url
     if getattr(kpi_cfg, "endpoint", None) is not None:
@@ -186,14 +230,21 @@ async def odoo_fetch_items(
                 f"The selected Odoo API endpoint '{kpi_cfg.endpoint.name}' is currently inactive. Please select an active endpoint in KPI configuration."
             )
         target_url = kpi_cfg.endpoint.url
+    target_url = "".join((target_url or "").split())
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(
-            target_url,
-            json=body if isinstance(body, (dict, list)) else {"payload": body},
-            headers=headers,
-            cookies=cookies,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                target_url,
+                headers=headers,
+                cookies=cookies,
+                **post_kwargs,
+            )
+    except httpx.HTTPError as e:
+        raise ValueError(f"Odoo server connection failed: {e}") from e
+    except Exception as e:
+        raise ValueError(f"Odoo request error: {e}") from e
+
     if resp.status_code < 200 or resp.status_code >= 300:
         raise ValueError(f"Odoo data fetch failed (HTTP {resp.status_code})")
     try:
@@ -207,6 +258,7 @@ async def odoo_fetch_items(
     if raw_items is None and isinstance(data, list):
         raw_items = data
     if not isinstance(raw_items, list):
+        print("DEBUG_FETCH_FAIL data=", data, "raw_items=", raw_items)
         raise ValueError("Odoo response did not contain a list of items")
     items = [dict(x) for x in raw_items if isinstance(x, dict)]
     return items
@@ -651,3 +703,31 @@ async def store_pre_downloaded_odoo_attachments(
         return stored_objects[0], errors
 
     return stored_objects, errors
+
+
+def build_on_demand_attachment_placeholders(kpi_id: int, raw_attachment_val: Any) -> Any:
+    """
+    Extract attachment IDs from raw_attachment_val and return a JSON-serializable list/dict of placeholders
+    pointing to our on-demand download proxy. If raw_attachment_val is False, None, or empty, return None.
+    """
+    if not raw_attachment_val or raw_attachment_val in (False, "False", "false", "None", "none", "0", 0, [], {}):
+        return None
+
+    att_ids = extract_odoo_attachment_ids(raw_attachment_val)
+    if not att_ids:
+        return None
+
+    placeholders = []
+    for att_id in att_ids:
+        if not att_id or str(att_id).strip() in ("", "0", "false", "none", "null"):
+            continue
+        placeholders.append({
+            "url": f"/api/kpis/{kpi_id}/files/odoo/{att_id}",
+            "filename": "Proof.pdf"
+        })
+
+    if not placeholders:
+        return None
+    if len(placeholders) == 1:
+        return placeholders[0]
+    return placeholders

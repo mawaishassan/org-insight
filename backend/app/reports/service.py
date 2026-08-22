@@ -1117,9 +1117,11 @@ def _blocks_to_jinja(blocks: list[dict]) -> str:
             _column_align_parts = [f"'{str(k).replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}': '{v}'" for k, v in _align_map.items()]
             _column_align_prefix = "{% set column_align = {" + ", ".join(_column_align_parts) + "} %}" if _column_align_parts else "{% set column_align = {} %}"
             _th_style_key = ' style="text-align: {{ column_align.get(key, \'left\') }}"'
-            _td_style_key = ' style="text-align: {{ column_align.get(key, \'left\') }}"'
-            _td_style_f = ' style="text-align: {{ column_align.get(f.field_key, \'left\') }}"'
-            _td_style_ef = ' style="text-align: {{ column_align.get(ef.field_key, \'left\') }}"'
+            _table_cell_extra = "; word-break: normal !important; overflow-wrap: normal !important; word-wrap: normal !important; white-space: normal !important; hyphens: none !important; padding: 6px 5px !important; vertical-align: middle !important;"
+            _td_style_key = f' style="text-align: {{{{ column_align.get(key, \'left\') }}}}{_table_cell_extra}"'
+            _td_style_f = f' style="text-align: {{{{ column_align.get(f.field_key, \'left\') }}}}{_table_cell_extra}"'
+            _td_style_ef = f' style="text-align: {{{{ column_align.get(ef.field_key, \'left\') }}}}{_table_cell_extra}"'
+            _th_style_key = f' style="text-align: {{{{ column_align.get(key, \'left\') }}}}{_table_cell_extra}"'
             _label_f_cond = "{% if show_multi_line_field_label or f.field_type != 'multi_line_items' %}" + _label_f + "{% endif %}"
             _label_key_cond = "{% set _fl = (kpi.entries[0].fields | default([]) | selectattr('field_key', 'equalto', key) | list) %}{% if show_multi_line_field_label or (_fl | length == 0) or (((_fl|first)|default({})).field_type != 'multi_line_items') %}" + _label_key + "{% endif %}"
             # Scalar cell (main KPI table). Multi-line fields are excluded from the main table.
@@ -3813,15 +3815,28 @@ async def generate_kpi_pdf_report(
                     textColor=colors.white
                 )
                 t_th_sr_style = ParagraphStyle(f"KpiTH_Sr_{f.key}", parent=t_th_style, alignment=TA_CENTER)
+                t_th_style_left = ParagraphStyle(f"KpiTH_Left_{f.key}", parent=t_th_style, alignment=TA_LEFT)
+                t_th_style_center = ParagraphStyle(f"KpiTH_Center_{f.key}", parent=t_th_style, alignment=TA_CENTER)
                 
-                t_td_style = ParagraphStyle(
-                    f"KpiTD_{f.key}",
+                t_td_style_left = ParagraphStyle(
+                    f"KpiTD_Left_{f.key}",
                     parent=styles["Normal"],
                     fontName="Helvetica",
                     fontSize=table_font_size,
                     leading=table_leading,
-                    textColor=colors.HexColor("#1f2937")
+                    textColor=colors.HexColor("#1f2937"),
+                    alignment=TA_LEFT
                 )
+                t_td_style_center = ParagraphStyle(
+                    f"KpiTD_Center_{f.key}",
+                    parent=styles["Normal"],
+                    fontName="Helvetica",
+                    fontSize=table_font_size,
+                    leading=table_leading,
+                    textColor=colors.HexColor("#1f2937"),
+                    alignment=TA_CENTER
+                )
+                t_td_style = t_td_style_center
                 t_td_sr_style = ParagraphStyle(f"KpiTD_Sr_{f.key}", parent=t_td_style, alignment=TA_CENTER)
 
                 available_width = max(100, (684 if use_landscape else 504) - table_indent)
@@ -3865,7 +3880,7 @@ async def generate_kpi_pdf_report(
 
                 table_data = [
                     [Paragraph("<b>Sr. No.</b>", t_th_sr_style)] + 
-                    [Paragraph(f"<b>{html.escape(get_header_text(h))}</b>", t_th_style) for h in headers]
+                    [Paragraph(f"<b>{html.escape(get_header_text(h))}</b>", t_th_style_left if idx == 0 else t_th_style_center) for idx, h in enumerate(headers)]
                 ]
 
                 def get_cell_text(row: dict, col: str) -> str:
@@ -3889,7 +3904,7 @@ async def generate_kpi_pdf_report(
                     table_data.append([
                         Paragraph(str(sr), t_td_sr_style)
                     ] + [
-                        Paragraph(get_cell_text(r, col), t_td_style) for col in selected_column_keys
+                        Paragraph(get_cell_text(r, col), t_td_style_left if idx == 0 else t_td_style_center) for idx, col in enumerate(selected_column_keys)
                     ])
 
                 grid_style = [

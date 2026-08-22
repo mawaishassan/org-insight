@@ -727,10 +727,20 @@ def _xlsx_bytes_for_multi_items_export(
                     url = str(obj.get("url") or obj.get("download_url") or "")
                     if url:
                         m = re.search(r"kpis/(\d+)/files/(\d+)/download", url)
+                        m_odoo = re.search(r"kpis/(\d+)/files/odoo/(\d+)", url)
                         if m:
                             kpi_id = m.group(1)
                             file_id = m.group(2)
                             frontend_path = f"/dashboard/entries/attachments/{kpi_id}/{file_id}"
+                            full_url = f"{base_url.rstrip('/')}{frontend_path}" if base_url else frontend_path
+                            cell.value = f'=HYPERLINK("{full_url}", "{fn}")'
+                            cell.font = link_font
+                            is_link = True
+                            col_widths[idx] = max(col_widths[idx], len(str(fn)))
+                        elif m_odoo:
+                            kpi_id = m_odoo.group(1)
+                            att_id = m_odoo.group(2)
+                            frontend_path = f"/dashboard/entries/attachments/{kpi_id}/odoo_{att_id}"
                             full_url = f"{base_url.rstrip('/')}{frontend_path}" if base_url else frontend_path
                             cell.value = f'=HYPERLINK("{full_url}", "{fn}")'
                             cell.font = link_font
@@ -2369,6 +2379,20 @@ async def list_multi_items_rows(
                 raw = None
             row_data_by_index[idx][str(key)] = raw
 
+        # Apply extraction rules (in-memory, non-mutating)
+        from app.entries.multi_line_load import _fetch_rules_for_field
+        rules = await _fetch_rules_for_field(db, field.id)
+        if rules:
+            try:
+                from app.entries.mli_extraction import apply_extraction_rules
+                page_indices = [int(ridx) for _, ridx in page_rows]
+                row_list = [row_data_by_index.get(idx, {}) for idx in page_indices]
+                processed = apply_extraction_rules(row_list, rules)
+                for idx, proc in zip(page_indices, processed):
+                    row_data_by_index[idx] = proc
+            except ValueError as exc:
+                logger.warning("MLI extraction skipped (circular dependency): %s", exc)
+
         for rid, row_index in page_rows:
             orig_index = int(row_index)
             r = row_data_by_index.get(orig_index, {})
@@ -3601,73 +3625,11 @@ async def sync_multi_items_from_odoo(
 
     all_attachment_errors: list[str] = []
     if att_sub_keys and (org_odoo.attachment_url_template or "").strip():
-        att_template = org_odoo.attachment_url_template.strip()
-        
-        # 1. Collect all attachment IDs to download concurrently
-        all_att_ids = []
+        from app.odoo.service import build_on_demand_attachment_placeholders
         for row in item_dicts:
             for att_key in att_sub_keys:
                 raw_att_val = row.get(att_key)
-                if raw_att_val is not None and raw_att_val != "":
-                    all_att_ids.extend(extract_odoo_attachment_ids(raw_att_val))
-        
-        unique_att_ids = list(set(all_att_ids))
-        
-        # 2. Download all files in parallel with controlled concurrency
-        set_sync_stage("kpi_entry", entry.id, "DOWNLOADING_ATTACHMENTS")
-        downloaded_data = {}
-        if unique_att_ids:
-            import httpx
-            import asyncio
-            
-            sem = asyncio.Semaphore(15)
-            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-                async def fetch_one(att_id):
-                    async with sem:
-                        target_url = (
-                            att_template.replace("{ATTACHMENT_ID}", str(att_id))
-                            .replace("{attachment_id}", str(att_id))
-                            .replace("__ATTACHMENT_ID__", str(att_id))
-                            .replace("{SESSION_ID}", session_id)
-                            .replace("{session_id}", session_id)
-                            .replace("__SESSION_ID__", session_id)
-                        )
-                        try:
-                            resp = await client.get(target_url, cookies={"session_id": session_id})
-                            if resp.status_code < 200 or resp.status_code >= 300:
-                                return Exception(f"HTTP {resp.status_code}")
-                            return att_id, resp.content, dict(resp.headers)
-                        except Exception as ex:
-                            return Exception(f"Download failed: {ex}")
-
-                tasks = [fetch_one(aid) for aid in unique_att_ids]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for aid, res in zip(unique_att_ids, results):
-                    if isinstance(res, Exception) or (isinstance(res, tuple) and len(res) == 0):
-                        err_msg = str(res) or res.__class__.__name__
-                        msg = f"Failed to download Odoo attachment ID {aid}: {err_msg}"
-                        all_attachment_errors.append(msg)
-                    elif isinstance(res, tuple) and len(res) == 3:
-                        downloaded_data[aid] = (res[1], res[2])  # (content, headers)
-
-        # 3. Store downloaded attachments sequentially for DB safety
-        for row in item_dicts:
-            for att_key in att_sub_keys:
-                raw_att_val = row.get(att_key)
-                if raw_att_val is not None and raw_att_val != "":
-                    converted, att_errs = await store_pre_downloaded_odoo_attachments(
-                        db,
-                        org_id=org_id,
-                        kpi_id=field.kpi_id,
-                        entry_id=entry.id,
-                        year=entry.year,
-                        user_id=current_user.id,
-                        raw_attachment_val=raw_att_val,
-                        downloaded_data=downloaded_data,
-                    )
-                    row[att_key] = converted
-                    if att_errs:
-                        all_attachment_errors.extend(att_errs)
+                row[att_key] = build_on_demand_attachment_placeholders(field.kpi_id, raw_att_val)
 
     existing_pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
     existing_rows: list[dict] = [r for _, r in existing_pairs] if existing_pairs else []

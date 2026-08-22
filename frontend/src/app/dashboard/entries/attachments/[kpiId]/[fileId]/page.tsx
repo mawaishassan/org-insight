@@ -76,17 +76,10 @@ export default function AttachmentDownloadPage() {
     const token = getAccessToken();
     if (!token) return;
     try {
-      const downloadApiPath = `/kpis/${kpiId}/files/${fileId}/download`;
-      const url = getApiUrl(downloadApiPath);
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error("Failed to load file");
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      window.open(blobUrl, "_blank", "noopener,noreferrer");
+      const { openKpiStoredFileInNewTab } = await import("@/lib/api");
+      await openKpiStoredFileInNewTab(`/api/kpis/${kpiId}/files/${fileId}/download`, token);
     } catch (err) {
-      alert("Could not open attachment.");
+      alert(err instanceof Error ? err.message : "Could not open attachment.");
     }
   };
 

@@ -1,5 +1,6 @@
 """Pydantic schemas for KPIs."""
 
+from typing import Any
 from pydantic import BaseModel, Field
 
 
@@ -320,7 +321,7 @@ class KpiOdooConfigUpdate(BaseModel):
     """KPI-specific Odoo fetch request body (Super Admin only)."""
 
     odoo_endpoint_id: int | None = Field(None, description="ID of configured OdooEndpoint for this KPI")
-    request_body: dict | list = Field(..., description="JSON body sent to Odoo data fetch URL")
+    request_body: dict | list | None = Field(None, description="JSON body sent to Odoo data fetch URL")
     response_items_path: str | None = Field(
         None,
         max_length=255,
@@ -416,3 +417,25 @@ class KpiSectionFieldIdsBody(BaseModel):
     """Body for bulk assign/unassign-to-section requests: the fields to move."""
 
     field_ids: list[int] = Field(..., min_length=1)
+
+
+class SubFieldFormulaValidateItem(BaseModel):
+    key: str = Field(..., description="Subfield column key, e.g. q1")
+    name: str = Field(..., description="Subfield column label, e.g. Q1")
+    field_type: str = Field(default="number", description="Field type: number, formula, single_line_text, etc.")
+    config: dict | None = Field(default=None, description="Subfield config dict")
+
+
+class SubFieldFormulaValidateRequest(BaseModel):
+    target_sub_key: str = Field(..., description="Target subfield key, e.g. total")
+    formula_expression: str = Field(..., description="Formula expression, e.g. Q1 + Q2 + Q3")
+    sub_fields: list[SubFieldFormulaValidateItem] = Field(default_factory=list, description="All subfields in the MLI column configuration")
+    sample_row: dict[str, Any] | None = Field(default=None, description="Optional sample row values for preview testing")
+
+
+class SubFieldFormulaValidateResponse(BaseModel):
+    is_valid: bool = Field(..., description="Whether the formula syntax, columns, and dependency graph are valid")
+    error: str | None = Field(None, description="Error message if invalid")
+    referenced_sub_keys: list[str] = Field(default_factory=list, description="Subfield keys referenced in the formula")
+    sample_result: Any | None = Field(None, description="Sample preview calculation result")
+    sample_equation: str | None = Field(None, description="Sample formatted preview equation string")

@@ -211,3 +211,38 @@ export async function postDashboardKvTableWidgetData(
     ...init,
   });
 }
+
+/**
+ * Universal period-shift batch — sends ALL widget types (charts, cards,
+ * line charts, trends, tables, text) in a single POST and receives all
+ * results back in one response.
+ *
+ * Use this instead of calling chart/batch + card/batch + individual
+ * line/trend/table endpoints when the user shifts the reporting period.
+ *
+ * Returns: { version: 1, results: { "<widget_id>": { ok, widget_type, meta, data, entry_revision } } }
+ */
+export async function postDashboardUniversalBatch(
+  token: string,
+  body: {
+    version: 1;
+    organization_id: number;
+    dashboard_id: number;
+    items: Array<{ widget: Record<string, unknown>; overrides?: Record<string, unknown> }>;
+  },
+  init?: RequestInit
+): Promise<{ version: number; results: Record<string, {
+  ok: boolean;
+  widget_type?: string;
+  meta?: Record<string, unknown>;
+  data?: Record<string, unknown>;
+  entry_revision?: string | null;
+  error?: string;
+}> }> {
+  return api("/widget-data/dashboard/batch", {
+    method: "POST",
+    body: JSON.stringify(body),
+    token,
+    ...init,
+  });
+}

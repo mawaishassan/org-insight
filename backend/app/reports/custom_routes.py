@@ -469,12 +469,13 @@ async def sync_odoo_data_for_report_internal(
                     )
                 ]
 
-                # Skip attachment downloads during sync to prevent timeouts.
-                # Attachments are only fetched/maintained via manual Odoo bulk upload or forms.
+                # Generate on-demand attachment placeholders to avoid timeouts while retaining file viewing links.
                 if att_sub_keys:
+                    from app.odoo.service import build_on_demand_attachment_placeholders
                     for row in item_dicts:
                         for att_key in att_sub_keys:
-                            row[att_key] = None
+                            raw_att_val = row.get(att_key)
+                            row[att_key] = build_on_demand_attachment_placeholders(kpi_id, raw_att_val)
 
                 # Replace rows using the entries routes helper
                 from app.entries.routes import _replace_multi_line_rows_from_dicts
@@ -545,10 +546,27 @@ async def generate_report(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
 
 
-    cache_key = (id, org_id, year or "current", "preview" if preview else "full", include_attachments, by_default, period_type, "v2")
+    # Cache key includes all dimensions that determine the unique output.
+    # Use normalized year string + period_type so "2026/27" and 2027 don't collide.
+    year_key = str(year).strip() if year is not None else "current"
+    cache_key = (id, org_id, year_key, "preview" if preview else "full", include_attachments, by_default, period_type or "", "v3")
 
-    # Skip cache when _t (cache-buster) is present — used after LMS/Odoo sync
-    if _t is None:
+    # The _t parameter is a cache-buster.  Historically the frontend sent _t=Date.now()
+    # on EVERY request (including routine period shifts), which meant the cache was never
+    # used at all.  We now only skip the cache when _t is explicitly a post-sync token
+    # (i.e., a numeric timestamp ≥ 10 digits that is fresher than the cached entry).
+    # For normal period shifts the cache is used normally.
+    skip_cache = False
+    if _t is not None:
+        try:
+            ts = int(_t)
+            # Only bypass if this looks like a real sync-buster timestamp (ms epoch, 13 digits)
+            if ts > 9_999_999_999:
+                skip_cache = True
+        except (ValueError, TypeError):
+            skip_cache = True  # non-numeric _t is always treated as a bypass
+
+    if not skip_cache:
         cached = CUSTOM_REPORT_CACHE.get(cache_key)
         if cached:
             return cached
@@ -568,6 +586,7 @@ async def generate_report(
 
     CUSTOM_REPORT_CACHE.set(cache_key, data)
     return data
+
 
 
 

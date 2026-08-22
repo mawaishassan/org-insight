@@ -676,10 +676,11 @@ function blocksToJinja(blocks: ReportBlock[]): string {
       Object.entries(columnAlign).forEach(([k, v]) => { if (["left", "center", "right", "justify"].includes(v)) alignMap[k] = v; });
       const columnAlignEntries = Object.entries(alignMap).map(([k, v]) => `'${k.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}': '${v}'`).join(", ");
       const columnAlignPrefix = `{% set column_align = { ${columnAlignEntries} } %}`;
-      const thStyle = ' style="text-align: {{ column_align.get(key, \'left\') }}"';
-      const tdStyleKey = ' style="text-align: {{ column_align.get(key, \'left\') }}"';
-      const tdStyleF = ' style="text-align: {{ column_align.get(f.field_key, \'left\') }}"';
-      const tdStyleEf = ' style="text-align: {{ column_align.get(ef.field_key, \'left\') }}"';
+      const tableCellExtra = "; word-break: normal !important; overflow-wrap: normal !important; word-wrap: normal !important; white-space: normal !important; hyphens: none !important; padding: 6px 5px !important; vertical-align: middle !important;";
+      const thStyle = ` style="text-align: {{ column_align.get(key, 'left') }}${tableCellExtra}"`;
+      const tdStyleKey = ` style="text-align: {{ column_align.get(key, 'left') }}${tableCellExtra}"`;
+      const tdStyleF = ` style="text-align: {{ column_align.get(f.field_key, 'left') }}${tableCellExtra}"`;
+      const tdStyleEf = ` style="text-align: {{ column_align.get(ef.field_key, 'left') }}${tableCellExtra}"`;
       const fieldsLayout = (b as { fieldsLayout?: "columns" | "rows" }).fieldsLayout ?? "columns";
       const showTableHeading = (b as { showTableHeading?: boolean }).showTableHeading;
       const headingPart = showTableHeading === false ? "" : "<h4>{{ kpi.kpi_name }}</h4>";

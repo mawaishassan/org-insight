@@ -191,6 +191,10 @@ async def can_view_dashboard_for_kpi_chart(
     if not user or user.id is None or kpi_id <= 0:
         return False
     uid = int(user.id)
+    cache_key = ("allowed_kpi", int(dashboard_id), int(org_id), int(kpi_id), uid)
+    if cache_key in db.info:
+        return db.info[cache_key]
+
     ok = (
         await db.execute(
             select(Dashboard.id)
@@ -205,11 +209,15 @@ async def can_view_dashboard_for_kpi_chart(
         )
     ).scalar_one_or_none()
     if ok is None:
+        db.info[cache_key] = False
         return False
     if user.role.value == "SUPER_ADMIN":
+        db.info[cache_key] = True
         return True
     if user.role.value == "ORG_ADMIN":
-        return user.organization_id == org_id
+        allowed = user.organization_id == org_id
+        db.info[cache_key] = allowed
+        return allowed
     perm = (
         await db.execute(
             select(DashboardAccessPermission.can_view).where(
@@ -218,7 +226,9 @@ async def can_view_dashboard_for_kpi_chart(
             ).limit(1)
         )
     ).scalar_one_or_none()
-    return bool(perm)
+    allowed = bool(perm)
+    db.info[cache_key] = allowed
+    return allowed
 
 
 async def user_can_access_dashboard(

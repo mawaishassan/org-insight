@@ -10,6 +10,8 @@ from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+import logging
+logger = logging.getLogger("uvicorn.error")
 
 from app.core.database import get_db
 from app.auth.dependencies import require_org_admin, require_super_admin, get_current_user, get_data_export_auth, DataExportAuth, security
@@ -41,6 +43,8 @@ from app.kpis.schemas import (
     AssignedRoleRef,
     UsedInReportRef,
     KpiFileResponse,
+    SubFieldFormulaValidateRequest,
+    SubFieldFormulaValidateResponse,
     KpiOdooConfigUpdate,
     KpiOdooConfigResponse,
     KpiOdooConfigStatus,
@@ -1020,13 +1024,8 @@ async def _fetch_kpi_odoo_preview_items(
     preview_body = body.request_body if body and body.request_body is not None else None
     preview_path = (body.response_items_path or "").strip() if body else ""
     if preview_body is None:
-        if not saved_kpi_odoo:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Save the KPI Odoo request body first, or send request_body in the preview request",
-            )
-        request_body = saved_kpi_odoo.request_body
-        response_items_path = saved_kpi_odoo.response_items_path
+        request_body = saved_kpi_odoo.request_body if saved_kpi_odoo else None
+        response_items_path = saved_kpi_odoo.response_items_path if saved_kpi_odoo else None
     else:
         request_body = preview_body
         response_items_path = preview_path or (saved_kpi_odoo.response_items_path if saved_kpi_odoo else None)
@@ -1290,22 +1289,283 @@ async def upload_kpi_files(
     ]
 
 
-@router.get("/{kpi_id}/files/{file_id}/download")
-async def download_kpi_file(
+@router.get("/{kpi_id}/files/odoo/{attachment_id}")
+@router.get("/{kpi_id}/files/odoo_{attachment_id}/download")
+async def download_odoo_file_on_demand(
     kpi_id: int,
-    file_id: int,
+    attachment_id: int,
     download: bool = Query(False),
+    token: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ):
-    """Stream file content. Auth: Org Admin or user with view/data_entry for this KPI."""
-    if not credentials:
+    """Stream attachment file from Odoo on-demand, caching it in storage."""
+    token_str = None
+    if credentials:
+        token_str = credentials.credentials
+    elif token:
+        token_str = token
+
+    if not token_str:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    token_str = credentials.credentials
+
+    from app.core.security import decode_token
+    payload = decode_token(token_str)
+    if not payload or payload.get("type") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    import time
+    t_start = time.time()
+
+    from app.core.models import User, KpiFile
+    from sqlalchemy.orm import load_only, noload
+    user_result = await db.execute(
+        select(User).where(User.id == int(user_id)).options(noload("*"), load_only(User.id, User.organization_id, User.is_active, User.role))
+    )
+    current_user = user_result.scalar_one_or_none()
+    if not current_user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if not current_user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User inactive")
+
+    can_view = await user_can_view_kpi(db, current_user.id, kpi_id)
+    if not can_view:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this KPI")
+
+    from app.core.models import KPI
+    kpi_res = await db.execute(select(KPI).where(KPI.id == kpi_id))
+    kpi_obj = kpi_res.scalar_one_or_none()
+    if not kpi_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+
+    target_org_id = kpi_obj.organization_id or current_user.organization_id
+
+    # 1. Check if the file is already cached/downloaded in KpiFile
+    cache_stmt = select(KpiFile).where(
+        KpiFile.kpi_id == kpi_id,
+        KpiFile.stored_path.like(f"%odoo_att_{attachment_id}%")
+    )
+    cache_res = await db.execute(cache_stmt)
+    kf = cache_res.scalars().first()
+    if kf and kf.size < 2500 and (kf.content_type or "").startswith("image"):
+        kf = None
+
+    if kf:
+        from app.storage.service import get_file_stream as storage_get_file_stream
+        try:
+            content = await storage_get_file_stream(db, kf.organization_id, kf.stored_path)
+            
+            import mimetypes
+            c_type = kf.content_type
+            if not c_type or c_type in ("application/octet-stream", "binary/octet-stream"):
+                guessed, _ = mimetypes.guess_type(kf.original_filename)
+                if guessed:
+                    c_type = guessed
+                    
+            disposition = "attachment" if download else "inline"
+            return StreamingResponse(
+                iter([content]),
+                media_type=c_type or "application/octet-stream",
+                headers={"Content-Disposition": f'{disposition}; filename="{kf.original_filename}"'},
+            )
+        except FileNotFoundError:
+            pass
+
+    # 2. Cache miss: authenticate and download on-demand from Odoo
+    from app.odoo.config_service import get_org_odoo_config
+    org_odoo = await get_org_odoo_config(db, target_org_id)
+    if not org_odoo or not (org_odoo.attachment_url_template or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Odoo attachment download template is not configured for this organization"
+        )
+
+    from app.odoo.service import odoo_authenticate
+    try:
+        session_id = await odoo_authenticate(org_odoo)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Odoo authentication failed: {e}"
+        )
+
+    from urllib.parse import urlparse
+    parsed_login = urlparse(org_odoo.login_url or "")
+    base_url = f"{parsed_login.scheme}://{parsed_login.netloc}" if parsed_login.netloc else "https://lms.uet.edu.pk"
+
+    att_template = (org_odoo.attachment_url_template or "").strip()
+    primary_url = (
+        att_template.replace("{ATTACHMENT_ID}", str(attachment_id))
+        .replace("{attachment_id}", str(attachment_id))
+        .replace("__ATTACHMENT_ID__", str(attachment_id))
+        .replace("{SESSION_ID}", session_id)
+        .replace("{session_id}", session_id)
+        .replace("__SESSION_ID__", session_id)
+    ) if att_template else f"{base_url}/web/content/{attachment_id}"
+
+    candidate_urls = [primary_url]
+    fallbacks = [
+        f"{base_url}/web/binary/saveas?model=ir.attachment&field=datas&id={attachment_id}&filename_field=datas_fname",
+        f"{base_url}/web/content/{attachment_id}",
+        f"{base_url}/web/content?model=ir.attachment&field=datas&id={attachment_id}",
+        f"{base_url}/web/content/ir.attachment/{attachment_id}/datas",
+        f"{base_url}/web/image/ir.attachment/{attachment_id}/datas",
+    ]
+    for fb in fallbacks:
+        if fb not in candidate_urls:
+            candidate_urls.append(fb)
+
+    import httpx
+    content = None
+    resp_headers = None
+    last_status = 404
+    last_error = None
+
+    async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+        for raw_u in candidate_urls:
+            clean_u = "".join((raw_u or "").split())
+            try:
+                resp = await client.get(clean_u, cookies={"session_id": session_id})
+                last_status = resp.status_code
+                if 200 <= resp.status_code < 300 and resp.content:
+                    c_bytes = resp.content
+                    c_type = resp.headers.get("content-type", "").lower()
+                    # Skip HTML error pages returned with HTTP 200
+                    if c_bytes.startswith(b"<!DOCTYPE") or c_bytes.startswith(b"<html") or c_bytes.startswith(b"<HTML"):
+                        continue
+                    # Skip Odoo 1x1 placeholder PNG icons for non-image documents
+                    if len(c_bytes) < 2500 and c_bytes.startswith(b"\x89PNG") and "octet-stream" not in c_type and "pdf" not in c_type:
+                        continue
+                    content = c_bytes
+                    resp_headers = httpx.Headers(resp.headers)
+                    break
+            except Exception as e:
+                last_error = str(e)
+                logger.warning("Odoo attachment fetch attempt failed for %s: %s", clean_u, e)
+
+    if not content:
+        try:
+            from sqlalchemy import cast, String
+            from app.core.models import KpiMultiLineCell
+            att_str = str(attachment_id)
+            cells_res = await db.execute(
+                select(KpiMultiLineCell).where(
+                    (cast(KpiMultiLineCell.value_json, String).like(f"%{att_str}%")) |
+                    (KpiMultiLineCell.value_text.like(f"%{att_str}%"))
+                )
+            )
+            cleared_count = 0
+            for cell in cells_res.scalars().all():
+                cell.value_json = None
+                cell.value_text = None
+                cleared_count += 1
+            if cleared_count > 0:
+                await db.commit()
+                logger.info("Auto-nulled %s missing attachment cells for Odoo ID %s", cleared_count, attachment_id)
+        except Exception as clean_err:
+            logger.warning("Failed to auto-null missing attachment cell for %s: %s", attachment_id, clean_err)
+
+        msg = f"Attachment ID {attachment_id} could not be fetched from Odoo (HTTP {last_status})"
+        if last_error:
+            msg += f": {last_error}"
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND if last_status in (404, 500) else status.HTTP_502_BAD_GATEWAY,
+            detail=msg
+        )
+
+    # 3. Process and store the downloaded file
+    from app.odoo.service import _extract_filename_from_headers
+    original_filename = _extract_filename_from_headers(resp_headers, attachment_id)
+    content_type = resp_headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+
+    import mimetypes
+    if not content_type or content_type in ("application/octet-stream", "binary/octet-stream", "text/plain"):
+        guessed, _ = mimetypes.guess_type(original_filename)
+        if guessed:
+            content_type = guessed
+        elif original_filename.lower().endswith(".pdf"):
+            content_type = "application/pdf"
+
+    import re
+    import uuid
+    base_name = re.sub(r"[^\w.\- ]", "_", original_filename).strip() or "file"
+    unique = f"{base_name[:100]}_{uuid.uuid4().hex[:8]}"
+    relative_path = f"org_{target_org_id}/kpi_{kpi_id}/odoo_att_{attachment_id}_{unique}"
+
+    from app.storage.service import upload_file as storage_upload_file
+    try:
+        stored_path = await storage_upload_file(db, target_org_id, relative_path, content, content_type)
+        
+        kf = KpiFile(
+            kpi_id=kpi_id,
+            organization_id=target_org_id,
+            original_filename=original_filename[:512],
+            stored_path=stored_path,
+            content_type=content_type[:255] if content_type else None,
+            size=len(content),
+            uploaded_by_user_id=None,
+        )
+        db.add(kf)
+        await db.commit()
+        logger.info(
+            "Odoo Attachment Fetch Success | ID: %s | KPI: %s | Size: %s bytes | Total: %.2f ms",
+            attachment_id, kpi_id, len(content), (time.time() - t_start) * 1000
+        )
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save downloaded attachment to local storage: {e}"
+        )
+
+    import mimetypes
+    disposition = "attachment" if download else "inline"
+    c_type = kf.content_type
+    if not c_type or c_type in ("application/octet-stream", "binary/octet-stream"):
+        guessed, _ = mimetypes.guess_type(kf.original_filename)
+        if guessed:
+            c_type = guessed
+
+    return StreamingResponse(
+        iter([content]),
+        media_type=c_type or "application/octet-stream",
+        headers={"Content-Disposition": f'{disposition}; filename="{kf.original_filename}"'},
+    )
+
+
+@router.get("/{kpi_id}/files/{file_id}/download")
+async def download_kpi_file(
+    kpi_id: int,
+    file_id: int,
+    download: bool = Query(False),
+    token: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+):
+    """Stream file content. Auth: Org Admin or user with view/data_entry for this KPI."""
+    token_str = None
+    if credentials:
+        token_str = credentials.credentials
+    elif token:
+        token_str = token
+
+    if not token_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     from app.core.security import decode_token
     from sqlalchemy.orm import noload, load_only
@@ -2107,4 +2367,135 @@ async def download_kpi_report_pdf_route(
         content=data,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{safe_display_name}.pdf"'}
+    )
+
+
+@router.post("/subfields/validate-formula", response_model=SubFieldFormulaValidateResponse)
+async def validate_subfield_formula(
+    body: SubFieldFormulaValidateRequest,
+    current_user: User = Depends(get_current_user),
+) -> SubFieldFormulaValidateResponse:
+    """
+    Validate a MLI subfield row-level formula:
+    - Check syntax
+    - Check that referenced columns exist in the subfield list
+    - Validate circular dependencies
+    - Evaluate on sample_row or default mock values to provide a preview equation and sample result.
+    """
+    expr = (body.formula_expression or "").strip()
+    if not expr:
+        return SubFieldFormulaValidateResponse(is_valid=False, error="Formula expression cannot be empty")
+
+    from app.formula_engine.circular_validation import extract_formula_dependencies, validate_mli_circular_dependencies
+    from app.formula_engine.evaluator import evaluate_formula
+
+    # Build subfield maps
+    sf_by_key = {sf.key: sf for sf in body.sub_fields if sf.key}
+    key_to_name = {sf.key: sf.name for sf in body.sub_fields if sf.key}
+
+    # Normalize expression (replace user-typed Name references with keys if needed)
+    normalized_expr = expr
+    for sf in body.sub_fields:
+        if sf.name and sf.name != sf.key:
+            pattern = r'\b' + re.escape(sf.name) + r'\b'
+            normalized_expr = re.sub(pattern, sf.key, normalized_expr)
+
+    # 1. Extract dependencies
+    deps = extract_formula_dependencies(normalized_expr)
+    missing_cols = []
+    for d in deps:
+        if d not in sf_by_key:
+            missing_cols.append(d)
+
+    if missing_cols:
+        return SubFieldFormulaValidateResponse(
+            is_valid=False,
+            error=f"Column(s) '{', '.join(missing_cols)}' do not exist in this MLI.",
+            referenced_sub_keys=list(deps)
+        )
+
+    # 2. Check self-reference
+    if body.target_sub_key in deps:
+        return SubFieldFormulaValidateResponse(
+            is_valid=False,
+            error=f"Target column '{key_to_name.get(body.target_sub_key, body.target_sub_key)}' cannot reference itself directly.",
+            referenced_sub_keys=list(deps)
+        )
+
+    # 3. Check circular dependencies across subfields
+    mock_sfs = []
+    for sf in body.sub_fields:
+        if sf.key == body.target_sub_key:
+            mock_sfs.append({
+                "key": sf.key,
+                "field_type": "formula",
+                "config": {"formula_expression": normalized_expr}
+            })
+        else:
+            mock_sfs.append({
+                "key": sf.key,
+                "field_type": sf.field_type,
+                "config": sf.config or {}
+            })
+
+    class DictObj:
+        def __init__(self, d):
+            self.key = d["key"]
+            self.field_type = d["field_type"]
+            self.config = d["config"]
+
+    try:
+        validate_mli_circular_dependencies([DictObj(d) for d in mock_sfs])
+    except ValueError as val_err:
+        return SubFieldFormulaValidateResponse(
+            is_valid=False,
+            error=f"Circular formula dependency detected: {val_err}",
+            referenced_sub_keys=list(deps)
+        )
+
+    # 4. Evaluate sample row for preview
+    sample_row = body.sample_row or {}
+    sample_vals = {}
+    sample_values_seq = [10, 20, 30, 40, 50, 15, 25, 5]
+    val_idx = 0
+
+    for sf in body.sub_fields:
+        if sf.key == body.target_sub_key:
+            continue
+        if sf.key in sample_row and sample_row[sf.key] is not None:
+            sample_vals[sf.key] = sample_row[sf.key]
+        else:
+            sample_vals[sf.key] = sample_values_seq[val_idx % len(sample_values_seq)]
+            val_idx += 1
+
+    try:
+        sample_result = evaluate_formula(
+            normalized_expr,
+            field_values=sample_vals,
+            multi_line_items_data={},
+            other_kpi_values={},
+            current_row=sample_vals
+        )
+    except Exception as eval_err:
+        return SubFieldFormulaValidateResponse(
+            is_valid=False,
+            error=f"Formula evaluation error: {eval_err}",
+            referenced_sub_keys=list(deps)
+        )
+
+    # Formulate readable sample equation preview
+    eq_str = expr
+    for k in deps:
+        val_display = str(sample_vals.get(k, 0))
+        pattern = r'\b' + re.escape(k) + r'\b'
+        eq_str = re.sub(pattern, val_display, eq_str)
+
+    sample_equation = f"{eq_str} = {sample_result}"
+
+    return SubFieldFormulaValidateResponse(
+        is_valid=True,
+        error=None,
+        referenced_sub_keys=list(deps),
+        sample_result=sample_result,
+        sample_equation=sample_equation
     )

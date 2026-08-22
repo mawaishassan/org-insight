@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { fetchAllMultiItemsRows, getKpiFieldsWithSubs, type KpiFieldWithSubs } from "@/lib/fetchMultiItemsRows";
 import { CustomLabel } from "./CustomLabel";
 import { useDashboardCustomization } from "./DashboardCustomizationContext";
+import { WidgetFullScreenProvider, useWidgetFullScreen } from "./WidgetFullScreenContext";
 import { SmartChartViewer } from "./SmartChartViewer";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
@@ -23,6 +24,7 @@ import {
   postDashboardTableWidgetRows,
   postDashboardTableWidgetData,
   postDashboardTrendWidgetData,
+  postDashboardUniversalBatch,
   postWidgetData,
 } from "@/lib/widgetData";
 
@@ -128,6 +130,69 @@ function enqueueDashboardCardBatch(req: Omit<PendingCard, "resolve" | "reject">)
       }, 0);
     }
     pendingCardBatches.set(key, cur);
+  });
+}
+
+/**
+ * Universal period-shift batch — coalesces ALL widget types into one POST.
+ *
+ * When the user shifts a reporting period, widgets call this instead of
+ * separate chart/batch + card/batch + individual line/trend/table endpoints.
+ * A single HTTP round-trip fetches data for the entire dashboard.
+ */
+type UniversalBatchKey = string;
+type PendingUniversal = {
+  token: string;
+  organizationId: number;
+  dashboardId: number;
+  widgetId: string;
+  widget: Record<string, unknown>;
+  overrides?: Record<string, unknown>;
+  resolve: (v: any) => void;
+  reject: (e: any) => void;
+};
+const pendingUniversalBatches = new Map<
+  UniversalBatchKey,
+  { timer: any; items: PendingUniversal[] }
+>();
+
+export function enqueueDashboardUniversalBatch(
+  req: Omit<PendingUniversal, "resolve" | "reject">
+): Promise<any> {
+  const key = `${req.token}::${req.organizationId}::${req.dashboardId}`;
+  return new Promise((resolve, reject) => {
+    const item: PendingUniversal = { ...req, resolve, reject };
+    const cur = pendingUniversalBatches.get(key) ?? { timer: null, items: [] as PendingUniversal[] };
+    cur.items.push(item);
+    if (!cur.timer) {
+      cur.timer = setTimeout(async () => {
+        const batch = pendingUniversalBatches.get(key);
+        if (!batch) return;
+        pendingUniversalBatches.delete(key);
+        const items = batch.items;
+        if (items.length === 0) return;
+        try {
+          const res = await postDashboardUniversalBatch(
+            req.token,
+            {
+              version: 1,
+              organization_id: req.organizationId,
+              dashboard_id: req.dashboardId,
+              items: items.map((x) => ({ widget: x.widget, overrides: x.overrides })),
+            }
+          );
+          items.forEach((x, idx) => {
+            const k = x.widgetId || `idx:${idx}`;
+            const r = res?.results?.[k] ?? res?.results?.[`idx:${idx}`];
+            if (r && r.ok) x.resolve(r);
+            else x.reject(new Error(r?.error || "Universal batch failed"));
+          });
+        } catch (e) {
+          items.forEach((x) => x.reject(e));
+        }
+      }, 0);
+    }
+    pendingUniversalBatches.set(key, cur);
   });
 }
 
@@ -467,6 +532,7 @@ function WidgetSettingsShell({
 }) {
   const [open, setOpen] = useState(false);
   const [layoutOpen, setLayoutOpen] = useState(false);
+  const [isFullScreen, setIsFullScreen] = useState(false);
   const [viewerMenu, setViewerMenu] = useState<React.ReactNode>(null);
   const [headerAddon, setHeaderAddon] = useState<React.ReactNode>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -499,181 +565,288 @@ function WidgetSettingsShell({
   return (
     <WidgetViewerMenuSetterContext.Provider value={setViewerMenu}>
       <WidgetHeaderAddonSetterContext.Provider value={setHeaderAddon}>
-        <div className="card" style={{ padding: "1rem", position: "relative", height: "100%", display: "flex", flexDirection: "column" }}>
+        {isFullScreen && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 9998,
+              background: "rgba(0, 0, 0, 0.75)",
+              backdropFilter: "blur(4px)",
+            }}
+            onClick={() => setIsFullScreen(false)}
+          />
+        )}
+        <div
+          className="card"
+          style={
+            isFullScreen
+              ? {
+                  position: "fixed",
+                  top: "4vh",
+                  left: "3vw",
+                  right: "3vw",
+                  bottom: "4vh",
+                  maxHeight: "92vh",
+                  zIndex: 9999,
+                  background: "var(--surface)",
+                  borderRadius: 16,
+                  padding: "1.75rem",
+                  boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.35)",
+                  display: "flex",
+                  flexDirection: "column",
+                  overflow: "hidden",
+                }
+              : {
+                  padding: "1rem",
+                  position: "relative",
+                  height: "100%",
+                  display: "flex",
+                  flexDirection: "column",
+                }
+          }
+        >
           {showHeader ? (
             <div
               style={{
                 display: "flex",
                 justifyContent: "flex-start",
-                alignItems: "flex-start",
+                alignItems: "center",
                 gap: "0.5rem",
                 marginBottom: "0.75rem",
+                borderBottom: isFullScreen ? "1px solid var(--border)" : "none",
+                paddingBottom: isFullScreen ? "0.75rem" : 0,
               }}
             >
               <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
                 {title ? (
-                  <h3 style={{ margin: 0, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</h3>
+                  <h3
+                    style={{
+                      margin: 0,
+                      fontSize: isFullScreen ? "1.75rem" : "1.1rem",
+                      fontWeight: isFullScreen ? 800 : 700,
+                      lineHeight: 1.3,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      color: "var(--text)",
+                    }}
+                  >
+                    {title}
+                  </h3>
                 ) : null}
               </div>
               <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
                 {headerAddon ? <div style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{headerAddon}</div> : null}
                 {hasDesign ? (
                   <div ref={layoutWrapRef} style={{ position: "relative", flexShrink: 0 }}>
-                  <button
-                    type="button"
-                    aria-label="Layout"
-                    aria-expanded={layoutOpen}
-                    aria-haspopup="true"
-                    onClick={() => setLayoutOpen((o) => !o)}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      width: 36,
-                      height: 36,
-                      padding: 0,
-                      border: "1px solid var(--border)",
-                      borderRadius: 8,
-                      background: "var(--surface)",
-                      color: "var(--text)",
-                      cursor: "pointer",
-                    }}
-                    title="Layout"
-                  >
-                    {/* layout icon */}
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                      <rect x="3" y="4" width="7" height="7" rx="1" />
-                      <rect x="14" y="4" width="7" height="7" rx="1" />
-                      <rect x="3" y="13" width="18" height="7" rx="1" />
-                    </svg>
-                  </button>
-                  {layoutOpen && (
-                    <div
-                      role="menu"
+                    <button
+                      type="button"
+                      aria-label="Layout"
+                      aria-expanded={layoutOpen}
+                      aria-haspopup="true"
+                      onClick={() => setLayoutOpen((o) => !o)}
                       style={{
-                        position: "absolute",
-                        right: 0,
-                        top: "calc(100% + 6px)",
-                        minWidth: 220,
-                        maxWidth: "min(90vw, 320px)",
-                        maxHeight: "min(70vh, 380px)",
-                        overflowY: "auto",
-                        zIndex: 40,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 36,
+                        height: 36,
+                        padding: 0,
                         border: "1px solid var(--border)",
-                        borderRadius: 10,
+                        borderRadius: 8,
                         background: "var(--surface)",
-                        boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
-                        padding: "0.35rem 0",
+                        color: "var(--text)",
+                        cursor: "pointer",
                       }}
+                      title="Layout"
                     >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                        <rect x="3" y="4" width="7" height="7" rx="1" />
+                        <rect x="14" y="4" width="7" height="7" rx="1" />
+                        <rect x="3" y="13" width="18" height="7" rx="1" />
+                      </svg>
+                    </button>
+                    {layoutOpen && (
                       <div
+                        role="menu"
                         style={{
-                          padding: "0.35rem 0.75rem 0.2rem",
-                          fontSize: "0.72rem",
-                          color: "var(--muted)",
-                          textTransform: "uppercase",
-                          letterSpacing: "0.04em",
+                          position: "absolute",
+                          right: 0,
+                          top: "calc(100% + 6px)",
+                          minWidth: 220,
+                          maxWidth: "min(90vw, 320px)",
+                          maxHeight: "min(70vh, 380px)",
+                          overflowY: "auto",
+                          zIndex: 40,
+                          border: "1px solid var(--border)",
+                          borderRadius: 10,
+                          background: "var(--surface)",
+                          boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
+                          padding: "0.35rem 0",
                         }}
                       >
-                        Width in row (12 columns)
-                      </div>
-                      {DESIGN_COL_SPAN_OPTIONS.map(({ span, label }) => (
-                        <MenuRow
-                          key={span}
-                          active={designActions!.colSpan === span}
-                          onClick={() => {
-                            designActions!.onSetColSpan(span);
-                            setLayoutOpen(false);
+                        <div
+                          style={{
+                            padding: "0.35rem 0.75rem 0.2rem",
+                            fontSize: "0.72rem",
+                            color: "var(--muted)",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.04em",
                           }}
                         >
-                          {label}
-                        </MenuRow>
-                      ))}
-                    </div>
-                  )}
+                          Width in row (12 columns)
+                        </div>
+                        {DESIGN_COL_SPAN_OPTIONS.map(({ span, label }) => (
+                          <MenuRow
+                            key={span}
+                            active={designActions!.colSpan === span}
+                            onClick={() => {
+                              designActions!.onSetColSpan(span);
+                              setLayoutOpen(false);
+                            }}
+                          >
+                            {label}
+                          </MenuRow>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : null}
                 {showSettingsButton ? (
-                  <div ref={wrapRef} style={{ position: "relative", flexShrink: 0 }}>
+                  <div ref={wrapRef} style={{ position: "relative", flexShrink: 0, display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                    <button
+                      type="button"
+                      aria-label="Expand Full Screen"
+                      title={isFullScreen ? "Exit Full Screen" : "Expand Full Screen"}
+                      onClick={() => setIsFullScreen((f) => !f)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 36,
+                        height: 36,
+                        padding: 0,
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        background: isFullScreen ? "rgba(79, 70, 229, 0.12)" : "var(--surface)",
+                        color: isFullScreen ? "var(--accent)" : "var(--text)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                        <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+
+                    <button
+                      type="button"
+                      aria-label="Widget options & view settings"
+                      title="Chart options & view settings"
+                      aria-expanded={open}
+                      aria-haspopup="true"
+                      onClick={() => setOpen((o) => !o)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 36,
+                        height: 36,
+                        padding: 0,
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        background: "var(--surface)",
+                        color: "var(--text)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                        <line x1="4" y1="21" x2="4" y2="14" strokeLinecap="round" />
+                        <line x1="4" y1="10" x2="4" y2="3" strokeLinecap="round" />
+                        <line x1="12" y1="21" x2="12" y2="12" strokeLinecap="round" />
+                        <line x1="12" y1="8" x2="12" y2="3" strokeLinecap="round" />
+                        <line x1="20" y1="21" x2="20" y2="16" strokeLinecap="round" />
+                        <line x1="20" y1="12" x2="20" y2="3" strokeLinecap="round" />
+                        <line x1="1" y1="14" x2="7" y2="14" strokeLinecap="round" />
+                        <line x1="9" y1="8" x2="15" y2="8" strokeLinecap="round" />
+                        <line x1="17" y1="16" x2="23" y2="16" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                    {open && (
+                      <div
+                        role="menu"
+                        style={{
+                          position: "absolute",
+                          right: 0,
+                          top: "calc(100% + 6px)",
+                          minWidth: 220,
+                          maxWidth: "min(90vw, 320px)",
+                          maxHeight: "min(70vh, 380px)",
+                          overflowY: "auto",
+                          zIndex: 40,
+                          border: "1px solid var(--border)",
+                          borderRadius: 10,
+                          background: "var(--surface)",
+                          boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
+                          padding: "0.35rem 0",
+                        }}
+                      >
+                        {hasDesign && (
+                          <>
+                            <MenuRow
+                              onClick={() => {
+                                designActions!.onEdit();
+                                setOpen(false);
+                              }}
+                            >
+                              Edit
+                            </MenuRow>
+                            <MenuRow
+                              danger
+                              onClick={() => {
+                                designActions!.onDelete();
+                                setOpen(false);
+                              }}
+                            >
+                              Delete
+                            </MenuRow>
+                          </>
+                        )}
+                        {hasDesign && hasViewer && <div style={{ borderTop: "1px solid var(--border)", margin: "0.25rem 0" }} />}
+                        {hasViewer && <div style={{ padding: "0.45rem 0.65rem" }}>{viewerMenu}</div>}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+                {isFullScreen && (
                   <button
                     type="button"
-                    aria-label="Widget settings"
-                    aria-expanded={open}
-                    aria-haspopup="true"
-                    onClick={() => setOpen((o) => !o)}
+                    className="btn"
+                    onClick={() => setIsFullScreen(false)}
                     style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      width: 36,
-                      height: 36,
-                      padding: 0,
-                      border: "1px solid var(--border)",
+                      padding: "0.4rem 0.85rem",
+                      fontSize: "0.85rem",
+                      fontWeight: 600,
                       borderRadius: 8,
-                      background: "var(--surface)",
+                      border: "1px solid var(--border)",
+                      background: "var(--bg-subtle, #f3f4f6)",
                       color: "var(--text)",
                       cursor: "pointer",
                     }}
                   >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                      <circle cx="12" cy="12" r="3" />
-                      <path
-                        d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
-                        strokeLinecap="round"
-                      />
-                    </svg>
+                    ✕ Exit Full Screen
                   </button>
-                  {open && (
-                    <div
-                      role="menu"
-                      style={{
-                        position: "absolute",
-                        right: 0,
-                        top: "calc(100% + 6px)",
-                        minWidth: 220,
-                        maxWidth: "min(90vw, 320px)",
-                        maxHeight: "min(70vh, 380px)",
-                        overflowY: "auto",
-                        zIndex: 40,
-                        border: "1px solid var(--border)",
-                        borderRadius: 10,
-                        background: "var(--surface)",
-                        boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
-                        padding: "0.35rem 0",
-                      }}
-                    >
-                {hasDesign && (
-                  <>
-                    <MenuRow
-                      onClick={() => {
-                        designActions!.onEdit();
-                        setOpen(false);
-                      }}
-                    >
-                      Edit
-                    </MenuRow>
-                    <MenuRow
-                      danger
-                      onClick={() => {
-                        designActions!.onDelete();
-                        setOpen(false);
-                      }}
-                    >
-                      Delete
-                    </MenuRow>
-                  </>
                 )}
-                {hasDesign && hasViewer && <div style={{ borderTop: "1px solid var(--border)", margin: "0.25rem 0" }} />}
-                {hasViewer && <div style={{ padding: "0.45rem 0.65rem" }}>{viewerMenu}</div>}
-                    </div>
-                  )}
-                  </div>
-                ) : null}
               </div>
             </div>
           ) : null}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>{children}</div>
-      </div>
+
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+            <WidgetFullScreenProvider isFullScreen={isFullScreen}>
+              {children}
+            </WidgetFullScreenProvider>
+          </div>
+        </div>
       </WidgetHeaderAddonSetterContext.Provider>
     </WidgetViewerMenuSetterContext.Provider>
   );
@@ -1043,7 +1216,7 @@ function KpiCardSingleValueWidget({
         dashboardId != null && (widget.source_mode === "field" || widget.source_mode === "multi_line_agg")
           ? deduplicatedRequest(
               fp!,
-              () => enqueueDashboardCardBatch({
+              () => enqueueDashboardUniversalBatch({
                 token,
                 organizationId,
                 dashboardId,
@@ -1260,13 +1433,23 @@ function KpiLineChartWidget({
     if (isWidgetDataBundleEnabled()) {
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
+      const widgetId = String((w as any)?.id ?? "");
       const bundleReq =
         dashboardId != null
-          ? postDashboardLineWidgetData(
+          ? enqueueDashboardUniversalBatch({
               token,
-              { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
-              { signal: ac.signal }
-            )
+              organizationId,
+              dashboardId,
+              widgetId,
+              widget: w,
+              overrides: undefined,
+            }).then((r) => ({
+              version: 1,
+              widget_type: "kpi_line_chart",
+              meta: r.meta ?? {},
+              data: r.data ?? {},
+              entry_revision: r.entry_revision ?? null,
+            }))
           : postWidgetData(
               token,
               {
@@ -1279,6 +1462,7 @@ function KpiLineChartWidget({
             );
       bundleReq
         .then((res) => {
+          if (ac.signal.aborted) return;
           const pts = res.data.points as Array<{ year: number; value: unknown }> | undefined;
           if (Array.isArray(pts)) {
             setPoints(
@@ -1756,7 +1940,7 @@ function KpiBarChartWidgetInner({
         dashboardId != null
           ? deduplicatedRequest(
               fp!,
-              () => enqueueDashboardChartBatch({
+              () => enqueueDashboardUniversalBatch({
                 token,
                 organizationId,
                 dashboardId,
@@ -2691,19 +2875,24 @@ function KpiTrendWidgetInner({
     if (isWidgetDataBundleEnabled()) {
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
+      const widgetId = String((w as any)?.id ?? "");
+      const trendOverrides = { selected_years: selectedYears };
       const bundleReq =
         dashboardId != null
-          ? postDashboardTrendWidgetData(
+          ? enqueueDashboardUniversalBatch({
               token,
-              {
-                version: 1,
-                organization_id: organizationId,
-                dashboard_id: dashboardId,
-                widget: w,
-                overrides: { selected_years: selectedYears },
-              },
-              { signal: ac.signal }
-            )
+              organizationId,
+              dashboardId,
+              widgetId,
+              widget: w,
+              overrides: trendOverrides,
+            }).then((r) => ({
+              version: 1,
+              widget_type: "kpi_trend",
+              meta: r.meta ?? {},
+              data: r.data ?? {},
+              entry_revision: r.entry_revision ?? null,
+            }))
           : postWidgetData(
               token,
               {
@@ -2711,7 +2900,7 @@ function KpiTrendWidgetInner({
                 organization_id: organizationId,
                 ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
                 widget: w,
-                overrides: { selected_years: selectedYears },
+                overrides: trendOverrides,
               },
               { signal: ac.signal }
             );

@@ -37,7 +37,9 @@ from app.widget_data.service import (
     resolve_dashboard_table_rows_widget_data,
     resolve_dashboard_table_widget_data,
     resolve_dashboard_trend_widget_data,
+    resolve_dashboard_universal_batch,
     resolve_widget_data,
+    trace,
 )
 
 
@@ -186,7 +188,6 @@ async def post_dashboard_chart_widget_data_batch(
     Returns a dict keyed by widget id (or index fallback).
     """
     t0 = time.perf_counter()
-    print(f"[widget-data] BEGIN /chart/batch dashboard_id={body.dashboard_id} org={body.organization_id}")
     try:
         org_id = _org_id(current_user, body.organization_id)
         if body.version != 1:
@@ -200,7 +201,7 @@ async def post_dashboard_chart_widget_data_batch(
         )
 
         dt = (time.perf_counter() - t0) * 1000.0
-        print(f"[widget-data] END /chart/batch dashboard_id={body.dashboard_id} ({dt:.1f}ms) items={len(results)}")
+        logger.info("[widget-data] /chart/batch dashboard_id=%s items=%d %.1fms", body.dashboard_id, len(results), dt)
         return {"version": 1, "results": results}
     except Exception:
         dt = (time.perf_counter() - t0) * 1000.0
@@ -210,8 +211,6 @@ async def post_dashboard_chart_widget_data_batch(
             body.organization_id,
             dt,
         )
-        traceback.print_exc()
-        print(f"[widget-data] CRASH /chart/batch dashboard_id={body.dashboard_id} ({dt:.1f}ms)")
         raise
 
 
@@ -222,7 +221,6 @@ async def post_dashboard_card_widget_data_batch(
     current_user: User = Depends(get_current_user),
 ):
     t0 = time.perf_counter()
-    print(f"[widget-data] BEGIN /card/batch dashboard_id={body.dashboard_id} org={body.organization_id}", flush=True)
     org_id = _org_id(current_user, body.organization_id)
     if body.version != 1:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported request version")
@@ -233,8 +231,52 @@ async def post_dashboard_card_widget_data_batch(
         db, current_user, org_id, body.dashboard_id, [it for it in items if isinstance(it, dict)]
     )
     dt = (time.perf_counter() - t0) * 1000.0
-    print(f"[widget-data] END /card/batch dashboard_id={body.dashboard_id} ({dt:.1f}ms) items={len(results)}", flush=True)
+    logger.info("[widget-data] /card/batch dashboard_id=%s items=%d %.1fms", body.dashboard_id, len(results), dt)
     return {"version": 1, "results": results}
+
+
+@router.post("/dashboard/batch")
+async def post_dashboard_universal_batch(
+    body: DashboardChartBatchRequestV1,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    **Universal period-shift batch endpoint** — accepts all widget types in a single request.
+
+    Use this on period changes instead of firing separate chart/batch + card/batch + individual
+    line/trend/table requests.  A single POST replaces N concurrent HTTP calls from the browser.
+
+    Returns a dict keyed by widget id (or "idx:N" fallback).
+    """
+    t0 = time.perf_counter()
+    org_id = _org_id(current_user, body.organization_id)
+    if body.version != 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported request version")
+    items = body.items or []
+    if not isinstance(items, list) or not items:
+        return {"version": 1, "results": {}}
+    trace(f"post_dashboard_universal_batch: received request, items={len(items)}")
+    try:
+        trace("post_dashboard_universal_batch: calling resolve_dashboard_universal_batch")
+        results = await resolve_dashboard_universal_batch(
+            db, current_user, org_id, body.dashboard_id, [it for it in items if isinstance(it, dict)]
+        )
+        trace("post_dashboard_universal_batch: resolve_dashboard_universal_batch returned successfully")
+        dt = (time.perf_counter() - t0) * 1000.0
+        logger.info(
+            "[widget-data] /dashboard/batch dashboard_id=%s items=%d %.1fms",
+            body.dashboard_id, len(results), dt
+        )
+        return {"version": 1, "results": results}
+    except Exception as e:
+        trace(f"post_dashboard_universal_batch: exception occurred: {str(e)}")
+        dt = (time.perf_counter() - t0) * 1000.0
+        logger.exception(
+            "widget-data/dashboard batch failed (dashboard_id=%s org_id=%s) after %.1fms",
+            body.dashboard_id, body.organization_id, dt,
+        )
+        raise
 
 
 @router.post("/card", response_model=WidgetDataResponseV1)

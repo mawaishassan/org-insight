@@ -2911,6 +2911,22 @@ export default function FullPageMultiItems() {
                     >
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {sf.name}
+                        {(sf.field_type === "formula" || Boolean((sf as any).config?.is_formula)) && (
+                          <span
+                            title="Calculated Row-Level Formula Field"
+                            style={{
+                              fontSize: "0.65rem",
+                              padding: "0.1rem 0.35rem",
+                              borderRadius: 4,
+                              background: "rgba(99, 102, 241, 0.12)",
+                              color: "#4f46e5",
+                              fontWeight: 600,
+                              fontFamily: "monospace",
+                            }}
+                          >
+                            fx
+                          </span>
+                        )}
                       <span style={{ fontSize: "0.85rem", color: isActive ? "var(--accent, inherit)" : "var(--muted)" }}>
                           {isActive ? (sortDir === "asc" ? " ↑" : " ↓") : " ⇅"}
                         </span>

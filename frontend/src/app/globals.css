@@ -282,4 +282,36 @@ textarea {
 .widget-skeleton--chart {
   border-radius: 10px;
   min-height: 220px;
+}
+
+/* ===== Universal Report Table Header Formatting ===== */
+th,
+table th,
+.report-kpi-table th,
+.report-simple-table th,
+.report-kpi-multi-table th,
+table.report-table th {
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+  word-wrap: normal !important;
+  white-space: normal !important;
+  hyphens: none !important;
+  -webkit-hyphens: none !important;
+  padding: 6px 5px !important;
+  vertical-align: middle !important;
+  box-sizing: border-box !important;
+}
+
+/* Custom Reports: Center values of all columns past the frozen description column */
+.custom-report table tbody tr td:nth-child(n+3),
+.custom-report table thead tr th:nth-child(n+3) {
+  text-align: center;
+}
+.custom-report table tbody tr td:nth-child(1),
+.custom-report table thead tr th:nth-child(1) {
+  text-align: center;
+}
+.custom-report table tbody tr td:nth-child(2),
+.custom-report table thead tr th:nth-child(2) {
+  text-align: left;
 }

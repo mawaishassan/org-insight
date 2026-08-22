@@ -562,12 +562,13 @@ async def sync_dashboard_odoo_data(
                 if isinstance(x, dict) and not _is_multi_items_row_effectively_empty(dict(x))
             ]
 
-            # Skip attachment downloads during sync to prevent timeouts.
-            # Attachments are only fetched/maintained via manual Odoo bulk upload or forms.
+            # Generate on-demand attachment placeholders to avoid timeouts while retaining file viewing links.
             if att_sub_keys:
+                from app.odoo.service import build_on_demand_attachment_placeholders
                 for row in item_dicts:
                     for att_key in att_sub_keys:
-                        row[att_key] = None
+                        raw_att_val = row.get(att_key)
+                        row[att_key] = build_on_demand_attachment_placeholders(field.kpi_id, raw_att_val)
 
             set_sync_stage("dashboard", dashboard_id, f"SAVING_KPI_ENTRIES (KPI {field.kpi_id})")
             await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=item_dicts)

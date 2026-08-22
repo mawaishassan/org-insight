@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select, and_
+import logging
+
+from sqlalchemy import select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.models import KPIField, KpiMultiLineCell, KpiMultiLineRow
+
+logger = logging.getLogger(__name__)
 
 
 def _cell_value_raw(c: KpiMultiLineCell) -> Any:
@@ -87,6 +91,17 @@ async def load_multi_line_row_dicts(
         if row_indices is not None:
             idx_set = {int(x) for x in row_indices}
             out = [(i, r) for i, r in out if i in idx_set]
+
+        # Apply extraction rules (in-memory, non-mutating)
+        rules = await _fetch_rules_for_field(db, field.id)
+        if rules:
+            try:
+                from app.entries.mli_extraction import apply_extraction_rules
+                processed = apply_extraction_rules([r for _, r in out], rules)
+                out = [(idx, processed[i]) for i, (idx, _) in enumerate(out)]
+            except ValueError as exc:
+                logger.warning("MLI extraction skipped (circular dependency): %s", exc)
+
         return out
 
     q_rows = (
@@ -118,11 +133,19 @@ async def load_multi_line_row_dicts(
                 )
             )
             q_rows = q_rows.where(
-                and_(
-                    KpiMultiLineCell.value_date >= start_date,
-                    KpiMultiLineCell.value_date < end_date,
-                    KpiMultiLineCell.value_text.isnot(None),
-                    KpiMultiLineCell.value_text != "",
+                or_(
+                    and_(
+                        KpiMultiLineCell.value_date.isnot(None),
+                        KpiMultiLineCell.value_date >= start_date,
+                        KpiMultiLineCell.value_date < end_date,
+                    ),
+                    and_(
+                        KpiMultiLineCell.value_text.isnot(None),
+                        KpiMultiLineCell.value_text != "",
+                        ~KpiMultiLineCell.value_text.in_(["false", "null", "none", "False", "Null", "None"]),
+                        KpiMultiLineCell.value_text >= start_date.isoformat(),
+                        KpiMultiLineCell.value_text < end_date.isoformat(),
+                    )
                 )
             )
 
@@ -211,4 +234,46 @@ async def load_multi_line_row_dicts(
                 filtered_out.append((r_idx, row))
         out = filtered_out
 
+    # Apply extraction rules (in-memory, non-mutating)
+    rules = await _fetch_rules_for_field(db, field.id)
+    if rules:
+        try:
+            from app.entries.mli_extraction import apply_extraction_rules
+            processed = apply_extraction_rules([r for _, r in out], rules)
+            out = [(idx, processed[i]) for i, (idx, _) in enumerate(out)]
+        except ValueError as exc:
+            logger.warning("MLI extraction skipped (circular dependency): %s", exc)
+
     return out
+
+
+async def _fetch_rules_for_field(db: AsyncSession, field_id: int) -> list[dict]:
+    """Load active extraction rules for a field, ordered by sort_order."""
+    from app.core.models import MLITextExtractionRule
+    res = await db.execute(
+        select(MLITextExtractionRule)
+        .where(
+            MLITextExtractionRule.field_id == field_id,
+            MLITextExtractionRule.is_active.is_(True),
+        )
+        .order_by(MLITextExtractionRule.sort_order)
+    )
+    rules = res.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "name": r.name,
+            "is_active": r.is_active,
+            "source_sub_field_key": r.source_sub_field_key,
+            "target_sub_field_key": r.target_sub_field_key,
+            "extraction_method": r.extraction_method,
+            "start_symbol": r.start_symbol,
+            "end_symbol": r.end_symbol,
+            "remove_delimiters_too": r.remove_delimiters_too,
+            "occurrence": r.occurrence,
+            "all_separator": r.all_separator,
+            "target_action": r.target_action,
+            "remove_from_source": r.remove_from_source,
+        }
+        for r in rules
+    ]

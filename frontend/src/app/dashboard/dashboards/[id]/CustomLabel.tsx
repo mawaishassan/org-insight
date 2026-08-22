@@ -53,7 +53,7 @@ export function CustomLabel({
           strokeWidth: svgProps?.strokeWidth || 0,
           ...svgProps?.style,
         }}
-        title={isOrgAdmin ? `Click to customize label "${originalStr}"` : undefined}
+        title={displayLabel}
       >
         {displayText}
       </text>

@@ -86,6 +86,7 @@ from app.reports.service import (
     period_key_sort_order,
     effective_kpi_time_dimension,
 )
+from app.entries.service import bulk_load_org_kpi_values
 
 logger = logging.getLogger(__name__)
 
@@ -633,7 +634,12 @@ async def generate_custom_report_data(
     recalculated_kpi_values: dict[tuple[int, str], float | int] = {}
     recalculated_kpi_mli_data: dict[tuple[int, str], list[dict]] = {}
 
-    print(f"DEBUG: date_range={date_range}, sorted_kpis={[k.id for k in sorted_kpis_list]}")
+    # ------------------------------------------------------------------
+    # Pre-fetch all numeric KPI field values for this org+year in ONE
+    # query, eliminating N separate _load_other_kpi_values calls inside
+    # the per-KPI loop below.
+    # ------------------------------------------------------------------
+    base_other_kpi_values = await bulk_load_org_kpi_values(db, yr, org_id)
 
     for idx, kpi in enumerate(sorted_kpis_list):
         kid = kpi.id
@@ -690,17 +696,18 @@ async def generate_custom_report_data(
                 entries_sorted = [entries_sorted[-1]]
 
         need_cross_kpi = _formulas_need_other_kpi_values(fields_to_include)
-        # For cross-KPI formula lookup, use the year of the actual entry found (not necessarily yr)
-        cross_kpi_year = yr
-        if date_range and entries_sorted:
-            cross_kpi_year = entries_sorted[0].year
-        other_kpi_values = (
-            await _load_other_kpi_values(db, cross_kpi_year, org_id, kpi.id)
-            if entries_sorted and need_cross_kpi
-            else {}
-        )
-        for (r_kid, r_fkey), rval in recalculated_kpi_values.items():
-            other_kpi_values[(r_kid, r_fkey)] = rval
+        # Build per-KPI other_kpi_values from the pre-fetched base dict.
+        # Overlay any values already recalculated earlier in this loop so
+        # that formula dependencies resolved in the correct topological order
+        # always see the freshly-computed value, not the stored DB value.
+        if need_cross_kpi:
+            other_kpi_values = dict(base_other_kpi_values)
+            for (r_kid, r_fkey), rval in recalculated_kpi_values.items():
+                other_kpi_values[(r_kid, r_fkey)] = rval
+        else:
+            # Still overlay recalculated values for formulas that only depend
+            # on sibling fields within the same KPI batch.
+            other_kpi_values = dict(recalculated_kpi_values)
 
         entry_ids_sorted = [e.id for e in entries_sorted]
 
@@ -742,19 +749,24 @@ async def generate_custom_report_data(
                     sorted_formula_sfs = _sort_formula_subfields(formula_sfs)
                     current_rows = [dict(r) for r in rows_list]
                     for sf_key, expr, cond_logic in sorted_formula_sfs:
+                        if not expr:
+                            continue
+                        # Build the multi-line context ONCE per formula subfield
+                        # (not once per row) — avoids rebuilding a potentially
+                        # large list reference on every iteration.
+                        ml_context = {mf.key: current_rows}
                         for r_copy in current_rows:
-                            if expr:
-                                new_val = evaluate_formula(
-                                    expr,
-                                    {},
-                                    {mf.key: current_rows},
-                                    other_kpi_values,
-                                    current_row=r_copy,
-                                    other_kpi_multi_line_data=recalculated_kpi_mli_data,
-                                )
-                                if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
-                                    new_val = apply_conditional_logic(new_val, cond_logic)
-                                r_copy[sf_key] = new_val if new_val is not None else 0
+                            new_val = evaluate_formula(
+                                expr,
+                                {},
+                                ml_context,
+                                other_kpi_values,
+                                current_row=r_copy,
+                                other_kpi_multi_line_data=recalculated_kpi_mli_data,
+                            )
+                            if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
+                                new_val = apply_conditional_logic(new_val, cond_logic)
+                            r_copy[sf_key] = new_val if new_val is not None else 0
                     recalculated_batch[eid] = current_rows
                 else:
                     recalculated_batch[eid] = rows_list
@@ -1073,6 +1085,31 @@ async def render_custom_report_html(
         font_family = f"'{custom_header_model.font_family}', Helvetica, Arial, sans-serif"
 
     out.append(f'<div class="custom-report" style="color: #111; font-family: {font_family};">')
+    out.append('''<style>
+      th, table th, .report-kpi-table th, .report-simple-table th {
+        word-break: normal !important;
+        overflow-wrap: normal !important;
+        word-wrap: normal !important;
+        white-space: normal !important;
+        hyphens: none !important;
+        -webkit-hyphens: none !important;
+        padding: 6px 5px !important;
+        vertical-align: middle !important;
+        box-sizing: border-box !important;
+      }
+      .custom-report table tbody tr td:nth-child(n+3),
+      .custom-report table thead tr th:nth-child(n+3) {
+        text-align: center;
+      }
+      .custom-report table tbody tr td:nth-child(1),
+      .custom-report table thead tr th:nth-child(1) {
+        text-align: center;
+      }
+      .custom-report table tbody tr td:nth-child(2),
+      .custom-report table thead tr th:nth-child(2) {
+        text-align: left;
+      }
+    </style>''')
 
     # Render Header at the top
     if custom_header_model:
@@ -1187,19 +1224,21 @@ async def render_custom_report_html(
                     out.append('<table style="border-collapse: collapse; width: 100%; border: 1px solid #d1d5db; margin-top: 0.25rem; margin-bottom: 0.5rem;">')
                     out.append('<thead>')
                     out.append(f'<tr style="background-color: {h1_color}; color: #ffffff; border-bottom: 2px solid {h1_color}; font-size: {mli_font_size}pt;">')
-                    out.append(f'<th style="border: 1px solid #d1d5db; padding: 8px; text-align: center; font-weight: 600; color: #ffffff;">S.No</th>')
-                    for sub in f["sub_fields"]:
-                        out.append(f'<th style="border: 1px solid #d1d5db; padding: 8px; text-align: center; font-weight: 600; color: #ffffff;">{sub["name"]}</th>')
+                    out.append(f'<th style="border: 1px solid #d1d5db; padding: 6px 5px; text-align: center; font-weight: 600; color: #ffffff; word-break: normal; overflow-wrap: normal; white-space: normal; hyphens: none; vertical-align: middle;">S.No</th>')
+                    for s_idx, sub in enumerate(f["sub_fields"]):
+                        align_css = "left" if s_idx == 0 else "center"
+                        out.append(f'<th style="border: 1px solid #d1d5db; padding: 6px 5px; text-align: {align_css}; font-weight: 600; color: #ffffff; word-break: normal; overflow-wrap: normal; white-space: normal; hyphens: none; vertical-align: middle;">{sub["name"]}</th>')
                     out.append('</tr>')
                     out.append('</thead>')
                     out.append('<tbody>')
                     for r_idx, row in enumerate(f["value_items"]):
                         bg = ' style="background-color: #f9fafb;"' if r_idx % 2 == 1 else ''
                         out.append(f'<tr{bg} style="font-size: {mli_font_size}pt;">')
-                        out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #4b5563;">{r_idx + 1}</td>')
-                        for sub in f["sub_fields"]:
+                        out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #4b5563; text-align: center;">{r_idx + 1}</td>')
+                        for s_idx, sub in enumerate(f["sub_fields"]):
                             rval = clean_numeric_value_string(row.get(sub["key"]))
-                            out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #111827;">{rval}</td>')
+                            align_css = "left" if s_idx == 0 else "center"
+                            out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #111827; text-align: {align_css};">{rval}</td>')
                         out.append('</tr>')
                     out.append('</tbody>')
                     out.append('</table>')
@@ -1382,18 +1421,33 @@ async def export_custom_report_file(
                             c = ws.cell(row=row_num, column=col_idx+2, value=val if val is not None else "—")
                             c.font = normal_font
                             c.border = thin_border
+                            c.alignment = Alignment(horizontal="left" if col_idx == 0 else "center", vertical="center")
                         ws.row_dimensions[row_num].height = 18
                         row_num += 1
                 row_num += 2 # spacer
 
-            # Autofit column widths
+            # Column widths formatting (respect custom_widths if set)
+            custom_widths = f.get("config", {}).get("column_widths") or {} if mlis else {}
             for col in ws.columns:
+                col_letter = get_column_letter(col[0].column)
+                c_idx = col[0].column
                 max_len = 0
                 for cell in col:
                     if cell.value is not None:
                         max_len = max(max_len, len(str(cell.value)))
-                col_letter = get_column_letter(col[0].column)
-                ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
+                
+                # If custom width is defined
+                cw = None
+                if c_idx == 1:
+                    cw = custom_widths.get("S.No")
+                elif c_idx - 2 < len(sub_fields):
+                    sf_obj = sub_fields[c_idx - 2]
+                    cw = custom_widths.get(sf_obj.get("key")) or custom_widths.get(sf_obj.get("name"))
+                
+                if cw:
+                    ws.column_dimensions[col_letter].width = max(8.0, float(cw) / 7.5)
+                else:
+                    ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
 
         out_io = io.BytesIO()
         wb.save(out_io)
@@ -1726,10 +1780,13 @@ async def export_custom_report_file(
 
                             for col_idx, sf in enumerate(sub_fields):
                                 row_cells[col_idx + 1].text = clean_numeric_value_string(item.get(sf.get("key")))
-                                if row_cells[col_idx + 1].paragraphs and row_cells[col_idx + 1].paragraphs[0].runs:
-                                    run = row_cells[col_idx + 1].paragraphs[0].runs[0]
-                                    run.font.size = Pt(mli_font_size)
-                                    run.font.name = docx_font
+                                if row_cells[col_idx + 1].paragraphs:
+                                    p = row_cells[col_idx + 1].paragraphs[0]
+                                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT if col_idx == 0 else WD_ALIGN_PARAGRAPH.CENTER
+                                    if p.runs:
+                                        run = p.runs[0]
+                                        run.font.size = Pt(mli_font_size)
+                                        run.font.name = docx_font
 
         out_io = io.BytesIO()
         doc.save(out_io)
@@ -1867,6 +1924,7 @@ async def export_custom_report_file(
             textColor=colors.HexColor("#111111"),
             leading=13
         )
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
         table_hdr_style = ParagraphStyle(
             "CustomTableHdrStyle",
             parent=styles["Normal"],
@@ -1874,15 +1932,30 @@ async def export_custom_report_file(
             fontSize=mli_font_size,
             leading=mli_font_size + 3,
             textColor=colors.white,
-            alignment=1
+            alignment=TA_CENTER
         )
-        table_body_style = ParagraphStyle(
-            "CustomTableBodyStyle",
+        table_hdr_style_left = ParagraphStyle(
+            "CustomTableHdrStyleLeft",
+            parent=table_hdr_style,
+            alignment=TA_LEFT
+        )
+        table_body_style_center = ParagraphStyle(
+            "CustomTableBodyStyleCenter",
             parent=styles["Normal"],
             fontName=font_name_regular,
             fontSize=mli_font_size,
-            leading=mli_font_size + 3
+            leading=mli_font_size + 3,
+            alignment=TA_CENTER
         )
+        table_body_style_left = ParagraphStyle(
+            "CustomTableBodyStyleLeft",
+            parent=styles["Normal"],
+            fontName=font_name_regular,
+            fontSize=mli_font_size,
+            leading=mli_font_size + 3,
+            alignment=TA_LEFT
+        )
+        table_body_style = table_body_style_center
 
         # Render Header logo + headings if present
         if custom_header:
@@ -2125,10 +2198,23 @@ async def export_custom_report_file(
                                 max_val_len = 15 if len(sub_fields) > 8 else 60
                                 col_chars[idx] = max(col_chars[idx], min(len(val_str), max_val_len))
                                 
-                        total_chars = sum(col_chars) or len(sub_fields)
-                        raw_widths = [max(min_col_width, available_table_w * (c / total_chars)) for c in col_chars]
-                        scale = available_table_w / sum(raw_widths) if sum(raw_widths) > available_table_w else 1.0
-                        col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
+                        custom_widths = f.get("config", {}).get("column_widths") or {}
+                        if custom_widths:
+                            configured_sr = float(custom_widths.get("S.No", 60)) * 0.75
+                            configured_cols = []
+                            for sf in sub_fields:
+                                cw = custom_widths.get(sf.get("key")) or custom_widths.get(sf.get("name"))
+                                if cw:
+                                    configured_cols.append(float(cw) * 0.75)
+                                else:
+                                    configured_cols.append(45.0)
+                            col_widths = [configured_sr] + configured_cols
+                        else:
+                            total_chars = sum(col_chars) or len(sub_fields)
+                            raw_widths = [max(min_col_width, available_table_w * (c / total_chars)) for c in col_chars]
+                            scale = available_table_w / sum(raw_widths) if sum(raw_widths) > available_table_w else 1.0
+                            col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
+
                         merged_headers = f.get("config", {}).get("merged_headers") or []
                         
                         t_style_cmds = [
@@ -2144,7 +2230,7 @@ async def export_custom_report_file(
                             covered_cols = set()
 
                             row_0 = [Paragraph("", table_hdr_style) for _ in range(len(sub_fields) + 1)]
-                            row_1 = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style) for sf in sub_fields]
+                            row_1 = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style_left if s_idx == 0 else table_hdr_style) for s_idx, sf in enumerate(sub_fields)]
                             
                             t_style_cmds.append(("BACKGROUND", (0, 0), (-1, 1), colors.HexColor(h1_color_hex)))
                             
@@ -2170,23 +2256,25 @@ async def export_custom_report_file(
                             for idx, sf in enumerate(sub_fields):
                                 c_idx = idx + 1
                                 if c_idx not in covered_cols:
-                                    row_0[c_idx] = Paragraph(sf.get("name") or sf.get("key"), table_hdr_style)
+                                    hdr_st = table_hdr_style_left if idx == 0 else table_hdr_style
+                                    row_0[c_idx] = Paragraph(sf.get("name") or sf.get("key"), hdr_st)
                                     t_style_cmds.append(("SPAN", (c_idx, 0), (c_idx, 1)))
 
                             pdf_table_data = [row_0, row_1]
                         else:
                             t_style_cmds.append(("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(h1_color_hex)))
-                            hdr_row = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style) for sf in sub_fields]
+                            hdr_row = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style_left if s_idx == 0 else table_hdr_style) for s_idx, sf in enumerate(sub_fields)]
                             pdf_table_data = [hdr_row]
 
                         for item_idx, item in enumerate(value_items):
-                            row = [Paragraph(str(item_idx + 1), table_body_style)]
-                            for sf in sub_fields:
+                            row = [Paragraph(str(item_idx + 1), table_body_style_center)]
+                            for s_idx, sf in enumerate(sub_fields):
                                 val = item.get(sf.get("key"))
                                 val_str = clean_numeric_value_string(val)
                                 if len(val_str) > 250:
                                     val_str = val_str[:250] + "..."
-                                row.append(Paragraph(val_str, table_body_style))
+                                cell_st = table_body_style_left if s_idx == 0 else table_body_style_center
+                                row.append(Paragraph(val_str, cell_st))
                             pdf_table_data.append(row)
 
                         t_mli = Table(pdf_table_data, colWidths=col_widths)

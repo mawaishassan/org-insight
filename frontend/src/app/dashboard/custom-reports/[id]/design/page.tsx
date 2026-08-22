@@ -17,6 +17,7 @@ import {
   removeConditionFromPayload,
 } from "@/lib/multiItemsFiltersHelper";
 import MultiItemsAdvancedFiltersPanel from "@/components/MultiItemsAdvancedFiltersPanel";
+import { ColumnWidthConfigModal } from "@/components/ColumnWidthConfigModal";
 
 interface KPISubField {
   id: number;
@@ -51,6 +52,10 @@ interface CustomReportField {
   config?: {
     selected_columns?: string[] | null;
     filters?: { conditions: any[]; _version: number } | null;
+    column_widths?: Record<string, number> | null;
+    custom_name?: string | null;
+    merged_headers?: any[] | null;
+    [key: string]: any;
   } | null;
 }
 
@@ -308,6 +313,7 @@ export default function CustomReportDesignPage() {
 
   // Column Selection & Reordering + Row Filtering States for MLIs
   const [editingFieldLoc, setEditingFieldLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
+  const [editingWidthsLoc, setEditingWidthsLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
   const [editingFieldConfig, setEditingFieldConfig] = useState<{
     selected_columns: string[];
     filters: { conditions: any[]; _version: number };
@@ -1705,6 +1711,30 @@ export default function CustomReportDesignPage() {
                                             ⚙️ {f.config ? "Configured" : "Configure Columns"}
                                           </button>
                                         )}
+                                        {f.field_type === "multi_line_items" && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setEditingWidthsLoc({ secIdx: sIdx, fieldIdx: fIdx });
+                                              setOpenFieldMenuLoc(null);
+                                            }}
+                                            style={{
+                                              border: "none",
+                                              background: "none",
+                                              padding: "0.5rem 1rem",
+                                              textAlign: "left",
+                                              fontSize: "0.85rem",
+                                              cursor: "pointer",
+                                              color: (f.config as any)?.column_widths ? "var(--primary)" : "var(--text)",
+                                              fontWeight: (f.config as any)?.column_widths ? 600 : 400
+                                            }}
+                                            onMouseEnter={(e) => (e.currentTarget.style.background = "#f1f5f9")}
+                                            onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                                          >
+                                            📐 {(f.config as any)?.column_widths ? "Configured Widths" : "Configure Column Widths"}
+                                          </button>
+                                        )}
                                         <button
                                           type="button"
                                           onClick={(e) => {
@@ -2889,6 +2919,51 @@ export default function CustomReportDesignPage() {
           </div>
         </div>
       )}
+      {editingWidthsLoc && (() => {
+        const sec = sections[editingWidthsLoc.secIdx];
+        const f = sec?.fields[editingWidthsLoc.fieldIdx];
+        if (!f) return null;
+
+        const kpi = allKpis.find(k => k.id === f.kpi_id);
+        const kpiField = kpi?.fields.find(fld => fld.id === f.kpi_field_id);
+        const subFields = kpiField?.sub_fields || [];
+        const selectedColKeys: string[] = (f.config as any)?.selected_columns || subFields.map(sf => sf.key).slice(0, 6);
+
+        const cols = selectedColKeys.map(k => {
+          const sf = subFields.find(s => s.key === k);
+          return { key: k, name: sf?.name || k };
+        });
+
+        return (
+          <ColumnWidthConfigModal
+            isOpen={true}
+            onClose={() => setEditingWidthsLoc(null)}
+            fieldName={f.field_name}
+            columns={cols}
+            initialWidths={(f.config as any)?.column_widths || null}
+            h1Color="#1e3a8a"
+            onSave={(newWidths) => {
+              setSections(prev => {
+                const next = [...prev];
+                const curField = next[editingWidthsLoc.secIdx].fields[editingWidthsLoc.fieldIdx];
+                const updatedConfig: Record<string, any> = { ...((curField.config as any) || {}) };
+                if (newWidths && Object.keys(newWidths).length > 0) {
+                  updatedConfig.column_widths = newWidths;
+                } else {
+                  delete updatedConfig.column_widths;
+                }
+                next[editingWidthsLoc.secIdx].fields[editingWidthsLoc.fieldIdx] = {
+                  ...curField,
+                  config: Object.keys(updatedConfig).length > 0 ? updatedConfig : null
+                };
+                return next;
+              });
+              setEditingWidthsLoc(null);
+              toast.success("Column width configuration updated.");
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }

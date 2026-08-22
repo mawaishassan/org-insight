@@ -580,7 +580,7 @@ class KpiOdooConfig(Base):
     odoo_endpoint_id = Column(
         Integer, ForeignKey("odoo_endpoints.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    request_body = Column(JSON, nullable=False)
+    request_body = Column(JSON, nullable=True)
     response_items_path = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
@@ -1453,5 +1453,65 @@ class CustomReportAttachment(Base):
     kpi_field = relationship("KPIField")
 
 
+class MLIExtractionSymbol(Base):
+    """Global registry of symbols available for MLI text extraction rules (e.g. '(', '<<')."""
 
+    __tablename__ = "mli_extraction_symbols"
+
+    id = Column(Integer, primary_key=True, index=True)
+    label = Column(String(100), nullable=False)   # Human-readable name, e.g. "Opening paren"
+    value = Column(String(20), nullable=False)     # Actual symbol string, e.g. "("
+    is_active = Column(Boolean, default=True, nullable=False, server_default="1")
+    sort_order = Column(Integer, default=0, nullable=False, server_default="0")
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class MLITextExtractionRule(Base):
+    """Per-MLI-field rule describing how to extract or remove text from a source sub-field cell.
+
+    extraction_method values:
+      - "between_symbols": find text between start_symbol/end_symbol, write to target cell
+      - "remove_only":     find and delete matched text from source cell (no target cell needed)
+    """
+
+    __tablename__ = "mli_text_extraction_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    field_id = Column(
+        Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False, server_default="1")
+    sort_order = Column(Integer, default=0, nullable=False, server_default="0")
+
+    # Source / target columns (sub-field keys, not IDs — keys are stable identifiers)
+    source_sub_field_key = Column(String(255), nullable=False)
+    # Nullable: not required when extraction_method = "remove_only"
+    target_sub_field_key = Column(String(255), nullable=True)
+
+    # Extraction method
+    extraction_method = Column(String(50), nullable=False, default="between_symbols")
+
+    # Symbol config
+    start_symbol = Column(String(20), nullable=False)
+    end_symbol = Column(String(20), nullable=False)
+    # Whether to also strip the delimiter characters themselves (not just inner text)
+    remove_delimiters_too = Column(Boolean, default=True, nullable=False, server_default="1")
+
+    # Occurrence: how many matches to act on
+    occurrence = Column(String(20), nullable=False, default="first")  # first | last | all
+    # Separator string used when occurrence = "all" and writing to target
+    all_separator = Column(String(50), nullable=True)
+
+    # Target action (only relevant for "between_symbols" method)
+    target_action = Column(String(30), nullable=True)  # replace | append | populate_if_empty
+
+    # For "between_symbols": strip the extracted portion from the source after writing to target
+    remove_from_source = Column(Boolean, default=False, nullable=False, server_default="0")
+
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    field = relationship("KPIField")
 

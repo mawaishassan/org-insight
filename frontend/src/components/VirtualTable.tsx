@@ -18,15 +18,8 @@ interface VirtualTableProps {
   rowHeight?: number;
   totalCount?: number;
   mergedHeaders?: MergedHeader[];
+  columnWidths?: Record<string, number> | null;
 }
-
-const getColWidth = (key: string) => {
-  const k = key.toLowerCase();
-  if (k.includes("department") || k.includes("name") || k.includes("title")) {
-    return 260;
-  }
-  return 150;
-};
 
 export function VirtualTable({
   columns,
@@ -35,7 +28,22 @@ export function VirtualTable({
   rowHeight = 42,
   totalCount,
   mergedHeaders,
+  columnWidths,
 }: VirtualTableProps) {
+  const getWidth = (key: string) => {
+    if (columnWidths && columnWidths[key] && columnWidths[key] > 0) {
+      return columnWidths[key];
+    }
+    if (key === "S.No" && columnWidths && columnWidths["S.No"]) {
+      return columnWidths["S.No"];
+    }
+    const k = key.toLowerCase();
+    if (k.includes("department") || k.includes("name") || k.includes("title")) {
+      return 260;
+    }
+    return 150;
+  };
+  const srNoWidth = (columnWidths && columnWidths["S.No"]) ? columnWidths["S.No"] : 60;
   const [scrollTop, setScrollTop] = useState(0);
   const headerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -65,7 +73,7 @@ export function VirtualTable({
     if (!mergedHeaders || mergedHeaders.length === 0) return null;
 
     const cells: { title: string; width: number; isGroup: boolean }[] = [];
-    cells.push({ title: "S.No", width: 60, isGroup: false });
+    cells.push({ title: "S.No", width: srNoWidth, isGroup: false });
 
     const colKeys = columns.map(c => c.key);
     const colIndices = new Map(colKeys.map((k, idx) => [k, idx]));
@@ -79,18 +87,18 @@ export function VirtualTable({
         if (endIdx >= i) {
           let groupWidth = 0;
           for (let k = i; k <= endIdx; k++) {
-            groupWidth += getColWidth(columns[k].key);
+            groupWidth += getWidth(columns[k].key);
           }
           cells.push({ title: group.title, width: groupWidth, isGroup: true });
           i = endIdx + 1;
           continue;
         }
       }
-      cells.push({ title: col.name, width: getColWidth(col.key), isGroup: false });
+      cells.push({ title: col.name, width: getWidth(col.key), isGroup: false });
       i++;
     }
     return cells;
-  }, [columns, mergedHeaders]);
+  }, [columns, mergedHeaders, columnWidths]);
 
   const coveredKeys = useMemo(() => {
     const set = new Set<string>();
@@ -116,35 +124,68 @@ export function VirtualTable({
       <div ref={headerRef} style={{ overflow: "hidden" }}>
         {parsedHeaderCells && (
           <div style={{ display: "flex", background: "#f8fafc", borderBottom: "1px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", width: "max-content", minWidth: "100%" }}>
-            {parsedHeaderCells.map((cell, idx) => (
+            {parsedHeaderCells.map((cell, idx) => {
+              const isSrNo = idx === 0;
+              const isFirstDataCol = idx === 1;
+              const isSticky = isSrNo || isFirstDataCol;
+              const stickyLeft = isSrNo ? 0 : 60;
+              const bg = cell.isGroup ? "#eff6ff" : "#f8fafc";
+              return (
+                <div
+                  key={idx}
+                  title={cell.title}
+                  style={{
+                    width: cell.width,
+                    padding: "0.75rem 1rem",
+                    borderRight: isFirstDataCol ? "2px solid var(--border)" : "1px solid var(--border)",
+                    textAlign: "center",
+                    flexShrink: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    color: cell.isGroup ? "#1e40af" : "var(--muted)",
+                    background: bg,
+                    position: isSticky ? "sticky" : "relative",
+                    left: isSticky ? stickyLeft : undefined,
+                    zIndex: isSticky ? 10 : 1,
+                    boxShadow: isFirstDataCol ? "3px 0 6px -2px rgba(0,0,0,0.08)" : undefined,
+                  }}
+                >
+                  {cell.title}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div style={{ display: "flex", background: "#f8fafc", borderBottom: "2px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", width: "max-content", minWidth: "100%" }}>
+          <div title="S.No" style={{ width: srNoWidth, padding: "0.75rem 1rem", borderRight: "1px solid var(--border)", textAlign: "center", flexShrink: 0, position: "sticky", left: 0, zIndex: 10, background: "#f8fafc" }}>
+            {parsedHeaderCells ? "" : "S.No"}
+          </div>
+          {columns.map((col, idx) => {
+            const isFirstCol = idx === 0;
+            const showTitle = !parsedHeaderCells || coveredKeys.has(col.key);
+            const headerText = col.name || col.key;
+            const colW = getWidth(col.key);
+            return (
               <div
-                key={idx}
+                key={col.key}
+                title={headerText}
                 style={{
-                  width: cell.width,
+                  width: colW,
                   padding: "0.75rem 1rem",
-                  borderRight: "1px solid var(--border)",
-                  textAlign: "center",
                   flexShrink: 0,
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
-                  color: cell.isGroup ? "#1e40af" : "var(--muted)",
-                  background: cell.isGroup ? "#eff6ff" : "transparent",
+                  borderRight: isFirstCol ? "2px solid var(--border)" : "1px solid var(--border)",
+                  textAlign: "center",
+                  position: isFirstCol ? "sticky" : "relative",
+                  left: isFirstCol ? srNoWidth : undefined,
+                  zIndex: isFirstCol ? 10 : 1,
+                  background: "#f8fafc",
+                  boxShadow: isFirstCol ? "3px 0 6px -2px rgba(0,0,0,0.08)" : undefined,
                 }}
               >
-                {cell.title}
-              </div>
-            ))}
-          </div>
-        )}
-        <div style={{ display: "flex", background: "#f8fafc", borderBottom: "2px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", width: "max-content", minWidth: "100%" }}>
-          <div style={{ width: 60, padding: "0.75rem 1rem", borderRight: "1px solid var(--border)", textAlign: "center", flexShrink: 0 }}>
-            {parsedHeaderCells ? "" : "S.No"}
-          </div>
-          {columns.map((col) => {
-            const showTitle = !parsedHeaderCells || coveredKeys.has(col.key);
-            return (
-              <div key={col.key} style={{ width: getColWidth(col.key), padding: "0.75rem 1rem", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderRight: "1px solid var(--border)", textAlign: "center" }}>
                 {showTitle ? col.name : ""}
               </div>
             );
@@ -172,52 +213,66 @@ export function VirtualTable({
           <div style={{ height: totalHeight, width: "max-content", minWidth: "100%", position: "relative" }}>
             {/* Dummy row to establish max-content width of the parent container for absolute positioned children */}
             <div style={{ display: "flex", height: 0, visibility: "hidden", overflow: "hidden" }}>
-              <div style={{ width: 60, flexShrink: 0 }}>S.No</div>
+              <div style={{ width: srNoWidth, flexShrink: 0 }}>S.No</div>
               {columns.map((col) => (
-                <div key={col.key} style={{ width: getColWidth(col.key), flexShrink: 0 }}></div>
+                <div key={col.key} style={{ width: getWidth(col.key), flexShrink: 0 }}></div>
               ))}
             </div>
-            {visibleRows.map(({ row, index }) => (
-              <div
-                key={index}
-                style={{
-                  position: "absolute",
-                  top: index * rowHeight,
-                  left: 0,
-                  width: "100%",
-                  height: rowHeight,
-                  display: "flex",
-                  alignItems: "center",
-                  borderBottom: "1px solid #f1f5f9",
-                  background: index % 2 === 1 ? "#fafafa" : "#ffffff",
-                  fontSize: "0.9rem",
-                  color: "#1e293b",
-                }}
-              >
-                <div style={{ width: 60, padding: "0 1rem", color: "#64748b", textAlign: "center", borderRight: "1px solid #f1f5f9", fontWeight: 500, flexShrink: 0 }}>
-                  {index + 1}
+            {visibleRows.map(({ row, index }) => {
+              const bg = index % 2 === 1 ? "#fafafa" : "#ffffff";
+              return (
+                <div
+                  key={index}
+                  style={{
+                    position: "absolute",
+                    top: index * rowHeight,
+                    left: 0,
+                    width: "100%",
+                    height: rowHeight,
+                    display: "flex",
+                    alignItems: "center",
+                    borderBottom: "1px solid #f1f5f9",
+                    background: bg,
+                    fontSize: "0.9rem",
+                    color: "#1e293b",
+                  }}
+                >
+                  <div style={{ width: srNoWidth, padding: "0 1rem", color: "#64748b", textAlign: "center", borderRight: "1px solid #f1f5f9", fontWeight: 500, flexShrink: 0, position: "sticky", left: 0, zIndex: 5, background: bg }}>
+                    {index + 1}
+                  </div>
+                  {columns.map((col, cIdx) => {
+                    const isFirstCol = cIdx === 0;
+                    const val = row[col.key];
+                    const valStr = val !== null && val !== undefined ? String(val) : "—";
+                    const colW = getWidth(col.key);
+                    return (
+                      <div
+                        key={col.key}
+                        style={{
+                          width: colW,
+                          padding: "0 1rem",
+                          flexShrink: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          position: isFirstCol ? "sticky" : "relative",
+                          left: isFirstCol ? srNoWidth : undefined,
+                          zIndex: isFirstCol ? 5 : 1,
+                          background: bg,
+                          borderRight: isFirstCol ? "2px solid #cbd5e1" : undefined,
+                          boxShadow: isFirstCol ? "3px 0 6px -2px rgba(0,0,0,0.08)" : undefined,
+                          fontWeight: isFirstCol ? 600 : 400,
+                          textAlign: isFirstCol ? "left" : "center",
+                        }}
+                        title={valStr}
+                      >
+                        {valStr}
+                      </div>
+                    );
+                  })}
                 </div>
-                {columns.map((col) => {
-                  const val = row[col.key];
-                  return (
-                    <div
-                      key={col.key}
-                      style={{
-                        width: getColWidth(col.key),
-                        padding: "0 1rem",
-                        flexShrink: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                      title={val !== null && val !== undefined ? String(val) : "—"}
-                    >
-                      {val !== null && val !== undefined ? String(val) : "—"}
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
