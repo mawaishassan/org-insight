@@ -3839,21 +3839,27 @@ async def generate_kpi_pdf_report(
                 t_td_style = t_td_style_center
                 t_td_sr_style = ParagraphStyle(f"KpiTD_Sr_{f.key}", parent=t_td_style, alignment=TA_CENTER)
 
-                available_width = max(100, (684 if use_landscape else 504) - table_indent)
+                col_count = len(selected_column_keys)
+                if col_count > 10:
+                    max_table_w = max(100, (756 if use_landscape else 576) - table_indent)
+                else:
+                    max_table_w = max(100, (684 if use_landscape else 504) - table_indent)
                 sr_no_width = 24
+                available_table_w = max_table_w - sr_no_width
+                min_col_width = 28 if col_count > 14 else (35 if col_count > 8 else 45)
 
                 sample_rows = filtered_rows[:200]
                 col_chars = []
                 for idx, col in enumerate(selected_column_keys):
                     h = headers[idx]
                     k_lower = col.lower() if col else ""
-                    if len(selected_column_keys) > 8:
+                    if idx == 0 or "department" in k_lower or "name" in k_lower or "title" in k_lower:
+                        w = 28 if col_count > 10 else 35
+                    elif col_count > 8:
                         if "faculty_who_submitted" in k_lower or "faculty_who" in k_lower:
-                            w = 16
-                        elif "department" in k_lower or "name" in k_lower:
                             w = 18
                         else:
-                            w = min(len(h), 12)
+                            w = max(10, min(len(h), 16))
                     else:
                         w = min(len(h), 25)
                     col_chars.append(w)
@@ -3866,12 +3872,12 @@ async def generate_kpi_pdf_report(
                         else:
                             ft = getattr(sf, "field_type", None) if sf else None
                             raw_cell = _display_string_for_pdf_export(r.get(col), ft) if r.get(col) is not None else ""
-                        max_val_len = 15 if len(selected_column_keys) > 8 else 60
+                        max_val_len = 15 if col_count > 8 else 60
                         col_chars[idx] = max(col_chars[idx], min(len(raw_cell), max_val_len))
 
-                total_chars = sum(col_chars) or len(selected_column_keys)
-                raw_widths = [max(min_col_width, (available_width - sr_no_width) * (c / total_chars)) for c in col_chars]
-                scale = (available_width - sr_no_width) / sum(raw_widths) if sum(raw_widths) > (available_width - sr_no_width) else 1.0
+                total_chars = sum(col_chars) or col_count
+                raw_widths = [max(min_col_width, available_table_w * (c / total_chars)) for c in col_chars]
+                scale = available_table_w / sum(raw_widths) if sum(raw_widths) > available_table_w else 1.0
                 
                 col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
 

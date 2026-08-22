@@ -2038,10 +2038,22 @@ export default function CustomReportDesignPage() {
                 className="btn btn-secondary"
                 onClick={() => {
                   const loc = editingFieldLoc;
+                  const currentConfig = editingFieldConfig;
+                  if (currentConfig && loc) {
+                    setSections(prev => {
+                      const next = [...prev];
+                      const curF = next[loc.secIdx].fields[loc.fieldIdx];
+                      next[loc.secIdx].fields[loc.fieldIdx] = {
+                        ...curF,
+                        config: { ...(curF.config || {}), ...currentConfig }
+                      };
+                      return next;
+                    });
+                  }
                   setEditingFieldLoc(null);
                   setEditingWidthsLoc(loc);
                 }}
-                style={{ padding: "0.4rem 0.75rem", fontSize: "0.82rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "0.3rem", flexShrink: 0 }}
+                style={{ padding: "0.45rem 0.85rem", fontSize: "0.85rem", fontWeight: 650, display: "flex", alignItems: "center", gap: "0.35rem", flexShrink: 0, color: "var(--primary)", border: "1px solid var(--primary-border, #bfdbfe)", background: "#eff6ff" }}
               >
                 📐 Configure Column Widths
               </button>
@@ -2412,14 +2424,39 @@ export default function CustomReportDesignPage() {
             })()}
 
             {/* Modal Actions */}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
               <button
                 type="button"
-                className="btn"
-                onClick={() => setEditingFieldLoc(null)}
+                className="btn btn-secondary"
+                onClick={() => {
+                  const loc = editingFieldLoc;
+                  const currentConfig = editingFieldConfig;
+                  if (currentConfig && loc) {
+                    setSections(prev => {
+                      const next = [...prev];
+                      const curF = next[loc.secIdx].fields[loc.fieldIdx];
+                      next[loc.secIdx].fields[loc.fieldIdx] = {
+                        ...curF,
+                        config: { ...(curF.config || {}), ...currentConfig }
+                      };
+                      return next;
+                    });
+                  }
+                  setEditingFieldLoc(null);
+                  setEditingWidthsLoc(loc);
+                }}
+                style={{ fontSize: "0.85rem", fontWeight: 650, color: "var(--primary)", border: "1px solid #bfdbfe", background: "#eff6ff" }}
               >
-                Cancel
+                📐 Configure Column Widths & Live Preview
               </button>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setEditingFieldLoc(null)}
+                >
+                  Cancel
+                </button>
               <button
                 type="button"
                 className="btn btn-primary"
@@ -2446,6 +2483,7 @@ export default function CustomReportDesignPage() {
               </button>
             </div>
           </div>
+        </div>
         </div>
       )}
       {editingAttachmentIdx !== null && editingAttachmentConfig && (
@@ -2943,9 +2981,11 @@ export default function CustomReportDesignPage() {
         const subFields = kpiField?.sub_fields || [];
         const selectedColKeys: string[] = (f.config as any)?.selected_columns || subFields.map(sf => sf.key).slice(0, 6);
 
+        const customLabels = (f.config as any)?.custom_sub_field_labels || {};
         const cols = selectedColKeys.map(k => {
           const sf = subFields.find(s => s.key === k);
-          return { key: k, name: sf?.name || k };
+          const updatedLabel = customLabels[k] || sf?.name || k;
+          return { key: k, name: updatedLabel };
         });
 
         return (

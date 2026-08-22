@@ -31,19 +31,21 @@ export function VirtualTable({
   columnWidths,
 }: VirtualTableProps) {
   const getWidth = (key: string) => {
-    if (columnWidths && columnWidths[key] && columnWidths[key] > 0) {
-      return columnWidths[key];
-    }
-    if (key === "S.No" && columnWidths && columnWidths["S.No"]) {
-      return columnWidths["S.No"];
-    }
     const k = key.toLowerCase();
-    if (k.includes("department") || k.includes("name") || k.includes("title")) {
-      return 260;
+    const isNameCol = k.includes("department") || k.includes("name") || k.includes("title");
+
+    // Comfortable baseline widths for ideal on-screen viewing experience:
+    // Name columns (e.g. Department Name) need at least 260px on screen
+    // Data columns need at least 115px on screen so header text doesn't squeeze vertically
+    const defaultScreenW = isNameCol ? 260 : 115;
+
+    if (columnWidths && columnWidths[key] && columnWidths[key] > 0) {
+      const minScreenCap = isNameCol ? 240 : 105;
+      return Math.max(columnWidths[key], minScreenCap);
     }
-    return 150;
+    return defaultScreenW;
   };
-  const srNoWidth = (columnWidths && columnWidths["S.No"]) ? columnWidths["S.No"] : 60;
+  const srNoWidth = (columnWidths && columnWidths["S.No"] && columnWidths["S.No"] >= 50) ? columnWidths["S.No"] : 60;
   const [scrollTop, setScrollTop] = useState(0);
   const headerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -123,12 +125,12 @@ export function VirtualTable({
       {/* Header Container (hidden scrollbar, synced via JS) */}
       <div ref={headerRef} style={{ overflow: "hidden" }}>
         {parsedHeaderCells && (
-          <div style={{ display: "flex", background: "#f8fafc", borderBottom: "1px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", width: "max-content", minWidth: "100%" }}>
+          <div style={{ display: "flex", background: "#f8fafc", borderBottom: "1px solid var(--border)", fontWeight: 650, fontSize: "0.82rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.03em", width: "max-content", minWidth: "100%" }}>
             {parsedHeaderCells.map((cell, idx) => {
               const isSrNo = idx === 0;
               const isFirstDataCol = idx === 1;
               const isSticky = isSrNo || isFirstDataCol;
-              const stickyLeft = isSrNo ? 0 : 60;
+              const stickyLeft = isSrNo ? 0 : srNoWidth;
               const bg = cell.isGroup ? "#eff6ff" : "#f8fafc";
               return (
                 <div
@@ -136,19 +138,26 @@ export function VirtualTable({
                   title={cell.title}
                   style={{
                     width: cell.width,
-                    padding: "0.75rem 1rem",
+                    minWidth: cell.width,
+                    padding: "0.6rem 0.5rem",
                     borderRight: isFirstDataCol ? "2px solid var(--border)" : "1px solid var(--border)",
                     textAlign: "center",
                     flexShrink: 0,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
+                    whiteSpace: "normal",
+                    wordBreak: "normal",
+                    overflowWrap: "normal",
+                    hyphens: "none",
+                    lineHeight: 1.25,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
                     color: cell.isGroup ? "#1e40af" : "var(--muted)",
                     background: bg,
                     position: isSticky ? "sticky" : "relative",
                     left: isSticky ? stickyLeft : undefined,
                     zIndex: isSticky ? 10 : 1,
                     boxShadow: isFirstDataCol ? "3px 0 6px -2px rgba(0,0,0,0.08)" : undefined,
+                    boxSizing: "border-box",
                   }}
                 >
                   {cell.title}
@@ -157,8 +166,8 @@ export function VirtualTable({
             })}
           </div>
         )}
-        <div style={{ display: "flex", background: "#f8fafc", borderBottom: "2px solid var(--border)", fontWeight: 600, fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", width: "max-content", minWidth: "100%" }}>
-          <div title="S.No" style={{ width: srNoWidth, padding: "0.75rem 1rem", borderRight: "1px solid var(--border)", textAlign: "center", flexShrink: 0, position: "sticky", left: 0, zIndex: 10, background: "#f8fafc" }}>
+        <div style={{ display: "flex", background: "#f8fafc", borderBottom: "2px solid var(--border)", fontWeight: 650, fontSize: "0.82rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.03em", width: "max-content", minWidth: "100%" }}>
+          <div title="S.No" style={{ width: srNoWidth, minWidth: srNoWidth, padding: "0.6rem 0.5rem", borderRight: "1px solid var(--border)", textAlign: "center", flexShrink: 0, position: "sticky", left: 0, zIndex: 10, background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box" }}>
             {parsedHeaderCells ? "" : "S.No"}
           </div>
           {columns.map((col, idx) => {
@@ -172,11 +181,17 @@ export function VirtualTable({
                 title={headerText}
                 style={{
                   width: colW,
-                  padding: "0.75rem 1rem",
+                  minWidth: colW,
+                  padding: "0.6rem 0.5rem",
                   flexShrink: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
+                  whiteSpace: "normal",
+                  wordBreak: "normal",
+                  overflowWrap: "normal",
+                  hyphens: "none",
+                  lineHeight: 1.25,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
                   borderRight: isFirstCol ? "2px solid var(--border)" : "1px solid var(--border)",
                   textAlign: "center",
                   position: isFirstCol ? "sticky" : "relative",
@@ -184,9 +199,10 @@ export function VirtualTable({
                   zIndex: isFirstCol ? 10 : 1,
                   background: "#f8fafc",
                   boxShadow: isFirstCol ? "3px 0 6px -2px rgba(0,0,0,0.08)" : undefined,
+                  boxSizing: "border-box",
                 }}
               >
-                {showTitle ? col.name : ""}
+                {showTitle ? (col.name || col.key) : ""}
               </div>
             );
           })}
