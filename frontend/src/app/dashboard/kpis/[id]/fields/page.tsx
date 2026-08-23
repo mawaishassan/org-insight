@@ -6488,7 +6488,52 @@ function FormulaBuilder({
 
   return (
     <div style={{ border: "1px solid var(--border)", borderRadius: "8px", padding: "1rem", background: "var(--bg-subtle, #f8f9fa)", width: "100%", maxWidth: "100%", boxSizing: "border-box", overflowX: "hidden" }}>
-      <div style={{ fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>Insert reference</div>
+      {/* Step 0: Same Row Sub-fields Dropdown Selector */}
+      {currentMliSubFields && currentMliSubFields.length > 0 && (
+        <div style={{ marginBottom: "0.85rem", padding: "0.75rem", background: "var(--surface)", border: "1px solid var(--primary)", borderRadius: 8 }}>
+          <div style={{ fontSize: "0.82rem", fontWeight: 700, color: "var(--primary)", marginBottom: "0.4rem", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+            <span>⚡ Same Row Sub-field (Formula for Each Row)</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+            <select
+              style={{ flex: "1 1 240px", padding: "0.38rem 0.55rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+              value=""
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val) {
+                  onInsert(`CurrentRow.${val}`);
+                }
+              }}
+            >
+              <option value="">— Select Sub-field (e.g. CurrentRow.key) —</option>
+              {currentMliSubFields
+                .filter((sf) => sf.key !== currentSubFieldKey)
+                .map((sf) => (
+                  <option key={sf.key} value={sf.key}>
+                    {sf.name} ({sf.key}) → CurrentRow.{sf.key}
+                  </option>
+                ))}
+            </select>
+
+            <div style={{ display: "flex", gap: "0.25rem", alignItems: "center" }}>
+              <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Operators:</span>
+              {["+", "-", "*", "/", "(", ")"].map((op) => (
+                <button
+                  key={op}
+                  type="button"
+                  className="btn"
+                  style={{ padding: "0.2rem 0.45rem", fontSize: "0.85rem", fontFamily: "monospace", minWidth: "28px" }}
+                  onClick={() => onInsert(` ${op} `)}
+                >
+                  {op}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.5rem" }}>Insert reference / Aggregation</div>
 
       {/* Step 1: Source Selector */}
       <div style={{ display: "flex", gap: "1rem", marginBottom: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>

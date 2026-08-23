@@ -2000,7 +2000,7 @@ async def export_custom_report_file(
         from app.reports.service import NumberedCanvas
         from app.core.models import Organization, OrganizationBranding
 
-        available_width = 720 if use_landscape else 540
+        available_width = 756.0 if use_landscape else 576.0
 
         scalar_bold = data.get("scalar_bold", True)
         if scalar_bold is None:
@@ -2015,7 +2015,7 @@ async def export_custom_report_file(
             custom_header = await db.get(CustomReportHeader, data["report_header_id"])
 
         out_io = io.BytesIO()
-        pdf_doc = SimpleDocTemplate(out_io, pagesize=landscape(letter) if use_landscape else letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=72)
+        pdf_doc = SimpleDocTemplate(out_io, pagesize=landscape(letter) if use_landscape else letter, rightMargin=18, leftMargin=18, topMargin=36, bottomMargin=54)
         story = []
 
         # Setup custom fonts and styles
@@ -2372,16 +2372,54 @@ async def export_custom_report_file(
 
                     if sub_fields:
                         col_count = len(sub_fields)
-                        sr_no_width = 32 if col_count > 10 else 40
-                        
-                        # Expand printable table width into side margins for wide tables (> 10 columns)
-                        if col_count > 10:
-                            max_table_printable_w = 756 if use_landscape else 576
+                        if col_count > 14:
+                            tbl_font_size = 7.0
+                            tbl_padding = 1.5
+                            sr_no_width = 24.0
+                        elif col_count > 10:
+                            tbl_font_size = 8.0
+                            tbl_padding = 2.0
+                            sr_no_width = 28.0
                         else:
-                            max_table_printable_w = available_width
+                            tbl_font_size = float(mli_font_size)
+                            tbl_padding = 3.0
+                            sr_no_width = 40.0
 
+                        cur_hdr_style = ParagraphStyle(
+                            f"CustomTblHdrStyle_{col_count}",
+                            parent=styles["Normal"],
+                            fontName=font_name_bold,
+                            fontSize=tbl_font_size,
+                            leading=tbl_font_size + 1.5,
+                            textColor=colors.white,
+                            alignment=TA_CENTER
+                        )
+                        cur_hdr_style_left = ParagraphStyle(
+                            f"CustomTblHdrStyleLeft_{col_count}",
+                            parent=cur_hdr_style,
+                            alignment=TA_LEFT
+                        )
+                        cur_body_style_center = ParagraphStyle(
+                            f"CustomTblBodyStyleCenter_{col_count}",
+                            parent=styles["Normal"],
+                            fontName=font_name_regular,
+                            fontSize=tbl_font_size,
+                            leading=tbl_font_size + 1.5,
+                            alignment=TA_CENTER
+                        )
+                        cur_body_style_left = ParagraphStyle(
+                            f"CustomTblBodyStyleLeft_{col_count}",
+                            parent=styles["Normal"],
+                            fontName=font_name_regular,
+                            fontSize=tbl_font_size,
+                            leading=tbl_font_size + 1.5,
+                            alignment=TA_LEFT
+                        )
+
+                        # Expand printable table width into side margins for wide tables (> 10 columns)
+                        max_table_printable_w = float(available_width)
                         available_table_w = max_table_printable_w - sr_no_width
-                        min_col_width = 28 if col_count > 14 else (35 if col_count > 8 else 45)
+                        min_col_width = 18.0 if col_count > 14 else (28.0 if col_count > 8 else 40.0)
                         
                         col_chars = []
                         for s_idx, sf in enumerate(sub_fields):
@@ -2414,21 +2452,32 @@ async def export_custom_report_file(
                                 if cw:
                                     configured_cols.append(float(cw) * 0.75)
                                 else:
-                                    configured_cols.append(45.0)
-                            col_widths = [configured_sr] + configured_cols
+                                    configured_cols.append(26.0 if col_count > 14 else 45.0)
+                            raw_widths = [configured_sr] + configured_cols
+                            sum_raw = sum(raw_widths)
+                            scale = max_table_printable_w / sum_raw if sum_raw > 0 else 1.0
+                            col_widths = [w * scale for w in raw_widths]
                         else:
-                            total_chars = sum(col_chars) or col_count
-                            raw_widths = [max(min_col_width, available_table_w * (c / total_chars)) for c in col_chars]
-                            scale = available_table_w / sum(raw_widths) if sum(raw_widths) > available_table_w else 1.0
-                            col_widths = [sr_no_width] + [max(min_col_width, w * scale) for w in raw_widths]
+                            if col_count > 14:
+                                dept_w = min(120.0, max(85.0, available_table_w * 0.17))
+                                remain_w = available_table_w - dept_w
+                                per_col_w = remain_w / (col_count - 1)
+                                col_widths = [sr_no_width, dept_w] + [per_col_w] * (col_count - 1)
+                            else:
+                                total_chars = sum(col_chars) or col_count
+                                raw_widths = [max(min_col_width, available_table_w * (c / total_chars)) for c in col_chars]
+                                scale = available_table_w / sum(raw_widths) if sum(raw_widths) > 0 else 1.0
+                                col_widths = [sr_no_width] + [w * scale for w in raw_widths]
 
                         merged_headers = f.get("config", {}).get("merged_headers") or []
                         
                         t_style_cmds = [
                             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                             ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
-                            ("TOPPADDING", (0, 0), (-1, -1), 3),
-                            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                            ("TOPPADDING", (0, 0), (-1, -1), tbl_padding),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), tbl_padding),
+                            ("LEFTPADDING", (0, 0), (-1, -1), tbl_padding),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), tbl_padding),
                         ]
 
                         if merged_headers:
@@ -2436,13 +2485,13 @@ async def export_custom_report_file(
                             col_indices = {key: idx + 1 for idx, key in enumerate(cols_keys)}
                             covered_cols = set()
 
-                            row_0 = [Paragraph("", table_hdr_style) for _ in range(len(sub_fields) + 1)]
-                            row_1 = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style_left if s_idx == 0 else table_hdr_style) for s_idx, sf in enumerate(sub_fields)]
+                            row_0 = [Paragraph("", cur_hdr_style) for _ in range(len(sub_fields) + 1)]
+                            row_1 = [Paragraph("Sr. No.", cur_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), cur_hdr_style_left if s_idx == 0 else cur_hdr_style) for s_idx, sf in enumerate(sub_fields)]
                             
                             t_style_cmds.append(("BACKGROUND", (0, 0), (-1, 1), colors.HexColor(h1_color_hex)))
                             
                             # Vertical merge Sr. No.
-                            row_0[0] = Paragraph("Sr. No.", table_hdr_style)
+                            row_0[0] = Paragraph("Sr. No.", cur_hdr_style)
                             t_style_cmds.append(("SPAN", (0, 0), (0, 1)))
 
                             # Write grouped headers
@@ -2453,7 +2502,7 @@ async def export_custom_report_file(
                                 if start_key in col_indices and end_key in col_indices:
                                     start_col = col_indices[start_key]
                                     end_col = col_indices[end_key]
-                                    row_0[start_col] = Paragraph(f"<b>{title}</b>", table_hdr_style)
+                                    row_0[start_col] = Paragraph(f"<b>{title}</b>", cur_hdr_style)
                                     t_style_cmds.append(("SPAN", (start_col, 0), (end_col, 0)))
                                     t_style_cmds.append(("ALIGN", (start_col, 0), (end_col, 0), "CENTER"))
                                     for c in range(start_col, end_col + 1):
@@ -2463,24 +2512,22 @@ async def export_custom_report_file(
                             for idx, sf in enumerate(sub_fields):
                                 c_idx = idx + 1
                                 if c_idx not in covered_cols:
-                                    hdr_st = table_hdr_style_left if idx == 0 else table_hdr_style
+                                    hdr_st = cur_hdr_style_left if idx == 0 else cur_hdr_style
                                     row_0[c_idx] = Paragraph(sf.get("name") or sf.get("key"), hdr_st)
                                     t_style_cmds.append(("SPAN", (c_idx, 0), (c_idx, 1)))
 
                             pdf_table_data = [row_0, row_1]
                         else:
                             t_style_cmds.append(("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(h1_color_hex)))
-                            hdr_row = [Paragraph("Sr. No.", table_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), table_hdr_style_left if s_idx == 0 else table_hdr_style) for s_idx, sf in enumerate(sub_fields)]
+                            hdr_row = [Paragraph("Sr. No.", cur_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), cur_hdr_style_left if s_idx == 0 else cur_hdr_style) for s_idx, sf in enumerate(sub_fields)]
                             pdf_table_data = [hdr_row]
 
                         for item_idx, item in enumerate(value_items):
-                            row = [Paragraph(str(item_idx + 1), table_body_style_center)]
+                            row = [Paragraph(str(item_idx + 1), cur_body_style_center)]
                             for s_idx, sf in enumerate(sub_fields):
                                 val = item.get(sf.get("key"))
                                 val_str = clean_numeric_value_string(val)
-                                if len(val_str) > 250:
-                                    val_str = val_str[:250] + "..."
-                                cell_st = table_body_style_left if s_idx == 0 else table_body_style_center
+                                cell_st = cur_body_style_left if s_idx == 0 else cur_body_style_center
                                 row.append(Paragraph(val_str, cell_st))
                             pdf_table_data.append(row)
 
