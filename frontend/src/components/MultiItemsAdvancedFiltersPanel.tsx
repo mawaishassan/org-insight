@@ -53,6 +53,36 @@ export default function MultiItemsAdvancedFiltersPanel({
   fieldId = null,
   year = null,
 }: MultiItemsAdvancedFiltersPanelProps) {
+  const [textUniqueValues, setTextUniqueValues] = React.useState<Record<string, string[]>>({});
+
+  // Load unique values for text & text-extraction subfields as needed
+  React.useEffect(() => {
+    if (!token) return;
+    filterDraft.forEach((row) => {
+      if (!row.field) return;
+      if (textUniqueValues[row.field] !== undefined) return;
+      const sub = subFields.find((s) => s.key === row.field);
+      if (!sub) return;
+      const targetFieldId = fieldId || (sub as any).field_id || (sub as any).parent_field_id;
+      if (!targetFieldId) return;
+
+      api<{ field_id: number; sub_field_key: string; unique_values: string[] }>(
+        `/kpis/fields/${targetFieldId}/subfields/${row.field}/unique-values`,
+        { token }
+      )
+        .then((res) => {
+          if (res?.unique_values) {
+            setTextUniqueValues((prev) => ({ ...prev, [row.field]: res.unique_values }));
+          } else {
+            setTextUniqueValues((prev) => ({ ...prev, [row.field]: [] }));
+          }
+        })
+        .catch(() => {
+          setTextUniqueValues((prev) => ({ ...prev, [row.field]: [] }));
+        });
+    });
+  }, [token, fieldId, filterDraft, subFields, textUniqueValues]);
+
   // Load source KPI fields as needed
   React.useEffect(() => {
     if (!token || effectiveOrgId == null) return;
@@ -579,14 +609,25 @@ export default function MultiItemsAdvancedFiltersPanel({
                             );
                           }
 
+                          const fieldUniqueVals = textUniqueValues[c.field] || [];
                           return (
-                            <input
-                              type="text"
-                              value={c.value}
-                              onChange={(e) => setRow(idx, { value: e.target.value })}
-                              style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                              placeholder="Value"
-                            />
+                            <>
+                              <input
+                                type="text"
+                                list={`unique-vals-${c.field}`}
+                                value={c.value}
+                                onChange={(e) => setRow(idx, { value: e.target.value })}
+                                style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                placeholder={fieldUniqueVals.length > 0 ? "Type or select value..." : "Value"}
+                              />
+                              {fieldUniqueVals.length > 0 && (
+                                <datalist id={`unique-vals-${c.field}`}>
+                                  {fieldUniqueVals.map((uv) => (
+                                    <option key={uv} value={uv} />
+                                  ))}
+                                </datalist>
+                              )}
+                            </>
                           );
                         })()}
                       </div>

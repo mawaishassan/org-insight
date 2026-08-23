@@ -84,6 +84,17 @@ async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: 
                 continue
             d[str(key)] = _ml_cell_raw(c)
         out.append(d)
+
+    # Apply text extraction rules if configured for this field
+    try:
+        from app.entries.multi_line_load import _fetch_rules_for_field
+        rules = await _fetch_rules_for_field(db, field.id)
+        if rules:
+            from app.entries.mli_extraction import apply_extraction_rules
+            out = apply_extraction_rules(out, rules)
+    except Exception as exc:
+        logger.warning("MLI extraction skipped in load_multi_line_items_rows: %s", exc)
+
     return out
 
 
@@ -3469,7 +3480,8 @@ async def recompute_mli_formula_subfields(
             formula_subs = [
                 sf for sf in sub_fields
                 if getattr(sf, "field_type", None) in ("formula", FieldType.formula) or
-                getattr(getattr(sf, "field_type", None), "value", None) == "formula"
+                getattr(getattr(sf, "field_type", None), "value", None) == "formula" or
+                (isinstance(sf.config, dict) and (sf.config.get("is_formula") or sf.config.get("formula_expression")))
             ]
             if not formula_subs:
                 continue
@@ -3521,21 +3533,28 @@ async def recompute_mli_formula_subfields(
             # Compute formula subfields: outer loop over fields (topological order), inner loop over rows
             for sf in sorted_subs:
                 sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
-                if sf_type_s == "formula":
-                    cfg = sf.config or {}
-                    if hasattr(cfg, "get"):
-                        expr = cfg.get("formula_expression")
-                    elif isinstance(cfg, dict):
-                        expr = cfg.get("formula_expression")
-                    else:
-                        expr = None
+                cfg = sf.config or {}
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                is_sf_formula = (sf_type_s == "formula") or bool(cfg.get("is_formula")) or bool(cfg.get("formula_expression"))
+                if is_sf_formula:
+                    expr = cfg.get("formula_expression") or getattr(sf, "formula_expression", None)
                     if not expr:
                         continue
+
+                    # Normalize human-readable subfield names to subfield keys in formula expression
+                    norm_expr = str(expr)
+                    sorted_all_subs = sorted(sub_fields, key=lambda s: len(s.name or ""), reverse=True)
+                    for sub_item in sorted_all_subs:
+                        s_name = (sub_item.name or "").strip()
+                        s_key = (sub_item.key or "").strip()
+                        if s_name and s_key and s_name != s_key:
+                            norm_expr = re.sub(r'\b' + re.escape(s_name) + r'\b', s_key, norm_expr)
 
                     for idx, r in enumerate(rows_orm):
                         working_row = multi_line_items_data[f.key][idx]
                         computed = evaluate_formula(
-                            expr,
+                            norm_expr,
                             value_by_key,
                             multi_line_items_data,
                             other_kpi_values,
@@ -3546,6 +3565,17 @@ async def recompute_mli_formula_subfields(
                         cond_logic = cfg.get("conditional_logic") if isinstance(cfg, dict) else None
                         if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
                             computed = apply_conditional_logic(computed, cond_logic)
+
+                        dec_places = cfg.get("decimal_places") if isinstance(cfg, dict) else None
+                        if dec_places is not None and str(dec_places).lower() != "auto":
+                            try:
+                                dp = int(dec_places)
+                                if isinstance(computed, (float, int)) and not isinstance(computed, bool):
+                                    computed = round(float(computed), dp)
+                                    if dp == 0:
+                                        computed = int(computed)
+                            except (ValueError, TypeError):
+                                pass
 
                         # Update working_row in-place
                         working_row[sf.key] = computed

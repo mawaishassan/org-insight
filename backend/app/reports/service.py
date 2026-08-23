@@ -325,6 +325,18 @@ async def _load_multi_line_items_rows_batch(
                 elif not sf:
                     cleaned_r[k] = v
             by_entry[int(eid)].append(cleaned_r)
+
+    # Apply text extraction rules for each entry in batch
+    try:
+        from app.entries.multi_line_load import _fetch_rules_for_field
+        rules = await _fetch_rules_for_field(db, field.id)
+        if rules:
+            from app.entries.mli_extraction import apply_extraction_rules
+            for eid in list(by_entry.keys()):
+                by_entry[eid] = apply_extraction_rules(by_entry[eid], rules)
+    except Exception as exc:
+        logger.warning("MLI extraction skipped in _load_multi_line_items_rows_batch: %s", exc)
+
     return dict(by_entry)
 
 

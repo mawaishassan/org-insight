@@ -116,6 +116,21 @@ export function ColumnWidthConfigModal({
     return rowObj;
   });
 
+  const totalTableWidth = (widths["S.No"] || 60) + columns.reduce((acc, col) => acc + (widths[col.key] || 120), 0);
+  const TARGET_PAGE_WIDTH = 850;
+
+  const handleAutoFitToPage = () => {
+    if (totalTableWidth <= 0) return;
+    const ratio = TARGET_PAGE_WIDTH / totalTableWidth;
+    const nextWidths: Record<string, number> = {};
+    nextWidths["S.No"] = Math.max(40, Math.round((widths["S.No"] || 60) * ratio));
+    columns.forEach((col) => {
+      const orig = widths[col.key] || 120;
+      nextWidths[col.key] = Math.max(45, Math.round(orig * ratio));
+    });
+    setWidths(nextWidths);
+  };
+
   return (
     <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0, 0, 0, 0.5)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999, padding: "1rem" }}>
       <div className="card" style={{ width: "100%", maxWidth: "1020px", maxHeight: "90vh", display: "flex", flexDirection: "column", background: "white", borderRadius: 14, boxShadow: "0 25px 50px -12px rgba(0,0,0,0.25)", overflow: "hidden", border: "1px solid var(--border)" }}>
@@ -127,7 +142,7 @@ export function ColumnWidthConfigModal({
               📐 Configure Column Widths — {fieldName}
             </h3>
             <p style={{ margin: "0.2rem 0 0 0", fontSize: "0.85rem", color: "#64748b" }}>
-              Set precise column widths or drag boundary handles directly in the live report preview below.
+              Set precise column widths. Tables are automatically scaled to fit within page borders without overflowing.
             </p>
           </div>
           <button type="button" onClick={onClose} style={{ border: "none", background: "transparent", fontSize: "1.4rem", cursor: "pointer", color: "#94a3b8" }}>&times;</button>
@@ -138,9 +153,26 @@ export function ColumnWidthConfigModal({
           
           {/* Controls List Grid */}
           <div style={{ background: "#f8fafc", padding: "1rem", borderRadius: 10, border: "1px solid var(--border)" }}>
-            <h4 style={{ margin: "0 0 0.75rem 0", fontSize: "0.9rem", color: "#334155", fontWeight: 650 }}>
-              Width Values (px)
-            </h4>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
+              <h4 style={{ margin: 0, fontSize: "0.9rem", color: "#334155", fontWeight: 650 }}>
+                Width Values (px) — Total: <span style={{ color: totalTableWidth > TARGET_PAGE_WIDTH ? "#d97706" : "#16a34a", fontWeight: 700 }}>{totalTableWidth}px</span>
+                {totalTableWidth > TARGET_PAGE_WIDTH && (
+                  <span style={{ fontSize: "0.75rem", color: "#b45309", marginLeft: "0.5rem", fontWeight: 500 }}>
+                    (Auto-scaled on print/PDF export to fit page borders: {TARGET_PAGE_WIDTH}px)
+                  </span>
+                )}
+              </h4>
+              <button
+                type="button"
+                className="btn"
+                onClick={handleAutoFitToPage}
+                style={{ fontSize: "0.8rem", padding: "0.25rem 0.6rem", background: "#e0e7ff", color: "#3730a3", borderColor: "#c7d2fe", fontWeight: 600 }}
+                title="Proportionally scale column widths to fit standard page container width"
+              >
+                ✨ Auto-Fit to Page Width ({TARGET_PAGE_WIDTH}px)
+              </button>
+            </div>
+
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "0.75rem" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem", background: "white", padding: "0.4rem 0.6rem", borderRadius: 6, border: "1px solid var(--border)" }}>
                 <span style={{ fontSize: "0.82rem", fontWeight: 600, color: "#475569" }}>S.No</span>

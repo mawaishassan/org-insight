@@ -149,6 +149,7 @@ async def check_type_compatibility(
     }
 
 
+@router.put("/{field_id}", response_model=KPIFieldResponse)
 @router.patch("/{field_id}", response_model=KPIFieldResponse)
 async def update_kpi_field(
     field_id: int,

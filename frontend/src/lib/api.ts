@@ -2,7 +2,7 @@
  * API client: base URL and fetch with JWT.
  */
 
-import { clearTokens } from "./auth";
+import { clearTokens, getAccessToken } from "./auth";
 
 /**
  * Base URL for API requests (no trailing slash).
@@ -232,7 +232,8 @@ export async function api<T>(
   path: string,
   options: RequestInit & { token?: string; useCache?: boolean; cacheTTL?: number } = {}
 ): Promise<T> {
-  const { token, body, useCache, cacheTTL, ...init } = options;
+  const { token: tokenFromOpts, body, useCache, cacheTTL, ...init } = options;
+  const token = tokenFromOpts || (typeof window !== "undefined" ? getAccessToken() : undefined);
   const url = getApiUrl(path);
   const method = (init.method || "GET").toUpperCase();
 
@@ -364,6 +365,9 @@ api.post = function <T>(path: string, body?: any, options?: RequestInit & { toke
 };
 api.put = function <T>(path: string, body?: any, options?: RequestInit & { token?: string }): Promise<T> {
   return api<T>(path, { ...options, method: "PUT", body: body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined });
+};
+api.patch = function <T>(path: string, body?: any, options?: RequestInit & { token?: string }): Promise<T> {
+  return api<T>(path, { ...options, method: "PATCH", body: body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined });
 };
 api.delete = function <T>(path: string, options?: RequestInit & { token?: string }): Promise<T> {
   return api<T>(path, { ...options, method: "DELETE" });
