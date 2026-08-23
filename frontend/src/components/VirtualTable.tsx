@@ -19,6 +19,7 @@ interface VirtualTableProps {
   totalCount?: number;
   mergedHeaders?: MergedHeader[];
   columnWidths?: Record<string, number> | null;
+  footerRows?: any[] | null;
 }
 
 export function VirtualTable({
@@ -29,6 +30,7 @@ export function VirtualTable({
   totalCount,
   mergedHeaders,
   columnWidths,
+  footerRows,
 }: VirtualTableProps) {
   const getWidth = (key: string) => {
     const k = key.toLowerCase();
@@ -292,6 +294,73 @@ export function VirtualTable({
           </div>
         )}
       </div>
+
+      {/* Evaluated Custom Report Table Footer */}
+      {footerRows && footerRows.length > 0 && (
+        <div style={{ borderTop: "2px solid #cbd5e1", background: "#f8fafc", width: "max-content", minWidth: "100%", overflowX: "auto" }}>
+          {footerRows.map((fRow, rIdx) => {
+            const cells = fRow.cells || [];
+            const totalSubCols = columns.length;
+            const sumColspan = cells.reduce((acc: number, c: any) => acc + (c.colspan || 1), 0);
+            const firstCellExtra = sumColspan === totalSubCols ? 1 : 0;
+
+            return (
+              <div key={rIdx} style={{ display: "flex", alignItems: "center", borderBottom: "1px solid #cbd5e1", fontSize: "0.875rem" }}>
+                {cells.map((c: any, cIdx: number) => {
+                  const colspan = (c.colspan || 1) + (cIdx === 0 ? firstCellExtra : 0);
+                  let cellWidth = 0;
+                  if (cIdx === 0 && firstCellExtra > 0) {
+                    cellWidth = srNoWidth;
+                    for (let k = 0; k < (c.colspan || 1); k++) {
+                      if (columns[k]) cellWidth += getWidth(columns[k].key);
+                    }
+                  } else {
+                    let colOffset = 0;
+                    for (let i = 0; i < cIdx; i++) {
+                      colOffset += cells[i].colspan || 1;
+                    }
+                    for (let k = 0; k < colspan; k++) {
+                      if (columns[colOffset + k]) {
+                        cellWidth += getWidth(columns[colOffset + k].key);
+                      }
+                    }
+                  }
+                  if (cellWidth === 0) cellWidth = 100;
+
+                  const isFirstCol = cIdx === 0;
+
+                  return (
+                    <div
+                      key={cIdx}
+                      style={{
+                        width: cellWidth,
+                        minWidth: cellWidth,
+                        padding: "0.6rem 0.75rem",
+                        borderRight: "1px solid #cbd5e1",
+                        textAlign: c.align || "left",
+                        fontWeight: c.bold ? 700 : 400,
+                        color: "#0f172a",
+                        boxSizing: "border-box",
+                        flexShrink: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        position: isFirstCol ? "sticky" : "relative",
+                        left: isFirstCol ? 0 : undefined,
+                        zIndex: isFirstCol ? 6 : 1,
+                        background: "#f8fafc",
+                      }}
+                      title={c.value}
+                    >
+                      {c.value}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Footer / Count Info */}
       <div style={{ padding: "0.5rem 1rem", borderTop: "1px solid var(--border)", background: "#f8fafc", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.8rem", color: "#64748b" }}>

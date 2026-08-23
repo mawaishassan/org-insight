@@ -1607,6 +1607,39 @@ async def get_column_unique_values(
             ),
         ).where(KpiMultiLineRowAccess.user_id == current_user.id)
 
+    from app.entries.multi_line_load import _fetch_rules_for_field, load_multi_line_row_dicts
+    rules = await _fetch_rules_for_field(db, field.id)
+    if rules:
+        target_ids = [entry.id] if entry is not None else (resolved_entry_ids if resolved_entry_ids else [e.id for e in all_entries])
+        if target_ids:
+            try:
+                row_tuples = await load_multi_line_row_dicts(
+                    db,
+                    entry_id=target_ids,
+                    field=field,
+                    current_user_id=current_user.id
+                )
+                from collections import Counter
+                values_counter = Counter()
+                for _, rdict in row_tuples:
+                    raw = rdict.get(sub_field_key)
+                    if raw is not None:
+                        val_s = str(raw).strip()
+                        if val_s and val_s.lower() not in ("none", "null", "false", "undefined", "—"):
+                            values_counter[val_s] += 1
+                def sort_key(item: tuple[str, int]):
+                    v = item[0]
+                    try:
+                        return (0, float(v))
+                    except (ValueError, TypeError):
+                        return (1, v.lower())
+                sorted_items = sorted(values_counter.items(), key=sort_key)
+                return ColumnUniqueValuesResponse(
+                    values=[ColumnUniqueValueItem(value=v, count=c) for v, c in sorted_items]
+                )
+            except Exception as exc:
+                logger.warning("Extraction rule processing skipped in get_column_unique_values: %s", exc)
+
     res = await db.execute(q)
     rows_data = res.all()
 
@@ -1719,7 +1752,10 @@ async def list_multi_items_rows(
         if getattr(sf, "id", None) is not None:
             subfields_dict[int(sf.id)] = sf
         ft_val = getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", None))
-        if str(ft_val) == "formula":
+        cfg = getattr(sf, "config", None) or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        if str(ft_val) == "formula" or cfg.get("is_formula") or cfg.get("formula_expression"):
             has_formula_sub = True
 
     if has_formula_sub:

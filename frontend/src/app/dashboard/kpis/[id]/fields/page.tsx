@@ -354,6 +354,16 @@ export default function KpiFieldsPage() {
     ui_section: string;
     config: ReferenceConfig;
   }>({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: "", config: {} });
+  const [inlineEditFieldIds, setInlineEditFieldIds] = useState<Record<number, boolean>>({});
+  const [inlineSubfieldDrafts, setInlineSubfieldDrafts] = useState<
+    Record<number, Array<{ id?: number; name: string; key: string; field_type: string; is_required: boolean; ui_section?: string; formula_expression?: string }>>
+  >({});
+  const [importStructureModal, setImportStructureModal] = useState<{
+    fieldId: number;
+    fieldName: string;
+    jsonText: string;
+    mode: "append" | "replace";
+  } | null>(null);
   const [isCondModalOpen, setIsCondModalOpen] = useState(false);
   const [condEditingFieldId, setCondEditingFieldId] = useState<number | string | null>(null);
   const [condTriggerId, setCondTriggerId] = useState<number | string | "">("");
@@ -741,6 +751,319 @@ export default function KpiFieldsPage() {
     } finally {
       setSectionsSaving(false);
     }
+  };
+
+  const handleMoveSubfieldUp = async (field: KpiField, subIndex: number) => {
+    if (subIndex <= 0) return;
+    const subs = [...(field.sub_fields ?? [])];
+    const temp = subs[subIndex];
+    subs[subIndex] = subs[subIndex - 1];
+    subs[subIndex - 1] = temp;
+    const updated = subs.map((s, idx) => ({ ...s, sort_order: idx }));
+    await onUpdateSubmit(field.id, buildMultiLineUpdateFromField(field), updated as any, undefined);
+  };
+
+  const handleMoveSubfieldDown = async (field: KpiField, subIndex: number) => {
+    const subs = [...(field.sub_fields ?? [])];
+    if (subIndex >= subs.length - 1) return;
+    const temp = subs[subIndex];
+    subs[subIndex] = subs[subIndex + 1];
+    subs[subIndex + 1] = temp;
+    const updated = subs.map((s, idx) => ({ ...s, sort_order: idx }));
+    await onUpdateSubmit(field.id, buildMultiLineUpdateFromField(field), updated as any, undefined);
+  };
+
+  const toggleInlineEditMode = (field: KpiField) => {
+    const fieldId = field.id;
+    setInlineEditFieldIds((prev) => {
+      const nextVal = !prev[fieldId];
+      if (nextVal) {
+        const subs = (field.sub_fields ?? []).map((s: any) => ({
+          id: s.id,
+          name: String(s.name ?? ""),
+          key: String(s.key ?? ""),
+          field_type: String(s.field_type ?? "single_line_text"),
+          is_required: !!s.is_required,
+          ui_section: typeof s.config?.ui_section === "string" ? s.config.ui_section : "",
+          formula_expression: typeof s.config?.formula_expression === "string" ? s.config.formula_expression : String(s.formula_expression ?? ""),
+        }));
+        setInlineSubfieldDrafts((d) => ({ ...d, [fieldId]: subs }));
+      }
+      return { ...prev, [fieldId]: nextVal };
+    });
+  };
+
+  const handleSaveInlineEdit = async (field: KpiField) => {
+    const drafts = inlineSubfieldDrafts[field.id] || [];
+    const nextSubs = drafts.map((item, idx) => {
+      const orig = (field.sub_fields ?? []).find((s) => s.id === item.id || s.key === item.key) as any;
+      const cfg = { ...(orig?.config ?? {}) };
+      if (item.ui_section) {
+        cfg.ui_section = item.ui_section.trim();
+      } else {
+        delete cfg.ui_section;
+      }
+      if (item.field_type === "formula" || item.formula_expression) {
+        cfg.is_formula = true;
+        cfg.formula_expression = (item.formula_expression || "").trim();
+      }
+      return {
+        id: item.id,
+        name: item.name.trim() || `Subfield ${idx + 1}`,
+        key: item.key.trim().toLowerCase().replace(/[^a-z0-9_]/g, "_") || `subfield_${idx + 1}`,
+        field_type: item.field_type || "single_line_text",
+        is_required: !!item.is_required,
+        sort_order: idx,
+        config: cfg,
+      };
+    });
+
+    await onUpdateSubmit(field.id, buildMultiLineUpdateFromField(field), nextSubs as any, undefined);
+    setInlineEditFieldIds((prev) => ({ ...prev, [field.id]: false }));
+    toast.success("Sub-fields updated successfully");
+  };
+
+  const handleExportStructure = (field: KpiField, format: "csv" | "json" = "csv") => {
+    const subs = (field.sub_fields ?? []).map((s) => {
+      const cfg = ((s as any).config ?? {}) as any;
+      const formulaExpr = typeof cfg.formula_expression === "string" ? cfg.formula_expression : ((s as any).formula_expression || "");
+      const refLabel =
+        (s.field_type === "formula" || cfg.is_formula)
+          ? formulaExpr
+          : (s.field_type === "reference" || s.field_type === "multi_reference") &&
+            (cfg.reference_source_kpi_id || cfg.reference_source_field_key)
+          ? `${cfg.reference_source_kpi_id ?? "?"} • ${String(cfg.reference_source_field_key ?? "—")}`
+          : "";
+
+      return {
+        name: String(s.name ?? ""),
+        key: String(s.key ?? ""),
+        field_type: String(s.field_type ?? "single_line_text"),
+        ref_or_formula: refLabel,
+        ui_section: typeof cfg.ui_section === "string" ? cfg.ui_section : "",
+        is_required: s.is_required ? "Yes" : "No",
+        raw: s,
+      };
+    });
+
+    if (format === "json") {
+      const cleanSubs = (field.sub_fields ?? []).map((s) => {
+        const cfg = ((s as any).config ?? {}) as any;
+        const cleanCfg = { ...cfg };
+        delete cleanCfg.id;
+        return {
+          name: s.name,
+          key: s.key,
+          field_type: s.field_type,
+          is_required: s.is_required,
+          ui_section: typeof cfg.ui_section === "string" ? cfg.ui_section : "",
+          config: cleanCfg,
+        };
+      });
+      const jsonStr = JSON.stringify(cleanSubs, null, 2);
+      navigator.clipboard.writeText(jsonStr).catch(() => {});
+      const blob = new Blob([jsonStr], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `mli_structure_${field.key}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Structure exported to JSON!");
+      return;
+    }
+
+    const header = ["Name", "Key", "Type", "Reference Source / Formula", "UI Section", "Required"];
+    const csvRows = [header.map((h) => `"${h.replace(/"/g, '""')}"`).join(",")];
+
+    subs.forEach((item) => {
+      const row = [
+        item.name,
+        item.key,
+        item.field_type,
+        item.ref_or_formula,
+        item.ui_section,
+        item.is_required,
+      ];
+      csvRows.push(row.map((val) => `"${String(val ?? "").replace(/"/g, '""')}"`).join(","));
+    });
+
+    const csvContent = "\uFEFF" + csvRows.join("\n");
+    navigator.clipboard.writeText(csvContent).catch(() => {});
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `mli_structure_${field.key}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    toast.success("Structure exported to Excel CSV!");
+  };
+
+  const handleImportStructureSubmit = async () => {
+    if (!importStructureModal || !importStructureModal.fieldId) return;
+    const { fieldId, jsonText, mode } = importStructureModal;
+
+    const rawText = jsonText.trim();
+    if (!rawText) {
+      toast.error("Please paste Excel table data, upload CSV/JSON file, or enter structure");
+      return;
+    }
+
+    let parsedItems: any[] = [];
+
+    if (rawText.startsWith("[") || rawText.startsWith("{")) {
+      try {
+        const jsonParsed = JSON.parse(rawText);
+        parsedItems = Array.isArray(jsonParsed) ? jsonParsed : [jsonParsed];
+      } catch (e) {
+      }
+    }
+
+    if (parsedItems.length === 0) {
+      const lines = rawText.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      if (lines.length > 0) {
+        const firstLine = lines[0];
+        const isTabDelimited = firstLine.includes("\t");
+
+        const parseCsvLine = (line: string) => {
+          if (isTabDelimited) return line.split("\t").map((cell) => cell.trim().replace(/^"|"$/g, ""));
+          const result: string[] = [];
+          let current = "";
+          let inQuotes = false;
+          for (let i = 0; i < line.length; i++) {
+            const ch = line[i];
+            if (ch === '"') {
+              if (inQuotes && line[i + 1] === '"') {
+                current += '"';
+                i++;
+              } else {
+                inQuotes = !inQuotes;
+              }
+            } else if (ch === "," && !inQuotes) {
+              result.push(current.trim());
+              current = "";
+            } else {
+              current += ch;
+            }
+          }
+          result.push(current.trim());
+          return result;
+        };
+
+        const headers = parseCsvLine(lines[0]).map((h) => h.toLowerCase().trim());
+        const hasHeader = headers.some((h) =>
+          ["name", "key", "type", "formula", "section", "required"].some((k) => h.includes(k))
+        );
+
+        const startIdx = hasHeader ? 1 : 0;
+        const colMap = {
+          name: headers.findIndex((h) => h.includes("name")),
+          key: headers.findIndex((h) => h.includes("key") || h.includes("code")),
+          type: headers.findIndex((h) => h.includes("type")),
+          formula: headers.findIndex((h) => h.includes("formula") || h.includes("reference") || h.includes("source")),
+          section: headers.findIndex((h) => h.includes("section") || h.includes("ui")),
+          required: headers.findIndex((h) => h.includes("required") || h.includes("req")),
+        };
+
+        for (let i = startIdx; i < lines.length; i++) {
+          const cells = parseCsvLine(lines[i]);
+          if (cells.length === 0 || (cells.length === 1 && !cells[0])) continue;
+
+          let nameVal = colMap.name >= 0 ? cells[colMap.name] : cells[0] || "";
+          let keyVal = colMap.key >= 0 ? cells[colMap.key] : cells[1] || "";
+          let typeVal = colMap.type >= 0 ? cells[colMap.type] : cells[2] || "";
+          let formulaVal = colMap.formula >= 0 ? cells[colMap.formula] : cells[3] || "";
+          let sectionVal = colMap.section >= 0 ? cells[colMap.section] : cells[4] || "";
+          let reqVal = colMap.required >= 0 ? cells[colMap.required] : cells[5] || "";
+
+          if (!nameVal && !keyVal) continue;
+
+          let isReqBool = false;
+          if (reqVal) {
+            const lowerReq = reqVal.toLowerCase().trim();
+            isReqBool = ["yes", "true", "1", "y", "required"].includes(lowerReq);
+          }
+
+          let normalizedType = typeVal.toLowerCase().replace(/[\s-]/g, "_");
+          const validTypes = ["single_line_text", "multi_line_text", "number", "date", "attachment", "reference", "multi_reference", "formula"];
+          if (!validTypes.includes(normalizedType)) {
+            if (normalizedType.includes("text") || normalizedType.includes("string")) normalizedType = "single_line_text";
+            else if (normalizedType.includes("num") || normalizedType.includes("int") || normalizedType.includes("float")) normalizedType = "number";
+            else if (normalizedType.includes("date") || normalizedType.includes("time")) normalizedType = "date";
+            else if (normalizedType.includes("form") || formulaVal.trim().length > 0) normalizedType = "formula";
+            else normalizedType = "single_line_text";
+          }
+
+          parsedItems.push({
+            name: nameVal || keyVal,
+            key: keyVal || nameVal,
+            field_type: normalizedType,
+            formula_expression: formulaVal,
+            ui_section: sectionVal,
+            is_required: isReqBool,
+          });
+        }
+      }
+    }
+
+    if (parsedItems.length === 0) {
+      toast.error("Could not parse any sub-fields from the provided input");
+      return;
+    }
+
+    const field = list.find((f) => f.id === fieldId);
+    if (!field) return;
+
+    const existingSubs = mode === "append" ? (field.sub_fields ?? []).map((s) => ({ ...s })) : [];
+    const existingKeys = new Set(existingSubs.map((s: any) => String(s.key).toLowerCase()));
+
+    const importedSubs: any[] = [];
+    for (let i = 0; i < parsedItems.length; i++) {
+      const item = parsedItems[i];
+      if (!item || typeof item !== "object") continue;
+      let rawName = String(item.name || "").trim() || `Subfield ${i + 1}`;
+      let rawKey = String(item.key || "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "_") || `subfield_${i + 1}`;
+      let fieldType = String(item.field_type || "single_line_text");
+
+      let finalKey = rawKey;
+      let counter = 1;
+      while (existingKeys.has(finalKey)) {
+        finalKey = `${rawKey}_${counter}`;
+        counter++;
+      }
+      existingKeys.add(finalKey);
+
+      const cfg = { ...(item.config ?? {}) };
+      const uiSec = item.ui_section || item.config?.ui_section;
+      if (uiSec) {
+        cfg.ui_section = String(uiSec).trim();
+      }
+
+      const formulaExpr = item.formula_expression || item.config?.formula_expression;
+      if (fieldType === "formula" || formulaExpr) {
+        cfg.is_formula = true;
+        if (formulaExpr) {
+          cfg.formula_expression = String(formulaExpr).trim();
+        }
+      }
+
+      importedSubs.push({
+        name: rawName,
+        key: finalKey,
+        field_type: fieldType,
+        is_required: !!item.is_required,
+        config: cfg,
+      });
+    }
+
+    const finalSubList = [...existingSubs, ...importedSubs].map((s, idx) => ({ ...s, sort_order: idx }));
+
+    await onUpdateSubmit(field.id, buildMultiLineUpdateFromField(field), finalSubList as any, undefined);
+    setImportStructureModal(null);
+    toast.success(`Imported ${importedSubs.length} sub-field(s) successfully!`);
   };
 
   useEffect(() => {
@@ -3182,17 +3505,60 @@ export default function KpiFieldsPage() {
                             >
                               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
                                 <div style={{ fontWeight: 750 }}>Sub-fields</div>
-                                <button
-                                  type="button"
-                                  className="btn btn-primary"
-                                  onClick={() => {
-                                    const nextUiSection = activeSection === "Other" ? "" : activeSection;
-                                    setAddSubFieldDraft({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: nextUiSection, config: {} });
-                                    setAddSubFieldModal({ fieldId: f.id, activeSection });
-                                  }}
-                                >
-                                  Add Sub Field
-                                </button>
+                                <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
+                                  <button
+                                    type="button"
+                                    className={inlineEditFieldIds[f.id] ? "btn btn-primary" : "btn"}
+                                    style={{
+                                      backgroundColor: inlineEditFieldIds[f.id] ? "#10b981" : undefined,
+                                      borderColor: inlineEditFieldIds[f.id] ? "#059669" : undefined,
+                                      color: inlineEditFieldIds[f.id] ? "white" : undefined,
+                                    }}
+                                    onClick={() => {
+                                      if (inlineEditFieldIds[f.id]) {
+                                        handleSaveInlineEdit(f);
+                                      } else {
+                                        toggleInlineEditMode(f);
+                                      }
+                                    }}
+                                  >
+                                    {inlineEditFieldIds[f.id] ? "Save Editing" : "Edit Mode"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => handleExportStructure(f)}
+                                    title="Export Sub-fields structure to Excel CSV or JSON file"
+                                  >
+                                    Export Structure
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => {
+                                      setImportStructureModal({
+                                        fieldId: f.id,
+                                        fieldName: String(f.name ?? f.key),
+                                        jsonText: "",
+                                        mode: "append",
+                                      });
+                                    }}
+                                    title="Import Sub-fields structure from Excel CSV file or text"
+                                  >
+                                    Import Structure
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    onClick={() => {
+                                      const nextUiSection = activeSection === "Other" ? "" : activeSection;
+                                      setAddSubFieldDraft({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: nextUiSection, config: {} });
+                                      setAddSubFieldModal({ fieldId: f.id, activeSection });
+                                    }}
+                                  >
+                                    + Add Sub Field
+                                  </button>
+                                </div>
                               </div>
                               <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
                                 {sections.map((sec) => {
@@ -3331,14 +3697,183 @@ export default function KpiFieldsPage() {
                                       <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Name</th>
                                       <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Key</th>
                                       <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Type</th>
-                                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source</th>
+                                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Reference source / Formula</th>
                                       <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>UI section</th>
                                       <th style={{ textAlign: "center", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600 }}>Required</th>
-                                      <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600, width: 140 }}>Actions</th>
+                                      <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "2px solid var(--border)", fontWeight: 600, width: 220 }}>Actions</th>
                                     </tr>
                                   </thead>
                                   <tbody>
                                     {(() => {
+                                      const isInlineEditing = !!inlineEditFieldIds[f.id];
+                                      const drafts = inlineSubfieldDrafts[f.id] || [];
+
+                                      if (isInlineEditing) {
+                                        return drafts.map((draftItem, i) => {
+                                          const keyForRow = draftItem.id ?? `draft_${i}`;
+                                          return (
+                                            <tr key={keyForRow} style={{ borderBottom: "1px solid var(--border)" }}>
+                                              <td style={{ padding: "0.4rem 0.5rem" }}>
+                                                <input
+                                                  type="text"
+                                                  className="input"
+                                                  value={draftItem.name}
+                                                  onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    setInlineSubfieldDrafts((prev) => {
+                                                      const arr = [...(prev[f.id] || [])];
+                                                      arr[i] = { ...arr[i], name: val };
+                                                      return { ...prev, [f.id]: arr };
+                                                    });
+                                                  }}
+                                                  style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.85rem" }}
+                                                />
+                                              </td>
+                                              <td style={{ padding: "0.4rem 0.5rem" }}>
+                                                <input
+                                                  type="text"
+                                                  className="input"
+                                                  value={draftItem.key}
+                                                  onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    setInlineSubfieldDrafts((prev) => {
+                                                      const arr = [...(prev[f.id] || [])];
+                                                      arr[i] = { ...arr[i], key: val };
+                                                      return { ...prev, [f.id]: arr };
+                                                    });
+                                                  }}
+                                                  style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.85rem", fontFamily: "monospace" }}
+                                                />
+                                              </td>
+                                              <td style={{ padding: "0.4rem 0.5rem" }}>
+                                                <select
+                                                  value={draftItem.field_type}
+                                                  onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    setInlineSubfieldDrafts((prev) => {
+                                                      const arr = [...(prev[f.id] || [])];
+                                                      arr[i] = { ...arr[i], field_type: val };
+                                                      return { ...prev, [f.id]: arr };
+                                                    });
+                                                  }}
+                                                  style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.85rem" }}
+                                                >
+                                                  {FIELD_TYPES.map((t) => (
+                                                    <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                                                  ))}
+                                                </select>
+                                              </td>
+                                              <td style={{ padding: "0.4rem 0.5rem" }}>
+                                                {draftItem.field_type === "formula" ? (
+                                                  <input
+                                                    type="text"
+                                                    className="input"
+                                                    placeholder="Formula e.g. [a] + [b]"
+                                                    value={draftItem.formula_expression || ""}
+                                                    onChange={(e) => {
+                                                      const val = e.target.value;
+                                                      setInlineSubfieldDrafts((prev) => {
+                                                        const arr = [...(prev[f.id] || [])];
+                                                        arr[i] = { ...arr[i], formula_expression: val };
+                                                        return { ...prev, [f.id]: arr };
+                                                      });
+                                                    }}
+                                                    style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.85rem", fontFamily: "monospace" }}
+                                                  />
+                                                ) : (
+                                                  <span style={{ color: "var(--muted)" }}>—</span>
+                                                )}
+                                              </td>
+                                              <td style={{ padding: "0.4rem 0.5rem" }}>
+                                                <input
+                                                  type="text"
+                                                  className="input"
+                                                  placeholder="Section"
+                                                  value={draftItem.ui_section || ""}
+                                                  onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    setInlineSubfieldDrafts((prev) => {
+                                                      const arr = [...(prev[f.id] || [])];
+                                                      arr[i] = { ...arr[i], ui_section: val };
+                                                      return { ...prev, [f.id]: arr };
+                                                    });
+                                                  }}
+                                                  style={{ width: "100%", padding: "0.3rem 0.4rem", fontSize: "0.85rem" }}
+                                                />
+                                              </td>
+                                              <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>
+                                                <input
+                                                  type="checkbox"
+                                                  checked={draftItem.is_required}
+                                                  onChange={(e) => {
+                                                    const checked = e.target.checked;
+                                                    setInlineSubfieldDrafts((prev) => {
+                                                      const arr = [...(prev[f.id] || [])];
+                                                      arr[i] = { ...arr[i], is_required: checked };
+                                                      return { ...prev, [f.id]: arr };
+                                                    });
+                                                  }}
+                                                  style={{ cursor: "pointer" }}
+                                                />
+                                              </td>
+                                              <td style={{ padding: "0.4rem 0.5rem", textAlign: "right", whiteSpace: "nowrap" }}>
+                                                <button
+                                                  type="button"
+                                                  className="btn"
+                                                  disabled={i === 0}
+                                                  onClick={() => {
+                                                    setInlineSubfieldDrafts((prev) => {
+                                                      const arr = [...(prev[f.id] || [])];
+                                                      if (i <= 0) return prev;
+                                                      const temp = arr[i];
+                                                      arr[i] = arr[i - 1];
+                                                      arr[i - 1] = temp;
+                                                      return { ...prev, [f.id]: arr };
+                                                    });
+                                                  }}
+                                                  title="Move Up"
+                                                  style={{ padding: "0.2rem 0.4rem", marginRight: "0.25rem", opacity: i === 0 ? 0.3 : 1 }}
+                                                >
+                                                  ▲
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  className="btn"
+                                                  disabled={i === drafts.length - 1}
+                                                  onClick={() => {
+                                                    setInlineSubfieldDrafts((prev) => {
+                                                      const arr = [...(prev[f.id] || [])];
+                                                      if (i >= arr.length - 1) return prev;
+                                                      const temp = arr[i];
+                                                      arr[i] = arr[i + 1];
+                                                      arr[i + 1] = temp;
+                                                      return { ...prev, [f.id]: arr };
+                                                    });
+                                                  }}
+                                                  title="Move Down"
+                                                  style={{ padding: "0.2rem 0.4rem", marginRight: "0.35rem", opacity: i === drafts.length - 1 ? 0.3 : 1 }}
+                                                >
+                                                  ▼
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  className="btn"
+                                                  style={{ color: "var(--error)" }}
+                                                  onClick={() => {
+                                                    setInlineSubfieldDrafts((prev) => {
+                                                      const arr = [...(prev[f.id] || [])].filter((_, idx) => idx !== i);
+                                                      return { ...prev, [f.id]: arr };
+                                                    });
+                                                  }}
+                                                >
+                                                  Remove
+                                                </button>
+                                              </td>
+                                            </tr>
+                                          );
+                                        });
+                                      }
+
                                       const rows = subs.map((s, i) => ({ s, i }));
                                       const filtered = rows.filter(({ s, i }) => {
                                         const sec = (s as any)?.config?.ui_section;
@@ -3346,28 +3881,53 @@ export default function KpiFieldsPage() {
                                         const group = label || "Other";
                                         return sections.length <= 1 ? true : group === activeSection;
                                       });
+
                                       return filtered.map(({ s, i }) => {
                                         const fieldType = String((s as any).field_type ?? "");
                                         const uiSectionVal = typeof (s as any)?.config?.ui_section === "string" ? String((s as any).config.ui_section) : "";
                                         const keyForRow = (s as any).id ?? `${(s as any).key}:${i}`;
                                         const cfg = ((s as any).config ?? {}) as any;
+                                        const formulaExpr = typeof cfg.formula_expression === "string" ? cfg.formula_expression : ((s as any).formula_expression || "");
                                         const refLabel =
-                                          (fieldType === "reference" || fieldType === "multi_reference") &&
-                                            (cfg.reference_source_kpi_id || cfg.reference_source_field_key)
+                                          (fieldType === "formula" || cfg.is_formula)
+                                            ? (formulaExpr ? `fx: ${formulaExpr}` : "fx Formula")
+                                            : (fieldType === "reference" || fieldType === "multi_reference") &&
+                                              (cfg.reference_source_kpi_id || cfg.reference_source_field_key)
                                             ? `${cfg.reference_source_kpi_id ?? "?"} • ${String(cfg.reference_source_field_key ?? "—")}${cfg.reference_source_sub_field_key ? ` • ${String(cfg.reference_source_sub_field_key)}` : ""}`
                                             : "—";
+
                                         return (
                                           <tr key={keyForRow} style={{ borderBottom: "1px solid var(--border)" }}>
                                             <>
                                               <td style={{ padding: "0.4rem 0.5rem" }}>{(s as any).name}</td>
                                               <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{(s as any).key}</td>
                                               <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{fieldType.replace(/_/g, " ")}</td>
-                                              <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>{refLabel}</td>
+                                              <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)", fontFamily: fieldType === "formula" || cfg.is_formula ? "monospace" : undefined }}>{refLabel}</td>
                                               <td style={{ padding: "0.4rem 0.5rem", color: "var(--muted)" }}>
                                                 {uiSectionVal.trim() ? uiSectionVal : "—"}
                                               </td>
                                               <td style={{ padding: "0.4rem 0.5rem", textAlign: "center" }}>{(s as any).is_required ? "Yes" : "No"}</td>
                                               <td style={{ padding: "0.4rem 0.5rem", textAlign: "right", whiteSpace: "nowrap" }}>
+                                                <button
+                                                  type="button"
+                                                  className="btn"
+                                                  disabled={i === 0}
+                                                  onClick={() => handleMoveSubfieldUp(f, i)}
+                                                  title="Move Up"
+                                                  style={{ padding: "0.2rem 0.4rem", marginRight: "0.25rem", opacity: i === 0 ? 0.3 : 1 }}
+                                                >
+                                                  ▲
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  className="btn"
+                                                  disabled={i === subs.length - 1}
+                                                  onClick={() => handleMoveSubfieldDown(f, i)}
+                                                  title="Move Down"
+                                                  style={{ padding: "0.2rem 0.4rem", marginRight: "0.35rem", opacity: i === subs.length - 1 ? 0.3 : 1 }}
+                                                >
+                                                  ▼
+                                                </button>
                                                 <button
                                                   type="button"
                                                   className="btn"
@@ -3392,26 +3952,6 @@ export default function KpiFieldsPage() {
                                                   }}
                                                 >
                                                   Edit
-                                                </button>
-                                                <button
-                                                  type="button"
-                                                  className="btn"
-                                                  style={{
-                                                    marginLeft: "0.35rem",
-                                                    backgroundColor: (s as any).field_type === "formula" || (s as any).config?.is_formula ? "#e0e7ff" : undefined,
-                                                    color: (s as any).field_type === "formula" || (s as any).config?.is_formula ? "#3730a3" : undefined,
-                                                    borderColor: (s as any).field_type === "formula" || (s as any).config?.is_formula ? "#c7d2fe" : undefined,
-                                                  }}
-                                                  onClick={() => {
-                                                    setFormulaModal({
-                                                      fieldId: f.id,
-                                                      subIndex: i,
-                                                      subField: s,
-                                                      allSubFields: (f.sub_fields ?? []) as any[],
-                                                    });
-                                                  }}
-                                                >
-                                                  {(s as any).field_type === "formula" || (s as any).config?.is_formula ? "fx Formula" : "fx Formula"}
                                                 </button>
                                                 <button
                                                   type="button"
@@ -5366,6 +5906,77 @@ export default function KpiFieldsPage() {
               >
                 {addModal === "categories" ? (domainCategorySaving ? "Adding…" : "Add selected") : (tagSaving ? "Adding…" : "Add selected")}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {importStructureModal && (
+        <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem" }}>
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "1.25rem", width: "100%", maxWidth: 620, boxShadow: "0 10px 25px rgba(0,0,0,0.2)" }}>
+            <div style={{ fontWeight: 700, fontSize: "1.1rem", marginBottom: "0.5rem" }}>
+              Import Sub-fields Structure ({importStructureModal.fieldName})
+            </div>
+            <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
+              Upload an Excel CSV / JSON file, or copy-paste rows directly from an Excel spreadsheet.
+            </p>
+
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.25rem" }}>Choose CSV / TSV / JSON File:</label>
+              <input
+                type="file"
+                accept=".csv,.json,.txt,.tsv,application/json"
+                style={{ fontSize: "0.85rem" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = (evt) => {
+                    const text = String(evt.target?.result || "");
+                    setImportStructureModal((p) => (p ? { ...p, jsonText: text } : p));
+                  };
+                  reader.readAsText(file);
+                }}
+              />
+            </div>
+
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "0.25rem" }}>
+                Or Paste Content / Excel Table Rows:
+              </label>
+              <textarea
+                value={importStructureModal.jsonText}
+                onChange={(e) => setImportStructureModal((p) => (p ? { ...p, jsonText: e.target.value } : p))}
+                placeholder={`Name\tKey\tType\tFormula\tUI Section\tRequired\nTotal Faculty\ttotal_faculty\tnumber\t\tGeneral\tYes\nNet Difference\tnet_diff\tformula\t[total_faculty] - [data_entered]\tGeneral\tNo`}
+                rows={7}
+                style={{ width: "100%", padding: "0.5rem", borderRadius: 8, border: "1px solid var(--border)", fontFamily: "monospace", fontSize: "0.85rem" }}
+              />
+            </div>
+
+            <div style={{ display: "flex", gap: "1rem", alignItems: "center", marginBottom: "1rem" }}>
+              <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Import Mode:</label>
+              <label style={{ fontSize: "0.85rem", cursor: "pointer" }}>
+                <input
+                  type="radio"
+                  name="import_mode"
+                  checked={importStructureModal.mode === "append"}
+                  onChange={() => setImportStructureModal((p) => (p ? { ...p, mode: "append" } : p))}
+                />{" "}
+                Append to existing sub-fields
+              </label>
+              <label style={{ fontSize: "0.85rem", cursor: "pointer" }}>
+                <input
+                  type="radio"
+                  name="import_mode"
+                  checked={importStructureModal.mode === "replace"}
+                  onChange={() => setImportStructureModal((p) => (p ? { ...p, mode: "replace" } : p))}
+                />{" "}
+                Replace all existing sub-fields
+              </label>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+              <button type="button" className="btn" onClick={() => setImportStructureModal(null)}>Cancel</button>
+              <button type="button" className="btn btn-primary" onClick={handleImportStructureSubmit}>Import Structure</button>
             </div>
           </div>
         </div>

@@ -330,8 +330,8 @@ async def save_layout(
 
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
-    CUSTOM_REPORT_CACHE.invalidate_report(id)
     await db.commit()
+    CUSTOM_REPORT_CACHE.invalidate_report(id)
 
 
 

@@ -18,6 +18,7 @@ import {
 } from "@/lib/multiItemsFiltersHelper";
 import MultiItemsAdvancedFiltersPanel from "@/components/MultiItemsAdvancedFiltersPanel";
 import { ColumnWidthConfigModal } from "@/components/ColumnWidthConfigModal";
+import { TableFooterConfigModal, TableFooterConfig } from "@/components/TableFooterConfigModal";
 
 interface KPISubField {
   id: number;
@@ -91,6 +92,7 @@ export default function CustomReportDesignPage() {
   const [deleteConfirmIdx, setDeleteConfirmIdx] = useState<number | null>(null);
   const [openSectionMenuIdx, setOpenSectionMenuIdx] = useState<number | null>(null);
   const [openFieldMenuLoc, setOpenFieldMenuLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
+  const [editingFooterLoc, setEditingFooterLoc] = useState<{ secIdx: number; fieldIdx: number } | null>(null);
   
   // KPI Search lists
   const [allKpis, setAllKpis] = useState<KPI[]>([]);
@@ -1735,6 +1737,30 @@ export default function CustomReportDesignPage() {
                                             📐 {(f.config as any)?.column_widths ? "Configured Widths" : "Configure Column Widths"}
                                           </button>
                                         )}
+                                        {f.field_type === "multi_line_items" && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setEditingFooterLoc({ secIdx: sIdx, fieldIdx: fIdx });
+                                              setOpenFieldMenuLoc(null);
+                                            }}
+                                            style={{
+                                              border: "none",
+                                              background: "none",
+                                              padding: "0.5rem 1rem",
+                                              textAlign: "left",
+                                              fontSize: "0.85rem",
+                                              cursor: "pointer",
+                                              color: (f.config as any)?.footer_config?.enabled ? "var(--primary)" : "var(--text)",
+                                              fontWeight: (f.config as any)?.footer_config?.enabled ? 600 : 400
+                                            }}
+                                            onMouseEnter={(e) => (e.currentTarget.style.background = "#f1f5f9")}
+                                            onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                                          >
+                                            📊 {(f.config as any)?.footer_config?.enabled ? "Configured Footer" : "Configure Table Footer"}
+                                          </button>
+                                        )}
                                         <button
                                           type="button"
                                           onClick={(e) => {
@@ -3014,6 +3040,47 @@ export default function CustomReportDesignPage() {
               });
               setEditingWidthsLoc(null);
               toast.success("Column width configuration updated.");
+            }}
+          />
+        );
+      })()}
+
+      {editingFooterLoc && (() => {
+        const sec = sections[editingFooterLoc.secIdx];
+        const f = sec?.fields[editingFooterLoc.fieldIdx];
+        if (!f) return null;
+
+        const kpi = allKpis.find(k => k.id === f.kpi_id);
+        const kpiField = kpi?.fields.find(fld => fld.id === f.kpi_field_id);
+        const subFields = kpiField?.sub_fields || [];
+        const selectedColKeys: string[] = (f.config as any)?.selected_columns || subFields.map(sf => sf.key).slice(0, 6);
+
+        const customLabels = (f.config as any)?.custom_sub_field_labels || {};
+        const cols = selectedColKeys.map(k => {
+          const sf = subFields.find(s => s.key === k);
+          const updatedLabel = customLabels[k] || sf?.name || k;
+          return { key: k, name: updatedLabel };
+        });
+
+        return (
+          <TableFooterConfigModal
+            isOpen={true}
+            onClose={() => setEditingFooterLoc(null)}
+            fieldName={f.field_name}
+            allSubFields={cols}
+            existingFooterConfig={(f.config as any)?.footer_config || null}
+            onSave={(newFooterCfg) => {
+              setSections((prev) => {
+                const next = [...prev];
+                const curF = next[editingFooterLoc.secIdx].fields[editingFooterLoc.fieldIdx];
+                next[editingFooterLoc.secIdx].fields[editingFooterLoc.fieldIdx] = {
+                  ...curF,
+                  config: { ...(curF.config || {}), footer_config: newFooterCfg }
+                };
+                return next;
+              });
+              toast.success("Saved table footer configuration (click Save Layout to persist changes)");
+              setEditingFooterLoc(null);
             }}
           />
         );

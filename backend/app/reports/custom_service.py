@@ -446,6 +446,114 @@ def _sort_formula_subfields(formula_sfs: list) -> list:
     return sorted_sfs
 
 
+def evaluate_report_table_footer_rows(
+    footer_config: dict | None,
+    sub_fields: list[dict],
+    value_items: list[dict],
+) -> list[dict] | None:
+    """
+    Evaluates custom report table footer config against rendered table rows.
+    Formula calculations (SUM, COUNT, AVG, MIN, MAX) run purely over the report table dataset.
+    """
+    if not footer_config or not isinstance(footer_config, dict) or not footer_config.get("enabled"):
+        return None
+
+    raw_rows = footer_config.get("rows")
+    if not isinstance(raw_rows, list) or not raw_rows:
+        return None
+
+    evaluated_rows = []
+    for r_idx, row in enumerate(raw_rows):
+        if not isinstance(row, dict):
+            continue
+        cells = row.get("cells")
+        if not isinstance(cells, list):
+            continue
+
+        eval_cells = []
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            colspan = cell.get("colspan", 1)
+            try:
+                colspan = max(1, int(colspan))
+            except (ValueError, TypeError):
+                colspan = 1
+
+            content_type = cell.get("content_type", "text")
+            align = cell.get("align", "left")
+            bold = cell.get("bold", True)
+            dec_places = cell.get("decimal_places", 2)
+
+            val_str = ""
+            if content_type == "text":
+                val_str = str(cell.get("text") or "")
+            elif content_type == "formula":
+                op = str(cell.get("formula_op") or "SUM").upper()
+                col_key = str(cell.get("column_key") or "")
+
+                nums = []
+                for row_dict in value_items:
+                    if isinstance(row_dict, dict) and col_key in row_dict:
+                        raw_v = row_dict[col_key]
+                        if raw_v is not None:
+                            try:
+                                nums.append(float(raw_v))
+                            except (ValueError, TypeError):
+                                try:
+                                    cleaned = str(raw_v).replace(",", "").strip()
+                                    if cleaned:
+                                        nums.append(float(cleaned))
+                                except (ValueError, TypeError):
+                                    pass
+
+                if op == "SUM":
+                    res_val = sum(nums) if nums else 0.0
+                elif op == "COUNT":
+                    res_val = len(nums)
+                elif op in ("AVG", "AVERAGE"):
+                    res_val = (sum(nums) / len(nums)) if nums else 0.0
+                elif op == "MIN":
+                    res_val = min(nums) if nums else 0.0
+                elif op == "MAX":
+                    res_val = max(nums) if nums else 0.0
+                else:
+                    res_val = sum(nums) if nums else 0.0
+
+                if dec_places is not None and str(dec_places).lower() != "auto":
+                    try:
+                        dp = int(dec_places)
+                        res_val = round(res_val, dp)
+                        if dp == 0:
+                            val_str = f"{int(res_val):,}"
+                        else:
+                            val_str = f"{res_val:,.{dp}f}"
+                    except (ValueError, TypeError):
+                        val_str = f"{res_val:,.2f}" if isinstance(res_val, float) else str(res_val)
+                else:
+                    val_str = f"{res_val:g}" if isinstance(res_val, (int, float)) else str(res_val)
+
+            eval_cells.append({
+                "id": cell.get("id") or f"c_{len(eval_cells)}",
+                "colspan": colspan,
+                "content_type": content_type,
+                "formula_op": cell.get("formula_op"),
+                "column_key": cell.get("column_key"),
+                "text": cell.get("text"),
+                "value": val_str,
+                "align": align,
+                "bold": bold,
+            })
+
+        if eval_cells:
+            evaluated_rows.append({
+                "id": row.get("id") or f"r_{r_idx}",
+                "cells": eval_cells,
+            })
+
+    return evaluated_rows if evaluated_rows else None
+
+
 async def generate_custom_report_data(
     db: AsyncSession,
     id: int,
@@ -1008,6 +1116,11 @@ async def generate_custom_report_data(
                 field_payload["sub_field_keys"] = filtered_sub_field_keys
                 field_payload["value_items"] = filtered_value_items
                 field_payload["total_count"] = total_cnt
+
+                footer_cfg = (field_payload.get("config") or {}).get("footer_config")
+                evaluated_footer = evaluate_report_table_footer_rows(footer_cfg, filtered_sub_fields, filtered_value_items)
+                if evaluated_footer:
+                    field_payload["evaluated_footer_rows"] = evaluated_footer
             else:
                 field_payload["config"] = getattr(f, "config", None) or {}
 
@@ -1217,7 +1330,7 @@ async def render_custom_report_html(
                     f'</h3>'
                 )
                 out.append('<div style="margin-left: 0.5rem;">')
-                if f.get("value_items"):
+                if f.get("value_items") or f.get("evaluated_footer_rows"):
                     total_cnt = f.get("total_count", len(f["value_items"]))
                     if total_cnt > len(f["value_items"]):
                         out.append(f'<div style="margin-bottom: 0.5rem; font-style: italic; color: #4b5563; font-size: 0.85rem; font-weight: 500;">Showing first {len(f["value_items"])} rows of {total_cnt} records.</div>')
@@ -1241,6 +1354,23 @@ async def render_custom_report_html(
                             out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #111827; text-align: {align_css};">{rval}</td>')
                         out.append('</tr>')
                     out.append('</tbody>')
+                    if f.get("evaluated_footer_rows"):
+                        out.append('<tfoot>')
+                        for f_row in f["evaluated_footer_rows"]:
+                            out.append(f'<tr style="font-size: {mli_font_size}pt; background-color: #f8fafc;">')
+                            cells = f_row.get("cells", [])
+                            total_sub_cols = len(f["sub_fields"])
+                            sum_colspan = sum(c.get("colspan", 1) for c in cells)
+                            first_cell_extra = 1 if sum_colspan == total_sub_cols else 0
+
+                            for c_idx, cell in enumerate(cells):
+                                c_span = cell.get("colspan", 1) + (first_cell_extra if c_idx == 0 else 0)
+                                c_val = cell.get("value", "")
+                                c_align = cell.get("align", "left")
+                                c_bold = "font-weight: bold;" if cell.get("bold", True) else "font-weight: normal;"
+                                out.append(f'<td colspan="{c_span}" style="border: 1px solid #d1d5db; padding: 8px; color: #111827; text-align: {c_align}; {c_bold}">{c_val}</td>')
+                            out.append('</tr>')
+                        out.append('</tfoot>')
                     out.append('</table>')
                 else:
                     out.append('<span style="color: #9ca3af; font-style: italic; font-size: 0.9rem;">No data entered</span>')
@@ -1424,6 +1554,42 @@ async def export_custom_report_file(
                             c.alignment = Alignment(horizontal="left" if col_idx == 0 else "center", vertical="center")
                         ws.row_dimensions[row_num].height = 18
                         row_num += 1
+
+                    # Footer Rows
+                    evaluated_footer = f.get("evaluated_footer_rows")
+                    if evaluated_footer:
+                        for f_row in evaluated_footer:
+                            cells = f_row.get("cells", [])
+                            total_sub_cols = len(sub_fields)
+                            sum_colspan = sum(c.get("colspan", 1) for c in cells)
+                            first_cell_extra = 1 if sum_colspan == total_sub_cols else 0
+
+                            col_cursor = 1
+                            for c_idx, cell in enumerate(cells):
+                                c_span = cell.get("colspan", 1) + (first_cell_extra if c_idx == 0 else 0)
+                                c_val = cell.get("value", "")
+                                c_align = cell.get("align", "left")
+                                c_bold = cell.get("bold", True)
+
+                                target_cell = ws.cell(row=row_num, column=col_cursor, value=c_val)
+                                target_cell.font = Font(name="Calibri", size=10, bold=c_bold)
+                                target_cell.border = thin_border
+                                target_cell.alignment = Alignment(horizontal=c_align, vertical="center")
+
+                                if c_span > 1:
+                                    end_col = col_cursor + c_span - 1
+                                    ws.merge_cells(start_row=row_num, start_column=col_cursor, end_row=row_num, end_column=end_col)
+                                    for c_col in range(col_cursor, end_col + 1):
+                                        m_c = ws.cell(row=row_num, column=c_col)
+                                        m_c.border = thin_border
+                                        m_c.font = Font(name="Calibri", size=10, bold=c_bold)
+                                    col_cursor = end_col + 1
+                                else:
+                                    col_cursor += 1
+
+                            ws.row_dimensions[row_num].height = 20
+                            row_num += 1
+
                 row_num += 2 # spacer
 
             # Column widths formatting (respect custom_widths if set)
@@ -1787,6 +1953,39 @@ async def export_custom_report_file(
                                         run = p.runs[0]
                                         run.font.size = Pt(mli_font_size)
                                         run.font.name = docx_font
+
+                        evaluated_footer = f.get("evaluated_footer_rows")
+                        if evaluated_footer:
+                            for f_row in evaluated_footer:
+                                f_cells = f_row.get("cells", [])
+                                total_sub_cols = len(sub_fields)
+                                sum_colspan = sum(c.get("colspan", 1) for c in f_cells)
+                                first_cell_extra = 1 if sum_colspan == total_sub_cols else 0
+
+                                row_cells = table.add_row().cells
+                                col_cursor = 0
+                                for c_idx, cell in enumerate(f_cells):
+                                    c_span = cell.get("colspan", 1) + (first_cell_extra if c_idx == 0 else 0)
+                                    c_val = cell.get("value", "")
+                                    c_align = cell.get("align", "left")
+                                    c_bold = cell.get("bold", True)
+
+                                    start_tc = row_cells[col_cursor]
+                                    start_tc.text = c_val
+                                    if start_tc.paragraphs:
+                                        p = start_tc.paragraphs[0]
+                                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT if c_align == "right" else (WD_ALIGN_PARAGRAPH.CENTER if c_align == "center" else WD_ALIGN_PARAGRAPH.LEFT)
+                                        if p.runs:
+                                            p.runs[0].font.size = Pt(mli_font_size)
+                                            p.runs[0].font.name = docx_font
+                                            p.runs[0].font.bold = c_bold
+
+                                    if c_span > 1 and (col_cursor + c_span - 1) < len(row_cells):
+                                        end_tc = row_cells[col_cursor + c_span - 1]
+                                        start_tc.merge(end_tc)
+                                        col_cursor += c_span
+                                    else:
+                                        col_cursor += 1
 
         out_io = io.BytesIO()
         doc.save(out_io)
@@ -2284,6 +2483,48 @@ async def export_custom_report_file(
                                 cell_st = table_body_style_left if s_idx == 0 else table_body_style_center
                                 row.append(Paragraph(val_str, cell_st))
                             pdf_table_data.append(row)
+
+                        evaluated_footer = f.get("evaluated_footer_rows")
+                        if evaluated_footer:
+                            for f_row in evaluated_footer:
+                                cur_row_idx = len(pdf_table_data)
+                                cells = f_row.get("cells", [])
+                                total_sub_cols = len(sub_fields)
+                                sum_colspan = sum(c.get("colspan", 1) for c in cells)
+                                first_cell_extra = 1 if sum_colspan == total_sub_cols else 0
+
+                                pdf_f_row = []
+                                col_cursor = 0
+                                for c_idx, cell in enumerate(cells):
+                                    c_span = cell.get("colspan", 1) + (first_cell_extra if c_idx == 0 else 0)
+                                    c_val = str(cell.get("value", ""))
+                                    c_align = cell.get("align", "left")
+                                    c_bold = cell.get("bold", True)
+
+                                    align_code = TA_RIGHT if c_align == "right" else (TA_CENTER if c_align == "center" else TA_LEFT)
+                                    footer_style = ParagraphStyle(
+                                        f"PDFFooter_{cur_row_idx}_{c_idx}",
+                                        parent=styles["Normal"],
+                                        fontName=font_name_bold if c_bold else font_name_regular,
+                                        fontSize=mli_font_size,
+                                        leading=mli_font_size + 3,
+                                        alignment=align_code
+                                    )
+
+                                    pdf_f_row.append(Paragraph(c_val, footer_style))
+
+                                    if c_span > 1:
+                                        start_c = col_cursor
+                                        end_c = min(col_cursor + c_span - 1, total_sub_cols)
+                                        t_style_cmds.append(("SPAN", (start_c, cur_row_idx), (end_c, cur_row_idx)))
+                                        for _ in range(c_span - 1):
+                                            pdf_f_row.append(Paragraph("", footer_style))
+                                        col_cursor = end_c + 1
+                                    else:
+                                        col_cursor += 1
+
+                                pdf_table_data.append(pdf_f_row)
+                                t_style_cmds.append(("BACKGROUND", (0, cur_row_idx), (-1, cur_row_idx), colors.HexColor("#f8fafc")))
 
                         t_mli = Table(pdf_table_data, colWidths=col_widths, hAlign='CENTER')
                         t_mli.setStyle(TableStyle(t_style_cmds))

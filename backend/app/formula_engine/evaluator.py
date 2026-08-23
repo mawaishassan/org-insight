@@ -9,7 +9,10 @@ and cross-KPI refs: KPI_FIELD(kpi_id, "field_key") for numeric fields from the s
 import ast
 import datetime
 import re
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     from simpleeval import SimpleEval, NameNotDefined
@@ -619,13 +622,15 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
         if not filter_candidates:
             return False
         for fv in filter_candidates:
-            if op_norm == "eq" and cell_str == fv:
+            c_low = cell_str.lower()
+            f_low = fv.lower()
+            if op_norm == "eq" and (cell_str == fv or c_low == f_low):
                 return True
-            if op_norm == "contains" and fv in cell_str:
+            if op_norm == "contains" and f_low in c_low:
                 return True
-            if op_norm == "starts_with" and cell_str.startswith(fv):
+            if op_norm == "starts_with" and c_low.startswith(f_low):
                 return True
-            if op_norm == "ends_with" and cell_str.endswith(fv):
+            if op_norm == "ends_with" and c_low.endswith(f_low):
                 return True
         if op_norm == "neq":
             return all(cell_str != fv for fv in filter_candidates)
@@ -886,6 +891,10 @@ def _make_evaluator(
     s.names = _SafeNames(dict(field_values))
     if current_row is not None:
         s.names["CurrentRow"] = CurrentRowWrapper(current_row)
+        for rk, rv in current_row.items():
+            if isinstance(rk, str):
+                rnum = _to_num(rv)
+                s.names[rk] = rnum if rnum is not None else (rv if rv is not None else 0)
         
     ref_values = other_kpi_values or {}
     items_data = multi_line_items_data or {}
@@ -1328,6 +1337,8 @@ def evaluate_formula(
             return None
         if isinstance(result, (int, float)):
             return _clean_num(result)
+        if isinstance(result, (str, bool)):
+            return result
         if isinstance(result, (GroupNode, AggSpec, _GroupNodeOp)):
             rows = []
             if multi_line_items_data:
@@ -1337,8 +1348,8 @@ def evaluate_formula(
                         break
             return _clean_num(result.evaluate(rows, current_row=current_row))
         return None
-    except (NameNotDefined, ZeroDivisionError, TypeError, KeyError, SyntaxError, ValueError):
-        # SyntaxError: malformed expression (e.g. stray paste); avoid crashing report render
+    except (NameNotDefined, ZeroDivisionError, TypeError, KeyError, SyntaxError, ValueError) as exc:
+        logger.warning("Formula evaluation exception for '%s': %s", expression, exc)
         return None
 
 

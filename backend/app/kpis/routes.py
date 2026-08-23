@@ -45,6 +45,7 @@ from app.kpis.schemas import (
     KpiFileResponse,
     SubFieldFormulaValidateRequest,
     SubFieldFormulaValidateResponse,
+    SubFieldUniqueValuesResponse,
     KpiOdooConfigUpdate,
     KpiOdooConfigResponse,
     KpiOdooConfigStatus,
@@ -2498,4 +2499,76 @@ async def validate_subfield_formula(
         referenced_sub_keys=list(deps),
         sample_result=sample_result,
         sample_equation=sample_equation
+    )
+
+
+@router.get("/fields/{field_id}/subfields/{sub_field_key}/unique-values", response_model=SubFieldUniqueValuesResponse)
+async def get_subfield_unique_values(
+    field_id: int,
+    sub_field_key: str,
+    organization_id: int | None = None,
+    year: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SubFieldUniqueValuesResponse:
+    """
+    Fetch unique post-extraction values for a specific MLI subfield.
+    Automatically applies text extraction rules so extracted text columns return clean extracted values.
+    """
+    from app.core.models import KPIField, KPIEntry
+    from app.entries.multi_line_load import load_multi_line_row_dicts
+
+    field_res = await db.execute(select(KPIField).where(KPIField.id == field_id))
+    field = field_res.scalar_one_or_none()
+    if not field:
+        raise HTTPException(status_code=404, detail="KPI field not found")
+
+    # Query entries for the field
+    q_entries = select(KPIEntry.id).where(KPIEntry.kpi_id == field.kpi_id)
+    if organization_id is not None:
+        q_entries = q_entries.where(KPIEntry.organization_id == organization_id)
+    if year is not None:
+        q_entries = q_entries.where(KPIEntry.year == year)
+
+    entries_res = await db.execute(q_entries)
+    entry_ids = [e[0] for e in entries_res.all()]
+
+    if not entry_ids:
+        return SubFieldUniqueValuesResponse(
+            field_id=field_id,
+            sub_field_key=sub_field_key,
+            unique_values=[]
+        )
+
+    # Load row dicts (automatically runs apply_extraction_rules)
+    rows_with_indices = await load_multi_line_row_dicts(
+        db,
+        entry_id=entry_ids,
+        field=field,
+        current_user_id=current_user.id
+    )
+
+    seen = set()
+    unique_vals: list[str] = []
+
+    for _, row in rows_with_indices:
+        raw_val = row.get(sub_field_key)
+        if raw_val is None:
+            continue
+        val_str = str(raw_val).strip()
+        if not val_str or val_str.lower() in ("none", "null", "false", "undefined", "—"):
+            continue
+        val_lower = val_str.lower()
+        if val_lower not in seen:
+            seen.add(val_lower)
+            unique_vals.append(val_str)
+            if len(unique_vals) >= 250:
+                break
+
+    unique_vals.sort()
+
+    return SubFieldUniqueValuesResponse(
+        field_id=field_id,
+        sub_field_key=sub_field_key,
+        unique_values=unique_vals
     )

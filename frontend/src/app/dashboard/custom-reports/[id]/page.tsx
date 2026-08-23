@@ -266,8 +266,8 @@ export default function CustomReportViewPage() {
       const isByDefault = selectedPeriodType === "by_default";
       const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
       const res = await api<{ rendered_html?: string }>(
-        `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}&preview=false${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}`,
-        { token, useCache: true }
+        `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}&preview=false${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`,
+        { token, useCache: false }
       );
       if (!res.rendered_html) {
         throw new Error("No printable content found");
@@ -800,6 +800,7 @@ export default function CustomReportViewPage() {
                         totalCount={f.total_count}
                         mergedHeaders={f.config?.merged_headers}
                         columnWidths={f.config?.column_widths}
+                        footerRows={(f as any).evaluated_footer_rows}
                       />
                     </div>
                   );

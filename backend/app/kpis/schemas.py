@@ -439,3 +439,9 @@ class SubFieldFormulaValidateResponse(BaseModel):
     referenced_sub_keys: list[str] = Field(default_factory=list, description="Subfield keys referenced in the formula")
     sample_result: Any | None = Field(None, description="Sample preview calculation result")
     sample_equation: str | None = Field(None, description="Sample formatted preview equation string")
+
+
+class SubFieldUniqueValuesResponse(BaseModel):
+    field_id: int = Field(..., description="KPI field ID")
+    sub_field_key: str = Field(..., description="Subfield column key")
+    unique_values: list[str] = Field(default_factory=list, description="List of unique post-extraction values")
