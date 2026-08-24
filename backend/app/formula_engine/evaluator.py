@@ -1445,7 +1445,10 @@ def evaluate_formula(
                         break
             return _clean_num(result.evaluate(rows, current_row=current_row))
         return None
-    except (NameNotDefined, ZeroDivisionError, TypeError, KeyError, SyntaxError, ValueError) as exc:
+    except ZeroDivisionError:
+        logger.debug("Division by zero evaluating formula '%s'", expression)
+        return None
+    except (NameNotDefined, TypeError, KeyError, SyntaxError, ValueError) as exc:
         logger.warning("Formula evaluation exception for '%s': %s", expression, exc)
         return None
 
