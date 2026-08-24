@@ -9,6 +9,9 @@ import { WidgetRenderer, type Widget } from "./widgets";
 import { generatePeriodOptions } from "@/lib/periodHelpers";
 import { DASHBOARD_GRID_COLUMNS, widgetGridColumnStyle } from "./layoutGrid";
 import { DashboardCustomizationProvider, useDashboardCustomization } from "./DashboardCustomizationContext";
+import { WidgetFullScreenNavigationProvider } from "./WidgetFullScreenContext";
+
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 interface DashboardDetail {
   id: number;
@@ -297,7 +300,7 @@ export default function DashboardViewPage() {
 
   const widgets = useMemo(() => asWidgets(dashboard?.layout), [dashboard?.layout]);
 
-  if (loading) return <p>Loading…</p>;
+  if (loading) return <WidgetSpinnerLoader size="large" text="Loading dashboard..." minHeight={300} />;
   if (error) return <p className="form-error">{error}</p>;
   if (!dashboard) return null;
 
@@ -312,21 +315,23 @@ export default function DashboardViewPage() {
       selectedPeriod={selectedPeriod}
       selectedPeriodType={selectedPeriodType}
     >
-      <DashboardViewContent
-        dashboard={dashboard}
-        syncInfo={syncInfo}
-        syncing={syncing}
-        handleSync={handleSync}
-        widgets={widgets}
-        refreshCount={refreshCount}
-        org={org}
-        selectedPeriodType={selectedPeriodType}
-        setSelectedPeriodType={setSelectedPeriodType}
-        selectedPeriod={selectedPeriod}
-        setSelectedPeriod={setSelectedPeriod}
-        customPeriods={customPeriods}
-        periodOptions={periodOptions}
-      />
+      <WidgetFullScreenNavigationProvider widgets={widgets}>
+        <DashboardViewContent
+          dashboard={dashboard}
+          syncInfo={syncInfo}
+          syncing={syncing}
+          handleSync={handleSync}
+          widgets={widgets}
+          refreshCount={refreshCount}
+          org={org}
+          selectedPeriodType={selectedPeriodType}
+          setSelectedPeriodType={setSelectedPeriodType}
+          selectedPeriod={selectedPeriod}
+          setSelectedPeriod={setSelectedPeriod}
+          customPeriods={customPeriods}
+          periodOptions={periodOptions}
+        />
+      </WidgetFullScreenNavigationProvider>
     </DashboardCustomizationProvider>
   );
 }

@@ -111,6 +111,7 @@ async def create_custom_report(db: AsyncSession, org_id: int, data: CustomReport
         branding_title=data.branding_title,
         show_odoo_button=data.show_odoo_button,
         odoo_sync_kpi_ids=data.odoo_sync_kpi_ids,
+        apply_further_processing_based_on_mli_filter=data.apply_further_processing_based_on_mli_filter,
 
     )
     db.add(report)
@@ -164,6 +165,8 @@ async def update_custom_report(db: AsyncSession, id: int, org_id: int, data: Cus
         report.show_odoo_button = data.show_odoo_button
     if getattr(data, "odoo_sync_kpi_ids", None) is not None:
         report.odoo_sync_kpi_ids = data.odoo_sync_kpi_ids
+    if getattr(data, "apply_further_processing_based_on_mli_filter", None) is not None:
+        report.apply_further_processing_based_on_mli_filter = data.apply_further_processing_based_on_mli_filter
 
     await db.flush()
     CUSTOM_REPORT_CACHE.invalidate_report(id)
@@ -195,6 +198,7 @@ async def duplicate_custom_report(db: AsyncSession, id: int, org_id: int) -> Cus
         branding_title=orig.branding_title,
         show_odoo_button=orig.show_odoo_button,
         odoo_sync_kpi_ids=orig.odoo_sync_kpi_ids,
+        apply_further_processing_based_on_mli_filter=getattr(orig, "apply_further_processing_based_on_mli_filter", False),
 
     )
     db.add(new_report)
@@ -242,6 +246,7 @@ async def save_custom_report_layout(
     mli_font_size: int | None = None,
     show_odoo_button: bool | None = None,
     odoo_sync_kpi_ids: list[int] | None = None,
+    apply_further_processing_based_on_mli_filter: bool | None = None,
 
 ) -> bool:
     report = await get_custom_report(db, id, org_id)
@@ -271,6 +276,8 @@ async def save_custom_report_layout(
     # odoo_sync_kpi_ids can be set to empty list or None explicitly
     if odoo_sync_kpi_ids is not None:
         report.odoo_sync_kpi_ids = odoo_sync_kpi_ids
+    if apply_further_processing_based_on_mli_filter is not None:
+        report.apply_further_processing_based_on_mli_filter = apply_further_processing_based_on_mli_filter
 
 
 
@@ -371,7 +378,7 @@ def _parse_kpi_formula_dependencies(formula_expression: str) -> list[int]:
     if not formula_expression:
         return []
     import re
-    pattern = r'\b(?:KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|KPI_GROUP_BY|UNIQUE_COUNT_KPI_ITEMS|COUNT_UNIQUE_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|COUNT_UNIQUE_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE)\s*\(\s*(\d+)'
+    pattern = r'\b(?:KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|KPI_GROUP_BY|UNIQUE_COUNT_KPI_ITEMS|COUNT_UNIQUE_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|COUNT_UNIQUE_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE|FETCH_KPI_ITEMS_WHERE)\s*\(\s*(\d+)'
     matches = re.findall(pattern, formula_expression, re.IGNORECASE)
     return [int(m) for m in matches]
 
@@ -749,6 +756,24 @@ async def generate_custom_report_data(
     # ------------------------------------------------------------------
     base_other_kpi_values = await bulk_load_org_kpi_values(db, yr, org_id)
 
+    # -------------------------------------------------------------------
+    # Filter-Aware MLI Processing flag
+    # When True, MLI Advance Filters are applied BEFORE scalar formula
+    # evaluation so that formula results reflect only the visible rows.
+    # -------------------------------------------------------------------
+    apply_filter_processing: bool = bool(getattr(custom_report, "apply_further_processing_based_on_mli_filter", False))
+
+    # Build a lookup: kpi_field_id -> CustomReportField.config
+    # (only for fields that have actual advance-filter conditions)
+    mf_config_map: dict[int, dict] = {}
+    if apply_filter_processing:
+        for _sec in custom_report.sections:
+            for _f in _sec.fields:
+                _cfg = getattr(_f, "config", None) or {}
+                _filters = _cfg.get("filters") or {}
+                if _filters.get("conditions"):
+                    mf_config_map[_f.kpi_field_id] = _cfg
+
     for idx, kpi in enumerate(sorted_kpis_list):
         kid = kpi.id
         fields_to_include = sorted(list(kpi.fields or []), key=lambda f: (f.sort_order, f.id))
@@ -878,6 +903,41 @@ async def generate_custom_report_data(
                     recalculated_batch[eid] = current_rows
                 else:
                     recalculated_batch[eid] = rows_list
+
+            # ----------------------------------------------------------
+            # Filter-Aware Pre-Evaluation Filtering
+            # If enabled, apply advance filters NOW (before formula eval)
+            # so scalar formulas operate on the same filtered dataset.
+            # ----------------------------------------------------------
+            if apply_filter_processing and mf.id in mf_config_map:
+                _field_cfg = mf_config_map[mf.id]
+                _raw_filters = _field_cfg.get("filters") or {}
+                if _raw_filters and _raw_filters.get("conditions"):
+                    try:
+                        from app.entries.multi_item_filters import row_passes_filters
+                        from app.entries.reference_filter_resolve import build_reference_resolution_map
+                        _conds = _raw_filters.get("conditions")
+                        # Collect all rows across entries for resolution-map building
+                        _all_rows_flat: list[dict] = []
+                        for _rl in recalculated_batch.values():
+                            if isinstance(_rl, list):
+                                _all_rows_flat.extend(_rl)
+                        _resolution_maps = await build_reference_resolution_map(
+                            db, org_id, yr, mf, _conds, _all_rows_flat
+                        )
+                        _ref_ftypes = {
+                            sf.key: (sf.field_type.value if hasattr(sf.field_type, "value") else sf.field_type)
+                            for sf in (getattr(mf, "sub_fields", []) or [])
+                        }
+                        _filtered_batch: dict = {}
+                        for _eid, _rl in recalculated_batch.items():
+                            _filtered_batch[_eid] = [
+                                r for r in _rl
+                                if row_passes_filters(r, _raw_filters, resolution_maps=_resolution_maps, reference_field_types=_ref_ftypes)
+                            ]
+                        recalculated_batch = _filtered_batch
+                    except Exception:
+                        pass  # Fallback: keep unfiltered rows if filter logic fails
 
             if date_range:
                 target_eid = entries_sorted[0].id if entries_sorted else 0
@@ -1061,10 +1121,13 @@ async def generate_custom_report_data(
                 filtered_sub_field_keys = [sf["key"] for sf in filtered_sub_fields]
                 
                 # Row filtering
+                # When apply_filter_processing=True, rows were already filtered during
+                # the MLI loading phase (before formula eval), so we skip re-filtering here
+                # to avoid redundant async work and potential double-reduction.
                 raw_filters = cfg.get("filters") or {}
                 filtered_value_items = []
                 if all_value_items:
-                    if raw_filters and raw_filters.get("conditions"):
+                    if not apply_filter_processing and raw_filters and raw_filters.get("conditions"):
                         from app.entries.multi_item_filters import row_passes_filters
                         from app.entries.reference_filter_resolve import build_reference_resolution_map
                         conds = raw_filters.get("conditions")
@@ -1675,9 +1738,7 @@ async def export_custom_report_file(
         )).scalar_one_or_none()
 
         footer_label = "Confidential Document"
-        if data.get("branding_title"):
-            footer_label = data["branding_title"]
-        elif org_branding and org_branding.footer_label:
+        if org_branding and org_branding.footer_label:
             footer_label = org_branding.footer_label
         else:
             if org and getattr(org, "name", None):
@@ -2586,10 +2647,7 @@ async def export_custom_report_file(
 
         footer_confidentiality = "Confidential Document"
         is_custom_brand = False
-        if data.get("branding_title"):
-            footer_confidentiality = data["branding_title"]
-            is_custom_brand = True
-        elif org_branding and org_branding.footer_label:
+        if org_branding and org_branding.footer_label:
             footer_confidentiality = org_branding.footer_label
             is_custom_brand = True
 

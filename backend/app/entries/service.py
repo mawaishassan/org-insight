@@ -2169,8 +2169,7 @@ def extract_all_referenced_kpi_ids(expr: str) -> set[int]:
     try:
         tree = ast.parse(expr_str)
     except Exception:
-        # Fallback to simple regex if AST parsing fails (e.g. due to syntax)
-        pattern = r"\b(KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE|KPI_GROUP_BY|GROUP_BY_KPI)\s*\(\s*(\d+)\s*,"
+        pattern = r"\b(KPI_FIELD|SUM_KPI_ITEMS|AVG_KPI_ITEMS|COUNT_KPI_ITEMS|MIN_KPI_ITEMS|MAX_KPI_ITEMS|SUM_KPI_ITEMS_WHERE|AVG_KPI_ITEMS_WHERE|COUNT_KPI_ITEMS_WHERE|MIN_KPI_ITEMS_WHERE|MAX_KPI_ITEMS_WHERE|KPI_GROUP_BY|GROUP_BY_KPI|FETCH_KPI_ITEMS_WHERE)\s*\(\s*(\d+)\s*,"
         for m in re.finditer(pattern, expr_str):
             referenced_ids.add(int(m.group(2)))
         return referenced_ids
@@ -2181,7 +2180,7 @@ def extract_all_referenced_kpi_ids(expr: str) -> set[int]:
             if func_name in (
                 "SUM_KPI_ITEMS", "AVG_KPI_ITEMS", "COUNT_KPI_ITEMS", "MIN_KPI_ITEMS", "MAX_KPI_ITEMS",
                 "SUM_KPI_ITEMS_WHERE", "AVG_KPI_ITEMS_WHERE", "COUNT_KPI_ITEMS_WHERE", "MIN_KPI_ITEMS_WHERE", "MAX_KPI_ITEMS_WHERE",
-                "KPI_FIELD", "KPI_GROUP_BY", "GROUP_BY_KPI"
+                "KPI_FIELD", "KPI_GROUP_BY", "GROUP_BY_KPI", "FETCH_KPI_ITEMS_WHERE"
             ):
                 if len(node.args) >= 2:
                     arg0 = node.args[0]
@@ -3169,7 +3168,7 @@ def extract_cross_kpi_mli_references(expression: str) -> set[tuple[int, str]]:
             if func_name in (
                 "SUM_KPI_ITEMS", "AVG_KPI_ITEMS", "COUNT_KPI_ITEMS", "MIN_KPI_ITEMS", "MAX_KPI_ITEMS",
                 "SUM_KPI_ITEMS_WHERE", "AVG_KPI_ITEMS_WHERE", "COUNT_KPI_ITEMS_WHERE", "MIN_KPI_ITEMS_WHERE", "MAX_KPI_ITEMS_WHERE",
-                "KPI_FIELD", "KPI_GROUP_BY", "GROUP_BY_KPI"
+                "KPI_FIELD", "KPI_GROUP_BY", "GROUP_BY_KPI", "FETCH_KPI_ITEMS_WHERE"
             ):
                 if len(node.args) >= 2:
                     kpi_id = None

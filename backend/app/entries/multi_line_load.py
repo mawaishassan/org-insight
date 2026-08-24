@@ -274,6 +274,10 @@ async def _fetch_rules_for_field(db: AsyncSession, field_id: int) -> list[dict]:
             "all_separator": r.all_separator,
             "target_action": r.target_action,
             "remove_from_source": r.remove_from_source,
+            "wrap_mode": r.wrap_mode,
+            "wrap_symbol": r.wrap_symbol,
+            "wrap_end_symbol": r.wrap_end_symbol,
+            "output_pattern": r.output_pattern,
         }
         for r in rules
     ]

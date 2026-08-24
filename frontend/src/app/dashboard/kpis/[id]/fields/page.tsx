@@ -78,6 +78,7 @@ const GROUP_FUNCTIONS = [
   { value: "MIN_ITEMS", label: "MIN" },
   { value: "MAX_ITEMS", label: "MAX" },
   { value: "COUNT_UNIQUE_ITEMS", label: "Count Unique" },
+  { value: "FETCH_ITEMS", label: "Fetch Filtered MLI" },
 ] as const;
 
 const WHERE_OPERATORS = [
@@ -5400,6 +5401,8 @@ export default function KpiFieldsPage() {
           onClose={() => setFormulaModal(null)}
           targetSubField={formulaModal.subField}
           allSubFields={formulaModal.allSubFields}
+          parentFieldKey={list.find((x) => x.id === formulaModal.fieldId)?.key}
+          orgId={orgId}
           onSave={async (updatedConfig) => {
             const field = list.find((x) => x.id === formulaModal.fieldId);
             if (!field) return;
@@ -5445,6 +5448,8 @@ export default function KpiFieldsPage() {
           onClose={() => setFormulaModal(null)}
           targetSubField={formulaModal.subField}
           allSubFields={formulaModal.allSubFields}
+          parentFieldKey={list.find((x) => x.id === formulaModal.fieldId)?.key}
+          orgId={orgId}
           onSave={async (updatedConfig) => {
             const field = list.find((x) => x.id === formulaModal.fieldId);
             if (!field) return;
@@ -6241,6 +6246,11 @@ function FormulaBuilder({
   const [otherKpis, setOtherKpis] = useState<FormulaRefKpi[]>([]);
   const [refOtherKpiId, setRefOtherKpiId] = useState<number | "">("");
 
+  const [fetchSeparator, setFetchSeparator] = useState<string>(", ");
+  const [fetchRemoveDuplicates, setFetchRemoveDuplicates] = useState<boolean>(true);
+  const [fetchSortOrder, setFetchSortOrder] = useState<"none" | "asc" | "desc">("none");
+  const [fetchEmptyFallback, setFetchEmptyFallback] = useState<string>("");
+
   const token = getAccessToken();
   const [userRole, setUserRole] = useState<string | null>(null);
 
@@ -6298,7 +6308,7 @@ function FormulaBuilder({
   const refFilterSubKey = primaryCond?.filterSubKey ?? "";
   const canInsertNumber = activeField?.field_type === "number" || activeField?.field_type === "formula";
   const isCountItemsOnly = refGroupFn === "COUNT_ITEMS";
-  const isConditionalWhere = useConditional && activeMliField !== null && !!refFilterSubKey;
+  const isConditionalWhere = (useConditional || refGroupFn === "FETCH_ITEMS") && activeMliField !== null && !!refFilterSubKey;
   const isCountWhere = refGroupFn === "COUNT_ITEMS";
   const canInsertItems = activeMliField !== null && (
     primaryGroupByKey !== ""
@@ -6351,6 +6361,58 @@ function FormulaBuilder({
     if (!activeMliField) return;
     const isOther = sourceKpi === "other";
     const kpiIdPrefix = isOther ? `${refOtherKpiId}, ` : "";
+
+    if (refGroupFn === "FETCH_ITEMS") {
+      const fnName = isOther ? "FETCH_KPI_ITEMS_WHERE" : "FETCH_ITEMS_WHERE";
+      const separatorQuote = `"${(fetchSeparator || "").replace(/"/g, '\\"')}"`;
+      const removeDupsVal = fetchRemoveDuplicates ? "yes" : "no";
+      const sortVal = `"${fetchSortOrder}"`;
+      const fallbackQuote = `"${(fetchEmptyFallback || "").replace(/"/g, '\\"')}"`;
+
+      const condArgs: string[] = [];
+      whereConditions.forEach((c, idx) => {
+        if (!c.filterSubKey) return;
+        const isLhsCurrent = c.filterSubKey.startsWith("CurrentRow.");
+        const resolvedFilterSubKey = isLhsCurrent ? c.filterSubKey.substring(11) : c.filterSubKey;
+
+        const sfRow = subFields.find((s: SubFieldDef) => s.key === (isLhsCurrent ? c.value : resolvedFilterSubKey));
+        const allowedOps = operatorsForSubFieldType(sfRow?.field_type);
+        const resolvedOp = allowedOps.some((o) => o.value === c.op) ? c.op : (allowedOps[0]?.value ?? "op_eq");
+
+        const raw = String(c.value ?? "").trim();
+        if (!raw) return;
+
+        if (idx > 0) condArgs.push(`"${c.logicWithPrev}"`);
+
+        if (isLhsCurrent) {
+          const val = `CurrentRow.${resolvedFilterSubKey}`;
+          if (isOther) {
+            condArgs.push(`"${raw}"`, `"${resolvedOp}"`, val);
+          } else {
+            condArgs.push(raw, resolvedOp, val);
+          }
+        } else {
+          const isUnquoted = c.compareType === "subfield" || c.compareType === "scalar" || c.compareType === "other_scalar";
+          const val = isUnquoted ? raw : quoteFormulaWhereValue(raw);
+          if (isOther) {
+            condArgs.push(`"${resolvedFilterSubKey}"`, `"${resolvedOp}"`, val);
+          } else {
+            condArgs.push(resolvedFilterSubKey, resolvedOp, val);
+          }
+        }
+      });
+
+      const prefix = isOther
+        ? `${refOtherKpiId}, "${activeMliField.key}", "${refSubKey}", ${separatorQuote}, "${removeDupsVal}", ${sortVal}, ${fallbackQuote}`
+        : `"${activeMliField.key}", "${refSubKey}", ${separatorQuote}, "${removeDupsVal}", ${sortVal}, ${fallbackQuote}`;
+
+      const finalExpr = condArgs.length > 0
+        ? `${fnName}(${prefix}, ${condArgs.join(", ")})`
+        : `${fnName}(${prefix})`;
+
+      onInsert(finalExpr);
+      return;
+    }
 
     // 1. Group By (primaryGroupByKey selected)
     if (primaryGroupByKey !== "") {
@@ -6669,7 +6731,12 @@ function FormulaBuilder({
               </div>
             )}
             <label style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.9rem", height: "34px", alignSelf: "flex-end", cursor: "pointer", marginBottom: "0.25rem" }}>
-              <input type="checkbox" checked={useConditional} onChange={(e) => setUseConditional(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={refGroupFn === "FETCH_ITEMS" ? true : useConditional}
+                disabled={refGroupFn === "FETCH_ITEMS"}
+                onChange={(e) => setUseConditional(e.target.checked)}
+              />
               Conditional (where)
             </label>
           </>
@@ -6677,8 +6744,56 @@ function FormulaBuilder({
 
       </div>
 
+      {refGroupFn === "FETCH_ITEMS" && activeMliField && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "0.75rem", marginBottom: "0.75rem", width: "100%", boxSizing: "border-box", padding: "0.75rem", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
+          <div>
+            <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Separator</label>
+            <input
+              type="text"
+              value={fetchSeparator}
+              onChange={(e) => setFetchSeparator(e.target.value)}
+              placeholder="e.g. , "
+              style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", boxSizing: "border-box" }}
+            />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Remove Duplicates</label>
+            <select
+              value={fetchRemoveDuplicates ? "yes" : "no"}
+              onChange={(e) => setFetchRemoveDuplicates(e.target.value === "yes")}
+              style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+            >
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
+            </select>
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Sort Order</label>
+            <select
+              value={fetchSortOrder}
+              onChange={(e) => setFetchSortOrder(e.target.value as any)}
+              style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+            >
+              <option value="none">Source Order</option>
+              <option value="asc">Ascending</option>
+              <option value="desc">Descending</option>
+            </select>
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>Empty Fallback</label>
+            <input
+              type="text"
+              value={fetchEmptyFallback}
+              onChange={(e) => setFetchEmptyFallback(e.target.value)}
+              placeholder="e.g. N/A"
+              style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", boxSizing: "border-box" }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Conditions grid */}
-      {useConditional && activeMliField && (
+      {(useConditional || refGroupFn === "FETCH_ITEMS") && activeMliField && (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", width: "100%", boxSizing: "border-box", marginTop: "0.5rem" }}>
           {whereConditions.map((c, idx) => {
             const isLhsCurrent = c.filterSubKey.startsWith("CurrentRow.");

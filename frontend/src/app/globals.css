@@ -260,6 +260,67 @@ textarea {
   transition: width 0.15s ease-out;
 }
 
+/* ===== Effective Spinner Loading Style ===== */
+@keyframes effective-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes effective-pulse-text {
+  0%, 100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+.effective-spinner-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  min-height: 120px;
+  width: 100%;
+  border-radius: 12px;
+  background: transparent;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all 0.3s ease;
+}
+
+.effective-spinner-container--overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.effective-spinner {
+  border-style: solid;
+  border-color: rgba(99, 102, 241, 0.18);
+  border-top-color: var(--primary, #4f46e5);
+  border-right-color: var(--primary, #4f46e5);
+  border-radius: 50%;
+  animation: effective-spin 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  box-shadow: 0 0 16px rgba(99, 102, 241, 0.28);
+}
+
+.effective-spinner-text {
+  margin-top: 0.65rem;
+  font-weight: 500;
+  color: var(--muted, #64748b);
+  letter-spacing: 0.015em;
+  animation: effective-pulse-text 1.6s ease-in-out infinite;
+}
+
 /* ===== Widget skeleton / shimmer loading ===== */
 @keyframes shimmer {
   0%   { background-position: 200% 0; }
@@ -269,14 +330,25 @@ textarea {
 .widget-skeleton {
   border-radius: 14px;
   min-height: 120px;
-  background: linear-gradient(
-    90deg,
-    var(--border, #e2e8f0) 25%,
-    var(--bg, #f8fafc)    50%,
-    var(--border, #e2e8f0) 75%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.4s infinite linear;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  background: rgba(255, 255, 255, 0.3);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.widget-skeleton::after {
+  content: "";
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(99, 102, 241, 0.2);
+  border-top-color: var(--primary, #4f46e5);
+  border-right-color: var(--primary, #4f46e5);
+  border-radius: 50%;
+  animation: effective-spin 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  box-shadow: 0 0 14px rgba(99, 102, 241, 0.25);
 }
 
 .widget-skeleton--chart {

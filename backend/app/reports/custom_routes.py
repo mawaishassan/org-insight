@@ -230,6 +230,7 @@ async def get_report_details(
         "branding_title": report.branding_title,
         "show_odoo_button": report.show_odoo_button,
         "odoo_sync_kpi_ids": report.odoo_sync_kpi_ids or [],
+        "apply_further_processing_based_on_mli_filter": getattr(report, "apply_further_processing_based_on_mli_filter", False),
         "sections": sections_data,
         "attachments": attachments_data,
         "fetch_data_with_date": getattr(report, "fetch_data_with_date", False),
@@ -326,6 +327,7 @@ async def save_layout(
         mli_font_size=body.mli_font_size,
         show_odoo_button=body.show_odoo_button,
         odoo_sync_kpi_ids=body.odoo_sync_kpi_ids,
+        apply_further_processing_based_on_mli_filter=body.apply_further_processing_based_on_mli_filter,
     )
 
     if not ok:

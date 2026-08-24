@@ -18,6 +18,9 @@ interface SubFieldDef {
   name: string;
 }
 
+export type ExtractionMethod = "between_symbols" | "remove_only" | "full_cell_format";
+export type WrapMode = "none" | "prefix" | "suffix" | "wrap" | "pattern";
+
 interface ExtractionRule {
   id: number;
   field_id: number;
@@ -26,7 +29,7 @@ interface ExtractionRule {
   sort_order: number;
   source_sub_field_key: string;
   target_sub_field_key: string | null;
-  extraction_method: "between_symbols" | "remove_only";
+  extraction_method: ExtractionMethod;
   start_symbol: string;
   end_symbol: string;
   remove_delimiters_too: boolean;
@@ -34,6 +37,10 @@ interface ExtractionRule {
   all_separator: string | null;
   target_action: "replace" | "append" | "populate_if_empty" | null;
   remove_from_source: boolean;
+  wrap_mode?: WrapMode | null;
+  wrap_symbol?: string | null;
+  wrap_end_symbol?: string | null;
+  output_pattern?: string | null;
 }
 
 type RuleForm = Omit<ExtractionRule, "id" | "field_id">;
@@ -52,6 +59,10 @@ const EMPTY_FORM: RuleForm = {
   all_separator: null,
   target_action: "replace",
   remove_from_source: false,
+  wrap_mode: "none",
+  wrap_symbol: "(",
+  wrap_end_symbol: ")",
+  output_pattern: "",
 };
 
 interface Props {
@@ -85,7 +96,7 @@ async function apiFetch<T>(path: string, token: string, options: RequestInit = {
 
 /** Client-side cycle detection (mirrors backend logic). */
 function hasCycle(rules: RuleForm[]): boolean {
-  const active = rules.filter((r) => r.is_active && r.extraction_method === "between_symbols");
+  const active = rules.filter((r) => r.is_active && r.extraction_method !== "remove_only");
   const targets = new Map<string, string>();
   for (const r of active) {
     if (r.target_sub_field_key) targets.set(r.target_sub_field_key, r.source_sub_field_key);
@@ -102,11 +113,95 @@ function hasCycle(rules: RuleForm[]): boolean {
   return false;
 }
 
-const TARGET_ACTION_LABELS: Record<string, string> = {
-  replace: "Replace",
-  append: "Append",
-  populate_if_empty: "Populate only if empty",
-};
+const DEFAULT_SYMBOLS = [
+  { label: "Opening Paren (", value: "(" },
+  { label: "Closing Paren )", value: ")" },
+  { label: "Opening Bracket [", value: "[" },
+  { label: "Closing Bracket ]", value: "]" },
+  { label: "Opening Brace {", value: "{" },
+  { label: "Closing Brace }", value: "}" },
+  { label: "Angle Open <", value: "<" },
+  { label: "Angle Close >", value: ">" },
+  { label: "Double Quote \"", value: "\"" },
+  { label: "Single Quote '", value: "'" },
+  { label: "Parentheses ()", value: "()" },
+  { label: "Square Brackets []", value: "[]" },
+  { label: "Curly Braces {}", value: "{}" },
+  { label: "Angle Brackets <>", value: "<>" },
+  { label: "Hyphen / Dash -", value: "-" },
+  { label: "Slash /", value: "/" },
+  { label: "Pipe |", value: "|" },
+  { label: "Colon :", value: ":" },
+  { label: "Semicolon ;", value: ";" },
+  { label: "Comma ,", value: "," },
+];
+
+/** Auto-lookup closing pair for opening symbol */
+function getMatchingPair(start: string): string {
+  if (start === "(" || start === "()") return ")";
+  if (start === "[" || start === "[]") return "]";
+  if (start === "{" || start === "{}") return "}";
+  if (start === "<" || start === "<>") return ">";
+  if (start === "\"\"" || start === "\"") return "\"";
+  if (start === "''" || start === "'") return "'";
+  return start;
+}
+
+/** Live client-side preview calculator */
+function computeLivePreview(form: RuleForm, sampleVal: string, targetColValue: string = ""): string {
+  if (!sampleVal && sampleVal !== "0") return "";
+  let val = sampleVal.trim();
+
+  // Extraction phase
+  if (form.extraction_method === "between_symbols") {
+    const start = form.start_symbol || "(";
+    const end = form.end_symbol || ")";
+    const sPos = val.indexOf(start);
+    if (sPos !== -1) {
+      const ePos = val.indexOf(end, sPos + start.length);
+      if (ePos !== -1) {
+        val = val.substring(sPos + start.length, ePos).trim();
+      }
+    }
+  }
+
+  // Formatting phase
+  const mode = form.wrap_mode || "none";
+  let formatted = val;
+
+  if (mode === "prefix") {
+    const sym = form.wrap_symbol || "";
+    formatted = `${sym}${val}`;
+  } else if (mode === "suffix") {
+    const sym = form.wrap_end_symbol || form.wrap_symbol || "";
+    formatted = `${val}${sym}`;
+  } else if (mode === "wrap") {
+    let start = form.wrap_symbol || "(";
+    let end = form.wrap_end_symbol || "";
+    if (start === "()") { start = "("; end = ")"; }
+    else if (start === "[]") { start = "["; end = "]"; }
+    else if (start === "{}") { start = "{"; end = "}"; }
+    else if (start === "<>") { start = "<"; end = ">"; }
+    else if (start === "\"\"") { start = "\""; end = "\""; }
+    else if (start === "''") { start = "'"; end = "'"; }
+
+    if (!end) {
+      end = getMatchingPair(start);
+    }
+    formatted = `${start}${val}${end}`;
+  } else if (mode === "pattern" || form.output_pattern) {
+    const pattern = form.output_pattern || "{CELL_VALUE}";
+    formatted = pattern.replace("{CELL_VALUE}", val);
+  }
+
+  // Target Action
+  if (form.target_action === "append" && targetColValue) {
+    const sep = form.all_separator || " ";
+    return `${targetColValue}${sep}${formatted}`;
+  }
+
+  return formatted;
+}
 
 // ─────────────────────────────────────────────
 // Component
@@ -125,6 +220,10 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
   const [previewRows, setPreviewRows] = useState<Record<string, unknown>[] | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Live test preview state
+  const [testSourceVal, setTestSourceVal] = useState<string>("Computer Science");
+  const [testTargetVal, setTestTargetVal] = useState<string>("Faculty of Computing");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -151,10 +250,14 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
     setFormError(null);
     setPreviewRows(null);
     setPreviewError(null);
+    setTestSourceVal("Computer Science");
+    setTestTargetVal("Faculty of Computing");
     setShowForm(true);
   };
 
   const openEdit = (rule: ExtractionRule) => {
+    const startSym = rule.wrap_symbol || "(";
+    const endSym = rule.wrap_end_symbol || getMatchingPair(startSym);
     setEditingId(rule.id);
     setForm({
       name: rule.name,
@@ -163,29 +266,40 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
       source_sub_field_key: rule.source_sub_field_key,
       target_sub_field_key: rule.target_sub_field_key,
       extraction_method: rule.extraction_method,
-      start_symbol: rule.start_symbol,
-      end_symbol: rule.end_symbol,
+      start_symbol: rule.start_symbol || "(",
+      end_symbol: rule.end_symbol || ")",
       remove_delimiters_too: rule.remove_delimiters_too,
       occurrence: rule.occurrence,
       all_separator: rule.all_separator,
-      target_action: rule.target_action,
+      target_action: rule.target_action || "replace",
       remove_from_source: rule.remove_from_source,
+      wrap_mode: rule.wrap_mode || "none",
+      wrap_symbol: startSym,
+      wrap_end_symbol: endSym,
+      output_pattern: rule.output_pattern || "",
     });
     setFormError(null);
     setPreviewRows(null);
     setPreviewError(null);
+    setTestSourceVal("Computer Science");
+    setTestTargetVal("Faculty of Computing");
     setShowForm(true);
   };
 
   const validateForm = (): string | null => {
     if (!form.name.trim()) return "Name is required";
     if (!form.source_sub_field_key) return "Source column is required";
-    if (!form.start_symbol) return "Start symbol is required";
-    if (!form.end_symbol) return "End symbol is required";
+
     if (form.extraction_method === "between_symbols") {
-      if (!form.target_sub_field_key) return "Target column is required for Between Symbols — Extract";
-      if (!form.target_action) return "Target action is required for Between Symbols — Extract";
+      if (!form.start_symbol) return "Start symbol is required";
+      if (!form.end_symbol) return "End symbol is required";
+      if (!form.target_sub_field_key) return "Target column is required for Between Symbols";
     }
+
+    if (form.extraction_method === "full_cell_format") {
+      if (!form.target_sub_field_key) return "Target column is required";
+    }
+
     // Client-side cycle check
     const rulesForCheck: RuleForm[] = [
       ...rules
@@ -204,6 +318,10 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
           all_separator: r.all_separator,
           target_action: r.target_action,
           remove_from_source: r.remove_from_source,
+          wrap_mode: r.wrap_mode,
+          wrap_symbol: r.wrap_symbol,
+          wrap_end_symbol: r.wrap_end_symbol,
+          output_pattern: r.output_pattern,
         })),
       form,
     ];
@@ -292,6 +410,18 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
   const setF = (partial: Partial<RuleForm>) => setForm((prev) => ({ ...prev, ...partial }));
   const activeSymbols = symbols.filter((s) => s.is_active);
 
+  // Available symbol dropdown items
+  const symbolOptions = [
+    ...activeSymbols.map((s) => ({ label: `${s.label} (${s.value})`, value: s.value })),
+    ...DEFAULT_SYMBOLS.filter((ds) => !activeSymbols.some((s) => s.value === ds.value)),
+  ];
+
+  const livePreviewResult = computeLivePreview(
+    f,
+    testSourceVal,
+    f.target_action === "append" ? testTargetVal : ""
+  );
+
   if (loading) return <div style={{ color: "var(--muted)", padding: "0.75rem 0" }}>Loading extraction rules…</div>;
 
   return (
@@ -307,7 +437,7 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
         <>
           {rules.length === 0 ? (
             <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "0.75rem" }}>
-              No extraction rules yet. Rules run in order and are applied in-memory — raw stored data is never changed.
+              No extraction rules yet. Rules run in order and format/extract values in-memory — raw stored data is never changed.
             </p>
           ) : (
             <ul style={{ listStyle: "none", margin: "0 0 0.75rem", padding: 0 }}>
@@ -325,13 +455,17 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
                     <span style={{ color: "var(--muted)", fontSize: "0.82rem" }}>
                       {rule.extraction_method === "remove_only" ? (
                         <><code>{rule.source_sub_field_key}</code> — remove <code>{rule.start_symbol}…{rule.end_symbol}</code></>
+                      ) : rule.extraction_method === "full_cell_format" ? (
+                        <><code>{rule.source_sub_field_key}</code> <span style={{ color: "#2563eb", fontWeight: 600 }}>[Full Cell {rule.wrap_mode || "format"}]</span> → <code>{rule.target_sub_field_key}</code></>
                       ) : (
                         <><code>{rule.source_sub_field_key}</code> <span style={{ fontFamily: "monospace" }}>{rule.start_symbol}…{rule.end_symbol}</span> → <code>{rule.target_sub_field_key}</code></>
                       )}
                     </span>
-                    <span style={{ fontSize: "0.75rem", padding: "0.1rem 0.45rem", borderRadius: 9999, border: "1px solid var(--border)", color: "var(--muted)" }}>
-                      {rule.occurrence}
-                    </span>
+                    {rule.wrap_mode && rule.wrap_mode !== "none" && (
+                      <span style={{ fontSize: "0.72rem", padding: "0.1rem 0.4rem", borderRadius: 4, background: "#eff6ff", color: "#1d4ed8", fontWeight: 600 }}>
+                        {rule.wrap_mode}: {rule.wrap_symbol} {rule.wrap_end_symbol ? `… ${rule.wrap_end_symbol}` : ""}
+                      </span>
+                    )}
                   </div>
                   <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
                     <label style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.82rem", color: "var(--muted)", cursor: "pointer" }}>
@@ -367,7 +501,7 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
             {/* Name */}
             <div className="form-group" style={{ margin: 0, gridColumn: "1 / -1" }}>
               <label>Rule name *</label>
-              <input id={`mli-rule-name-${fieldId}`} className="form-control" value={f.name} onChange={(e) => setF({ name: e.target.value })} placeholder="e.g. Extract patent code" />
+              <input id={`mli-rule-name-${fieldId}`} className="form-control" value={f.name} onChange={(e) => setF({ name: e.target.value })} placeholder="e.g. Append department wrapped in parentheses" />
             </div>
 
             {/* Method */}
@@ -378,12 +512,17 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
                 className="form-control"
                 value={f.extraction_method}
                 onChange={(e) => {
-                  const m = e.target.value as "between_symbols" | "remove_only";
-                  setF({ extraction_method: m, target_sub_field_key: m === "remove_only" ? null : f.target_sub_field_key, target_action: m === "remove_only" ? null : (f.target_action ?? "replace") });
+                  const m = e.target.value as ExtractionMethod;
+                  setF({
+                    extraction_method: m,
+                    target_sub_field_key: m === "remove_only" ? null : (f.target_sub_field_key || f.source_sub_field_key),
+                    target_action: m === "remove_only" ? null : (f.target_action ?? "replace"),
+                  });
                 }}
               >
-                <option value="between_symbols">Between Symbols — Extract (copy text to target column)</option>
+                <option value="between_symbols">Between Symbols — Extract (copy text between delimiters)</option>
                 <option value="remove_only">Between Symbols — Remove Only (delete text from source column)</option>
+                <option value="full_cell_format">Full Cell Value — Format / Wrap / Append (entire complete value)</option>
               </select>
             </div>
 
@@ -396,8 +535,8 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
               </select>
             </div>
 
-            {/* Target column — only for between_symbols */}
-            {f.extraction_method === "between_symbols" && (
+            {/* Target column — for between_symbols and full_cell_format */}
+            {f.extraction_method !== "remove_only" && (
               <div className="form-group" style={{ margin: 0 }}>
                 <label>Target column *</label>
                 <select id={`mli-rule-tgt-${fieldId}`} className="form-control" value={f.target_sub_field_key ?? ""} onChange={(e) => setF({ target_sub_field_key: e.target.value || null })}>
@@ -407,61 +546,192 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
               </div>
             )}
 
-            {/* Start symbol */}
-            <div className="form-group" style={{ margin: 0 }}>
-              <label>Start symbol *</label>
-              <select id={`mli-rule-start-${fieldId}`} className="form-control" value={f.start_symbol} onChange={(e) => setF({ start_symbol: e.target.value })}>
-                <option value="">— select —</option>
-                {activeSymbols.map((s) => <option key={s.id} value={s.value}>{s.label} ({s.value})</option>)}
-              </select>
-            </div>
+            {/* Start & End symbols — only for between_symbols / remove_only */}
+            {f.extraction_method !== "full_cell_format" && (
+              <>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label>Start symbol *</label>
+                  <select id={`mli-rule-start-${fieldId}`} className="form-control" value={f.start_symbol} onChange={(e) => setF({ start_symbol: e.target.value })}>
+                    <option value="">— select —</option>
+                    {symbolOptions.map((s, idx) => <option key={idx} value={s.value}>{s.label}</option>)}
+                  </select>
+                </div>
 
-            {/* End symbol */}
-            <div className="form-group" style={{ margin: 0 }}>
-              <label>End symbol *</label>
-              <select id={`mli-rule-end-${fieldId}`} className="form-control" value={f.end_symbol} onChange={(e) => setF({ end_symbol: e.target.value })}>
-                <option value="">— select —</option>
-                {activeSymbols.map((s) => <option key={s.id} value={s.value}>{s.label} ({s.value})</option>)}
-              </select>
-            </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label>End symbol *</label>
+                  <select id={`mli-rule-end-${fieldId}`} className="form-control" value={f.end_symbol} onChange={(e) => setF({ end_symbol: e.target.value })}>
+                    <option value="">— select —</option>
+                    {symbolOptions.map((s, idx) => <option key={idx} value={s.value}>{s.label}</option>)}
+                  </select>
+                </div>
 
-            {/* Occurrence */}
-            <div className="form-group" style={{ margin: 0 }}>
-              <label>Occurrence</label>
-              <select id={`mli-rule-occ-${fieldId}`} className="form-control" value={f.occurrence} onChange={(e) => setF({ occurrence: e.target.value as any })}>
-                <option value="first">First match</option>
-                <option value="last">Last match</option>
-                <option value="all">All matches</option>
-              </select>
-            </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label>Occurrence</label>
+                  <select id={`mli-rule-occ-${fieldId}`} className="form-control" value={f.occurrence} onChange={(e) => setF({ occurrence: e.target.value as any })}>
+                    <option value="first">First match</option>
+                    <option value="last">Last match</option>
+                    <option value="all">All matches</option>
+                  </select>
+                </div>
+              </>
+            )}
 
-            {/* Separator — only when occurrence=all and extracting */}
-            {f.occurrence === "all" && f.extraction_method === "between_symbols" && (
+            {/* Separator */}
+            {f.extraction_method !== "remove_only" && (
               <div className="form-group" style={{ margin: 0 }}>
-                <label>Separator (when joining all matches)</label>
-                <input className="form-control" value={f.all_separator ?? ""} onChange={(e) => setF({ all_separator: e.target.value || null })} placeholder=", " />
+                <label>Separator / Space</label>
+                <input className="form-control" value={f.all_separator ?? ""} onChange={(e) => setF({ all_separator: e.target.value || null })} placeholder="Default space ( )" />
               </div>
             )}
 
-            {/* Target action — only for between_symbols */}
-            {f.extraction_method === "between_symbols" && (
+            {/* Target action — for between_symbols and full_cell_format */}
+            {f.extraction_method !== "remove_only" && (
               <div className="form-group" style={{ margin: 0 }}>
                 <label>Target action *</label>
                 <select id={`mli-rule-action-${fieldId}`} className="form-control" value={f.target_action ?? "replace"} onChange={(e) => setF({ target_action: e.target.value as any })}>
-                  <option value="replace">Replace</option>
-                  <option value="append">Append</option>
-                  <option value="populate_if_empty">Populate only if empty</option>
+                  <option value="replace">Replace target cell</option>
+                  <option value="append">Append to existing target cell</option>
+                  <option value="populate_if_empty">Populate only if target is empty</option>
                 </select>
+              </div>
+            )}
+
+            {/* Symbol Application / Formatting Section */}
+            {f.extraction_method !== "remove_only" && (
+              <div style={{ gridColumn: "1 / -1", background: "#fff", padding: "0.85rem 1rem", borderRadius: 8, border: "1px solid var(--border)", marginTop: "0.5rem" }}>
+                <div style={{ fontWeight: 600, fontSize: "0.9rem", marginBottom: "0.6rem", color: "#1e293b" }}>
+                  Symbol Application & Wrapping
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0.65rem 1rem" }}>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label>Symbol Application Mode</label>
+                    <select className="form-control" value={f.wrap_mode || "none"} onChange={(e) => setF({ wrap_mode: e.target.value as WrapMode })}>
+                      <option value="none">None (Plain Extracted Value)</option>
+                      <option value="wrap">Wrap with Start & End Symbols (e.g. ( Value ))</option>
+                      <option value="prefix">Prefix Symbol (e.g. [ Value)</option>
+                      <option value="suffix">Suffix Symbol (e.g. Value ])</option>
+                      <option value="pattern">Custom Output Pattern Template</option>
+                    </select>
+                  </div>
+
+                  {f.wrap_mode === "wrap" && (
+                    <>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label>Start Symbol (Opening)</label>
+                        <select
+                          className="form-control"
+                          value={f.wrap_symbol || ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            const pair = getMatchingPair(val);
+                            setF({ wrap_symbol: val, wrap_end_symbol: pair });
+                          }}
+                        >
+                          <option value="">— select start symbol —</option>
+                          {symbolOptions.map((s, idx) => <option key={idx} value={s.value}>{s.label}</option>)}
+                        </select>
+                      </div>
+
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label>End Symbol (Closing)</label>
+                        <select
+                          className="form-control"
+                          value={f.wrap_end_symbol || ""}
+                          onChange={(e) => setF({ wrap_end_symbol: e.target.value })}
+                        >
+                          <option value="">— select end symbol —</option>
+                          {symbolOptions.map((s, idx) => <option key={idx} value={s.value}>{s.label}</option>)}
+                        </select>
+                      </div>
+                    </>
+                  )}
+
+                  {f.wrap_mode === "prefix" && (
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label>Prefix Symbol</label>
+                      <select className="form-control" value={f.wrap_symbol || ""} onChange={(e) => setF({ wrap_symbol: e.target.value })}>
+                        <option value="">— select symbol —</option>
+                        {symbolOptions.map((s, idx) => <option key={idx} value={s.value}>{s.label}</option>)}
+                      </select>
+                    </div>
+                  )}
+
+                  {f.wrap_mode === "suffix" && (
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label>Suffix Symbol</label>
+                      <select className="form-control" value={f.wrap_end_symbol || f.wrap_symbol || ""} onChange={(e) => setF({ wrap_end_symbol: e.target.value, wrap_symbol: e.target.value })}>
+                        <option value="">— select symbol —</option>
+                        {symbolOptions.map((s, idx) => <option key={idx} value={s.value}>{s.label}</option>)}
+                      </select>
+                    </div>
+                  )}
+
+                  {(f.wrap_mode === "pattern" || f.output_pattern) && (
+                    <div className="form-group" style={{ margin: 0, gridColumn: "1 / -1" }}>
+                      <label>Custom Output Pattern</label>
+                      <input
+                        className="form-control"
+                        value={f.output_pattern || ""}
+                        onChange={(e) => setF({ output_pattern: e.target.value })}
+                        placeholder="e.g. [ {CELL_VALUE} ]  or  {faculty} [{CELL_VALUE}]"
+                      />
+                      <div style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: "0.3rem", display: "flex", gap: "0.4rem", flexWrap: "wrap", alignItems: "center" }}>
+                        <span>Click placeholder to insert:</span>
+                        <button type="button" className="btn" style={{ padding: "0.1rem 0.35rem", fontSize: "0.75rem" }} onClick={() => setF({ output_pattern: (f.output_pattern || "") + "{CELL_VALUE}" })}>
+                          {"{CELL_VALUE}"}
+                        </button>
+                        {subFields.map((sf) => (
+                          <button key={sf.key} type="button" className="btn" style={{ padding: "0.1rem 0.35rem", fontSize: "0.75rem" }} onClick={() => setF({ output_pattern: (f.output_pattern || "") + `{${sf.key}}` })}>
+                            {`{${sf.key}}`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
 
+          {/* Real-time Interactive Preview Section */}
+          {f.extraction_method !== "remove_only" && (
+            <div style={{ marginTop: "1rem", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, padding: "0.85rem 1rem" }}>
+              <div style={{ fontWeight: 700, fontSize: "0.85rem", color: "#0369a1", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <span>⚡ Real-Time Live Preview</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0.6rem 1rem" }}>
+                <div>
+                  <label style={{ fontSize: "0.78rem", fontWeight: 600, color: "#0369a1" }}>Test Source Value:</label>
+                  <input className="form-control" style={{ fontSize: "0.82rem", background: "#fff" }} value={testSourceVal} onChange={(e) => setTestSourceVal(e.target.value)} placeholder="Enter test source cell value" />
+                </div>
+                {f.target_action === "append" && (
+                  <div>
+                    <label style={{ fontSize: "0.78rem", fontWeight: 600, color: "#0369a1" }}>Existing Target Value:</label>
+                    <input className="form-control" style={{ fontSize: "0.82rem", background: "#fff" }} value={testTargetVal} onChange={(e) => setTestTargetVal(e.target.value)} placeholder="Enter target cell existing value" />
+                  </div>
+                )}
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label style={{ fontSize: "0.78rem", fontWeight: 600, color: "#0369a1" }}>Resulting Stored Target Value:</label>
+                  <div style={{ background: "#fff", border: "1px solid #7dd3fc", padding: "0.45rem 0.75rem", borderRadius: 6, fontWeight: 700, fontSize: "0.95rem", color: "#0c4a6e" }}>
+                    {livePreviewResult || <span style={{ color: "var(--muted)", fontWeight: 400 }}>(empty)</span>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Boolean flags */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem", marginTop: "0.9rem" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.9rem", cursor: "pointer" }}>
-              <input type="checkbox" checked={f.remove_delimiters_too} onChange={(e) => setF({ remove_delimiters_too: e.target.checked })} />
-              Also remove delimiter characters (the <code style={{ margin: "0 0.15rem" }}>{f.start_symbol}</code> and <code style={{ margin: "0 0.15rem" }}>{f.end_symbol}</code> themselves)
-            </label>
+            <span style={{ fontSize: "0.85rem", color: "#166534", background: "#f0fdf4", border: "1px solid #bbf7d0", padding: "0.2rem 0.55rem", borderRadius: 6, fontWeight: 600 }}>
+              ✓ Source cell value is preserved intact (never erased)
+            </span>
+
+            {f.extraction_method !== "full_cell_format" && (
+              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.9rem", cursor: "pointer" }}>
+                <input type="checkbox" checked={f.remove_delimiters_too} onChange={(e) => setF({ remove_delimiters_too: e.target.checked })} />
+                Also remove delimiter characters ({f.start_symbol} and {f.end_symbol})
+              </label>
+            )}
 
             {f.extraction_method === "between_symbols" && (
               <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.9rem", cursor: "pointer" }}>
@@ -476,7 +746,7 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
             </label>
           </div>
 
-          {/* Preview */}
+          {/* Backend sample preview */}
           <div style={{ marginTop: "1.1rem" }}>
             <button
               id={`mli-rule-preview-${fieldId}`}
@@ -486,7 +756,7 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
               disabled={previewLoading}
               style={{ marginRight: "0.5rem" }}
             >
-              {previewLoading ? "Running preview…" : "▶ Preview on sample rows"}
+              {previewLoading ? "Running preview…" : "▶ Preview on entry rows"}
             </button>
             {previewError && <span style={{ color: "var(--error)", fontSize: "0.85rem" }}>{previewError}</span>}
           </div>
