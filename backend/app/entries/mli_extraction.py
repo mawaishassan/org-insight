@@ -117,6 +117,8 @@ def _apply_rules_to_row(row: dict, rules: list[dict]) -> dict:
                 row = _apply_between_symbols(row, rule)
             elif method == "remove_only":
                 row = _apply_remove_only(row, rule)
+            elif method == "full_cell_format":
+                row = _apply_full_cell_format(row, rule)
         except Exception:
             # Never crash downstream consumers — skip bad rule silently
             pass
@@ -124,7 +126,7 @@ def _apply_rules_to_row(row: dict, rules: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Extraction methods
+# Extraction methods & Formatting Helpers
 # ---------------------------------------------------------------------------
 
 BRACKET_PAIRS = {
@@ -133,6 +135,76 @@ BRACKET_PAIRS = {
     "{": "}",
     "<": ">",
 }
+
+BRACKET_PAIRS_REVERSE = {
+    "(": ")",
+    "[": "]",
+    "{": "}",
+    "<": ">",
+    "()": ("(", ")"),
+    "[]": ("[", "]"),
+    "{}": ("{", "}"),
+    "<>": ("<", ">"),
+    '""': ('"', '"'),
+    "''": ("'", "'"),
+}
+
+
+def _apply_wrapping_and_pattern(
+    value: str,
+    row: dict,
+    wrap_mode: str | None,
+    wrap_symbol: str | None,
+    output_pattern: str | None,
+    wrap_end_symbol: str | None = None,
+) -> str:
+    """Apply prefix, suffix, wrapping symbol, or custom pattern template to value."""
+    if value is None:
+        val_str = ""
+    else:
+        val_str = str(value).strip()
+
+    if not wrap_mode or wrap_mode == "none":
+        if output_pattern:
+            wrap_mode = "pattern"
+        else:
+            return val_str
+
+    if wrap_mode == "prefix":
+        sym = wrap_symbol or ""
+        return f"{sym}{val_str}"
+
+    if wrap_mode == "suffix":
+        sym = wrap_end_symbol or wrap_symbol or ""
+        return f"{val_str}{sym}"
+
+    if wrap_mode == "wrap":
+        open_sym = wrap_symbol or ""
+        close_sym = wrap_end_symbol or ""
+        if not close_sym:
+            if open_sym in BRACKET_PAIRS_REVERSE:
+                pair = BRACKET_PAIRS_REVERSE[open_sym]
+                if isinstance(pair, tuple):
+                    open_sym, close_sym = pair
+                else:
+                    close_sym = pair
+            elif len(open_sym) == 2 and open_sym[0] in BRACKET_PAIRS and open_sym[1] == BRACKET_PAIRS[open_sym[0]]:
+                open_sym, close_sym = open_sym[0], open_sym[1]
+            else:
+                close_sym = open_sym
+        return f"{open_sym}{val_str}{close_sym}"
+
+    if wrap_mode == "pattern" or output_pattern:
+        pattern = output_pattern or "{CELL_VALUE}"
+        res = pattern.replace("{CELL_VALUE}", val_str)
+        # Resolve any other {sub_field_key} placeholders present in row
+        for k, v in row.items():
+            if isinstance(k, str) and f"{{{k}}}" in res:
+                v_str = "" if v is None else str(v).strip()
+                res = res.replace(f"{{{k}}}", v_str)
+        return res
+
+    return val_str
 
 
 def _find_matches(
@@ -217,6 +289,10 @@ def _apply_between_symbols(row: dict, rule: dict) -> dict:
     target_action = rule.get("target_action", "replace")
     remove_from_source = rule.get("remove_from_source", False)
     remove_delimiters_too = rule.get("remove_delimiters_too", True)
+    wrap_mode = rule.get("wrap_mode")
+    wrap_symbol = rule.get("wrap_symbol")
+    wrap_end_symbol = rule.get("wrap_end_symbol")
+    output_pattern = rule.get("output_pattern")
 
     raw = row.get(src_key)
     if raw is None or not isinstance(raw, str):
@@ -228,7 +304,12 @@ def _apply_between_symbols(row: dict, rule: dict) -> dict:
 
     # Collect extracted text pieces (inner content only, trimmed)
     extracted_pieces = [raw[m[2]:m[3]].strip() for m in matches]
-    extracted_str = separator.join(p for p in extracted_pieces if p).strip()
+    formatted_pieces = [
+        _apply_wrapping_and_pattern(p, row, wrap_mode, wrap_symbol, output_pattern, wrap_end_symbol)
+        for p in extracted_pieces
+        if p
+    ]
+    extracted_str = separator.join(p for p in formatted_pieces if p).strip()
 
     # Write to target if provided
     if tgt_key and extracted_str:
@@ -244,6 +325,35 @@ def _apply_between_symbols(row: dict, rule: dict) -> dict:
     # Remove from source if requested
     if remove_from_source:
         row[src_key] = _remove_spans(raw, matches, remove_delimiters_too)
+
+    return row
+
+
+def _apply_full_cell_format(row: dict, rule: dict) -> dict:
+    src_key = rule["source_sub_field_key"]
+    tgt_key = rule.get("target_sub_field_key") or src_key
+    target_action = rule.get("target_action", "replace")
+    wrap_mode = rule.get("wrap_mode")
+    wrap_symbol = rule.get("wrap_symbol")
+    wrap_end_symbol = rule.get("wrap_end_symbol")
+    output_pattern = rule.get("output_pattern")
+    separator = rule.get("all_separator") or " "
+
+    raw = row.get(src_key)
+    if raw is None:
+        return row
+
+    val_str = str(raw).strip()
+    formatted_str = _apply_wrapping_and_pattern(val_str, row, wrap_mode, wrap_symbol, output_pattern, wrap_end_symbol)
+
+    existing = row.get(tgt_key)
+    if target_action == "replace" or existing is None or existing == "":
+        row[tgt_key] = formatted_str
+    elif target_action == "append":
+        row[tgt_key] = (str(existing) + separator + formatted_str) if existing else formatted_str
+    elif target_action == "populate_if_empty":
+        if not existing and existing != 0:
+            row[tgt_key] = formatted_str
 
     return row
 

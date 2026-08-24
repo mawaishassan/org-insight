@@ -5,6 +5,8 @@ import Link from "next/link";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
+
 const TIME_DIMENSION_ORDER = ["yearly", "half_yearly", "quarterly", "monthly"] as const;
 const TIME_DIMENSION_LABELS: Record<string, string> = {
   yearly: "Yearly",
@@ -281,7 +283,7 @@ export function KpiCardsGrid({
       : `/dashboard/entries/kpi/${kpiId}?year=${year}&organization_id=${organizationId}`;
 
   if (loading && overview.length === 0 && filteredKpis.length === 0) {
-    return <p>Loading...</p>;
+    return <WidgetSpinnerLoader size="large" text="Loading KPIs..." minHeight={200} />;
   }
 
   if (error) {

@@ -1324,6 +1324,9 @@ class CustomReport(Base):
     mli_font_size = Column(Integer, default=10, nullable=False, server_default="10")
     show_odoo_button = Column(Boolean, default=False, nullable=False, server_default="false")
     odoo_sync_kpi_ids = Column(JSON, nullable=True)  # List of KPI IDs to sync when button clicked (None = all odoo KPIs in report)
+    apply_further_processing_based_on_mli_filter = Column(Boolean, default=False, nullable=False, server_default="false")
+    # When True, MLI Advance Filters and Period Filters are applied BEFORE Scalar Formula evaluation
+    # ensuring that formula results reflect only the filtered/visible MLI rows.
 
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
@@ -1509,6 +1512,12 @@ class MLITextExtractionRule(Base):
 
     # For "between_symbols": strip the extracted portion from the source after writing to target
     remove_from_source = Column(Boolean, default=False, nullable=False, server_default="0")
+
+    # Wrapping & Pattern Formatting (New)
+    wrap_mode = Column(String(30), nullable=True, default="none")  # none | prefix | suffix | wrap | pattern
+    wrap_symbol = Column(String(50), nullable=True)                 # e.g. "(", "[", "{", etc.
+    wrap_end_symbol = Column(String(50), nullable=True)             # e.g. ")", "]", "}", etc.
+    output_pattern = Column(String(255), nullable=True)             # e.g. "[ {CELL_VALUE} ]" or "{faculty} [{dept}]"
 
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)

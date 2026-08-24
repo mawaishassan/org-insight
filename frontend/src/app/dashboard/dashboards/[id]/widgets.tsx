@@ -7,10 +7,11 @@ import { api } from "@/lib/api";
 import { fetchAllMultiItemsRows, getKpiFieldsWithSubs, type KpiFieldWithSubs } from "@/lib/fetchMultiItemsRows";
 import { CustomLabel } from "./CustomLabel";
 import { useDashboardCustomization } from "./DashboardCustomizationContext";
-import { WidgetFullScreenProvider, useWidgetFullScreen } from "./WidgetFullScreenContext";
+import { WidgetFullScreenProvider, useWidgetFullScreen, useWidgetFullScreenNavigation } from "./WidgetFullScreenContext";
 import { SmartChartViewer } from "./SmartChartViewer";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 import {
   isLikelyAbortError,
   isWidgetDataBundleEnabled,
@@ -27,6 +28,21 @@ import {
   postDashboardUniversalBatch,
   postWidgetData,
 } from "@/lib/widgetData";
+
+function WidgetBlurPlaceholder({ minHeight = 120 }: { minHeight?: number | string }) {
+  return (
+    <div
+      style={{
+        width: "100%",
+        minHeight,
+        borderRadius: 12,
+        background: "rgba(248, 250, 252, 0.4)",
+        backdropFilter: "blur(6px)",
+        WebkitBackdropFilter: "blur(6px)",
+      }}
+    />
+  );
+}
 
 // Batch bar/pie chart loads to avoid browser connection queuing when dashboards contain many charts.
 type ChartBatchKey = string;
@@ -524,19 +540,47 @@ function WidgetSettingsShell({
   designActions,
   widgetKey,
   children,
+  allowFullScreen = true,
 }: {
   title?: string;
   designActions?: WidgetDesignMenuActions;
   widgetKey: string;
   children: React.ReactNode;
+  allowFullScreen?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [layoutOpen, setLayoutOpen] = useState(false);
-  const [isFullScreen, setIsFullScreen] = useState(false);
   const [viewerMenu, setViewerMenu] = useState<React.ReactNode>(null);
   const [headerAddon, setHeaderAddon] = useState<React.ReactNode>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const layoutWrapRef = useRef<HTMLDivElement>(null);
+
+  const { fullScreenWidgetId, setFullScreenWidgetId, goToNext, goToPrev, hasNext, hasPrev } = useWidgetFullScreenNavigation();
+  const isFullScreen = fullScreenWidgetId === widgetKey;
+  const setIsFullScreen = (val: boolean | ((prev: boolean) => boolean)) => {
+    if (typeof val === "function") {
+      setFullScreenWidgetId(val(isFullScreen) ? widgetKey : null);
+    } else {
+      setFullScreenWidgetId(val ? widgetKey : null);
+    }
+  };
+
+  useEffect(() => {
+    if (!isFullScreen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "ArrowRight" || e.key === "Right") {
+        goToNext();
+      } else if (e.key === "ArrowLeft" || e.key === "Left") {
+        goToPrev();
+      } else if (e.key === "Escape") {
+        setIsFullScreen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isFullScreen, goToNext, goToPrev]);
 
   useEffect(() => {
     setViewerMenu(null);
@@ -566,16 +610,104 @@ function WidgetSettingsShell({
     <WidgetViewerMenuSetterContext.Provider value={setViewerMenu}>
       <WidgetHeaderAddonSetterContext.Provider value={setHeaderAddon}>
         {isFullScreen && (
-          <div
-            style={{
-              position: "fixed",
-              inset: 0,
-              zIndex: 9998,
-              background: "rgba(0, 0, 0, 0.75)",
-              backdropFilter: "blur(4px)",
-            }}
-            onClick={() => setIsFullScreen(false)}
-          />
+          <>
+            <div
+              style={{
+                position: "fixed",
+                inset: 0,
+                zIndex: 9998,
+                background: "rgba(0, 0, 0, 0.75)",
+                backdropFilter: "blur(4px)",
+              }}
+              onClick={() => setIsFullScreen(false)}
+            />
+            {hasPrev && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  goToPrev();
+                }}
+                style={{
+                  position: "fixed",
+                  left: "1vw",
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  zIndex: 10000,
+                  width: "50px",
+                  height: "50px",
+                  borderRadius: "50%",
+                  border: "none",
+                  background: "rgba(255, 255, 255, 0.15)",
+                  color: "#ffffff",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  transition: "background 0.2s, transform 0.2s",
+                  backdropFilter: "blur(2px)",
+                  boxShadow: "0 4px 12px rgba(0, 0, 0, 0.25)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "rgba(255, 255, 255, 0.3)";
+                  e.currentTarget.style.transform = "translateY(-50%) scale(1.1)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "rgba(255, 255, 255, 0.15)";
+                  e.currentTarget.style.transform = "translateY(-50%) scale(1)";
+                }}
+                aria-label="Previous Widget"
+                title="Previous Widget"
+              >
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+            )}
+            {hasNext && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  goToNext();
+                }}
+                style={{
+                  position: "fixed",
+                  right: "1vw",
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  zIndex: 10000,
+                  width: "50px",
+                  height: "50px",
+                  borderRadius: "50%",
+                  border: "none",
+                  background: "rgba(255, 255, 255, 0.15)",
+                  color: "#ffffff",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  transition: "background 0.2s, transform 0.2s",
+                  backdropFilter: "blur(2px)",
+                  boxShadow: "0 4px 12px rgba(0, 0, 0, 0.25)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "rgba(255, 255, 255, 0.3)";
+                  e.currentTarget.style.transform = "translateY(-50%) scale(1.1)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "rgba(255, 255, 255, 0.15)";
+                  e.currentTarget.style.transform = "translateY(-50%) scale(1)";
+                }}
+                aria-label="Next Widget"
+                title="Next Widget"
+              >
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+            )}
+          </>
         )}
         <div
           className="card"
@@ -715,29 +847,31 @@ function WidgetSettingsShell({
                 ) : null}
                 {showSettingsButton ? (
                   <div ref={wrapRef} style={{ position: "relative", flexShrink: 0, display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                    <button
-                      type="button"
-                      aria-label="Expand Full Screen"
-                      title={isFullScreen ? "Exit Full Screen" : "Expand Full Screen"}
-                      onClick={() => setIsFullScreen((f) => !f)}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: 36,
-                        height: 36,
-                        padding: 0,
-                        border: "1px solid var(--border)",
-                        borderRadius: 8,
-                        background: isFullScreen ? "rgba(79, 70, 229, 0.12)" : "var(--surface)",
-                        color: isFullScreen ? "var(--accent)" : "var(--text)",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                        <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </button>
+                    {allowFullScreen && (
+                      <button
+                        type="button"
+                        aria-label="Expand Full Screen"
+                        title={isFullScreen ? "Exit Full Screen" : "Expand Full Screen"}
+                        onClick={() => setIsFullScreen((f) => !f)}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          width: 36,
+                          height: 36,
+                          padding: 0,
+                          border: "1px solid var(--border)",
+                          borderRadius: 8,
+                          background: isFullScreen ? "rgba(79, 70, 229, 0.12)" : "var(--surface)",
+                          color: isFullScreen ? "var(--accent)" : "var(--text)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                          <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </button>
+                    )}
 
                     <button
                       type="button"
@@ -841,7 +975,7 @@ function WidgetSettingsShell({
             </div>
           ) : null}
 
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: isFullScreen ? "auto" : "hidden" }}>
             <WidgetFullScreenProvider isFullScreen={isFullScreen}>
               {children}
             </WidgetFullScreenProvider>
@@ -884,7 +1018,7 @@ export function WidgetRenderer({
 
   if (effectiveWidget.type === "text") {
     return (
-      <WidgetSettingsShell title={effectiveWidget.title} designActions={designActions} widgetKey={effectiveWidget.id}>
+      <WidgetSettingsShell title={effectiveWidget.title} designActions={designActions} widgetKey={effectiveWidget.id} allowFullScreen={false}>
         <div style={{ whiteSpace: "pre-wrap" }}>{effectiveWidget.text || ""}</div>
       </WidgetSettingsShell>
     );
@@ -1136,10 +1270,16 @@ function KpiSingleValueWidget({
       .finally(() => setLoading(false));
   }, [token, widget.kpi_id, widget.year, widget.period_key, widget.field_key, organizationId]);
 
+  const { setWidgetLoading } = useDashboardCustomization();
+  useEffect(() => {
+    setWidgetLoading(widget.id, loading);
+    return () => setWidgetLoading(widget.id, false);
+  }, [widget.id, loading, setWidgetLoading]);
+
   return (
-    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id} allowFullScreen={false}>
       {loading ? (
-        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+        <WidgetBlurPlaceholder minHeight={80} />
       ) : error ? (
         <p className="form-error">{error}</p>
       ) : (
@@ -1367,10 +1507,16 @@ function KpiCardSingleValueWidget({
   const showRefreshing = refreshing || (loading && !!previousValueRef.current);
 
 
+  const { setWidgetLoading } = useDashboardCustomization();
+  useEffect(() => {
+    setWidgetLoading(widget.id, showSkeleton);
+    return () => setWidgetLoading(widget.id, false);
+  }, [widget.id, showSkeleton, setWidgetLoading]);
+
   return (
-    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id} allowFullScreen={false}>
       {showSkeleton ? (
-        <div className="widget-skeleton" />
+        <WidgetBlurPlaceholder minHeight={110} />
       ) : error && !previousValueRef.current ? (
         <p className="form-error">{error}</p>
       ) : (
@@ -1510,10 +1656,16 @@ function KpiLineChartWidget({
   const minV = values.length ? Math.min(...values) : 0;
   const maxV = values.length ? Math.max(...values) : 1;
 
+  const { setWidgetLoading } = useDashboardCustomization();
+  useEffect(() => {
+    setWidgetLoading(widget.id, loading);
+    return () => setWidgetLoading(widget.id, false);
+  }, [widget.id, loading, setWidgetLoading]);
+
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
       {loading ? (
-        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+        <WidgetBlurPlaceholder minHeight={150} />
       ) : error ? (
         <p className="form-error">{error}</p>
       ) : numeric.length === 0 ? (
@@ -2689,10 +2841,16 @@ function KpiBarChartWidgetInner({
     }
   }, [mode, groups, bars, widget.id, registerWidgetLabels]);
 
+  const { setWidgetLoading } = useDashboardCustomization();
+  useEffect(() => {
+    setWidgetLoading(widget.id, loading);
+    return () => setWidgetLoading(widget.id, false);
+  }, [widget.id, loading, setWidgetLoading]);
+
   return (
     <>
       {loading ? (
-        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+        <WidgetBlurPlaceholder minHeight={200} />
       ) : error ? (
         <p className="form-error">{error}</p>
       ) : mode === "multi_line_items" ? (
@@ -3594,10 +3752,16 @@ function KpiTrendWidgetInner({
     }
   }, [mode, categories, widget.field_keys, widget.id, registerWidgetLabels]);
 
+  const { setWidgetLoading } = useDashboardCustomization();
+  useEffect(() => {
+    setWidgetLoading(widget.id, loading);
+    return () => setWidgetLoading(widget.id, false);
+  }, [widget.id, loading, setWidgetLoading]);
+
   return (
     <>
       {loading ? (
-        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+        <WidgetBlurPlaceholder minHeight={200} />
       ) : error ? (
         <p className="form-error">{error}</p>
       ) : selectedYears.length === 0 ? (
@@ -4177,10 +4341,16 @@ function KpiTableWidget({
       .finally(() => setLoading(false));
   }, [token, widget.kpi_id, widget.year, widget.period_key, organizationId, JSON.stringify(widget.field_keys ?? [])]);
 
+  const { setWidgetLoading } = useDashboardCustomization();
+  useEffect(() => {
+    setWidgetLoading(widget.id, loading);
+    return () => setWidgetLoading(widget.id, false);
+  }, [widget.id, loading, setWidgetLoading]);
+
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
       {loading ? (
-        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+        <WidgetBlurPlaceholder minHeight={160} />
       ) : error ? (
         <p className="form-error">{error}</p>
       ) : rows.length === 0 ? (
@@ -4791,6 +4961,12 @@ function KpiMultiLineTableWidgetInner({
     hasJoins,
   ]);
 
+  const { setWidgetLoading } = useDashboardCustomization();
+  useEffect(() => {
+    setWidgetLoading(widget.id, loading);
+    return () => setWidgetLoading(widget.id, false);
+  }, [widget.id, loading, setWidgetLoading]);
+
   return (
     <>
       {showAdvancedFilters ? (
@@ -4825,7 +5001,7 @@ function KpiMultiLineTableWidgetInner({
         </div>
       ) : null}
       {loading ? (
-        <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+        <WidgetBlurPlaceholder minHeight={200} />
       ) : error ? (
         <p className="form-error">{error}</p>
       ) : (

@@ -1242,6 +1242,101 @@ def _make_evaluator(
                     seen.add(v_norm)
         return len(seen)
 
+    def fetch_items_where(
+        field_key: str,
+        value_sub_key: str,
+        separator: str,
+        remove_duplicates: Any,
+        sort_direction: str,
+        empty_val: str,
+        *where_args: Any
+    ) -> str:
+        where_args = _resolve_current_row_args(where_args)
+        rows = items_data.get(field_key) if isinstance(items_data, dict) else []
+        data = {field_key: rows}
+        matched = _rows_where_multi(data, field_key, where_args, 0)
+        
+        vals = []
+        for r in matched:
+            v = r.get(value_sub_key)
+            if v is not None:
+                if isinstance(v, dict):
+                    v_str = str(v.get("value") or v.get("label") or str(v)).strip()
+                else:
+                    v_str = str(v).strip()
+                if v_str:
+                    vals.append(v_str)
+                    
+        if not vals:
+            return empty_val or ""
+            
+        rem_dup = str(remove_duplicates).strip().lower() in ("yes", "true", "1")
+        if rem_dup:
+            seen = set()
+            deduped = []
+            for val in vals:
+                if val not in seen:
+                    seen.add(val)
+                    deduped.append(val)
+            vals = deduped
+            
+        sort_dir = str(sort_direction).strip().lower()
+        if sort_dir in ("asc", "ascending"):
+            vals.sort(key=lambda x: x.lower())
+        elif sort_dir in ("desc", "descending"):
+            vals.sort(key=lambda x: x.lower(), reverse=True)
+            
+        sep = str(separator) if separator is not None else ", "
+        return sep.join(vals)
+
+    def fetch_kpi_items_where(
+        kpi_id: int,
+        field_key: str,
+        value_sub_key: str,
+        separator: str,
+        remove_duplicates: Any,
+        sort_direction: str,
+        empty_val: str,
+        *where_args: Any
+    ) -> str:
+        where_args = _resolve_current_row_args(where_args)
+        rows = _other_kpi_rows(kpi_id, field_key)
+        data = {field_key: rows}
+        matched = _rows_where_multi(data, field_key, where_args, 0)
+        
+        vals = []
+        for r in matched:
+            v = r.get(value_sub_key)
+            if v is not None:
+                if isinstance(v, dict):
+                    v_str = str(v.get("value") or v.get("label") or str(v)).strip()
+                else:
+                    v_str = str(v).strip()
+                if v_str:
+                    vals.append(v_str)
+                    
+        if not vals:
+            return empty_val or ""
+            
+        rem_dup = str(remove_duplicates).strip().lower() in ("yes", "true", "1")
+        if rem_dup:
+            seen = set()
+            deduped = []
+            for val in vals:
+                if val not in seen:
+                    seen.add(val)
+                    deduped.append(val)
+            vals = deduped
+            
+        sort_dir = str(sort_direction).strip().lower()
+        if sort_dir in ("asc", "ascending"):
+            vals.sort(key=lambda x: x.lower())
+        elif sort_dir in ("desc", "descending"):
+            vals.sort(key=lambda x: x.lower(), reverse=True)
+            
+        sep = str(separator) if separator is not None else ", "
+        return sep.join(vals)
+
     s.functions = {
         "WHERE": lambda *a: tuple(a) if len(a) > 1 else (a[0] if a else ()),
         "GROUP_BY": group_by_fn,
@@ -1286,6 +1381,8 @@ def _make_evaluator(
         "MIN_KPI_ITEMS_WHERE": min_KPI_items_where if "min_KPI_items_where" in locals() else min_kpi_items_where,
         "MAX_KPI_ITEMS_WHERE": max_kpi_items_where,
         "KPI_FIELD": kpi_field,
+        "FETCH_ITEMS_WHERE": fetch_items_where,
+        "FETCH_KPI_ITEMS_WHERE": fetch_kpi_items_where,
     }
     return s
 

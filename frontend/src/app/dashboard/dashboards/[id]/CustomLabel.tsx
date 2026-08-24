@@ -53,9 +53,9 @@ export function CustomLabel({
           strokeWidth: svgProps?.strokeWidth || 0,
           ...svgProps?.style,
         }}
-        title={displayLabel}
       >
         {displayText}
+        <title>{displayLabel}</title>
       </text>
     );
   }
@@ -68,7 +68,7 @@ export function CustomLabel({
         textDecoration: showUnderline && isOrgAdmin ? "underline dashed var(--border)" : "none",
         display: "inline-block",
       }}
-      title={isOrgAdmin ? `Click to customize label "${originalStr}"` : undefined}
+      title={isOrgAdmin ? `${displayLabel}\n(Click to customize label "${originalStr}")` : displayLabel}
     >
       {displayText}
     </span>

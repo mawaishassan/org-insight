@@ -209,6 +209,9 @@ export function SmartChartViewer({
   // Measure card container width dynamically for responsive sizing
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState<number>(640);
+  const [viewportHeight, setViewportHeight] = useState<number>(
+    typeof window !== "undefined" ? window.innerHeight : 800
+  );
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -222,6 +225,15 @@ export function SmartChartViewer({
     const ro = new ResizeObserver(updateWidth);
     ro.observe(containerRef.current);
     return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleResize = () => {
+      setViewportHeight(window.innerHeight);
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
   }, []);
 
   const handleChartTypeChange = (nextType: "bar" | "pie") => {
@@ -315,8 +327,12 @@ export function SmartChartViewer({
           </div>
         )}
 
-        <div style={{ display: "flex", gap: isFullScreen ? "3.5rem" : "1.5rem", alignItems: "center", justifyContent: isFullScreen ? "center" : "space-between", flexWrap: "wrap", width: "100%", maxWidth: isFullScreen ? "1400px" : "100%", margin: "0 auto", padding: isFullScreen ? "1.5rem 0.5rem" : "0.25rem" }}>
-          <div style={{ width: isFullScreen ? 520 : 290, height: isFullScreen ? 520 : 290, flexShrink: 0, margin: isFullScreen ? "0" : "0 auto", position: "relative" }}>
+        {(() => {
+          const containerHeight = 0.92 * viewportHeight - 110;
+          const pieSize = isFullScreen ? Math.max(300, Math.min(650, containerHeight - 40)) : 290;
+          return (
+            <div style={{ display: "flex", gap: isFullScreen ? "3.5rem" : "1.5rem", alignItems: "center", justifyContent: isFullScreen ? "center" : "space-between", flexWrap: "wrap", width: "100%", maxWidth: isFullScreen ? "1400px" : "100%", margin: "0 auto", padding: isFullScreen ? "1.5rem 0.5rem" : "0.25rem" }}>
+              <div style={{ width: pieSize, height: pieSize, flexShrink: 0, margin: isFullScreen ? "0" : "0 auto", position: "relative" }}>
             <svg
               viewBox="0 0 300 300"
               role="img"
@@ -495,22 +511,22 @@ export function SmartChartViewer({
           </div>
 
           {/* Alongside Details Column: Lists ALL original individual categories with their descriptions */}
-          <div style={{ flex: 1, minWidth: isFullScreen ? 340 : 220, maxHeight: isFullScreen ? 520 : 290, overflowY: "auto", scrollbarWidth: "thin", paddingRight: "0.5rem" }}>
+          <div style={{ flex: 1, minWidth: isFullScreen ? 340 : 220, maxHeight: isFullScreen ? Math.max(300, containerHeight - 40) : 290, overflowY: "auto", scrollbarWidth: "thin", paddingRight: "0.5rem" }}>
             <div
               style={{
-                fontSize: isFullScreen ? "1.05rem" : "0.78rem",
+                fontSize: isFullScreen ? "1.6rem" : "0.78rem",
                 fontWeight: isFullScreen ? 800 : 600,
                 color: "var(--muted)",
                 textTransform: "uppercase",
                 letterSpacing: "0.04em",
-                marginBottom: isFullScreen ? "0.85rem" : "0.5rem",
+                marginBottom: isFullScreen ? "1.2rem" : "0.5rem",
                 display: "flex",
                 justifyContent: "space-between",
               }}
             >
               <span>Categories ({mergedRawItems.length})</span>
             </div>
-            <div style={{ display: "grid", gap: isFullScreen ? "0.75rem" : "0.45rem" }}>
+            <div style={{ display: "grid", gap: isFullScreen ? "1.1rem" : "0.45rem" }}>
               {mergedRawItems.map((item, i) => {
                 const topIdx = processedItems.findIndex((p) => !p.isOther && p.key === item.key);
                 const displayLabel = topIdx >= 0 ? getDisplayLabel(item.label, widgetId) : "Others";
@@ -519,11 +535,11 @@ export function SmartChartViewer({
                 const percentStr = totalValue > 0 ? ((item.value / totalValue) * 100).toFixed(1) : "0";
 
                 return (
-                  <div key={item.key} style={{ display: "flex", alignItems: "center", gap: isFullScreen ? "0.75rem" : "0.5rem" }}>
-                    <div style={{ width: isFullScreen ? 14 : 10, height: isFullScreen ? 14 : 10, borderRadius: "3px", background: fill, flexShrink: 0 }} />
+                  <div key={item.key} style={{ display: "flex", alignItems: "center", gap: isFullScreen ? "1.1rem" : "0.5rem" }}>
+                    <div style={{ width: isFullScreen ? 20 : 10, height: isFullScreen ? 20 : 10, borderRadius: isFullScreen ? "5px" : "3px", background: fill, flexShrink: 0 }} />
                     <div
                       style={{
-                        fontSize: isFullScreen ? "1.2rem" : "0.92rem",
+                        fontSize: isFullScreen ? "1.7rem" : "0.92rem",
                         fontWeight: 700,
                         color: "var(--text)",
                         overflow: "hidden",
@@ -534,7 +550,7 @@ export function SmartChartViewer({
                       title={`${getDisplayLabel(item.label, widgetId)}: ${item.value.toLocaleString()} (${percentStr}%)`}
                     >
                       <CustomLabel value={item.label} widgetId={widgetId} showUnderline={false} />
-                      <span style={{ color: "var(--text-secondary, #334155)", marginLeft: "0.4rem", fontWeight: 700 }}>
+                      <span style={{ color: "var(--text-secondary, #334155)", marginLeft: isFullScreen ? "0.8rem" : "0.4rem", fontWeight: 700 }}>
                         ({item.value.toLocaleString()} — {percentStr}%)
                       </span>
                     </div>
@@ -544,9 +560,11 @@ export function SmartChartViewer({
             </div>
           </div>
         </div>
-      </div>
-    );
-  }
+      );
+    })()}
+  </div>
+);
+}
 
   // --- HORIZONTAL & VERTICAL BAR CHART RENDERERS ---
   // Completely remove "Others" concept from Bar Charts: render ALL original individual categories directly!
@@ -562,7 +580,7 @@ export function SmartChartViewer({
 
   let rotationAngle = 0;
   if (isFullScreen) {
-    rotationAngle = 0;
+    rotationAngle = n <= 5 ? 0 : -35;
   } else {
     rotationAngle = n <= 4 ? 0 : -45;
   }
@@ -583,12 +601,14 @@ export function SmartChartViewer({
 
   let bottomPadding = 45;
   if (rotationAngle === 0) {
-    bottomPadding = isFullScreen ? 95 : 50;
+    bottomPadding = isFullScreen ? 60 : 50;
   } else {
-    bottomPadding = Math.min(150, Math.max(85, Math.round(Math.min(25, maxLabelLen) * 6.5)));
+    bottomPadding = isFullScreen 
+      ? Math.max(75, Math.round(Math.min(22, maxLabelLen) * 7.5 + 20)) 
+      : Math.min(150, Math.max(85, Math.round(Math.min(25, maxLabelLen) * 6.5)));
   }
-
-  const H = (isFullScreen ? 450 : 290) + bottomPadding;
+  const containerHeight = 0.92 * viewportHeight - 110;
+  const H = isFullScreen ? Math.max(300, containerHeight - 30) : (290 + bottomPadding);
   const top = 32;
   const innerH = Math.max(60, H - top - bottomPadding);
   const maxV = Math.max(...data.map((d) => d.value), 1);
@@ -603,7 +623,7 @@ export function SmartChartViewer({
           width: "100%",
           overflow: "hidden",
           boxSizing: "border-box",
-          paddingBottom: isFullScreen ? "1.5rem" : "0.5rem",
+          paddingBottom: isFullScreen ? "0px" : "0.5rem",
         }}
       >
         <svg
@@ -613,7 +633,7 @@ export function SmartChartViewer({
           preserveAspectRatio="xMidYMin meet"
           role="img"
           aria-label="Vertical Bar chart"
-          style={{ display: "block", width: "100%", height: "auto", touchAction: "none" }}
+          style={{ display: "block", width: "100%", height: isFullScreen ? H : "auto", touchAction: "none" }}
           onMouseLeave={() => {
             setHoverKey(null);
             setHoverPt(null);
@@ -631,6 +651,21 @@ export function SmartChartViewer({
             const y = top + innerH - h;
             const displayLabel = getDisplayLabel(b.label, widgetId);
             const fill = getColorForValue(displayLabel, i, data.length, colorForIndex(i, data.length));
+
+            const angleRad = Math.abs(rotationAngle) * Math.PI / 180;
+            const cosA = Math.cos(angleRad) || 0.8;
+            const leftBoundaryLimit = Math.max(5, Math.floor(x / (charPx * cosA)));
+
+            let sliceTruncateLength = isFullScreen
+              ? (rotationAngle === 0 ? 40 : Math.min(22, leftBoundaryLimit))
+              : (rotationAngle === 0 ? maxLabelChars : Math.min(16, leftBoundaryLimit));
+
+            if (rotationAngle !== 0 && i === 0 && isFullScreen && displayLabel) {
+              const words = displayLabel.split(" ");
+              if (words.length > 1) {
+                sliceTruncateLength = words[0].length + 2;
+              }
+            }
 
             return (
               <g key={b.key}>
@@ -687,17 +722,17 @@ export function SmartChartViewer({
                   </text>
                 ) : null}
 
-                <g transform={`translate(${x + barW / 2}, ${top + innerH + (rotationAngle === 0 ? (isFullScreen ? 12 : 8) : 14)}) rotate(${rotationAngle})`}>
+                <g transform={`translate(${x + barW / 2}, ${top + innerH + (rotationAngle === 0 ? (isFullScreen ? 16 : 8) : (isFullScreen ? 12 : 14))}) rotate(${rotationAngle})`}>
                   <CustomLabel
                     value={b.label}
                     widgetId={widgetId}
                     isSvg={true}
                     showUnderline={false}
-                    truncateLength={rotationAngle === 0 ? maxLabelChars : 16}
+                    truncateLength={sliceTruncateLength}
                     svgProps={{
                       x: 0,
-                      y: rotationAngle === 0 ? (isFullScreen ? 8 : 6) : 0,
-                      fontSize: isFullScreen ? "16" : n > 40 ? "10" : n > 20 ? "12" : "13",
+                      y: rotationAngle === 0 ? (isFullScreen ? 12 : 6) : 0,
+                      fontSize: isFullScreen ? (rotationAngle === 0 ? "26" : "22") : n > 40 ? "10" : n > 20 ? "12" : "13",
                       fontWeight: "800",
                       fill: "var(--text)",
                       textAnchor: rotationAngle === 0 ? "middle" : "end",
@@ -716,13 +751,13 @@ export function SmartChartViewer({
                 const titleLines = wrapTextToLines(hoverPt.title, 34);
                 const line2 = `Value: ${hoverPt.value.toLocaleString()}${hoverPt.percent ? ` (${hoverPt.percent}%)` : ""}`;
                 
-                const padX = isFullScreen ? 20 : 14;
-                const padY = isFullScreen ? 16 : 12;
-                const titleLineH = isFullScreen ? 24 : 18;
+                const padX = isFullScreen ? 28 : 14;
+                const padY = isFullScreen ? 24 : 12;
+                const titleLineH = isFullScreen ? 32 : 18;
                 const maxChars = Math.max(...titleLines.map((s) => s.length), line2.length);
-                const boxW = Math.min(isFullScreen ? 450 : 380, Math.max(isFullScreen ? 220 : 180, maxChars * (isFullScreen ? 9.8 : 8.0) + padX * 2));
+                const boxW = Math.min(isFullScreen ? 600 : 380, Math.max(isFullScreen ? 320 : 180, maxChars * (isFullScreen ? 14.5 : 8.0) + padX * 2));
                 const titleBlockH = titleLines.length * titleLineH;
-                const subTitleH = isFullScreen ? 24 : 20;
+                const subTitleH = isFullScreen ? 30 : 20;
                 const boxH = padY * 2 + titleBlockH + subTitleH;
 
                 const preferLeft = hoverPt.x > cardW * 0.55;
@@ -733,11 +768,11 @@ export function SmartChartViewer({
                   <g>
                     <rect x={x} y={y} width={boxW} height={boxH} rx={8} fill="var(--surface)" stroke="var(--border)" filter="drop-shadow(0 6px 12px rgba(0,0,0,0.18))" />
                     {titleLines.map((tLine, idx) => (
-                      <text key={idx} x={x + padX} y={y + padY + (isFullScreen ? 18 : 14) + idx * titleLineH} fontSize={isFullScreen ? "18" : "14"} fontWeight="800" fill="var(--text)">
+                      <text key={idx} x={x + padX} y={y + padY + (isFullScreen ? 26 : 14) + idx * titleLineH} fontSize={isFullScreen ? "26" : "14"} fontWeight="800" fill="var(--text)">
                         {tLine}
                       </text>
                     ))}
-                    <text x={x + padX} y={y + padY + (isFullScreen ? 18 : 14) + titleBlockH + 4} fontSize={isFullScreen ? "15" : "13"} fontWeight="700" fill="var(--text-secondary, #475569)">
+                    <text x={x + padX} y={y + padY + (isFullScreen ? 26 : 14) + titleBlockH + (isFullScreen ? 10 : 4)} fontSize={isFullScreen ? "22" : "13"} fontWeight="700" fill="var(--text-secondary, #475569)">
                       {line2}
                     </text>
                   </g>

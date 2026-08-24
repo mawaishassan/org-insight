@@ -123,6 +123,8 @@ export default function CustomReportDesignPage() {
   const [odooSyncKpiIds, setOdooSyncKpiIds] = useState<number[]>([]);
   const [localOdooSyncKpiIds, setLocalOdooSyncKpiIds] = useState<number[]>([]);
   const [odooConfiguredKpis, setOdooConfiguredKpis] = useState<{id: number; name: string}[]>([]);
+  const [applyFurtherProcessing, setApplyFurtherProcessing] = useState<boolean>(false);
+  const [localApplyFurtherProcessing, setLocalApplyFurtherProcessing] = useState<boolean>(false);
 
 
 
@@ -198,9 +200,10 @@ export default function CustomReportDesignPage() {
       setLocalMliFontSize(mliFontSize);
       setLocalShowOdooButton(showOdooButton);
       setLocalOdooSyncKpiIds(odooSyncKpiIds);
+      setLocalApplyFurtherProcessing(applyFurtherProcessing);
 
     }
-  }, [reportSettingsOpen, fetchDataWithDate, dateFetchingConfig, reportHeaderId, showReportName, brandingTitle, scalarBold, scalarFontSize, mliFontSize, showOdooButton, odooSyncKpiIds]);
+  }, [reportSettingsOpen, fetchDataWithDate, dateFetchingConfig, reportHeaderId, showReportName, brandingTitle, scalarBold, scalarFontSize, mliFontSize, showOdooButton, odooSyncKpiIds, applyFurtherProcessing]);
 
 
 
@@ -276,6 +279,7 @@ export default function CustomReportDesignPage() {
       mli_font_size: mliFontSize,
       show_odoo_button: showOdooButton,
       odoo_sync_kpi_ids: odooSyncKpiIds,
+      apply_further_processing_based_on_mli_filter: applyFurtherProcessing,
     };
 
     const reportLayout = {
@@ -307,10 +311,11 @@ export default function CustomReportDesignPage() {
       mli_font_size: (report as any).mli_font_size ?? 10,
       show_odoo_button: (report as any).show_odoo_button ?? false,
       odoo_sync_kpi_ids: (report as any).odoo_sync_kpi_ids ?? [],
+      apply_further_processing_based_on_mli_filter: (report as any).apply_further_processing_based_on_mli_filter ?? false,
     };
 
     return JSON.stringify(currentLayout) !== JSON.stringify(reportLayout);
-  }, [report, sections, attachments, fetchDataWithDate, dateFetchingConfig, reportHeaderId, showReportName, brandingTitle, scalarBold, scalarFontSize, mliFontSize, showOdooButton, odooSyncKpiIds]);
+  }, [report, sections, attachments, fetchDataWithDate, dateFetchingConfig, reportHeaderId, showReportName, brandingTitle, scalarBold, scalarFontSize, mliFontSize, showOdooButton, odooSyncKpiIds, applyFurtherProcessing]);
 
 
   // Column Selection & Reordering + Row Filtering States for MLIs
@@ -423,6 +428,7 @@ export default function CustomReportDesignPage() {
         setMliFontSize((detail as any).mli_font_size ?? 10);
         setShowOdooButton((detail as any).show_odoo_button ?? false);
         setOdooSyncKpiIds((detail as any).odoo_sync_kpi_ids || []);
+        setApplyFurtherProcessing((detail as any).apply_further_processing_based_on_mli_filter ?? false);
         setOdooConfiguredKpis(odooKpis || []);
 
         setCustomReportHeaders(headersData || []);
@@ -789,6 +795,7 @@ export default function CustomReportDesignPage() {
         mli_font_size: mliFontSize,
         show_odoo_button: showOdooButton,
         odoo_sync_kpi_ids: odooSyncKpiIds,
+        apply_further_processing_based_on_mli_filter: applyFurtherProcessing,
       };
 
 
@@ -812,6 +819,7 @@ export default function CustomReportDesignPage() {
         mli_font_size: mliFontSize,
         show_odoo_button: showOdooButton,
         odoo_sync_kpi_ids: odooSyncKpiIds,
+        apply_further_processing_based_on_mli_filter: applyFurtherProcessing,
       } : null);
 
 
@@ -968,20 +976,6 @@ export default function CustomReportDesignPage() {
                     </div>
                   )}
 
-                  {/* Branding/Footer label Override */}
-                  <div style={{ display: "grid", gap: "0.25rem" }}>
-                    <label style={{ fontSize: "0.8rem", fontWeight: 600 }}>Custom Footer Branding Label</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Confidential | Org Name"
-                      value={localBrandingTitle}
-                      onChange={(e) => setLocalBrandingTitle(e.target.value)}
-                      style={{ padding: "0.35rem 0.5rem", fontSize: "0.82rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
-                    />
-                    <p style={{ margin: 0, fontSize: "0.7rem", color: "var(--muted)" }}>
-                      Overrides the default organization footer branding label in the PDF footer.
-                    </p>
-                  </div>
 
                   {/* Typography & Font Sizes */}
                   <div style={{ display: "grid", gap: "0.6rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
@@ -1114,7 +1108,40 @@ export default function CustomReportDesignPage() {
 
 
 
-                
+                {/* Apply Further Processing Based on MLI Filter */}
+                <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
+                  <div>
+                    <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>MLI Filter-Aware Formula Processing</span>
+                    <p style={{ margin: "0.2rem 0 0 0", fontSize: "0.75rem", color: "var(--muted)" }}>
+                      When enabled, MLI Advance Filters and Period Filters are applied <strong>before</strong> Scalar Formula evaluation, ensuring formula totals match the filtered table rows.
+                    </p>
+                  </div>
+                  <div style={{ display: "grid", gap: "0.25rem" }}>
+                    <span style={{ fontSize: "0.8rem", fontWeight: 600 }}>Apply Further Processing Based on MLI Filter</span>
+                    <div style={{ display: "flex", gap: "1rem" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.8rem", cursor: "pointer", margin: 0 }}>
+                        <input
+                          type="radio"
+                          name="applyFurtherProcessingRadio"
+                          checked={localApplyFurtherProcessing === true}
+                          onChange={() => setLocalApplyFurtherProcessing(true)}
+                        />
+                        Yes (Filter-Aware)
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.8rem", cursor: "pointer", margin: 0 }}>
+                        <input
+                          type="radio"
+                          name="applyFurtherProcessingRadio"
+                          checked={localApplyFurtherProcessing === false}
+                          onChange={() => setLocalApplyFurtherProcessing(false)}
+                        />
+                        No (Default)
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+
                 <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
                   <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Report Date-Fetching Configuration</span>
                   
@@ -1262,6 +1289,7 @@ export default function CustomReportDesignPage() {
                       setMliFontSize(localMliFontSize);
                       setShowOdooButton(localShowOdooButton);
                       setOdooSyncKpiIds(localOdooSyncKpiIds);
+                      setApplyFurtherProcessing(localApplyFurtherProcessing);
 
                       const tok = getAccessToken();
                       if (!tok || !id) return;
@@ -1295,6 +1323,7 @@ export default function CustomReportDesignPage() {
                           mli_font_size: localMliFontSize,
                           show_odoo_button: localShowOdooButton,
                           odoo_sync_kpi_ids: localOdooSyncKpiIds,
+                          apply_further_processing_based_on_mli_filter: localApplyFurtherProcessing,
                         };
 
 
@@ -1318,6 +1347,7 @@ export default function CustomReportDesignPage() {
                           mli_font_size: localMliFontSize,
                           show_odoo_button: localShowOdooButton,
                           odoo_sync_kpi_ids: localOdooSyncKpiIds,
+                          apply_further_processing_based_on_mli_filter: localApplyFurtherProcessing,
                         } : null);
 
 

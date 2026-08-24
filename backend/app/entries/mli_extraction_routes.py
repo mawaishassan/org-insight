@@ -250,6 +250,10 @@ async def _get_active_rules_dicts(db: AsyncSession, field_id: int) -> list[dict]
             "extraction_method": r.extraction_method,
             "start_symbol": r.start_symbol,
             "end_symbol": r.end_symbol,
+            "wrap_mode": r.wrap_mode,
+            "wrap_symbol": r.wrap_symbol,
+            "wrap_end_symbol": r.wrap_end_symbol,
+            "output_pattern": r.output_pattern,
         }
         for r in res.scalars().all()
     ]

@@ -47,6 +47,8 @@ interface DashboardCustomizationContextProps {
   /** Increments every time selectedPeriod or selectedPeriodType changes. Widgets use this
    *  to associate requests with a configuration and discard stale responses. */
   requestGeneration: number;
+  setWidgetLoading: (widgetId: string | number, isLoading: boolean) => void;
+  isAnyWidgetLoading: boolean;
 }
 
 const DashboardCustomizationContext = createContext<DashboardCustomizationContextProps | null>(null);
@@ -73,6 +75,8 @@ export function useDashboardCustomization() {
       periodOptions: [],
       selectedPeriod: "",
       requestGeneration: 0,
+      setWidgetLoading: () => {},
+      isAnyWidgetLoading: false,
     };
   }
   return context;
@@ -330,6 +334,22 @@ export function DashboardCustomizationProvider({
     }
   };
 
+  const [loadingWidgets, setLoadingWidgets] = useState<Set<string | number>>(new Set());
+
+  const setWidgetLoading = useCallback((widgetId: string | number, isLoading: boolean) => {
+    setLoadingWidgets((prev) => {
+      const next = new Set(prev);
+      if (isLoading) {
+        next.add(widgetId);
+      } else {
+        next.delete(widgetId);
+      }
+      return next;
+    });
+  }, []);
+
+  const isAnyWidgetLoading = loadingWidgets.size > 0;
+
   const openEditModal = (originalLabel: string, widgetId?: string) => {
     setActiveLabelToEdit({ originalLabel, widgetId });
   };
@@ -360,9 +380,56 @@ export function DashboardCustomizationProvider({
         selectedPeriod,
         selectedPeriodType,
         requestGeneration,
+        setWidgetLoading,
+        isAnyWidgetLoading,
       }}
     >
       {children}
+
+      {/* Single Central Screen Spinner Overlay */}
+      {isAnyWidgetLoading && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 99999,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(255, 255, 255, 0.4)",
+            backdropFilter: "blur(10px)",
+            WebkitBackdropFilter: "blur(10px)",
+            pointerEvents: "none",
+            transition: "all 0.25s ease",
+          }}
+        >
+          <div
+            className="effective-spinner"
+            style={{
+              width: 52,
+              height: 52,
+              borderWidth: 4,
+            }}
+          />
+          <span
+            className="effective-spinner-text"
+            style={{
+              marginTop: "0.9rem",
+              fontSize: "0.92rem",
+              fontWeight: 600,
+              color: "#1e293b",
+              background: "rgba(255, 255, 255, 0.95)",
+              padding: "0.35rem 0.95rem",
+              borderRadius: 999,
+              boxShadow: "0 4px 18px rgba(0,0,0,0.08)",
+              border: "1px solid rgba(226,232,240,0.9)",
+            }}
+          >
+            Loading dashboard data...
+          </span>
+        </div>
+      )}
 
       {/* Individual Label Customizer Modal */}
       {activeLabelToEdit && (

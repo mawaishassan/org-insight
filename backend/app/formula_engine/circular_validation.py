@@ -23,6 +23,7 @@ def extract_formula_dependencies(expression: Optional[str]) -> set[str]:
                 "SUM_KPI_ITEMS", "AVG_KPI_ITEMS", "COUNT_KPI_ITEMS", "MIN_KPI_ITEMS", "MAX_KPI_ITEMS",
                 "SUM_KPI_ITEMS_WHERE", "AVG_KPI_ITEMS_WHERE", "COUNT_KPI_ITEMS_WHERE", "MIN_KPI_ITEMS_WHERE", "MAX_KPI_ITEMS_WHERE",
                 "KPI_FIELD", "CurrentRow",
+                "FETCH_ITEMS_WHERE", "FETCH_KPI_ITEMS_WHERE",
                 "op_eq", "op_neq", "op_gt", "op_gte", "op_lt", "op_lte",
                 "op_contains", "op_not_contains", "op_starts_with", "op_ends_with",
                 "op_and", "op_or", "eq", "neq", "gt", "gte", "lt", "lte",
