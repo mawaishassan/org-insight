@@ -146,6 +146,7 @@ class KPIUpdate(BaseModel):
     is_joined: bool | None = Field(None, description="Is Joined (Virtual) KPI")
     joined_config: dict | None = Field(None, description="Joined KPI mapping configuration")
     report_header_id: int | None = Field(None, description="Set custom report header template; null = No Header")
+    auto_compute_formulas: bool | None = Field(None, description="Super Admin only: when False, MLI formula sub-fields won't auto-recompute on page open")
 
 
 class DomainTagRef(BaseModel):
@@ -237,6 +238,7 @@ class KPIResponse(BaseModel):
     is_joined: bool = False
     joined_config: dict | None = None
     report_header: KPIReportHeaderRef | None = None
+    auto_compute_formulas: bool = True
 
     class Config:
         from_attributes = True

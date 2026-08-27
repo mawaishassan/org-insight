@@ -338,6 +338,8 @@ async def update_kpi(
         kpi.is_joined = data.is_joined
     if data.joined_config is not None:
         kpi.joined_config = data.joined_config
+    if data.auto_compute_formulas is not None:
+        kpi.auto_compute_formulas = data.auto_compute_formulas
     
     fields_set = getattr(data, "model_fields_set", None) or getattr(data, "__fields_set__", set())
     if "report_header_id" in fields_set:

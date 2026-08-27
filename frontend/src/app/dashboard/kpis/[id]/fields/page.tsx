@@ -211,6 +211,7 @@ interface KpiInfo {
   api_endpoint_url?: string | null;
   time_dimension?: string | null;
   carry_forward_data?: boolean;
+  auto_compute_formulas?: boolean;
   is_joined?: boolean;
   joined_config?: any;
   organization_tags?: OrgTagRef[];
@@ -260,6 +261,7 @@ const kpiUpdateSchema = z.object({
   api_endpoint_url: z.string().max(2048).optional(),
   time_dimension: z.string().optional(),
   carry_forward_data: z.boolean().optional(),
+  auto_compute_formulas: z.boolean().optional(),
   organization_tag_ids: z.array(z.number().int()).optional(),
   is_joined: z.boolean().optional(),
   joined_config: z.any().optional(),
@@ -531,6 +533,7 @@ export default function KpiFieldsPage() {
       api_endpoint_url: "",
       time_dimension: "",
       carry_forward_data: false,
+      auto_compute_formulas: true,
       organization_tag_ids: [],
       is_joined: false,
       joined_config: null,
@@ -548,13 +551,14 @@ export default function KpiFieldsPage() {
         api_endpoint_url: kpi.api_endpoint_url ?? "",
         time_dimension: kpi.time_dimension ?? "",
         carry_forward_data: kpi.carry_forward_data ?? false,
+        auto_compute_formulas: kpi.auto_compute_formulas ?? true,
         organization_tag_ids: (kpi.organization_tags ?? []).map((t) => t.id),
         is_joined: kpi.is_joined ?? false,
         joined_config: kpi.joined_config ?? null,
         report_header_id: kpi.report_header_id ?? "none",
       });
     }
-  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.carry_forward_data, kpi?.organization_tags, kpi?.is_joined, kpi?.joined_config, kpi?.report_header_id, orgIdFromUrl]);
+  }, [kpi?.id, kpi?.name, kpi?.description, kpi?.sort_order, kpi?.entry_mode, kpi?.api_endpoint_url, kpi?.time_dimension, kpi?.carry_forward_data, kpi?.auto_compute_formulas, kpi?.organization_tags, kpi?.is_joined, kpi?.joined_config, kpi?.report_header_id, orgIdFromUrl]);
 
   useEffect(() => {
     if (!token) return;
@@ -1931,6 +1935,7 @@ export default function KpiFieldsPage() {
           api_endpoint_url: data.entry_mode === "api" && data.api_endpoint_url ? data.api_endpoint_url.trim() : null,
           time_dimension: data.time_dimension && data.time_dimension.trim() ? data.time_dimension.trim() : null,
           carry_forward_data: data.carry_forward_data,
+          auto_compute_formulas: data.auto_compute_formulas,
           organization_tag_ids: data.organization_tag_ids ?? [],
           is_joined: !!data.is_joined,
           joined_config: data.joined_config,
@@ -2317,15 +2322,26 @@ export default function KpiFieldsPage() {
                       </p>
                     </div>
                     {userRole === "SUPER_ADMIN" && (
-                      <div className="form-group" style={{ marginTop: "1rem" }}>
-                        <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
-                          <input type="checkbox" {...kpiEditForm.register("carry_forward_data")} />
-                          Carry forward data (non-cyclic)
-                        </label>
-                        <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
-                          When enabled, new time cycles will pre-fill with values from the previous period until the user changes them. History is preserved per period.
-                        </p>
-                      </div>
+                      <>
+                        <div className="form-group" style={{ marginTop: "1rem" }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                            <input type="checkbox" {...kpiEditForm.register("carry_forward_data")} />
+                            Carry forward data (non-cyclic)
+                          </label>
+                          <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+                            When enabled, new time cycles will pre-fill with values from the previous period until the user changes them. History is preserved per period.
+                          </p>
+                        </div>
+                        <div className="form-group" style={{ marginTop: "1rem" }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer", fontSize: "0.9rem" }}>
+                            <input type="checkbox" {...kpiEditForm.register("auto_compute_formulas")} />
+                            Auto-compute formulas on page open
+                          </label>
+                          <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.35rem" }}>
+                            When disabled, formula sub-fields on MLI tables will not compute automatically when opened. Instead, a manual &ldquo;Recompute Formulas&rdquo; button will be shown in the MLI data entry interface.
+                          </p>
+                        </div>
+                      </>
                     )}
                     {kpiSaveError && <p className="form-error" style={{ marginBottom: "0.5rem" }}>{kpiSaveError}</p>}
                     <button type="submit" className="btn btn-primary" disabled={kpiEditForm.formState.isSubmitting || kpiSaving}>

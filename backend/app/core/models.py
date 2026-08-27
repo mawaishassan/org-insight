@@ -539,6 +539,9 @@ class KPI(Base):
     carry_forward_data = Column(Boolean, default=False, nullable=False, server_default="0")  # Non-cyclic: copy from previous period when new
     is_joined = Column(Boolean, default=False, nullable=False, server_default="0")
     joined_config = Column(JSON, nullable=True)
+    # When True (default): formula sub-fields in all MLI fields auto-recompute on page open.
+    # When False: formulas are only recomputed on demand via the "Recompute Formulas" button (Super Admin setting).
+    auto_compute_formulas = Column(Boolean, default=True, nullable=False, server_default="1")
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -1525,4 +1528,35 @@ class MLITextExtractionRule(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     field = relationship("KPIField")
+
+
+class KpiBulkUploadTask(Base):
+    """Stores the state of asynchronous Multi-Line Items (MLI) bulk uploads."""
+
+    __tablename__ = "kpi_bulk_upload_tasks"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    entry_id = Column(Integer, ForeignKey("kpi_entries.id", ondelete="CASCADE"), nullable=False, index=True)
+    field_id = Column(Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(30), nullable=False, default="PENDING")  # PENDING | PARSING | VALIDATING | IMPORTING | COMPLETED | FAILED
+    import_mode = Column(String(20), nullable=False)  # replace | append | upsert
+    match_sub_field_key = Column(String(100), nullable=True)
+    total_rows = Column(Integer, nullable=False, default=0)
+    processed_rows = Column(Integer, nullable=False, default=0)
+    progress_percent = Column(Float, nullable=False, default=0.0)
+    rows_added = Column(Integer, nullable=False, default=0)
+    rows_updated = Column(Integer, nullable=False, default=0)
+    rows_overridden = Column(Integer, nullable=False, default=0)
+    error_message = Column(Text, nullable=True)
+    validation_errors = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    completed_at = Column(DateTime, nullable=True)
+
+    entry = relationship("KPIEntry")
+    field = relationship("KPIField")
+    user = relationship("User")
+
+
+import uuid
 

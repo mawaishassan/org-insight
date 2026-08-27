@@ -409,7 +409,7 @@ async def fetch_multiline_bar_agg_buckets(
             {flt_sql} AS flt_raw,
             {val_expr} AS val_raw
           FROM kpi_multi_line_rows r
-          INNER JOIN kpi_multi_line_cells cg ON cg.row_id = r.id AND cg.sub_field_id = :gid
+          LEFT JOIN kpi_multi_line_cells cg ON cg.row_id = r.id AND cg.sub_field_id = :gid
           {join_cf}
           {join_cv}
           {extra_joins}

@@ -11,7 +11,7 @@ import logging
 import asyncio
 import re
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body, Request, BackgroundTasks, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1164,6 +1164,7 @@ class MultiItemsPageContextResponse(BaseModel):
     can_add_row: bool
     can_export: bool = False
     is_joined: bool = False
+    auto_compute_formulas: bool = True
 
 
 class EntryIdResponse(BaseModel):
@@ -1213,6 +1214,8 @@ async def download_multi_items_template(
 
 @router.post("/multi-items/upload")
 async def upload_multi_items_excel(
+    background_tasks: BackgroundTasks,
+    response: Response,
     entry_id: int = Query(...),
     field_id: int = Query(...),
     append: bool = Query(False, description="Deprecated: use import_mode=append instead"),
@@ -1265,162 +1268,21 @@ async def upload_multi_items_excel(
     if field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Field does not belong to entry KPI")
 
-    content = await file.read()
-    items = _parse_multi_items_xlsx(content, field)
-    items = [it for it in items if isinstance(it, dict) and not _is_multi_items_row_effectively_empty(it)]
-    if not items:
-        # Most common cause: header mismatch (edited column names) or rows are blank/whitespace.
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No data rows found in Excel. Please download the template again and ensure the header row matches the template columns.",
-        )
-    logger.info("Parsed %s data row(s) from Excel for entry_id=%s field_id=%s org_id=%s", len(items), entry_id, field_id, org_id)
+    import os
+    import uuid
+    from fastapi import BackgroundTasks, Response, status as status_codes
+    from app.core.models import KpiBulkUploadTask
+    from app.core.database import AsyncSessionLocal
+    from app.entries.bulk_upload_processor import process_bulk_upload_task
 
-    # Reference consistency check for reference sub-fields (row-level errors)
-    # Rules:
-    # - Missing/blank/"NA" values => coerce to null (do not validate)
-    # - Invalid values => return row/column error and abort upload (no partial import)
-    from app.entries.service import (
-        get_reference_allowed_values,
-        _normalize_reference_value,
-        _is_reference_empty_or_sentinel,
-        coerce_multi_reference_raw,
-        filter_multi_reference_to_allowed,
-        _is_subfield_satisfied_for_row,
-    )
-
-    # Clean/sanitize dependent subfields in parsed items if their trigger conditions are False
-    key_to_sf = {sf.key: sf for sf in (field.sub_fields or [])}
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        changed = True
-        while changed:
-            changed = False
-            for sf in (field.sub_fields or []):
-                if item.get(sf.key) is not None:
-                    if not _is_subfield_satisfied_for_row(sf, item, key_to_sf):
-                        item[sf.key] = None
-                        changed = True
-
-    validation_errors: list[dict] = []
-
-    ref_sub_fields = [s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.reference]
-    multif_sub_fields = [
-        s for s in (field.sub_fields or []) if getattr(s, "field_type", None) == FieldType.multi_reference
-    ]
-
-    # One DB round-trip per distinct referenced KPI field (parallelized); shared by reference + multi_reference columns.
-    seen_ck: set[tuple[int, str, str | None]] = set()
-    ordered_ck: list[tuple[int, str, str | None]] = []
-    for sf in (*ref_sub_fields, *multif_sub_fields):
-        cfg = getattr(sf, "config", None) or {}
-        sid = cfg.get("reference_source_kpi_id")
-        skey = cfg.get("reference_source_field_key")
-        subkey = cfg.get("reference_source_sub_field_key")
-        if not sid or not skey:
-            continue
-        ck = (int(sid), str(skey), str(subkey) if subkey else None)
-        if ck not in seen_ck:
-            seen_ck.add(ck)
-            ordered_ck.append(ck)
-
-    ref_list_by_ck: dict[tuple[int, str, str | None], list[str]] = {}
-    if ordered_ck:
-
-        async def _fetch_allowed(ck: tuple[int, str, str | None]) -> tuple[tuple[int, str, str | None], list[str]]:
-            sid, skey, subkey = ck
-            lst = await get_reference_allowed_values(
-                db,
-                int(sid),
-                str(skey),
-                org_id,
-                source_sub_field_key=(str(subkey) if subkey else None),
-                year=entry.year,
-            )
-            return ck, lst
-
-        ref_list_by_ck = dict(await asyncio.gather(*[_fetch_allowed(ck) for ck in ordered_ck]))
-
-    allowed_cache: dict[tuple[int, str, str | None], set[str]] = {
-        ck: {_normalize_reference_value(a) for a in lst} for ck, lst in ref_list_by_ck.items()
-    }
-
-    for row_idx, item in enumerate(items):
-        if not isinstance(item, dict):
-            continue
-        for sf in ref_sub_fields:
-            cfg = getattr(sf, "config", None) or {}
-            sid = cfg.get("reference_source_kpi_id")
-            skey = cfg.get("reference_source_field_key")
-            subkey = cfg.get("reference_source_sub_field_key")
-            if not sid or not skey:
-                continue
-            cache_key = (int(sid), str(skey), str(subkey) if subkey else None)
-            cell = item.get(sf.key)
-            raw = cell if isinstance(cell, str) else str(cell) if cell is not None else ""
-            normalized = _normalize_reference_value(raw)
-            if _is_reference_empty_or_sentinel(normalized):
-                item[sf.key] = None
-                continue
-            if normalized not in allowed_cache.get(cache_key, set()):
-                validation_errors.append(
-                    {
-                        "field_key": field.key,
-                        "sub_field_key": sf.key,
-                        "row_index": row_idx,
-                        "value": raw,
-                        "row": item,
-                        "message": "Value does not exist in the referenced KPI field.",
-                    }
-                )
-    for row_idx, item in enumerate(items):
-        if not isinstance(item, dict):
-            continue
-        for sf in multif_sub_fields:
-            cfg = getattr(sf, "config", None) or {}
-            sid = cfg.get("reference_source_kpi_id")
-            skey = cfg.get("reference_source_field_key")
-            subkey = cfg.get("reference_source_sub_field_key")
-            if not sid or not skey:
-                continue
-            cache_key = (int(sid), str(skey), str(subkey) if subkey else None)
-            allowed_list = ref_list_by_ck.get(cache_key, [])
-            allowed_norm = allowed_cache.get(cache_key, set())
-            cell = item.get(sf.key)
-            for tok in coerce_multi_reference_raw(cell):
-                if isinstance(tok, dict):
-                    s = None
-                    for k in ("label", "text", "value", "name"):
-                        if k in tok and tok[k] is not None:
-                            s = str(tok[k])
-                            break
-                    if s is None:
-                        continue
-                else:
-                    s = str(tok) if tok is not None else ""
-                n = _normalize_reference_value(s)
-                if _is_reference_empty_or_sentinel(n):
-                    continue
-                if n not in allowed_norm:
-                    validation_errors.append(
-                        {
-                            "field_key": field.key,
-                            "sub_field_key": sf.key,
-                            "row_index": row_idx,
-                            "value": str(cell),
-                            "row": item,
-                            "message": "One or more values do not exist in the referenced KPI field.",
-                        }
-                    )
-                    break
-            else:
-                cleaned = filter_multi_reference_to_allowed(cell, allowed_list) if allowed_list else []
-                item[sf.key] = cleaned if cleaned else None
-    if validation_errors:
-        raise EntryValidationError(validation_errors)
-
-    items = [it for it in items if isinstance(it, dict) and not _is_multi_items_row_effectively_empty(it)]
+    task_id = str(uuid.uuid4())
+    os.makedirs("storage/uploads", exist_ok=True)
+    temp_file_path = f"storage/uploads/bulk_{task_id}.xlsx"
+    
+    # Save file to disk
+    with open(temp_file_path, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
 
     mode = _resolve_multi_items_import_mode(import_mode, append)
     if mode == "upsert":
@@ -1436,66 +1298,78 @@ async def upload_multi_items_excel(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="match_sub_field_key must be a defined sub-field key for this multi-line field",
             )
-        match_ft = getattr(sub_by_key[mk], "field_type", None)
     else:
         mk = None
-        match_ft = None
 
-    imported_count = len(items) if isinstance(items, list) else 0
-    rows_updated = 0
-
-    if mode == "replace":
-        # Override/replace: do not load existing row dicts — we delete all rows anyway; loading was O(old rows) and dominated runtime.
-        prev_row_res = await db.execute(
-            select(func.count())
-            .select_from(KpiMultiLineRow)
-            .where(
-                KpiMultiLineRow.entry_id == entry.id,
-                KpiMultiLineRow.field_id == field.id,
-            )
-        )
-        prev_count = int(prev_row_res.scalar_one() or 0)
-        new_rows = items
-        rows_added = imported_count
-        rows_overridden = prev_count
-    else:
-        existing_pairs = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field)
-        existing_list = [r for _, r in existing_pairs] if existing_pairs else []
-
-        if mode == "append":
-            new_rows = existing_list + items
-            rows_added = imported_count
-            rows_overridden = 0
-        else:
-            merged, rows_updated, rows_added = _upsert_merge_multi_line_items(
-                existing_list, items, mk, match_ft
-            )
-            new_rows = merged
-            rows_overridden = 0
-    await mark_entry_modified(db, entry, current_user.id)
-    await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
-    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
+    # Insert task to DB
+    new_task = KpiBulkUploadTask(
+        id=task_id,
+        entry_id=entry_id,
+        field_id=field_id,
+        user_id=current_user.id,
+        status="PENDING",
+        import_mode=mode,
+        match_sub_field_key=mk,
+    )
+    db.add(new_task)
     await db.commit()
-    logger.info(
-        "END multi-items upload: entry_id=%s field_id=%s org_id=%s mode=%s added=%s updated=%s overridden=%s",
-        entry.id,
-        field.id,
-        org_id,
-        mode,
-        rows_added,
-        rows_updated,
-        rows_overridden,
+
+    # Trigger background processor task
+    background_tasks.add_task(
+        process_bulk_upload_task,
+        task_id=task_id,
+        temp_file_path=temp_file_path,
+        entry_id=entry_id,
+        field_id=field_id,
+        org_id=org_id,
+        import_mode=mode,
+        match_sub_field_key=mk,
+        current_user_id=current_user.id,
+        session_factory=AsyncSessionLocal,
     )
 
+    response.status_code = status_codes.HTTP_202_ACCEPTED
     return {
-        "entry_id": entry.id,
-        "field_id": field.id,
-        "import_mode": mode,
-        "append": mode == "append",
-        "rows_added": rows_added,
-        "rows_updated": rows_updated,
-        "rows_overridden": rows_overridden,
-        "match_sub_field_key": mk,
+        "task_id": task_id,
+        "status": "PENDING",
+        "progress_percent": 0.0,
+    }
+
+
+@router.get("/multi-items/upload/status/{task_id}")
+async def get_bulk_upload_status(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retrieve status, progress, and validation results for an asynchronous bulk upload task."""
+    from app.core.models import KpiBulkUploadTask
+
+    res = await db.execute(
+        select(KpiBulkUploadTask).where(KpiBulkUploadTask.id == task_id)
+    )
+    task = res.scalar_one_or_none()
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Bulk upload task not found",
+        )
+
+    return {
+        "id": task.id,
+        "entry_id": task.entry_id,
+        "field_id": task.field_id,
+        "status": task.status,
+        "import_mode": task.import_mode,
+        "total_rows": task.total_rows,
+        "processed_rows": task.processed_rows,
+        "progress_percent": round(task.progress_percent, 1),
+        "rows_added": task.rows_added,
+        "rows_updated": task.rows_updated,
+        "rows_overridden": task.rows_overridden,
+        "error_message": task.error_message,
+        "validation_errors": task.validation_errors,
+        "completed_at": task.completed_at,
     }
 
 
@@ -1724,6 +1598,44 @@ async def get_column_unique_values(
     )
 
 
+class RecomputeFormulasRequest(BaseModel):
+    entry_id: int
+    field_id: int
+    organization_id: int | None = None
+
+
+@router.post("/multi-items/recompute-formulas")
+async def recompute_mli_formulas(
+    body: RecomputeFormulasRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Manually trigger MLI formula recomputation for a KPI entry + field.
+
+    Used when auto_compute_formulas is disabled on the KPI. Runs both the
+    local sub-field formula engine and cross-KPI formula propagation.
+    """
+    org_id = _org_id(current_user, body.organization_id)
+    # Verify entry exists and belongs to org
+    entry_res = await db.execute(
+        select(KPIEntry).where(KPIEntry.id == body.entry_id, KPIEntry.organization_id == org_id)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    # Verify field exists and belongs to same KPI
+    field = await _load_multi_items_field(db, org_id, body.field_id)
+    if not field or field.kpi_id != entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+    # Run local MLI formula recompute
+    from app.entries.service import recompute_mli_formula_subfields
+    await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id, field_id=field.id)
+    # Run cross-KPI formula propagation (same as after a row save)
+    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
+    await db.commit()
+    return {"ok": True}
+
+
 @router.get("/multi-items/rows", response_model=MultiItemsListResponse)
 async def list_multi_items_rows(
     entry_id: int = Query(...),
@@ -1778,8 +1690,16 @@ async def list_multi_items_rows(
             has_formula_sub = True
 
     if has_formula_sub:
-        from app.entries.service import recompute_mli_formula_subfields
-        await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id, field_id=field.id)
+        # Respect the KPI-level auto_compute_formulas flag (Super Admin setting).
+        # Load the KPI to check if auto-compute is enabled (default True).
+        from sqlalchemy import select as _select
+        from app.core.models import KPI as _KPI
+        _kpi_res = await db.execute(_select(_KPI).where(_KPI.id == entry.kpi_id))
+        _kpi = _kpi_res.scalar_one_or_none()
+        _auto_compute = getattr(_kpi, "auto_compute_formulas", True)
+        if _auto_compute:
+            from app.entries.service import recompute_mli_formula_subfields
+            await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id, field_id=field.id)
 
     if fetch_all and search:
         raise HTTPException(
@@ -4375,12 +4295,13 @@ async def get_multi_items_page_context(
         await db.commit()
 
     # KPI minimal
-    kpi_res = await db.execute(select(KPI.id, KPI.name, KPI.is_joined).where(KPI.id == kpi_id, KPI.organization_id == org_id))
+    kpi_res = await db.execute(select(KPI.id, KPI.name, KPI.is_joined, KPI.auto_compute_formulas).where(KPI.id == kpi_id, KPI.organization_id == org_id))
     kpi_row = kpi_res.first()
     if not kpi_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
     kpi_name = str(kpi_row[1] or "")
     is_joined = bool(kpi_row[2])
+    auto_compute_formulas = bool(kpi_row[3])
 
     # Load just the requested field (fast path) + permissions payload like /entries/fields
     field_res = await db.execute(
@@ -4485,6 +4406,7 @@ async def get_multi_items_page_context(
         can_add_row=bool(can_add),
         can_export=bool(can_export),
         is_joined=is_joined,
+        auto_compute_formulas=auto_compute_formulas,
     )
 
 
