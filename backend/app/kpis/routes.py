@@ -209,6 +209,7 @@ def _kpi_to_response(k):
         is_joined=getattr(k, "is_joined", False),
         joined_config=getattr(k, "joined_config", None),
         report_header=report_header_ref,
+        auto_compute_formulas=getattr(k, "auto_compute_formulas", True),
     )
 
 
@@ -345,6 +346,12 @@ async def update_org_kpi(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only Super Admin may set KPI card display fields",
+        )
+    # Only SUPER_ADMIN may control the formula auto-compute setting
+    if body.auto_compute_formulas is not None and current_user.role.value != "SUPER_ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Super Admin may change the formula auto-compute setting",
         )
     org_id = _org_id(current_user, organization_id)
     kpi = await update_kpi(db, kpi_id, org_id, body)

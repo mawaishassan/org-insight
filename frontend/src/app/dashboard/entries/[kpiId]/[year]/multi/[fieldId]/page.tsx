@@ -189,8 +189,10 @@ export default function FullPageMultiItems() {
   const [uploadProgressHint, setUploadProgressHint] = useState<string | null>(null);
   const [uploadElapsedClock, setUploadElapsedClock] = useState<string | null>(null);
   const bulkUploadTickRef = useRef<number | null>(null);
+  const [autoComputeFormulas, setAutoComputeFormulas] = useState<boolean>(true);
+  const [recomputingFormulas, setRecomputingFormulas] = useState<boolean>(false);
 
-  const pageBusy = exportingCsv || exportingXlsx || exportingPdf || downloadingTemplate || loading || uploading || saving;
+  const pageBusy = exportingCsv || exportingXlsx || exportingPdf || downloadingTemplate || loading || uploading || saving || recomputingFormulas;
   const busyLabel = exportingCsv
     ? "Exporting CSV…"
     : exportingXlsx
@@ -201,11 +203,13 @@ export default function FullPageMultiItems() {
       ? "Downloading template…"
     : uploading
       ? "Uploading…"
-      : saving
-        ? "Saving…"
-        : loading
-          ? "Loading…"
-          : null;
+    : saving
+      ? "Saving…"
+    : recomputingFormulas
+      ? "Recomputing formulas…"
+    : loading
+      ? "Loading…"
+      : null;
   const parsedFiltersFromUrl = useMemo(() => {
     if (!filtersFromUrl) return null;
     try {
@@ -230,6 +234,14 @@ export default function FullPageMultiItems() {
   const [refFilterOptions, setRefFilterOptions] = useState<Record<string, string[]>>({});
   const [sourceKpiFieldsById, setSourceKpiFieldsById] = useState<Record<number, FieldSummary[]>>({});
   const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
+  const [activeUploadTaskId, setActiveUploadTaskId] = useState<string | null>(null);
+  const [uploadTaskStatus, setUploadTaskStatus] = useState<string | null>(null);
+  const [uploadTaskProgress, setUploadTaskProgress] = useState<number>(0);
+  const [uploadTaskProcessedRows, setUploadTaskProcessedRows] = useState<number>(0);
+  const [uploadTaskTotalRows, setUploadTaskTotalRows] = useState<number>(0);
+  const [uploadTaskErrorMsg, setUploadTaskErrorMsg] = useState<string | null>(null);
+  const [uploadTaskValidationErrors, setUploadTaskValidationErrors] = useState<any[]>([]);
+  const [uploadTaskStats, setUploadTaskStats] = useState<{added: number; updated: number; overridden: number} | null>(null);
   const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | "odoo" | "previous_year" | null>(null);
   const [importCapabilities, setImportCapabilities] = useState<{
     channels: string[];
@@ -339,6 +351,54 @@ export default function FullPageMultiItems() {
     entryIdLiveRef.current = entryId;
   }, [entryId]);
 
+  useEffect(() => {
+    if (!activeUploadTaskId) return;
+
+    let timer: any = null;
+    const checkStatus = async () => {
+      try {
+        const res = await fetch(getApiUrl(`/entries/multi-items/upload/status/${activeUploadTaskId}`), {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        if (!res.ok) {
+          throw new Error("Failed to fetch upload status");
+        }
+        const data = await res.json() as any;
+        setUploadTaskStatus(data.status);
+        setUploadTaskProgress(data.progress_percent ?? 0);
+        setUploadTaskProcessedRows(data.processed_rows ?? 0);
+        setUploadTaskTotalRows(data.total_rows ?? 0);
+        
+        if (data.status === "COMPLETED") {
+          clearInterval(timer);
+          setUploadTaskStats({
+            added: data.rows_added ?? 0,
+            updated: data.rows_updated ?? 0,
+            overridden: data.rows_overridden ?? 0,
+          });
+          toast.success(`Import completed successfully! ${data.rows_added} added, ${data.rows_updated} updated.`);
+          refreshRows();
+        } else if (data.status === "FAILED") {
+          clearInterval(timer);
+          setUploadTaskErrorMsg(data.error_message || "A system error occurred during processing.");
+          setUploadTaskValidationErrors(Array.isArray(data.validation_errors) ? data.validation_errors : []);
+          toast.error("Import failed. Please check the validation report.");
+        }
+      } catch (err: any) {
+        console.error(err);
+      }
+    };
+
+    checkStatus();
+    timer = setInterval(checkStatus, 1500);
+
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [activeUploadTaskId, token]);
+
   // If token is missing/cleared (e.g. expired), send user to login
   useEffect(() => {
     if (!token) {
@@ -377,6 +437,28 @@ export default function FullPageMultiItems() {
       .catch(() => setImportCapabilities(null));
   }, [token, effectiveOrgId, fieldId, kpiId, field?.config]);
 
+  const handleRecomputeFormulas = async () => {
+    if (!token || !entryId || !fieldId) return;
+    setRecomputingFormulas(true);
+    try {
+      await api("/entries/multi-items/recompute-formulas", {
+        method: "POST",
+        token,
+        body: JSON.stringify({
+          entry_id: entryId,
+          field_id: fieldId,
+          organization_id: effectiveOrgId ?? null,
+        }),
+      });
+      toast.success("Formula columns recomputed successfully");
+      await loadRows({ force: true });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Formula recomputation failed");
+    } finally {
+      setRecomputingFormulas(false);
+    }
+  };
+
   const loadContext = async () => {
     if (!token || !kpiId || effectiveOrgId == null || !fieldId) return;
     const loadId = ++multiPageContextLoadGenRef.current;
@@ -392,6 +474,7 @@ export default function FullPageMultiItems() {
         can_add_row: boolean;
         can_export: boolean;
         is_joined?: boolean;
+        auto_compute_formulas?: boolean;
       }>(
         `/entries/multi-items/page-context?${new URLSearchParams({
           kpi_id: String(kpiId),
@@ -415,6 +498,7 @@ export default function FullPageMultiItems() {
       setCanAddRow(ctx?.can_add_row === true);
       setCanExport(ctx?.can_export === true);
       setIsJoinedKpi(ctx?.is_joined === true);
+      setAutoComputeFormulas(ctx?.auto_compute_formulas !== false);
     } catch (e) {
       if (loadId === multiPageContextLoadGenRef.current) {
         setError(e instanceof Error ? e.message : "Failed to load context");
@@ -1275,6 +1359,24 @@ export default function FullPageMultiItems() {
               )}
             </>
           )}
+          {!autoComputeFormulas && (field?.sub_fields ?? []).some((sf) => sf.field_type === "formula" || Boolean((sf as any).config?.is_formula)) && (
+            <button
+              type="button"
+              className="btn"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.35rem",
+                background: "rgba(99, 102, 241, 0.08)",
+                color: "#4f46e5",
+                borderColor: "rgba(99, 102, 241, 0.2)",
+              }}
+              disabled={pageBusy}
+              onClick={handleRecomputeFormulas}
+            >
+              ⟳ Recompute Formulas
+            </button>
+          )}
           <button
             type="button"
             className="btn"
@@ -1740,6 +1842,17 @@ export default function FullPageMultiItems() {
                         }
                         if (res.ok) {
                           const payload = (await res.json()) as any;
+                          if (payload?.task_id) {
+                            setActiveUploadTaskId(payload.task_id);
+                            setUploadTaskStatus("PENDING");
+                            setUploadTaskProgress(0);
+                            setUploadTaskProcessedRows(0);
+                            setUploadTaskTotalRows(0);
+                            setUploadTaskErrorMsg(null);
+                            setUploadTaskValidationErrors([]);
+                            setUploadTaskStats(null);
+                            return;
+                          }
                           const added = Number(payload?.rows_added ?? 0);
                           const overridden = Number(payload?.rows_overridden ?? 0);
                           const updated = Number(payload?.rows_updated ?? 0);
@@ -3521,6 +3634,152 @@ export default function FullPageMultiItems() {
 
               <div style={{ display: "flex", justifyContent: "flex-end", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
                 <button type="button" className="btn" onClick={() => setRowAccessModal(null)}>Close</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {activeUploadTaskId !== null && (() => {
+        const isDone = uploadTaskStatus === "COMPLETED" || uploadTaskStatus === "FAILED";
+        let statusText = "Initializing task...";
+        if (uploadTaskStatus === "PARSING") statusText = "Parsing Excel spreadsheet...";
+        if (uploadTaskStatus === "VALIDATING") statusText = `Validating row data constraints (${uploadTaskProcessedRows} / ${uploadTaskTotalRows || "..."})`;
+        if (uploadTaskStatus === "IMPORTING") statusText = `Importing records to database (${uploadTaskProcessedRows} / ${uploadTaskTotalRows || "..."})`;
+        if (uploadTaskStatus === "COMPLETED") statusText = "Data import completed successfully!";
+        if (uploadTaskStatus === "FAILED") statusText = "Data import failed.";
+
+        return (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.5)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 1100,
+            }}
+          >
+            <div
+              className="card"
+              style={{
+                width: "95%",
+                maxWidth: 680,
+                padding: "1.75rem",
+                maxHeight: "90vh",
+                display: "flex",
+                flexDirection: "column",
+                gap: "1.25rem",
+                boxShadow: "0 10px 25px rgba(0,0,0,0.2)",
+                borderRadius: 12,
+                background: "var(--surface)",
+              }}
+            >
+              <div>
+                <h3 style={{ fontSize: "1.2rem", fontWeight: 700, margin: 0 }}>
+                  Bulk Data Import Processing
+                </h3>
+                <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
+                  Uploading and parsing Multi-line Items spreadsheet. Please keep this tab open during processing.
+                </p>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.9rem", fontWeight: 500 }}>
+                  <span style={{ color: uploadTaskStatus === "FAILED" ? "var(--error)" : "var(--text-primary)" }}>
+                    {statusText}
+                  </span>
+                  <span>{uploadTaskProgress}%</span>
+                </div>
+                
+                {/* Progress Bar */}
+                <div style={{ width: "100%", height: 10, background: "var(--border)", borderRadius: 5, overflow: "hidden" }}>
+                  <div
+                    style={{
+                      width: `${uploadTaskProgress}%`,
+                      height: "100%",
+                      background: uploadTaskStatus === "FAILED" ? "var(--error)" : "linear-gradient(90deg, var(--primary) 0%, #3b82f6 100%)",
+                      borderRadius: 5,
+                      transition: "width 0.3s ease",
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Success summary */}
+              {uploadTaskStatus === "COMPLETED" && uploadTaskStats && (
+                <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "1rem", background: "var(--surface)", fontSize: "0.9rem" }}>
+                  <div style={{ fontWeight: 600, color: "var(--success)", marginBottom: "0.5rem" }}>✓ Summary of changes:</div>
+                  <ul style={{ margin: 0, paddingLeft: "1.25rem", display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                    <li>Added: <strong>{uploadTaskStats.added}</strong> rows</li>
+                    <li>Updated: <strong>{uploadTaskStats.updated}</strong> rows</li>
+                    {uploadTaskStats.overridden > 0 && <li>Overrode: <strong>{uploadTaskStats.overridden}</strong> existing rows</li>}
+                  </ul>
+                </div>
+              )}
+
+              {/* Error messages */}
+              {uploadTaskStatus === "FAILED" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "1rem", minHeight: 0 }}>
+                  {uploadTaskErrorMsg && (
+                    <div style={{ border: "1px solid rgba(var(--error-rgb, 239, 68, 68), 0.25)", borderRadius: 8, padding: "1rem", background: "rgba(var(--error-rgb, 239, 68, 68), 0.05)", color: "var(--error)", fontSize: "0.88rem" }}>
+                      <strong>System Error:</strong> {uploadTaskErrorMsg}
+                    </div>
+                  )}
+
+                  {uploadTaskValidationErrors.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", minHeight: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: "0.9rem", color: "var(--error)" }}>
+                        Data Validation Failures (showing first {uploadTaskValidationErrors.length} errors):
+                      </div>
+                      <div style={{ border: "1px solid var(--border)", borderRadius: 8, maxHeight: "200px", overflowY: "auto", background: "var(--surface)" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
+                          <thead>
+                            <tr style={{ background: "var(--border)", textAlign: "left", position: "sticky", top: 0, zIndex: 10 }}>
+                              <th style={{ padding: "0.45rem 0.5rem" }}>Row</th>
+                              <th style={{ padding: "0.45rem 0.5rem" }}>Field</th>
+                              <th style={{ padding: "0.45rem 0.5rem" }}>Value</th>
+                              <th style={{ padding: "0.45rem 0.5rem" }}>Error Details</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {uploadTaskValidationErrors.map((err, i) => (
+                              <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
+                                <td style={{ padding: "0.45rem 0.5rem", fontWeight: 700 }}>{err.row_index}</td>
+                                <td style={{ padding: "0.45rem 0.5rem", fontWeight: 500 }}>{err.sub_field_name || err.sub_field_key}</td>
+                                <td style={{ padding: "0.45rem 0.5rem", color: "var(--muted)", fontFamily: "monospace" }}>{String(err.value)}</td>
+                                <td style={{ padding: "0.45rem 0.5rem", color: "var(--error)" }}>{err.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div style={{ display: "flex", justifyContent: "flex-end", borderTop: "1px solid var(--border)", paddingTop: "0.75rem", gap: "0.5rem" }}>
+                {isDone ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      setActiveUploadTaskId(null);
+                      setBulkPanelOpen(false);
+                      setUploadOption(null);
+                    }}
+                    style={{ padding: "0.45rem 1.25rem", borderRadius: 8 }}
+                  >
+                    Close
+                  </button>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", color: "var(--muted)" }}>
+                    <div className="spinner" style={{ width: 16, height: 16, border: "2px solid var(--border)", borderTopColor: "var(--primary)", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+                    Please do not close this tab...
+                  </div>
+                )}
               </div>
             </div>
           </div>

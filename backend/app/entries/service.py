@@ -3555,15 +3555,15 @@ async def _precompute_group_by_lookup_sql(
         pivot_selects = []
         for g_field in group_fields:
             pivot_selects.append(
-                f"MAX(CASE WHEN sf.key = '{g_field}' THEN COALESCE(c.value_text, CAST(c.value_number AS TEXT), CAST(c.value_boolean AS TEXT), CAST(c.value_date AS TEXT), c.value_json->>'label', c.value_json->>'name', c.value_json->>'value', CAST(c.value_json AS TEXT)) END) AS {g_field}"
+                f"MAX(CASE WHEN sf.sf_key = '{g_field}' THEN COALESCE(sf.value_text, CAST(sf.value_number AS TEXT), CAST(sf.value_boolean AS TEXT), CAST(sf.value_date AS TEXT), sf.value_json->>'label', sf.value_json->>'name', sf.value_json->>'value', CAST(sf.value_json AS TEXT)) END) AS {g_field}"
             )
         target = leaf_agg.field
         if target and target not in group_fields:
             if leaf_agg.func in ("SUM", "AVG", "AVERAGE", "MIN", "MAX"):
-                pivot_selects.append(f"MAX(CASE WHEN sf.key = '{target}' THEN c.value_number END) AS {target}")
+                pivot_selects.append(f"MAX(CASE WHEN sf.sf_key = '{target}' THEN sf.value_number END) AS {target}")
             else:
                 pivot_selects.append(
-                    f"MAX(CASE WHEN sf.key = '{target}' THEN COALESCE(c.value_text, CAST(c.value_number AS TEXT), CAST(c.value_boolean AS TEXT), CAST(c.value_date AS TEXT), c.value_json->>'label', c.value_json->>'name', c.value_json->>'value', CAST(c.value_json AS TEXT)) END) AS {target}"
+                    f"MAX(CASE WHEN sf.sf_key = '{target}' THEN COALESCE(sf.value_text, CAST(sf.value_number AS TEXT), CAST(sf.value_boolean AS TEXT), CAST(sf.value_date AS TEXT), sf.value_json->>'label', sf.value_json->>'name', sf.value_json->>'value', CAST(sf.value_json AS TEXT)) END) AS {target}"
                 )
 
         group_cols = ", ".join(group_fields)
