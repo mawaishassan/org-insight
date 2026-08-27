@@ -1317,11 +1317,13 @@ class CustomReport(Base):
     report_header_id = Column(
         Integer, ForeignKey("custom_report_headers.id", ondelete="SET NULL"), nullable=True
     )
-    show_report_name = Column(Boolean, default=True, nullable=False, server_default="true")
+    show_report_name = Column(Boolean, default=False, nullable=False, server_default="false")
     branding_title = Column(String(255), nullable=True)
     scalar_bold = Column(Boolean, default=True, nullable=False, server_default="true")
     scalar_font_size = Column(Integer, default=11, nullable=False, server_default="11")
     mli_font_size = Column(Integer, default=10, nullable=False, server_default="10")
+    scalar_font_family = Column(String(255), default="Inter", nullable=False, server_default="Inter")
+    mli_font_family = Column(String(255), default="Inter", nullable=False, server_default="Inter")
     show_odoo_button = Column(Boolean, default=False, nullable=False, server_default="false")
     odoo_sync_kpi_ids = Column(JSON, nullable=True)  # List of KPI IDs to sync when button clicked (None = all odoo KPIs in report)
     apply_further_processing_based_on_mli_filter = Column(Boolean, default=False, nullable=False, server_default="false")

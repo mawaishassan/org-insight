@@ -67,6 +67,46 @@ _report_preview_cache: ContextVar[dict[tuple, object] | None] = ContextVar(
 )
 
 
+def _row_signature(r: dict) -> tuple:
+    # 1. If a unique ID is present, use it as the signature
+    for k in ['id', 'patent_lms_id', 'lms_id']:
+        if k in r and r[k] is not None and r[k] != "":
+            val = str(r[k])
+            if val.endswith(".0"):
+                val = val[:-2]
+            return (("id", val),)
+            
+    # 2. If no ID is present, fall back to Title/Name + Date
+    sig_keys = []
+    for k in ['invention_title', 'title', 'name', 'project_title', 'book_title', 'paper_title']:
+        if k in r and r[k] is not None and r[k] != "":
+            sig_keys.append((k, str(r[k]).strip().lower()))
+    for k in ['date_of_filing', 'date', 'filing_date', 'publication_date']:
+        if k in r and r[k] is not None and r[k] != "":
+            sig_keys.append((k, str(r[k]).strip()[:10]))
+            
+    if sig_keys:
+        return tuple(sorted(sig_keys))
+    else:
+        non_empty = [(k, str(v).strip()) for k, v in r.items() if v is not None and str(v).strip() != ""]
+        return tuple(sorted(non_empty))
+
+
+def _deduplicate_rows(rows: list[dict]) -> list[dict]:
+    by_sig = {}
+    for r in rows:
+        sig = _row_signature(r)
+        if sig not in by_sig:
+            by_sig[sig] = []
+        by_sig[sig].append(r)
+        
+    deduped = []
+    for sig, group in by_sig.items():
+        best_row = max(group, key=lambda r: len([v for v in r.values() if v is not None and v != ""]))
+        deduped.append(best_row)
+    return deduped
+
+
 def _get_report_preview_cache() -> dict[tuple, object]:
     cache = _report_preview_cache.get()
     if cache is None:
@@ -152,7 +192,7 @@ def _kpi_multi_line_orm_row_to_dict(r: KpiMultiLineRow) -> dict:
 
 
 async def _load_multi_line_items_rows_batch(
-    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None
+    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None, resolving_linked_fields: set[int] = None
 ) -> dict[int, list[dict]]:
     """Optimized direct load of multi-line rows and cells to handle large datasets efficiently without ORM eager load overhead."""
     if not entry_ids:
@@ -336,6 +376,16 @@ async def _load_multi_line_items_rows_batch(
                 by_entry[eid] = apply_extraction_rules(by_entry[eid], rules)
     except Exception as exc:
         logger.warning("MLI extraction skipped in _load_multi_line_items_rows_batch: %s", exc)
+
+    # Resolve linked columns batch-wise
+    from app.entries.service import resolve_linked_columns_in_rows_batch
+    by_entry = await resolve_linked_columns_in_rows_batch(
+        db,
+        entry_ids=entry_ids,
+        field=field,
+        rows_by_entry_id=by_entry,
+        resolving_linked_fields=resolving_linked_fields
+    )
 
     return dict(by_entry)
 
@@ -1984,6 +2034,11 @@ async def generate_report_data(
         return None
 
     selected_period = year
+    if rt and getattr(rt, "fetch_data_with_date", False):
+        if not selected_period or by_default or selected_period == "by_default":
+            selected_period = "2025/26"
+            by_default = False
+
     date_range = None
     entry_start_year: int | None = None  # calendar start year of the period (e.g. 2026 for "2026/27")
     if rt and getattr(rt, "fetch_data_with_date", False) and selected_period and not by_default:
@@ -1999,6 +2054,7 @@ async def generate_report_data(
                 pass
 
     yr = _parse_year_int(year)
+    yr_display = selected_period if (rt and getattr(rt, "fetch_data_with_date", False) and selected_period) else yr
     t0 = time.perf_counter()
     cache_key = (template_id, org_id, int(yr), bool(include_drafts), by_default, selected_period, period_type, "v4")
     if not bypass_cache:
@@ -2203,7 +2259,7 @@ async def generate_report_data(
     out = {
         "template_name": rt.name,
         "template_id": rt.id,
-        "year": yr,
+        "year": yr_display,
         "text_blocks": text_blocks,
         "kpis": [],
     }
@@ -2387,6 +2443,7 @@ async def generate_report_data(
                 combined_rows = []
                 for rows_list in recalculated_batch.values():
                     combined_rows.extend(rows_list)
+                combined_rows = _deduplicate_rows(combined_rows)
                 ml_rows_by_field_id[mf.id] = {target_eid: combined_rows}
                 recalculated_kpi_mli_data[(kpi.id, mf.key)] = combined_rows
             else:
@@ -2395,6 +2452,7 @@ async def generate_report_data(
                 for rlist in recalculated_batch.values():
                     if isinstance(rlist, list):
                         all_rows.extend(rlist)
+                all_rows = _deduplicate_rows(all_rows)
                 recalculated_kpi_mli_data[(kpi.id, mf.key)] = all_rows
                 
             total_ml_load_ms += (time.perf_counter() - t_ml0) * 1000.0
@@ -3460,6 +3518,11 @@ async def generate_kpi_pdf_report(
             header_elements.append(sub_p)
 
         if img and img2:
+            if use_landscape:
+                from reportlab.pdfbase import pdfmetrics
+                text_w = pdfmetrics.stringWidth(kpi.report_header.main_heading, font_name_bold, pdf_main_fs)
+                sub_w = pdfmetrics.stringWidth(kpi.report_header.sub_heading, sub_font_name_italic, sub_font_size) if kpi.report_header.sub_heading else 0
+                mid_width = min(header_w - w1 - w2, max(text_w, sub_w) + 6)
             header_table = Table(
                 [[img, header_elements, img2]],
                 colWidths=[w1, mid_width, w2],
@@ -3477,6 +3540,11 @@ async def generate_kpi_pdf_report(
         elif img:
             w1 = logo_w + 4
             mid_width = header_w - w1
+            if use_landscape:
+                from reportlab.pdfbase import pdfmetrics
+                text_w = pdfmetrics.stringWidth(kpi.report_header.main_heading, font_name_bold, pdf_main_fs)
+                sub_w = pdfmetrics.stringWidth(kpi.report_header.sub_heading, sub_font_name_italic, sub_font_size) if kpi.report_header.sub_heading else 0
+                mid_width = min(header_w - w1, max(text_w, sub_w) + 6)
             header_table = Table(
                 [[img, header_elements]],
                 colWidths=[w1, mid_width],
@@ -3491,6 +3559,11 @@ async def generate_kpi_pdf_report(
         elif img2:
             w2 = logo_w2 + 4
             mid_width = header_w - w2
+            if use_landscape:
+                from reportlab.pdfbase import pdfmetrics
+                text_w = pdfmetrics.stringWidth(kpi.report_header.main_heading, font_name_bold, pdf_main_fs)
+                sub_w = pdfmetrics.stringWidth(kpi.report_header.sub_heading, sub_font_name_italic, sub_font_size) if kpi.report_header.sub_heading else 0
+                mid_width = min(header_w - w2, max(text_w, sub_w) + 6)
             header_table = Table(
                 [[header_elements, img2]],
                 colWidths=[mid_width, w2],

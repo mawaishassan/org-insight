@@ -104,10 +104,17 @@ async def load_multi_line_row_dicts(
 
         return out
 
+    entry_ids = entry_id if isinstance(entry_id, list) else [entry_id]
+
+    field_cfg = field.config or {}
+    is_linked = field_cfg.get("data_source") == "linked" or any(
+        (sf.config or {}).get("data_source") == "linked" for sf in getattr(field, "sub_fields", None) or []
+    )
+
     q_rows = (
-        select(KpiMultiLineRow.id, KpiMultiLineRow.row_index)
+        select(KpiMultiLineRow.id, KpiMultiLineRow.row_index, KpiMultiLineRow.entry_id)
         .where(KpiMultiLineRow.field_id == field.id)
-        .order_by(KpiMultiLineRow.row_index)
+        .order_by(KpiMultiLineRow.entry_id, KpiMultiLineRow.row_index)
     )
     if isinstance(entry_id, list):
         q_rows = q_rows.where(KpiMultiLineRow.entry_id.in_(entry_id))
@@ -151,61 +158,83 @@ async def load_multi_line_row_dicts(
 
     if row_indices is not None:
         idx = [int(i) for i in row_indices if isinstance(i, int)]
-        if not idx:
+        if not idx and not is_linked:
             return []
-        q_rows = q_rows.where(KpiMultiLineRow.row_index.in_(idx))
+        if idx:
+            q_rows = q_rows.where(KpiMultiLineRow.row_index.in_(idx))
         
     rows_res = await db.execute(q_rows)
     rows_list = rows_res.all()
-    if not rows_list:
-        return []
-        
-    row_ids = [r[0] for r in rows_list]
-    
-    # Load cells in chunks to avoid parameter limits
-    from app.core.models import KPIFieldSubField
-    cells_list = []
-    chunk_size = 5000
-    for i in range(0, len(row_ids), chunk_size):
-        chunk_ids = row_ids[i:i+chunk_size]
-        cells_res = await db.execute(
-            select(
-                KpiMultiLineCell.row_id,
-                KpiMultiLineCell.value_text,
-                KpiMultiLineCell.value_number,
-                KpiMultiLineCell.value_boolean,
-                KpiMultiLineCell.value_date,
-                KpiMultiLineCell.value_json,
-                KPIFieldSubField.key
+
+    rows_by_entry = {eid: [] for eid in entry_ids}
+    row_index_map = {}
+
+    if rows_list:
+        row_ids = [r[0] for r in rows_list]
+        from app.core.models import KPIFieldSubField
+        cells_list = []
+        chunk_size = 5000
+        for i in range(0, len(row_ids), chunk_size):
+            chunk_ids = row_ids[i:i+chunk_size]
+            cells_res = await db.execute(
+                select(
+                    KpiMultiLineCell.row_id,
+                    KpiMultiLineCell.value_text,
+                    KpiMultiLineCell.value_number,
+                    KpiMultiLineCell.value_boolean,
+                    KpiMultiLineCell.value_date,
+                    KpiMultiLineCell.value_json,
+                    KPIFieldSubField.key
+                )
+                .join(KPIFieldSubField, KPIFieldSubField.id == KpiMultiLineCell.sub_field_id)
+                .where(KpiMultiLineCell.row_id.in_(chunk_ids))
             )
-            .join(KPIFieldSubField, KPIFieldSubField.id == KpiMultiLineCell.sub_field_id)
-            .where(KpiMultiLineCell.row_id.in_(chunk_ids))
+            cells_list.extend(cells_res.all())
+            
+        from collections import defaultdict
+        cells_by_row = defaultdict(dict)
+        for row_id, vt, vn, vb, vd, vj, sf_key in cells_list:
+            raw_val = None
+            if vj is not None:
+                raw_val = vj
+            elif vt is not None:
+                raw_val = vt
+            elif vn is not None:
+                raw_val = vn
+            elif vb is not None:
+                raw_val = vb
+            elif vd is not None:
+                try:
+                    raw_val = vd.isoformat()
+                except Exception:
+                    raw_val = str(vd)
+            cells_by_row[row_id][str(sf_key)] = raw_val
+
+        entry_row_lists = defaultdict(list)
+        for rid, r_idx, eid in rows_list:
+            entry_row_lists[eid].append((int(r_idx), cells_by_row.get(rid, {})))
+
+        for eid in entry_ids:
+            sorted_e_rows = sorted(entry_row_lists[eid], key=lambda x: x[0])
+            rows_by_entry[eid] = [r for _, r in sorted_e_rows]
+            row_index_map[eid] = [r_idx for r_idx, _ in sorted_e_rows]
+
+    if is_linked:
+        from app.entries.service import resolve_linked_columns_in_rows_batch
+        rows_by_entry = await resolve_linked_columns_in_rows_batch(
+            db,
+            entry_ids=entry_ids,
+            field=field,
+            rows_by_entry_id=rows_by_entry
         )
-        cells_list.extend(cells_res.all())
-        
-    # Reconstruct dictionary
-    from collections import defaultdict
-    cells_by_row = defaultdict(dict)
-    for row_id, vt, vn, vb, vd, vj, sf_key in cells_list:
-        raw_val = None
-        if vj is not None:
-            raw_val = vj
-        elif vt is not None:
-            raw_val = vt
-        elif vn is not None:
-            raw_val = vn
-        elif vb is not None:
-            raw_val = vb
-        elif vd is not None:
-            try:
-                raw_val = vd.isoformat()
-            except Exception:
-                raw_val = str(vd)
-        cells_by_row[row_id][str(sf_key)] = raw_val
-        
+
     out = []
-    for rid, r_idx in rows_list:
-        out.append((int(r_idx), cells_by_row.get(rid, {})))
+    for eid in entry_ids:
+        resolved_rows = rows_by_entry.get(eid, [])
+        indices = row_index_map.get(eid, [])
+        for idx, r in enumerate(resolved_rows):
+            r_idx = indices[idx] if idx < len(indices) else idx
+            out.append((r_idx, r))
 
     if date_range:
         start_date, end_date, date_col_key = date_range
@@ -234,7 +263,6 @@ async def load_multi_line_row_dicts(
                 filtered_out.append((r_idx, row))
         out = filtered_out
 
-    # Apply extraction rules (in-memory, non-mutating)
     rules = await _fetch_rules_for_field(db, field.id)
     if rules:
         try:

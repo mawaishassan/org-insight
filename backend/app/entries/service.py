@@ -65,6 +65,203 @@ def _ml_cell_raw(c: KpiMultiLineCell) -> Any:
     return None
 
 
+async def resolve_linked_columns_in_rows_batch(
+    db: AsyncSession,
+    *,
+    entry_ids: list[int],
+    field: KPIField,
+    rows_by_entry_id: dict[int, list[dict]],
+    resolving_linked_fields: set[int] = None
+) -> dict[int, list[dict]]:
+    if resolving_linked_fields is None:
+        resolving_linked_fields = set()
+    if field.id in resolving_linked_fields:
+        import logging
+        logging.getLogger("app").warning(f"Circular linked columns dependency detected for field_id {field.id}. Resolving skipped.")
+        return rows_by_entry_id
+
+    field_cfg = field.config or {}
+    is_parent_linked = field_cfg.get("data_source") == "linked" and field_cfg.get("link_source")
+
+    sub_fields = getattr(field, "sub_fields", None) or []
+    linked_subs = []
+    
+    if is_parent_linked:
+        link_cfg = field_cfg["link_source"]
+        src_kpi_id = link_cfg.get("source_kpi_id")
+        src_field_id = link_cfg.get("source_field_id")
+        if src_kpi_id and src_field_id:
+            linked_subs.append((field, link_cfg))
+    else:
+        for sf in sub_fields:
+            cfg = sf.config or {}
+            if cfg.get("data_source") == "linked" and cfg.get("link_source"):
+                linked_subs.append((sf, cfg["link_source"]))
+
+    if not linked_subs:
+        return rows_by_entry_id
+
+    if not entry_ids:
+        return rows_by_entry_id
+
+    from app.core.models import KPIEntry
+    entries_res = await db.execute(
+        select(KPIEntry.id, KPIEntry.organization_id, KPIEntry.year, KPIEntry.period_key)
+        .where(KPIEntry.id.in_(entry_ids))
+    )
+    entries_meta = {e[0]: {"org_id": e[1], "year": e[2], "period_key": e[3]} for e in entries_res.all()}
+
+    from collections import defaultdict
+    configs_by_source = defaultdict(list)
+    for target_obj, link_cfg in linked_subs:
+        src_kpi_id = link_cfg.get("source_kpi_id")
+        src_field_id = link_cfg.get("source_field_id")
+        if src_kpi_id and src_field_id:
+            configs_by_source[(src_kpi_id, src_field_id)].append((target_obj, link_cfg))
+
+    from sqlalchemy import or_
+    for (src_kpi_id, src_field_id), targets in configs_by_source.items():
+        conditions = []
+        for meta in entries_meta.values():
+            conditions.append(
+                and_(
+                    KPIEntry.organization_id == meta["org_id"],
+                    KPIEntry.year == meta["year"],
+                    KPIEntry.period_key == meta["period_key"]
+                )
+            )
+        if not conditions:
+            continue
+
+        src_entries_res = await db.execute(
+            select(KPIEntry.id, KPIEntry.organization_id, KPIEntry.year, KPIEntry.period_key)
+            .where(
+                KPIEntry.kpi_id == src_kpi_id,
+                or_(*conditions)
+            )
+        )
+        src_entries = src_entries_res.all()
+        if not src_entries:
+            continue
+
+        src_entry_ids = [se[0] for se in src_entries]
+
+        from app.core.models import KPIField
+        src_field_res = await db.execute(
+            select(KPIField)
+            .where(KPIField.id == src_field_id)
+            .options(selectinload(KPIField.sub_fields))
+        )
+        src_field = src_field_res.scalar_one_or_none()
+        if not src_field:
+            continue
+
+        from app.reports.service import _load_multi_line_items_rows_batch
+        src_rows_by_entry = await _load_multi_line_items_rows_batch(
+            db,
+            entry_ids=src_entry_ids,
+            field=src_field,
+            resolving_linked_fields=resolving_linked_fields | {field.id}
+        )
+
+        src_rows_by_meta = defaultdict(list)
+        for se_id, org_id, year, period_key in src_entries:
+            rows = src_rows_by_entry.get(se_id, [])
+            src_rows_by_meta[(org_id, year, period_key)].extend(rows)
+
+        for entry_id in entry_ids:
+            meta = entries_meta.get(entry_id)
+            if not meta:
+                continue
+            meta_key = (meta["org_id"], meta["year"], meta["period_key"])
+            src_rows = src_rows_by_meta.get(meta_key, [])
+
+            mappings = {}
+            for target_obj, link_cfg in targets:
+                if target_obj == field:
+                    if link_cfg.get("column_mappings"):
+                        mappings.update(link_cfg["column_mappings"])
+                else:
+                    if link_cfg.get("column_mappings"):
+                        mappings.update(link_cfg["column_mappings"])
+                    elif link_cfg.get("source_column_key"):
+                        mappings[target_obj.key] = link_cfg["source_column_key"]
+
+            if not mappings:
+                continue
+
+            generated_rows = []
+            for sr in src_rows:
+                gr = {}
+                for curr_key, src_key in mappings.items():
+                    gr[curr_key] = sr.get(src_key)
+                generated_rows.append(gr)
+
+            duplicate_handling = None
+            if is_parent_linked:
+                duplicate_handling = field_cfg.get("duplicate_handling")
+            else:
+                for target_obj, link_cfg in targets:
+                    if target_obj != field:
+                        dh = target_obj.config.get("duplicate_handling") if target_obj.config else None
+                        if dh:
+                            duplicate_handling = dh
+                            break
+
+            if duplicate_handling and duplicate_handling.get("remove_duplicates"):
+                duplicate_keys = duplicate_handling.get("duplicate_keys") or []
+                if duplicate_keys:
+                    deduped_rows = []
+                    seen_keys = set()
+                    for gr in generated_rows:
+                        key_parts = []
+                        for k in duplicate_keys:
+                            val = gr.get(k)
+                            val_s = str(val).strip().lower() if val not in (None, "") else ""
+                            key_parts.append(val_s)
+                        row_key = tuple(key_parts)
+                        if row_key not in seen_keys:
+                            seen_keys.add(row_key)
+                            deduped_rows.append(gr)
+                    generated_rows = deduped_rows
+
+            current_rows = rows_by_entry_id.get(entry_id, [])
+            final_rows = []
+            duplicate_keys = duplicate_handling.get("duplicate_keys") if duplicate_handling else None
+
+            for idx, gr in enumerate(generated_rows):
+                matched_r = None
+                
+                if duplicate_keys:
+                    gr_key = tuple(str(gr.get(k)).strip().lower() for k in duplicate_keys)
+                    for r in current_rows:
+                        r_key = tuple(str(r.get(k)).strip().lower() for k in duplicate_keys)
+                        if gr_key == r_key:
+                            matched_r = r
+                            break
+
+                if not matched_r and idx < len(current_rows):
+                    matched_r = current_rows[idx]
+
+                final_row = {}
+                if matched_r:
+                    for k, v in matched_r.items():
+                        final_row[k] = v
+                else:
+                    for other_sf in sub_fields:
+                        final_row[other_sf.key] = None
+
+                for curr_key in mappings.keys():
+                    final_row[curr_key] = gr.get(curr_key)
+
+                final_rows.append(final_row)
+
+            current_rows = final_rows
+            rows_by_entry_id[entry_id] = current_rows
+
+    return rows_by_entry_id
+
+
 async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField) -> list[dict]:
     """Load relational multi_line_items rows into legacy list-of-dicts shape."""
     res = await db.execute(
@@ -93,7 +290,17 @@ async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: 
             from app.entries.mli_extraction import apply_extraction_rules
             out = apply_extraction_rules(out, rules)
     except Exception as exc:
-        logger.warning("MLI extraction skipped in load_multi_line_items_rows: %s", exc)
+        import logging
+        logging.getLogger("app").warning("MLI extraction skipped in load_multi_line_items_rows: %s", exc)
+
+    # Resolve linked columns dynamically
+    res_dict = await resolve_linked_columns_in_rows_batch(
+        db,
+        entry_ids=[entry_id],
+        field=field,
+        rows_by_entry_id={entry_id: out}
+    )
+    out = res_dict.get(entry_id, [])
 
     return out
 

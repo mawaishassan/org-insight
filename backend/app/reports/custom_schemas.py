@@ -8,11 +8,13 @@ class CustomReportCreate(BaseModel):
     fetch_data_with_date: bool = False
     date_fetching_config: dict | None = None
     report_header_id: int | None = None
-    show_report_name: bool = True
+    show_report_name: bool = False
     branding_title: str | None = None
     show_odoo_button: bool = False
     odoo_sync_kpi_ids: list[int] | None = None  # KPI IDs selected by Super Admin to sync; None = none selected
     apply_further_processing_based_on_mli_filter: bool = False
+    scalar_font_family: str = "Inter"
+    mli_font_family: str = "Inter"
 
 
 
@@ -28,6 +30,8 @@ class CustomReportUpdate(BaseModel):
     branding_title: str | None = None
     show_odoo_button: bool | None = None
     odoo_sync_kpi_ids: list[int] | None = None
+    scalar_font_family: str | None = None
+    mli_font_family: str | None = None
     apply_further_processing_based_on_mli_filter: bool | None = None
 
 
@@ -64,7 +68,7 @@ class CustomReportResponse(BaseModel):
     fetch_data_with_date: bool = False
     date_fetching_config: dict | None = None
     report_header_id: int | None = None
-    show_report_name: bool = True
+    show_report_name: bool = False
     branding_title: str | None = None
     show_odoo_button: bool = False
     odoo_sync_kpi_ids: list[int] | None = None
@@ -73,6 +77,8 @@ class CustomReportResponse(BaseModel):
     scalar_bold: bool = True
     scalar_font_size: int = 11
     mli_font_size: int = 10
+    scalar_font_family: str = "Inter"
+    mli_font_family: str = "Inter"
     created_at: datetime
     updated_at: datetime
 
@@ -116,6 +122,8 @@ class CustomReportLayoutSave(BaseModel):
     show_odoo_button: bool | None = None
     odoo_sync_kpi_ids: list[int] | None = None
     apply_further_processing_based_on_mli_filter: bool | None = None
+    scalar_font_family: str | None = None
+    mli_font_family: str | None = None
 
 
 

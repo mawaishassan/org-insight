@@ -89,6 +89,12 @@ export default function CustomReportViewPage() {
     api<any>(`/custom-reports/${id}/detail?organization_id=${orgId}`, { token })
       .then((t) => {
         setTemplate(t);
+        if (t.date_fetching_config?.default_period_type === "by_default" && t.date_fetching_config?.default_period) {
+          const parsedYear = Number(t.date_fetching_config.default_period);
+          if (!isNaN(parsedYear)) {
+            setReportYear(parsedYear);
+          }
+        }
       })
       .catch((e) => console.error("Failed to load custom report details", e));
 
@@ -131,12 +137,20 @@ export default function CustomReportViewPage() {
   const requestGenRef = useRef(0);
 
   useEffect(() => {
+    if (!template) return;
     const isSuperAdmin = userRole === "SUPER_ADMIN";
-    const dateFetchingDisabled = template && !template.fetch_data_with_date;
+    const dateFetchingDisabled = !template.fetch_data_with_date;
     const forceDefault = userRole !== null && !isSuperAdmin && dateFetchingDisabled;
 
-    if (forceDefault || !selectedPeriodType) {
+    if (forceDefault) {
       setSelectedPeriodType("by_default");
+    } else if (!selectedPeriodType) {
+      const defPeriodType = template.date_fetching_config?.default_period_type;
+      if (defPeriodType) {
+        setSelectedPeriodType(defPeriodType);
+      } else {
+        setSelectedPeriodType("by_default");
+      }
     } else if (selectedPeriodType !== "by_default" && customPeriods.length > 0 && !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType)) {
       setSelectedPeriodType("by_default");
     }
@@ -156,14 +170,19 @@ export default function CustomReportViewPage() {
       setSelectedPeriod("by_default");
     } else if (periodOptions.length > 0) {
       if (!selectedPeriod || selectedPeriod === "by_default" || !periodOptions.some(opt => opt.value === selectedPeriod)) {
-        const curYearStr = String(new Date().getFullYear());
-        const match = periodOptions.find((opt) => opt.value.includes(curYearStr)) || periodOptions[0];
-        setSelectedPeriod(match.value);
+        const defPeriod = template?.date_fetching_config?.default_period;
+        if (defPeriod && periodOptions.some(opt => opt.value === defPeriod)) {
+          setSelectedPeriod(defPeriod);
+        } else {
+          const curYearStr = String(new Date().getFullYear());
+          const match = periodOptions.find((opt) => opt.value.includes(curYearStr)) || periodOptions[0];
+          setSelectedPeriod(match.value);
+        }
       }
     } else {
       setSelectedPeriod("");
     }
-  }, [periodOptions, selectedPeriod, selectedPeriodType]);
+  }, [periodOptions, selectedPeriod, selectedPeriodType, template]);
 
   useEffect(() => {
     if (!id || !token || !orgId || !template) return;
@@ -451,7 +470,7 @@ export default function CustomReportViewPage() {
                   disabled={loading || isShiftingPeriod}
                   style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: (loading || isShiftingPeriod) ? "not-allowed" : "pointer", opacity: (loading || isShiftingPeriod) ? 0.6 : 1, fontWeight: 500 }}
                 >
-                  <option value="by_default">Default</option>
+                  <option value="by_default">Data entry</option>
                   {customPeriods.map((cp: any) => (
                     <option key={cp.custom_period_name} value={cp.custom_period_name}>
                       {cp.custom_period_name}
@@ -462,7 +481,7 @@ export default function CustomReportViewPage() {
 
               {selectedPeriodType === "by_default" ? (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Year</label>
+                  <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Reporting period:</label>
                   <select
                     value={reportYear}
                     onChange={(e) => setReportYear(Number(e.target.value))}
@@ -477,7 +496,7 @@ export default function CustomReportViewPage() {
               ) : (
                 periodOptions.length > 0 && (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Reporting Period:</label>
+                    <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Reporting period:</label>
                     <select
                       value={selectedPeriod}
                       onChange={(e) => setSelectedPeriod(e.target.value)}
