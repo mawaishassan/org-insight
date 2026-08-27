@@ -844,7 +844,12 @@ export default function MultiItemRowDetail() {
   const nonFormulaSerialized = useMemo(() => {
     const obj: Record<string, unknown> = {};
     subFields.forEach((sf) => {
-      if (sf.field_type !== "formula") {
+      const isMappedAsLinked = subFields.some(otherSf => {
+        const otherLinkSrc = otherSf.config?.link_source || {};
+        const mappings = (otherLinkSrc as any).column_mappings || {};
+        return otherSf.config?.data_source === "linked" && mappings[sf.key];
+      });
+      if (sf.field_type !== "formula" && sf.config?.data_source !== "linked" && !isMappedAsLinked) {
         obj[sf.key] = editData[sf.key];
       }
     });
@@ -854,8 +859,15 @@ export default function MultiItemRowDetail() {
   useEffect(() => {
     if (!entryId || !fieldId || !token) return;
 
-    const hasFormula = subFields.some((sf) => sf.field_type === "formula");
-    if (!hasFormula) return;
+    const hasFormulaOrLink = subFields.some((sf) => {
+      const isMappedAsLinked = subFields.some(otherSf => {
+        const otherLinkSrc = otherSf.config?.link_source || {};
+        const mappings = (otherLinkSrc as any).column_mappings || {};
+        return otherSf.config?.data_source === "linked" && mappings[sf.key];
+      });
+      return sf.field_type === "formula" || sf.config?.data_source === "linked" || isMappedAsLinked;
+    });
+    if (!hasFormulaOrLink) return;
 
     const controller = new AbortController();
     const timeout = setTimeout(async () => {
@@ -1294,7 +1306,14 @@ export default function MultiItemRowDetail() {
                 const key = sf.key;
                 const val = editData[key];
                 const isFormulaField = sf.field_type === "formula" || Boolean(sf.config?.is_formula);
-                const canEdit = sf.can_edit !== false && !isFormulaField && isRowEditable;
+                const isLinkedField = sf.config?.data_source === "linked";
+                const isMappedAsLinked = compactFields.some(otherSf => {
+                  const otherLinkSrc = otherSf.config?.link_source || {};
+                  const mappings = (otherLinkSrc as any).column_mappings || {};
+                  return otherSf.config?.data_source === "linked" && mappings[sf.key];
+                });
+                const isReadOnlyField = isFormulaField || isLinkedField || isMappedAsLinked;
+                const canEdit = sf.can_edit !== false && !isReadOnlyField && isRowEditable;
                 const displayVal =
                   sf.field_type === "boolean"
                     ? Boolean(val) ? "Yes" : "No"

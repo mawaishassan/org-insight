@@ -1,0 +1,113 @@
+=== MATCHING KPIs ===
+KPI: id=5, name='New faculty programs'
+KPI: id=11, name='Phd faculty ratio'
+KPI: id=13, name='Q publications per faculty'
+KPI: id=14, name='Scopus citations per faculty'
+KPI: id=20, name='Faculty awards'
+KPI: id=47, name='Faculty winning national/international research awards'
+KPI: id=39, name='Ratio of PhD or equivalent faculty to total faculty at the university'
+KPI: id=245, name='Academic_Structure_faculty'
+KPI: id=126, name='Faculty/student engagement in outreach'
+KPI: id=98, name='Faculty/Staff International Exposure'
+KPI: id=173, name='Faculty Positions'
+KPI: id=180, name='Faculty'
+KPI: id=205, name='Academic Faculty'
+KPI: id=206, name='Academic Faculty Contract Types'
+KPI: id=207, name='Academic Faculty Designations'
+KPI: id=249, name='Department-wise Faculty Research Grant Submission Summary'
+KPI: id=267, name='Faculty New KPI'
+KPI: id=273, name='QEC Faculty Performance'
+KPI: id=274, name='Faculty Wise Publications,Grants,Patents,Performance'
+KPI: id=276, name='Faculty Wise QEC Performance Report'
+KPI: id=277, name='QEC Faculty Performance Dept Wise'
+KPI: id=278, name='QEC Faculty Performance Faculty Wise'
+KPI: id=254, name=' Faculty Wise RIC Report'
+KPI: id=281, name='Consultancy/Testing'
+KPI: id=284, name='Testing'
+
+=== FIELDS FOR MATCHING KPIs ===
+Field: id=611, kpi_id=267, name='Faculty', key='faculty', type=FieldType.multi_line_items, config=None
+Field: id=624, kpi_id=278, name='QEC Faculty Performance Faculty Wise', key='qec_faculty_performance_faculty_wise', type=FieldType.multi_line_items, config=None
+Field: id=396, kpi_id=39, name='No. of full-time faculty members excluding visiting,  exchange, or short-term contract', key='no_of_full_time_faculty_members_excluding_visiting_exchange_or_short_term_contract', type=FieldType.multi_line_items, config=None
+Field: id=511, kpi_id=11, name='Total PHD', key='total_phd', type=FieldType.number, config=None
+Field: id=571, kpi_id=249, name='Department-wise Faculty Research Grant Submission Summary', key='department_wise_faculty_research_grant_submission_summary', type=FieldType.multi_line_items, config={'multi_items_import_channel': 'odoo', 'odoo_field_mappings': {'name': 'department_name'}, 'odoo_field_list_indices': {}, 'odoo_sub_field_mappings': {'department_name': {'column': 'name'}}}
+Field: id=620, kpi_id=273, name='Total Servay Entries', key='total_servay_entries', type=FieldType.formula, config=None
+Field: id=572, kpi_id=249, name='Total Faculty in the University', key='total_faculty_in_the_university', type=FieldType.formula, config=None
+Field: id=573, kpi_id=249, name='Total Faculty Who Submitted Research Grants', key='total_faculty_who_submitted_research_grants', type=FieldType.formula, config=None
+Field: id=28, kpi_id=47, name='Research awards', key='research_awards_count', type=FieldType.multi_line_items, config=None
+Field: id=566, kpi_id=245, name='faculty', key='faculty', type=FieldType.multi_line_items, config=None
+Field: id=162, kpi_id=98, name='Provide details of faculty/staff with international research, collaboration, or training opportunities.', key='provide_details_of_faculty_staff_with_international_research_collaboration_or_training_opportunities', type=FieldType.multi_line_items, config=None
+Field: id=164, kpi_id=98, name='Nominations, approval letters, completion certificates, or travel reports.', key='nominations_approval_letters_completion_certificates_or_travel_reports', type=FieldType.attachment, config=None
+Field: id=202, kpi_id=126, name='if  yes then', key='if_yes_then', type=FieldType.multi_line_items, config=None
+Field: id=201, kpi_id=126, name='Are faculty and students actively engaged in outreach or community projects?', key='are_faculty_and_students_actively_engaged_in_outreach_or_community_projects', type=FieldType.boolean, config={'conditional_rules': [{'id': 'rule_1785009635625', 'operator': 'eq', 'value': True, 'dependent_fields': [202], 'logical_operator': 'or', 'additional_conditions': []}]}
+Field: id=241, kpi_id=180, name='Faculty', key='faculty', type=FieldType.multi_line_items, config={'multi_items_api_endpoint_url': 'http://fpms.uet.edu.pk'}
+Field: id=282, kpi_id=205, name='Total Assistant Professors', key='total_assistant_professors', type=FieldType.formula, config=None
+Field: id=283, kpi_id=205, name='Total Associate Proffesors', key='total_associate_proffesors', type=FieldType.formula, config=None
+Field: id=284, kpi_id=205, name='Total Professors', key='total_professors', type=FieldType.formula, config=None
+Field: id=285, kpi_id=205, name='Total Lecturers', key='total_lecturers', type=FieldType.formula, config=None
+Field: id=280, kpi_id=206, name='Contract Types', key='contract_types', type=FieldType.multi_line_items, config=None
+Field: id=281, kpi_id=207, name='Designations', key='designations', type=FieldType.multi_line_items, config=None
+Field: id=279, kpi_id=205, name='Faculty', key='faculty', type=FieldType.multi_line_items, config={'multi_items_import_channel': 'odoo', 'odoo_field_mappings': {'name': 'emp_name', 'contract_type': 'contract', 'designation': 'designation', 'gender': 'gender', 'department': 'department', 'campus': 'campus', 'faculty_id': 'employee_id', 'qualification': 'qualification'}, 'odoo_field_list_indices': {}, 'odoo_sub_field_mappings': {'emp_name': {'column': 'name'}, 'contract': {'column': 'contract_type'}, 'designation': {'column': 'designation'}, 'gender': {'column': 'gender'}, 'department': {'column': 'department'}, 'campus': {'column': 'campus'}, 'employee_id': {'column': 'faculty_id'}, 'qualification': {'column': 'qualification'}}}
+Field: id=584, kpi_id=254, name=' Faculty wise RIC Report', key='faculty_wise_ric_report', type=FieldType.multi_line_items, config={'multi_items_import_channel': 'odoo', 'odoo_field_mappings': {'name': 'faculty_member_name', 'department': 'department_name', 'campus': 'campus', 'faculty_id': 'faculty_id'}, 'odoo_field_list_indices': {}, 'odoo_sub_field_mappings': {'faculty_member_name': {'column': 'name'}, 'department_name': {'column': 'department'}, 'campus': {'column': 'campus'}, 'faculty_id': {'column': 'faculty_id'}}}
+Field: id=617, kpi_id=274, name='Faculty Wise Performance', key='faculty_wise_performance', type=FieldType.multi_line_items, config={'multi_items_import_channel': 'odoo', 'odoo_field_mappings': {'faculty_id': 'faculty_name', 'department_id': 'department_name'}, 'odoo_field_list_indices': {'faculty_id': 1, 'department_id': 1}, 'odoo_sub_field_mappings': {'faculty_name': {'column': 'faculty_id', 'list_index': 1}, 'department_name': {'column': 'department_id', 'list_index': 1}}}
+Field: id=616, kpi_id=273, name='QEC Faculty Performance', key='qec_faculty_performance', type=FieldType.multi_line_items, config={'multi_items_api_endpoint_url': 'https://d45b2525-4fb1-4a9a-9cf9-cd61f2a5583f.mock.pstmn.io/get'}
+Field: id=623, kpi_id=277, name='QEC Faculty Performance Dept Wise', key='qec_faculty_performance_dept_wise', type=FieldType.multi_line_items, config=None
+Field: id=634, kpi_id=281, name='Consultancy', key='consultancy', type=FieldType.multi_line_items, config={'multi_items_import_channel': 'odoo', 'odoo_field_mappings': {'faculty_id': 'faculty_name', 'project_end_date': 'project_end_date', 'designation_id': 'designation', 'oric_percentage': 'oric_percentage', 'date_of_execution': 'date_of_execution', 'consultancy_type': 'consultancy_type', 'id': 'id', 'campus_id': 'campus', 'attachment_ids': 'attachment_ids', 'company_country': 'company_country', 'key_deliverables': 'key_deliverables', 'company_name': 'company_name', 'contract_value': 'contract_value', 'department_id': 'department_id'}, 'odoo_field_list_indices': {'faculty_id': 1, 'designation_id': 1, 'campus_id': 1, 'attachment_ids': 0, 'department_id': 1}, 'odoo_sub_field_mappings': {'faculty_id': {'column': 'faculty_id', 'list_index': 0}, 'faculty_name': {'column': 'faculty_id', 'list_index': 1}, 'project_end_date': {'column': 'project_end_date'}, 'designation': {'column': 'designation_id', 'list_index': 1}, 'oric_percentage': {'column': 'oric_percentage'}, 'date_of_execution': {'column': 'date_of_execution'}, 'consultancy_type': {'column': 'consultancy_type'}, 'id': {'column': 'id'}, 'campus': {'column': 'campus_id', 'list_index': 1}, 'attachment_ids': {'column': 'attachment_ids', 'list_index': 0}, 'company_country': {'column': 'company_country'}, 'key_deliverables': {'column': 'key_deliverables'}, 'company_name': {'column': 'company_name'}, 'contract_value': {'column': 'contract_value'}, 'department_id': {'column': 'department_id', 'list_index': 1}}}
+Field: id=642, kpi_id=284, name='Testing', key='testing', type=FieldType.multi_line_items, config={'data_source': 'linked', 'link_source': {'source_kpi_id': 205, 'source_field_id': 279, 'column_mappings': {'faculty_name': 'emp_name', 'designation': 'designation', 'department': 'department'}}, 'duplicate_handling': {'remove_duplicates': True, 'duplicate_keys': ['faculty_name']}}
+
+=== ENTRIES FOR MATCHING KPIs ===
+Entry: id=66, kpi_id=47, org_id=3, year=2026, period=''
+Entry: id=315, kpi_id=39, org_id=3, year=2026, period=''
+Entry: id=96, kpi_id=180, org_id=3, year=2026, period=''
+Entry: id=347, kpi_id=254, org_id=3, year=2026, period=''
+Entry: id=164, kpi_id=205, org_id=3, year=2027, period=''
+Entry: id=119, kpi_id=180, org_id=3, year=2021, period=''
+Entry: id=123, kpi_id=180, org_id=3, year=2025, period=''
+Entry: id=145, kpi_id=173, org_id=3, year=2026, period=''
+Entry: id=151, kpi_id=206, org_id=3, year=2026, period=''
+Entry: id=152, kpi_id=207, org_id=3, year=2026, period=''
+Entry: id=154, kpi_id=205, org_id=3, year=2025, period=''
+Entry: id=156, kpi_id=180, org_id=3, year=2022, period=''
+Entry: id=157, kpi_id=180, org_id=3, year=2023, period=''
+Entry: id=158, kpi_id=180, org_id=3, year=2024, period=''
+Entry: id=231, kpi_id=98, org_id=3, year=2026, period=''
+Entry: id=89, kpi_id=98, org_id=3, year=2026, period=''
+Entry: id=265, kpi_id=126, org_id=3, year=2026, period=''
+Entry: id=53, kpi_id=126, org_id=3, year=2026, period=''
+Entry: id=356, kpi_id=254, org_id=3, year=2025, period=''
+Entry: id=363, kpi_id=249, org_id=3, year=2026, period=''
+Entry: id=373, kpi_id=276, org_id=3, year=2026, period=''
+Entry: id=374, kpi_id=276, org_id=3, year=2026, period=''
+Entry: id=376, kpi_id=273, org_id=3, year=2026, period=''
+Entry: id=377, kpi_id=277, org_id=3, year=2026, period=''
+Entry: id=378, kpi_id=277, org_id=3, year=2026, period=''
+Entry: id=379, kpi_id=278, org_id=3, year=2026, period=''
+Entry: id=371, kpi_id=273, org_id=3, year=2026, period=''
+Entry: id=375, kpi_id=274, org_id=3, year=2026, period=''
+Entry: id=153, kpi_id=205, org_id=3, year=2026, period=''
+Entry: id=335, kpi_id=249, org_id=3, year=2026, period=''
+Entry: id=383, kpi_id=281, org_id=3, year=2026, period=''
+Entry: id=386, kpi_id=284, org_id=3, year=2026, period=''
+
+=== MULTI LINE ROWS COUNT: 2848 ===
+Entry ID 376, Field ID 616 has 1000 rows in KpiMultiLineRow
+Entry ID 89, Field ID 162 has 2 rows in KpiMultiLineRow
+Entry ID 231, Field ID 162 has 2 rows in KpiMultiLineRow
+Entry ID 53, Field ID 202 has 3 rows in KpiMultiLineRow
+Entry ID 379, Field ID 624 has 72 rows in KpiMultiLineRow
+Entry ID 371, Field ID 616 has 100 rows in KpiMultiLineRow
+Entry ID 123, Field ID 241 has 7 rows in KpiMultiLineRow
+Entry ID 119, Field ID 241 has 7 rows in KpiMultiLineRow
+Entry ID 265, Field ID 202 has 3 rows in KpiMultiLineRow
+Entry ID 156, Field ID 241 has 7 rows in KpiMultiLineRow
+Entry ID 157, Field ID 241 has 7 rows in KpiMultiLineRow
+Entry ID 158, Field ID 241 has 7 rows in KpiMultiLineRow
+Entry ID 96, Field ID 241 has 7 rows in KpiMultiLineRow
+Entry ID 347, Field ID 584 has 743 rows in KpiMultiLineRow
+Entry ID 377, Field ID 623 has 40 rows in KpiMultiLineRow
+Entry ID 151, Field ID 280 has 5 rows in KpiMultiLineRow
+Entry ID 152, Field ID 281 has 4 rows in KpiMultiLineRow
+Entry ID 383, Field ID 634 has 23 rows in KpiMultiLineRow
+Entry ID 153, Field ID 279 has 743 rows in KpiMultiLineRow
+Entry ID 315, Field ID 396 has 2 rows in KpiMultiLineRow
+Entry ID 335, Field ID 571 has 64 rows in KpiMultiLineRow

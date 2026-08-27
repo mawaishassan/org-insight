@@ -49,7 +49,7 @@ export function TableFooterConfigModal({
   const [enabled, setEnabled] = useState<boolean>(false);
   const [rows, setRows] = useState<FooterRowConfig[]>([]);
   const [selectedRowIdx, setSelectedRowIdx] = useState<number>(0);
-  const [selectedCellIdx, setSelectedCellIdx] = useState<number>(0);
+  const [selectedCellIndices, setSelectedCellIndices] = useState<number[]>([0]);
 
   // Helper to create default row matching allSubFields
   const createDefaultRow = (rowIdStr: string): FooterRowConfig => {
@@ -86,7 +86,7 @@ export function TableFooterConfigModal({
         content_type: "formula",
         formula_op: "SUM",
         column_key: sf.key,
-        align: "right",
+        align: "center",
         bold: true,
         decimal_places: 2,
       };
@@ -109,22 +109,27 @@ export function TableFooterConfigModal({
         setRows([createDefaultRow("row_1")]);
       }
       setSelectedRowIdx(0);
-      setSelectedCellIdx(0);
+      setSelectedCellIndices([0]);
     }
   }, [isOpen, existingFooterConfig, allSubFields.length]);
 
   if (!isOpen) return null;
 
   const activeRow = rows[selectedRowIdx] || rows[0];
-  const activeCell = activeRow?.cells[selectedCellIdx] || activeRow?.cells[0];
+  const firstSelectedIdx = selectedCellIndices[0] ?? 0;
+  const activeCell = activeRow?.cells[firstSelectedIdx] || activeRow?.cells[0];
 
   // Cell modification handler
-  const updateActiveCell = (updates: Partial<FooterCellConfig>) => {
+  const updateActiveCells = (updates: Partial<FooterCellConfig>) => {
     setRows((prevRows) => {
       const newRows = [...prevRows];
       const curRow = { ...newRows[selectedRowIdx] };
       const curCells = [...curRow.cells];
-      curCells[selectedCellIdx] = { ...curCells[selectedCellIdx], ...updates };
+      selectedCellIndices.forEach((idx) => {
+        if (curCells[idx]) {
+          curCells[idx] = { ...curCells[idx], ...updates };
+        }
+      });
       curRow.cells = curCells;
       newRows[selectedRowIdx] = curRow;
       return newRows;
@@ -133,21 +138,23 @@ export function TableFooterConfigModal({
 
   // Merge selected cell with adjacent right cell
   const handleMergeRight = () => {
-    if (!activeRow || selectedCellIdx >= activeRow.cells.length - 1) return;
+    const firstIdx = selectedCellIndices[0];
+    if (selectedCellIndices.length !== 1 || firstIdx === undefined) return;
+    if (!activeRow || firstIdx >= activeRow.cells.length - 1) return;
 
     setRows((prevRows) => {
       const newRows = [...prevRows];
       const curRow = { ...newRows[selectedRowIdx] };
       const curCells = [...curRow.cells];
-      const curCell = curCells[selectedCellIdx];
-      const nextCell = curCells[selectedCellIdx + 1];
+      const curCell = curCells[firstIdx];
+      const nextCell = curCells[firstIdx + 1];
 
       const mergedCell: FooterCellConfig = {
         ...curCell,
         colspan: curCell.colspan + nextCell.colspan,
       };
 
-      curCells.splice(selectedCellIdx, 2, mergedCell);
+      curCells.splice(firstIdx, 2, mergedCell);
       curRow.cells = curCells;
       newRows[selectedRowIdx] = curRow;
       return newRows;
@@ -156,27 +163,30 @@ export function TableFooterConfigModal({
 
   // Unmerge selected cell if colspan > 1
   const handleUnmerge = () => {
-    if (!activeCell || activeCell.colspan <= 1) return;
+    const firstIdx = selectedCellIndices[0];
+    if (selectedCellIndices.length !== 1 || firstIdx === undefined) return;
+    const cell = activeRow?.cells[firstIdx];
+    if (!cell || cell.colspan <= 1) return;
 
     setRows((prevRows) => {
       const newRows = [...prevRows];
       const curRow = { ...newRows[selectedRowIdx] };
       const curCells = [...curRow.cells];
-      const countToCreate = activeCell.colspan;
+      const countToCreate = cell.colspan;
 
       const newCells: FooterCellConfig[] = Array.from({ length: countToCreate }, (_, idx) => ({
-        id: `${activeCell.id}_unmerged_${idx}_${Date.now()}`,
+        id: `${cell.id}_unmerged_${idx}_${Date.now()}`,
         colspan: 1,
-        content_type: idx === 0 ? activeCell.content_type : "text",
-        text: idx === 0 ? activeCell.text : "",
-        formula_op: activeCell.formula_op,
-        column_key: activeCell.column_key,
-        align: activeCell.align || "left",
-        bold: activeCell.bold ?? true,
-        decimal_places: activeCell.decimal_places ?? 2,
+        content_type: idx === 0 ? cell.content_type : "text",
+        text: idx === 0 ? cell.text : "",
+        formula_op: cell.formula_op,
+        column_key: cell.column_key,
+        align: cell.align || "center",
+        bold: cell.bold ?? true,
+        decimal_places: cell.decimal_places ?? 2,
       }));
 
-      curCells.splice(selectedCellIdx, 1, ...newCells);
+      curCells.splice(firstIdx, 1, ...newCells);
       curRow.cells = curCells;
       newRows[selectedRowIdx] = curRow;
       return newRows;
@@ -189,7 +199,7 @@ export function TableFooterConfigModal({
     const newRow = createDefaultRow(newRowId);
     setRows((prev) => [...prev, newRow]);
     setSelectedRowIdx(rows.length);
-    setSelectedCellIdx(0);
+    setSelectedCellIndices([0]);
   };
 
   // Remove current footer row
@@ -198,7 +208,7 @@ export function TableFooterConfigModal({
     setRows((prev) => prev.filter((_, idx) => idx !== rIdx));
     if (selectedRowIdx >= rIdx) {
       setSelectedRowIdx(Math.max(0, selectedRowIdx - 1));
-      setSelectedCellIdx(0);
+      setSelectedCellIndices([0]);
     }
   };
 
@@ -371,7 +381,7 @@ export function TableFooterConfigModal({
                       key={r.id}
                       onClick={() => {
                         setSelectedRowIdx(rIdx);
-                        setSelectedCellIdx(0);
+                        setSelectedCellIndices([0]);
                       }}
                       style={{
                         padding: "0.35rem 0.75rem",
@@ -449,24 +459,39 @@ export function TableFooterConfigModal({
                       <tr>
                         <td style={{ padding: "8px", border: "1px solid #cbd5e1", textAlign: "center", color: "#64748b" }}>*</td>
                         {activeRow?.cells.map((cell, cIdx) => {
-                          const isSelected = selectedCellIdx === cIdx;
+                          const isSelected = selectedCellIndices.includes(cIdx);
                           return (
                             <td
                               key={cell.id}
                               colSpan={cell.colspan}
-                              onClick={() => setSelectedCellIdx(cIdx)}
+                              onClick={() => setSelectedCellIndices([cIdx])}
                               style={{
                                 padding: "10px",
                                 border: isSelected ? "2px solid #2563eb" : "1px solid #cbd5e1",
                                 backgroundColor: isSelected ? "#eff6ff" : cell.content_type === "formula" ? "#f0fdf4" : "#f8fafc",
                                 cursor: "pointer",
-                                textAlign: cell.align || "left",
+                                textAlign: cell.align || "center",
                                 fontWeight: cell.bold ? 700 : 400,
                                 color: isSelected ? "#1e40af" : "#0f172a",
                                 transition: "all 0.15s ease",
+                                position: "relative"
                               }}
                             >
-                              <div style={{ fontSize: "0.8rem" }}>
+                              <div style={{ position: "absolute", top: 2, right: 2, display: "flex", gap: "2px", alignItems: "center" }} onClick={e => e.stopPropagation()}>
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedCellIndices(prev => [...new Set([...prev, cIdx])]);
+                                    } else {
+                                      setSelectedCellIndices(prev => prev.filter(idx => idx !== cIdx));
+                                    }
+                                  }}
+                                  style={{ cursor: "pointer", width: 14, height: 14 }}
+                                />
+                              </div>
+                              <div style={{ fontSize: "0.8rem", paddingTop: "6px" }}>
                                 {cell.content_type === "text"
                                   ? cell.text || "<Empty Text>"
                                   : `${cell.formula_op || "SUM"}(${cell.column_key || ""})`}
@@ -491,16 +516,16 @@ export function TableFooterConfigModal({
                 <button
                   type="button"
                   onClick={handleMergeRight}
-                  disabled={!activeRow || selectedCellIdx >= activeRow.cells.length - 1}
+                  disabled={selectedCellIndices.length !== 1 || !activeRow || selectedCellIndices[0] >= activeRow.cells.length - 1}
                   style={{
                     padding: "0.3rem 0.6rem",
                     borderRadius: "6px",
                     border: "1px solid #cbd5e1",
-                    backgroundColor: selectedCellIdx < (activeRow?.cells.length || 0) - 1 ? "#ffffff" : "#f1f5f9",
-                    color: selectedCellIdx < (activeRow?.cells.length || 0) - 1 ? "#2563eb" : "#94a3b8",
+                    backgroundColor: (selectedCellIndices.length === 1 && selectedCellIndices[0] < (activeRow?.cells.length || 0) - 1) ? "#ffffff" : "#f1f5f9",
+                    color: (selectedCellIndices.length === 1 && selectedCellIndices[0] < (activeRow?.cells.length || 0) - 1) ? "#2563eb" : "#94a3b8",
                     fontSize: "0.775rem",
                     fontWeight: 600,
-                    cursor: selectedCellIdx < (activeRow?.cells.length || 0) - 1 ? "pointer" : "not-allowed",
+                    cursor: (selectedCellIndices.length === 1 && selectedCellIndices[0] < (activeRow?.cells.length || 0) - 1) ? "pointer" : "not-allowed",
                   }}
                 >
                   + Merge Right
@@ -508,16 +533,16 @@ export function TableFooterConfigModal({
                 <button
                   type="button"
                   onClick={handleUnmerge}
-                  disabled={!activeCell || activeCell.colspan <= 1}
+                  disabled={selectedCellIndices.length !== 1 || !activeCell || activeCell.colspan <= 1}
                   style={{
                     padding: "0.3rem 0.6rem",
                     borderRadius: "6px",
                     border: "1px solid #cbd5e1",
-                    backgroundColor: (activeCell?.colspan || 1) > 1 ? "#ffffff" : "#f1f5f9",
-                    color: (activeCell?.colspan || 1) > 1 ? "#dc2626" : "#94a3b8",
+                    backgroundColor: (selectedCellIndices.length === 1 && (activeCell?.colspan || 1) > 1) ? "#ffffff" : "#f1f5f9",
+                    color: (selectedCellIndices.length === 1 && (activeCell?.colspan || 1) > 1) ? "#dc2626" : "#94a3b8",
                     fontSize: "0.775rem",
                     fontWeight: 600,
-                    cursor: (activeCell?.colspan || 1) > 1 ? "pointer" : "not-allowed",
+                    cursor: (selectedCellIndices.length === 1 && (activeCell?.colspan || 1) > 1) ? "pointer" : "not-allowed",
                   }}
                 >
                   Unmerge Cell
@@ -538,7 +563,7 @@ export function TableFooterConfigModal({
                   }}
                 >
                   <h4 style={{ margin: 0, fontSize: "0.875rem", fontWeight: 600, color: "#0f172a" }}>
-                    Configure Selected Cell (Column Position {selectedCellIdx + 1}, Colspan: {activeCell.colspan})
+                    Configure Selected Cells ({selectedCellIndices.length === 1 ? `Column Position ${selectedCellIndices[0] + 1}, Colspan: ${activeCell.colspan}` : `${selectedCellIndices.length} cells selected`})
                   </h4>
 
                   {/* Content Type Selector */}
@@ -549,7 +574,7 @@ export function TableFooterConfigModal({
                         type="radio"
                         name="contentType"
                         checked={activeCell.content_type === "text"}
-                        onChange={() => updateActiveCell({ content_type: "text" })}
+                        onChange={() => updateActiveCells({ content_type: "text" })}
                       />
                       Static Text
                     </label>
@@ -558,7 +583,7 @@ export function TableFooterConfigModal({
                         type="radio"
                         name="contentType"
                         checked={activeCell.content_type === "formula"}
-                        onChange={() => updateActiveCell({ content_type: "formula" })}
+                        onChange={() => updateActiveCells({ content_type: "formula" })}
                       />
                       Formula
                     </label>
@@ -573,7 +598,7 @@ export function TableFooterConfigModal({
                       <input
                         type="text"
                         value={activeCell.text || ""}
-                        onChange={(e) => updateActiveCell({ text: e.target.value })}
+                        onChange={(e) => updateActiveCells({ text: e.target.value })}
                         placeholder="e.g. Grand Total, Overall Average"
                         style={{
                           width: "100%",
@@ -592,7 +617,7 @@ export function TableFooterConfigModal({
                         </label>
                         <select
                           value={activeCell.formula_op || "SUM"}
-                          onChange={(e) => updateActiveCell({ formula_op: e.target.value as any })}
+                          onChange={(e) => updateActiveCells({ formula_op: e.target.value as any })}
                           style={{
                             width: "100%",
                             padding: "0.45rem 0.65rem",
@@ -616,7 +641,7 @@ export function TableFooterConfigModal({
                         </label>
                         <select
                           value={activeCell.column_key || ""}
-                          onChange={(e) => updateActiveCell({ column_key: e.target.value })}
+                          onChange={(e) => updateActiveCells({ column_key: e.target.value })}
                           style={{
                             width: "100%",
                             padding: "0.45rem 0.65rem",
@@ -641,7 +666,7 @@ export function TableFooterConfigModal({
                         <select
                           value={activeCell.decimal_places ?? 2}
                           onChange={(e) =>
-                            updateActiveCell({
+                             updateActiveCells({
                               decimal_places: e.target.value === "auto" ? "auto" : Number(e.target.value),
                             })
                           }
@@ -673,7 +698,7 @@ export function TableFooterConfigModal({
                         <button
                           key={a}
                           type="button"
-                          onClick={() => updateActiveCell({ align: a })}
+                          onClick={() => updateActiveCells({ align: a })}
                           style={{
                             padding: "0.25rem 0.5rem",
                             borderRadius: "4px",
@@ -695,7 +720,7 @@ export function TableFooterConfigModal({
                       <input
                         type="checkbox"
                         checked={activeCell.bold ?? true}
-                        onChange={(e) => updateActiveCell({ bold: e.target.checked })}
+                        onChange={(e) => updateActiveCells({ bold: e.target.checked })}
                       />
                       Bold Font
                     </label>
@@ -747,7 +772,7 @@ export function TableFooterConfigModal({
                               style={{
                                 border: "1px solid #cbd5e1",
                                 padding: "8px",
-                                textAlign: c.align || "left",
+                                textAlign: c.align || "center",
                                 fontWeight: c.bold ? "bold" : "normal",
                                 color: "#0f172a",
                               }}

@@ -490,7 +490,21 @@ async def _assert_field_not_joined(db: AsyncSession, field_id: int):
         )
 
 
+_ILLEGAL_CHARACTERS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+def clean_excel_value(val: Any) -> Any:
+    if isinstance(val, str):
+        return _ILLEGAL_CHARACTERS_RE.sub("", val)
+    return val
+
+
 def _serialize_multi_item_cell_for_xlsx(val: Any, field_type: FieldType | str | None) -> Any:
+    """Ensure cell values are openpyxl-safe (lists/dicts are flattened or JSON — never raw list)."""
+    res = _serialize_multi_item_cell_for_xlsx_inner(val, field_type)
+    return clean_excel_value(res)
+
+
+def _serialize_multi_item_cell_for_xlsx_inner(val: Any, field_type: FieldType | str | None) -> Any:
     """Ensure cell values are openpyxl-safe (lists/dicts are flattened or JSON — never raw list)."""
     if val is None:
         return ""
@@ -608,6 +622,11 @@ def _resolve_export_filename(requested: str | None, default_base: str, ext: str)
 
 
 def _typed_value_for_xlsx_export(val: Any, field_type: FieldType | str | None) -> Any:
+    res = _typed_value_for_xlsx_export_inner(val, field_type)
+    return clean_excel_value(res)
+
+
+def _typed_value_for_xlsx_export_inner(val: Any, field_type: FieldType | str | None) -> Any:
     """
     Coerce a raw multi-line cell value to a native Python type so openpyxl stores a proper
     Excel data type: numbers stay numeric, dates become real Excel dates, booleans become
@@ -2050,6 +2069,12 @@ async def list_multi_items_rows(
     kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
     kpi = kpi_res.scalar_one_or_none()
     use_fast_sql_paging = not search and (not filters or sql_filters_spec is not None)
+    field_cfg = field.config or {}
+    is_linked = field_cfg.get("data_source") == "linked" or any(
+        (sf.config or {}).get("data_source") == "linked" for sf in getattr(field, "sub_fields", None) or []
+    )
+    if is_linked:
+        use_fast_sql_paging = False
     if kpi and getattr(kpi, "is_joined", False):
         use_fast_sql_paging = False
     rows: list[tuple[int, dict]] = []
@@ -3053,9 +3078,15 @@ async def preview_row_formulas(
         multi_line_items_data[mf.key] = await load_multi_line_items_rows(db, entry_id=entry.id, field=mf)
 
     sub_fields = list(field.sub_fields or [])
-    formula_subs = [sf for sf in sub_fields if sf.field_type == FieldType.formula or sf.field_type == "formula"]
-    if not formula_subs:
+    has_formula_or_link = any(
+        sf.field_type == FieldType.formula or sf.field_type == "formula" or (sf.config and isinstance(sf.config, dict) and sf.config.get("data_source") == "linked")
+        for sf in sub_fields
+    )
+    if not has_formula_or_link:
         return {}
+
+    # Re-declare formula_subs for dependency extraction
+    formula_subs = [sf for sf in sub_fields if sf.field_type == FieldType.formula or sf.field_type == "formula"]
 
     from app.entries.service import (
         extract_cross_kpi_mli_references,
@@ -3107,7 +3138,22 @@ async def preview_row_formulas(
         else:
             working_row[k] = v
 
+    # Resolve linked columns dynamically so they are prefilled and available for formulas
+    from app.entries.service import resolve_linked_columns_in_rows_batch
+    linked_resolved_dict = await resolve_linked_columns_in_rows_batch(
+        db,
+        entry_ids=[entry.id],
+        field=field,
+        rows_by_entry_id={entry.id: [working_row]}
+    )
+    working_row = linked_resolved_dict[entry.id][0]
+
     computed_formulas = {}
+    for sf in sub_fields:
+        cfg = sf.config or {}
+        if cfg.get("data_source") == "linked":
+            computed_formulas[sf.key] = working_row.get(sf.key)
+
     for sf in sorted_subs:
         sf_type_s = sf.field_type.value if hasattr(sf.field_type, "value") else str(sf.field_type)
         if sf_type_s == "formula":
@@ -4684,7 +4730,7 @@ async def _build_kpi_entry_xlsx(
             val = str(fv.value_json)[:500]
         else:
             val = ""
-        ws_scalar.append([f.name, val])
+        ws_scalar.append([clean_excel_value(f.name), clean_excel_value(val)])
 
     # --- One sheet per multi_line_items field ---
     multi_fields = [
@@ -4728,7 +4774,7 @@ async def _build_kpi_entry_xlsx(
                     return "; ".join(str(x) for x in raw)
                 return raw if raw is not None else ""
 
-            ws.append([_cell_out(k) for k in keys])
+            ws.append([clean_excel_value(_cell_out(k)) for k in keys])
 
     buf = BytesIO()
     wb.save(buf)

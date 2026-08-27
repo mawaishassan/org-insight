@@ -190,7 +190,7 @@ async def get_report_details(
                 "custom_report_section_id": f.custom_report_section_id,
                 "kpi_field_id": f.kpi_field_id,
                 "field_key": f.kpi_field.key,
-                "field_name": f.kpi_field.name,
+                "field_name": (f.config or {}).get("custom_name") or f.kpi_field.name,
                 "field_type": f.kpi_field.field_type.value if hasattr(f.kpi_field.field_type, "value") else str(f.kpi_field.field_type),
                 "sort_order": f.sort_order,
                 "kpi_id": f.kpi_field.kpi_id,
@@ -325,6 +325,8 @@ async def save_layout(
         scalar_bold=body.scalar_bold,
         scalar_font_size=body.scalar_font_size,
         mli_font_size=body.mli_font_size,
+        scalar_font_family=body.scalar_font_family,
+        mli_font_family=body.mli_font_family,
         show_odoo_button=body.show_odoo_button,
         odoo_sync_kpi_ids=body.odoo_sync_kpi_ids,
         apply_further_processing_based_on_mli_filter=body.apply_further_processing_based_on_mli_filter,
@@ -688,6 +690,7 @@ async def export_custom_report(
     organization_id: int | None = Query(None),
     attachment_ids: str | None = Query(None),
     by_default: bool = Query(False),
+    period_type: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -709,7 +712,7 @@ async def export_custom_report(
         else:
             from app.reports.custom_service import export_custom_report_file
             file_bytes, filename, content_type = await export_custom_report_file(
-                db, id, org_id, year, format, by_default=by_default
+                db, id, org_id, year, format, by_default=by_default, period_type=period_type
             )
     except Exception as e:
         import traceback

@@ -12,6 +12,7 @@ import toast from "react-hot-toast";
 import { OdooMultiLineImportAdmin } from "@/components/OdooMultiLineImportConfig";
 import { MLIExtractionRulesPanel } from "@/components/MLIExtractionRulesPanel";
 import { MliFormulaBuilderModal } from "@/components/MliFormulaBuilderModal";
+import { LinkedConfigUI } from "@/components/LinkedConfigUI";
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
   return new URLSearchParams(
@@ -366,6 +367,10 @@ export default function KpiFieldsPage() {
     mode: "append" | "replace";
   } | null>(null);
   const [isCondModalOpen, setIsCondModalOpen] = useState(false);
+  const [showLinkedConfigModal, setShowLinkedConfigModal] = useState<number | null>(null);
+  const [showExtractionModal, setShowExtractionModal] = useState<number | null>(null);
+  const [showVisibilityModal, setShowVisibilityModal] = useState<string | number | null>(null);
+  const [kpis, setKpis] = useState<Array<{ id: number; name: string }>>([]);
   const [condEditingFieldId, setCondEditingFieldId] = useState<number | string | null>(null);
   const [condTriggerId, setCondTriggerId] = useState<number | string | "">("");
   const [condTriggerVal, setCondTriggerVal] = useState<boolean>(true);
@@ -575,6 +580,13 @@ export default function KpiFieldsPage() {
       .then(setCustomHeaders)
       .catch(() => setCustomHeaders([]));
   }, [token, userRole, orgId]);
+
+  useEffect(() => {
+    if (!token || orgId == null) return;
+    api<Array<{ id: number; name: string }>>(`/kpis?organization_id=${orgId}`, { token })
+      .then(setKpis)
+      .catch(() => setKpis([]));
+  }, [token, orgId]);
   const fieldsQuery = (o?: number) => {
     const id = o ?? orgId;
     return id != null ? `kpi_id=${kpiId}&organization_id=${id}` : `kpi_id=${kpiId}`;
@@ -4044,34 +4056,7 @@ export default function KpiFieldsPage() {
                 </ul>
               )}
 
-              {/* MLI Text Extraction Rules Card */}
-              {superAdminFieldsTab.startsWith("multi:") && (() => {
-                const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
-                const activeParentFieldId = match ? Number(match[1]) : null;
-                const activeParentField = activeParentFieldId ? list.find((f) => f.id === activeParentFieldId) : null;
-                if (!activeParentField) return null;
-                const subFieldDefs = (activeParentField.sub_fields ?? []).map((s: any) => ({ key: s.key, name: s.name }));
-                return (
-                  <div
-                    style={{
-                      border: "1px solid var(--border)",
-                      borderRadius: 10,
-                      padding: "0.85rem 0.9rem",
-                      background: "var(--surface)",
-                      marginBottom: "0.75rem",
-                    }}
-                  >
-                    <div style={{ fontWeight: 700, marginBottom: "0.65rem" }}>Text Extraction Rules</div>
-                    <MLIExtractionRulesPanel
-                      token={token ?? ""}
-                      fieldId={activeParentFieldId!}
-                      subFields={subFieldDefs}
-                    />
-                  </div>
-                );
-              })()}
-
-              {/* Conditional Visibility Rules Card */}
+              {/* Unified Rules & Configurations Card */}
               {(superAdminFieldsTab === "scalar" || superAdminFieldsTab.startsWith("multi:")) && (() => {
                 const isMultiTab = superAdminFieldsTab.startsWith("multi:");
                 const match = /^multi:(\d+)$/.exec(superAdminFieldsTab);
@@ -4082,7 +4067,12 @@ export default function KpiFieldsPage() {
 
                 const subs = (activeParentField?.sub_fields ?? []) as any[];
 
-                // Collect all rules: legacy and new format
+                // 1. Check if Linked Column Config is active
+                const isLinked = isMultiTab && (activeParentField?.config?.data_source === "linked");
+                const sourceKpiId = activeParentField?.config?.link_source?.source_kpi_id;
+                const sourceKpiName = sourceKpiId ? kpis.find(k => k.id === sourceKpiId)?.name : "";
+
+                // 2. Collect visibility rules
                 const allRules: {
                   id: string;
                   isLegacy: boolean;
@@ -4097,7 +4087,6 @@ export default function KpiFieldsPage() {
                 }[] = [];
 
                 if (isMultiTab) {
-                  // MLI Subfields
                   subs.forEach((s: any) => {
                     const triggerId = s.config?.condition_trigger_field_id;
                     const triggerKey = s.config?.condition_trigger_field_key;
@@ -4136,7 +4125,6 @@ export default function KpiFieldsPage() {
                     }
                   });
                 } else {
-                  // Scalar Fields
                   list.forEach((f: any) => {
                     const triggerId = f.config?.condition_trigger_field_id;
                     if (triggerId != null) {
@@ -4173,172 +4161,105 @@ export default function KpiFieldsPage() {
                   });
                 }
 
-                function formatConditionText(operator: string, value: any, triggerFieldType?: string): string {
-                  const op = operator.toLowerCase();
-                  const isBool = triggerFieldType === "boolean" || typeof value === "boolean";
-                  if (op === "eq") {
-                    if (isBool) return value ? "is Yes" : "is No";
-                    return `= ${value}`;
-                  }
-                  if (op === "neq") {
-                    if (isBool) return value ? "is No" : "is Yes";
-                    return `!= ${value}`;
-                  }
-                  if (op === "gt") return `> ${value}`;
-                  if (op === "lt") return `< ${value}`;
-                  if (op === "gte") return `>= ${value}`;
-                  if (op === "lte") return `<= ${value}`;
-                  if (op === "between") {
-                    const vals = Array.isArray(value) ? value : [value, ""];
-                    return `Between ${vals[0]} and ${vals[1]}`;
-                  }
-                  if (op === "outside") {
-                    const vals = Array.isArray(value) ? value : [value, ""];
-                    return `Outside ${vals[0]} and ${vals[1]}`;
-                  }
-                  return `${operator} ${value}`;
-                }
-
                 return (
-                  <div className="card" style={{ marginTop: "2rem", padding: "1.5rem" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1rem", flexWrap: "wrap", gap: "1rem" }}>
-                      <div>
-                        <h3 style={{ fontSize: "1.1rem", fontWeight: 600, margin: 0 }}>
-                          Conditional Visibility Rules
-                        </h3>
-                        <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0.25rem 0 0" }}>
-                          Configure fields to dynamically show or hide based on the value of another field.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={() => {
-                          setCondEditingFieldId(null);
-                          setCondTriggerId("");
-                          setCondTriggerVal(true);
-                          setCondDepType("existing");
-                          setCondDepFieldId("");
-                          setCondNewName("");
-                          setCondNewKey("");
-                          setCondNewFieldType("single_line_text");
-                          setCondNewRequired(false);
-                          setCondNewRefConfig({});
-                          setCondOperator("eq");
-                          setCondValueText("");
-                          setCondValueText2("");
-                          setCondDepFieldIds([]);
-                          setCondLogicalOperator("or");
-                          setCondAdditionalConditions([]);
-                          setEditingRuleId(null);
-                          setIsCondModalOpen(true);
-                        }}
-                      >
-                        Add Rule
-                      </button>
+                  <div className="card" style={{ marginTop: "1.5rem", padding: "1.25rem 1.5rem" }}>
+                    <div>
+                      <h3 style={{ fontSize: "1.05rem", fontWeight: 700, margin: 0 }}>
+                        Rules & Configurations
+                      </h3>
+                      <p style={{ color: "var(--muted)", fontSize: "0.82rem", margin: "0.25rem 0 1.25rem 0" }}>
+                        Manage data formatting, cross-table links, and visibility triggers for {isMultiTab ? "this Multi-line Item" : "these fields"}.
+                      </p>
                     </div>
 
-                    {allRules.length === 0 ? (
-                      <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "1rem 0 0" }}>
-                        No conditional visibility rules configured yet.
-                      </p>
-                    ) : (
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem", marginTop: "1rem" }}>
-                        <thead>
-                          <tr>
-                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Dependent Field(s)</th>
-                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Trigger Field</th>
-                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>Condition</th>
-                            <th style={{ textAlign: "right", padding: "0.5rem", borderBottom: "1px solid var(--border)", width: 140 }}>Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {allRules.map((rule) => {
-                            let triggerName = "";
-                            let triggerKey = "";
-                            let triggerType = "";
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
+                      
+                      {/* 1. Text Extraction Rules (Only for MLI) */}
+                      {isMultiTab && (
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", border: "1px solid var(--border)", borderRadius: 10, padding: "0.85rem 1rem", background: "var(--surface)", flexWrap: "wrap" }}>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: "0.9rem" }}>Text Extraction Rules</div>
+                            <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "0.15rem" }}>
+                              Format and extract values in-memory using regex rules. Raw stored data is never changed.
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => setShowExtractionModal(activeParentFieldId)}
+                            style={{
+                              backgroundColor: "var(--primary-subtle, #eff6ff)",
+                              color: "var(--primary, #2563eb)",
+                              border: "1px solid rgba(var(--primary-rgb, 37, 99, 235), 0.25)",
+                              fontWeight: 600,
+                              padding: "0.45rem 1.1rem",
+                              borderRadius: 8
+                            }}
+                          >
+                            Configure Extraction
+                          </button>
+                        </div>
+                      )}
 
-                            const trigger = isMultiTab
-                              ? subs.find(t => String(t.id || t.key) === String(rule.triggerFieldId))
-                              : list.find(t => t.id === Number(rule.triggerFieldId));
-                            if (trigger) {
-                              triggerName = trigger.name;
-                              triggerKey = trigger.key;
-                              triggerType = trigger.field_type;
-                            }
+                      {/* 2. Linked Column Config (Only for MLI) */}
+                      {isMultiTab && (
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", border: "1px solid var(--border)", borderRadius: 10, padding: "0.85rem 1rem", background: "var(--surface)", flexWrap: "wrap" }}>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: "0.9rem" }}>Linked Column Config</div>
+                            <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "0.15rem" }}>
+                              Configure automatic data copying and mapping from other Multi-line Item tables.
+                            </div>
+                            <div style={{ fontSize: "0.78rem", color: isLinked ? "var(--primary)" : "var(--muted)", fontWeight: 600, marginTop: "0.25rem" }}>
+                              {isLinked ? `🔗 Linked to ${sourceKpiName || "Source KPI"}` : "Manual data entry"}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => setShowLinkedConfigModal(activeParentFieldId)}
+                            style={{
+                              backgroundColor: "var(--primary-subtle, #eff6ff)",
+                              color: "var(--primary, #2563eb)",
+                              border: "1px solid rgba(var(--primary-rgb, 37, 99, 235), 0.25)",
+                              fontWeight: 600,
+                              padding: "0.45rem 1.1rem",
+                              borderRadius: 8
+                            }}
+                          >
+                            Configure Linking
+                          </button>
+                        </div>
+                      )}
 
-                            return (
-                              <tr key={rule.id}>
-                                <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                  <strong>{rule.dependentNames}</strong>
-                                </td>
-                                <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                  {triggerName ? (
-                                    <span>{triggerName} <span style={{ color: "var(--muted)" }}>({triggerKey})</span></span>
-                                  ) : (
-                                    <span style={{ color: "var(--error)" }}>Missing Trigger</span>
-                                  )}
-                                </td>
-                                <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)" }}>
-                                  Show when trigger {formatConditionText(rule.operator, rule.value, triggerType)}
-                                  {Array.isArray(rule.additional_conditions) && rule.additional_conditions.length > 0 && (
-                                    <span>
-                                      {" "}{rule.logical_operator?.toUpperCase() || "OR"}{" "}
-                                      {rule.additional_conditions.map((ac: any, i: number) => (
-                                        <span key={i}>
-                                          {i > 0 ? ` ${rule.logical_operator?.toUpperCase() || "OR"} ` : ""}
-                                          {formatConditionText(ac.operator, ac.value, triggerType)}
-                                        </span>
-                                      ))}
-                                    </span>
-                                  )}
-                                </td>
-                                <td style={{ padding: "0.5rem", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
-                                  <button
-                                    type="button"
-                                    className="btn"
-                                    style={{ marginRight: "0.35rem" }}
-                                    onClick={() => {
-                                      setCondEditingFieldId(rule.id);
-                                      setEditingRuleId(rule.id);
-                                      setCondTriggerId(rule.triggerFieldId);
-                                      setCondOperator(rule.operator);
-                                      setCondDepFieldIds(rule.dependentFieldIds);
-                                      setCondDepType("existing");
-                                      setCondLogicalOperator(rule.logical_operator || "or");
-                                      setCondAdditionalConditions(rule.additional_conditions || []);
+                      {/* 3. Conditional Visibility Rules */}
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", border: "1px solid var(--border)", borderRadius: 10, padding: "0.85rem 1rem", background: "var(--surface)", flexWrap: "wrap" }}>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: "0.9rem" }}>Conditional Visibility Rules</div>
+                          <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "0.15rem" }}>
+                            Configure fields to dynamically show or hide based on the value of another field.
+                          </div>
+                          <div style={{ fontSize: "0.78rem", color: allRules.length > 0 ? "var(--primary)" : "var(--muted)", fontWeight: 600, marginTop: "0.25rem" }}>
+                            {allRules.length > 0 ? `👁️ ${allRules.length} visibility rule(s) configured` : "No conditional rules"}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => setShowVisibilityModal(isMultiTab ? activeParentFieldId : "scalar")}
+                          style={{
+                            backgroundColor: "var(--primary-subtle, #eff6ff)",
+                            color: "var(--primary, #2563eb)",
+                            border: "1px solid rgba(var(--primary-rgb, 37, 99, 235), 0.25)",
+                            fontWeight: 600,
+                            padding: "0.45rem 1.1rem",
+                            borderRadius: 8
+                          }}
+                        >
+                          Manage Visibility
+                        </button>
+                      </div>
 
-                                      if (trigger && trigger.field_type === "boolean") {
-                                        setCondTriggerVal(rule.value);
-                                      } else {
-                                        if (Array.isArray(rule.value)) {
-                                          setCondValueText(String(rule.value[0] ?? ""));
-                                          setCondValueText2(String(rule.value[1] ?? ""));
-                                        } else {
-                                          setCondValueText(String(rule.value ?? ""));
-                                          setCondValueText2("");
-                                        }
-                                      }
-                                      setIsCondModalOpen(true);
-                                    }}
-                                  >
-                                    Edit
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn"
-                                    style={{ color: "var(--error)" }}
-                                    onClick={() => handleRemoveConditionalRule(rule.id)}
-                                  >
-                                    Remove
-                                  </button>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    )}
+                    </div>
                   </div>
                 );
               })()}
@@ -4970,6 +4891,8 @@ export default function KpiFieldsPage() {
                     </label>
                   </div>
 
+
+
                   {(addSubFieldDraft.field_type === "reference" || addSubFieldDraft.field_type === "multi_reference") && (
                     <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
                       <div style={{ fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.5rem" }}>Reference source</div>
@@ -5219,6 +5142,8 @@ export default function KpiFieldsPage() {
                       Required
                     </label>
                   </div>
+
+
 
                   {(editSubFieldDraft.field_type === "reference" || editSubFieldDraft.field_type === "multi_reference") && (
                     <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
@@ -5986,6 +5911,368 @@ export default function KpiFieldsPage() {
           </div>
         </div>
       )}
+
+      {showLinkedConfigModal != null && (() => {
+        const activeParentFieldId = showLinkedConfigModal;
+        const activeParentField = list.find((f) => f.id === activeParentFieldId);
+        if (!activeParentField) return null;
+        const parentFieldConfig = activeParentField.config || {};
+        return (
+          <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem" }}>
+            <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "1.5rem", width: "100%", maxWidth: 650, maxHeight: "90vh", overflow: "hidden", boxShadow: "0 10px 25px rgba(0,0,0,0.2)", display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)", paddingBottom: "0.75rem", flexShrink: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: "1.1rem" }}>
+                  Linked Column Config — {activeParentField.name}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowLinkedConfigModal(null)}
+                  style={{ background: "none", border: "none", fontSize: "1.5rem", color: "var(--muted)", cursor: "pointer", padding: 0, lineHeight: 1 }}
+                >
+                  &times;
+                </button>
+              </div>
+              
+              <div style={{ flex: 1, overflowY: "auto", paddingRight: "0.25rem" }}>
+                <LinkedConfigUI
+                  organizationId={kpi?.organization_id ?? orgId ?? undefined}
+                  currentKpiId={kpiId}
+                  currentMliSubFields={activeParentField.sub_fields}
+                  value={parentFieldConfig}
+                  onCancel={() => setShowLinkedConfigModal(null)}
+                  onChange={async (newConfig) => {
+                    if (!token) return;
+                    try {
+                      await api(`/fields/${activeParentFieldId}?${fieldsQuery()}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({ config: newConfig }),
+                        token,
+                      });
+                      loadList();
+                      toast.success("Linked column configuration updated successfully");
+                      setShowLinkedConfigModal(null);
+                    } catch (e) {
+                      toast.error(e instanceof Error ? e.message : "Failed to update linking config");
+                    }
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {showExtractionModal != null && (() => {
+        const activeParentFieldId = showExtractionModal;
+        const activeParentField = list.find((f) => f.id === activeParentFieldId);
+        if (!activeParentField) return null;
+        const subFieldDefs = (activeParentField.sub_fields ?? []).map((s: any) => ({ key: s.key, name: s.name }));
+        return (
+          <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem" }}>
+            <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "1.5rem", width: "100%", maxWidth: 750, maxHeight: "90vh", overflow: "hidden", boxShadow: "0 10px 25px rgba(0,0,0,0.2)", display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)", paddingBottom: "0.75rem", flexShrink: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: "1.1rem" }}>
+                  Text Extraction Rules — {activeParentField.name}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowExtractionModal(null)}
+                  style={{ background: "none", border: "none", fontSize: "1.5rem", color: "var(--muted)", cursor: "pointer", padding: 0, lineHeight: 1 }}
+                >
+                  &times;
+                </button>
+              </div>
+              
+              <div style={{ flex: 1, overflowY: "auto" }}>
+                <MLIExtractionRulesPanel
+                  token={token ?? ""}
+                  fieldId={activeParentFieldId!}
+                  subFields={subFieldDefs}
+                />
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {showVisibilityModal != null && (() => {
+        const isMultiTab = typeof showVisibilityModal === "number";
+        const activeParentFieldId = isMultiTab ? Number(showVisibilityModal) : null;
+        const activeParentField = isMultiTab ? list.find((f) => f.id === activeParentFieldId) : null;
+        if (isMultiTab && !activeParentField) return null;
+
+        const subs = (activeParentField?.sub_fields ?? []) as any[];
+
+        // Collect visibility rules
+        const allRules: {
+          id: string;
+          isLegacy: boolean;
+          triggerFieldId: number | string;
+          triggerFieldKey?: string;
+          operator: string;
+          value: any;
+          dependentFieldIds: (number | string)[];
+          dependentNames: string;
+          logical_operator?: string;
+          additional_conditions?: { operator: string; value: string }[];
+        }[] = [];
+
+        if (isMultiTab) {
+          subs.forEach((s: any) => {
+            const triggerId = s.config?.condition_trigger_field_id;
+            const triggerKey = s.config?.condition_trigger_field_key;
+            if (triggerId != null || triggerKey != null) {
+              allRules.push({
+                id: `legacy:${s.id || s.key}`,
+                isLegacy: true,
+                triggerFieldId: triggerId || triggerKey || "",
+                triggerFieldKey: triggerKey,
+                operator: "eq",
+                value: s.config.condition_trigger_value ?? true,
+                dependentFieldIds: [s.id || s.key],
+                dependentNames: s.name,
+              });
+            }
+            const rules = s.config?.conditional_rules;
+            if (Array.isArray(rules)) {
+              rules.forEach((r: any) => {
+                const depKeys = r.dependent_fields || r.dependent_field_ids || [];
+                const depNames = depKeys
+                  .map((k: any) => subs.find(x => String(x.id) === String(k) || String(x.key) === String(k))?.name || k)
+                  .join(", ");
+                allRules.push({
+                  id: r.id || `rule:${s.id || s.key}:${Date.now()}`,
+                  isLegacy: false,
+                  triggerFieldId: s.id || s.key,
+                  triggerFieldKey: s.key,
+                  operator: r.operator || "eq",
+                  value: r.value,
+                  dependentFieldIds: depKeys,
+                  dependentNames: depNames,
+                  logical_operator: r.logical_operator || "or",
+                  additional_conditions: r.additional_conditions || [],
+                });
+              });
+            }
+          });
+        } else {
+          list.forEach((f: any) => {
+            const triggerId = f.config?.condition_trigger_field_id;
+            if (triggerId != null) {
+              allRules.push({
+                id: `legacy:${f.id}`,
+                isLegacy: true,
+                triggerFieldId: triggerId,
+                operator: "eq",
+                value: f.config.condition_trigger_value ?? true,
+                dependentFieldIds: [f.id],
+                dependentNames: f.name,
+              });
+            }
+            const rules = f.config?.conditional_rules;
+            if (Array.isArray(rules)) {
+              rules.forEach((r: any) => {
+                const depIds = r.dependent_fields || r.dependent_field_ids || [];
+                const depNames = depIds
+                  .map((id: any) => list.find(x => String(x.id) === String(id))?.name || id)
+                  .join(", ");
+                allRules.push({
+                  id: r.id || `rule:${f.id}:${Date.now()}`,
+                  isLegacy: false,
+                  triggerFieldId: f.id,
+                  operator: r.operator || "eq",
+                  value: r.value,
+                  dependentFieldIds: depIds,
+                  dependentNames: depNames,
+                  logical_operator: r.logical_operator || "or",
+                  additional_conditions: r.additional_conditions || [],
+                });
+              });
+            }
+          });
+        }
+
+        function formatConditionText(operator: string, value: any, triggerFieldType?: string): string {
+          const op = operator.toLowerCase();
+          const isBool = triggerFieldType === "boolean" || typeof value === "boolean";
+          if (op === "eq") {
+            if (isBool) return value ? "is Yes" : "is No";
+            return `= ${value}`;
+          }
+          if (op === "neq") {
+            if (isBool) return value ? "is No" : "is Yes";
+            return `!= ${value}`;
+          }
+          if (op === "gt") return `> ${value}`;
+          if (op === "lt") return `< ${value}`;
+          if (op === "gte") return `>= ${value}`;
+          if (op === "lte") return `<= ${value}`;
+          if (op === "between") {
+            const vals = Array.isArray(value) ? value : [value, ""];
+            return `Between ${vals[0]} and ${vals[1]}`;
+          }
+          if (op === "outside") {
+            const vals = Array.isArray(value) ? value : [value, ""];
+            return `Outside ${vals[0]} and ${vals[1]}`;
+          }
+          return `${operator} ${value}`;
+        }
+
+        return (
+          <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem" }}>
+            <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "1.5rem", width: "100%", maxWidth: 850, maxHeight: "90vh", overflow: "hidden", boxShadow: "0 10px 25px rgba(0,0,0,0.2)", display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)", paddingBottom: "0.75rem", flexShrink: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: "1.1rem" }}>
+                  Conditional Visibility Rules {isMultiTab ? `— ${activeParentField?.name}` : "— Scalar Fields"}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowVisibilityModal(null)}
+                  style={{ background: "none", border: "none", fontSize: "1.5rem", color: "var(--muted)", cursor: "pointer", padding: 0, lineHeight: 1 }}
+                >
+                  &times;
+                </button>
+              </div>
+
+              <div style={{ flex: 1, overflowY: "auto" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+                  <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: 0 }}>
+                    Configure fields to dynamically show or hide based on the value of another field.
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      setCondEditingFieldId(null);
+                      setCondTriggerId("");
+                      setCondTriggerVal(true);
+                      setCondDepType("existing");
+                      setCondDepFieldId("");
+                      setCondNewName("");
+                      setCondNewKey("");
+                      setCondNewFieldType("single_line_text");
+                      setCondNewRequired(false);
+                      setCondNewRefConfig({});
+                      setCondOperator("eq");
+                      setCondValueText("");
+                      setCondValueText2("");
+                      setCondDepFieldIds([]);
+                      setCondLogicalOperator("or");
+                      setCondAdditionalConditions([]);
+                      setEditingRuleId(null);
+                      setIsCondModalOpen(true);
+                    }}
+                  >
+                    Add Rule
+                  </button>
+                </div>
+
+                {allRules.length === 0 ? (
+                  <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "1rem 0" }}>
+                    No conditional visibility rules configured yet.
+                  </p>
+                ) : (
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.88rem" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "0.65rem 0.5rem", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontWeight: 600 }}>Dependent Field(s)</th>
+                        <th style={{ textAlign: "left", padding: "0.65rem 0.5rem", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontWeight: 600 }}>Trigger Field</th>
+                        <th style={{ textAlign: "left", padding: "0.65rem 0.5rem", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontWeight: 600 }}>Condition</th>
+                        <th style={{ textAlign: "right", padding: "0.65rem 0.5rem", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontWeight: 600, width: 140 }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {allRules.map((rule) => {
+                        let triggerName = "";
+                        let triggerKey = "";
+                        let triggerType = "";
+
+                        const trigger = isMultiTab
+                          ? subs.find(t => String(t.id || t.key) === String(rule.triggerFieldId))
+                          : list.find(t => t.id === Number(rule.triggerFieldId));
+                        if (trigger) {
+                          triggerName = trigger.name;
+                          triggerKey = trigger.key;
+                          triggerType = trigger.field_type;
+                        }
+
+                        return (
+                          <tr key={rule.id}>
+                            <td style={{ padding: "0.65rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                              <strong>{rule.dependentNames}</strong>
+                            </td>
+                            <td style={{ padding: "0.65rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                              {triggerName ? (
+                                <span>{triggerName} <span style={{ color: "var(--muted)" }}>({triggerKey})</span></span>
+                              ) : (
+                                <span style={{ color: "var(--error)" }}>Missing Trigger</span>
+                              )}
+                            </td>
+                            <td style={{ padding: "0.65rem 0.5rem", borderBottom: "1px solid var(--border)" }}>
+                              Show when trigger {formatConditionText(rule.operator, rule.value, triggerType)}
+                              {Array.isArray(rule.additional_conditions) && rule.additional_conditions.length > 0 && (
+                                <span>
+                                  {" "}{rule.logical_operator?.toUpperCase() || "OR"}{" "}
+                                  {rule.additional_conditions.map((ac: any, i: number) => (
+                                    <span key={i}>
+                                      {i > 0 ? ` ${rule.logical_operator?.toUpperCase() || "OR"} ` : ""}
+                                      {formatConditionText(ac.operator, ac.value, triggerType)}
+                                    </span>
+                                  ))}
+                                </span>
+                              )}
+                            </td>
+                            <td style={{ padding: "0.65rem 0.5rem", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ marginRight: "0.35rem", padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+                                onClick={() => {
+                                  setCondEditingFieldId(rule.id);
+                                  setEditingRuleId(rule.id);
+                                  setCondTriggerId(rule.triggerFieldId);
+                                  setCondOperator(rule.operator);
+                                  setCondDepFieldIds(rule.dependentFieldIds);
+                                  setCondDepType("existing");
+                                  setCondLogicalOperator(rule.logical_operator || "or");
+                                  setCondAdditionalConditions(rule.additional_conditions || []);
+
+                                  if (trigger && trigger.field_type === "boolean") {
+                                    setCondTriggerVal(rule.value);
+                                  } else {
+                                    if (Array.isArray(rule.value)) {
+                                      setCondValueText(String(rule.value[0] ?? ""));
+                                      setCondValueText2(String(rule.value[1] ?? ""));
+                                    } else {
+                                      setCondValueText(String(rule.value ?? ""));
+                                      setCondValueText2("");
+                                    }
+                                  }
+                                  setIsCondModalOpen(true);
+                                }}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ color: "var(--error)", padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+                                onClick={() => handleRemoveConditionalRule(rule.id)}
+                              >
+                                Remove
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </>
   );
   return content;
@@ -6082,6 +6369,7 @@ function ReferenceConfigUI({
     </div>
   );
 }
+
 
 interface FormulaRefKpi {
   id: number;

@@ -34,6 +34,15 @@ from app.formula_engine.evaluator import evaluate_formula, apply_conditional_log
 
 from decimal import Decimal
 
+import re
+_ILLEGAL_CHARACTERS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+def clean_excel_value(val: Any) -> Any:
+    if isinstance(val, str):
+        return _ILLEGAL_CHARACTERS_RE.sub("", val)
+    return val
+
+
 def clean_numeric_value_string(val) -> str:
     if val is None:
         return "—"
@@ -90,6 +99,47 @@ from app.entries.service import bulk_load_org_kpi_values
 
 logger = logging.getLogger(__name__)
 
+
+def _row_signature(r: dict) -> tuple:
+    # 1. If a unique ID is present, use it as the signature
+    for k in ['id', 'patent_lms_id', 'lms_id']:
+        if k in r and r[k] is not None and r[k] != "":
+            val = str(r[k])
+            if val.endswith(".0"):
+                val = val[:-2]
+            return (("id", val),)
+            
+    # 2. If no ID is present, fall back to Title/Name + Date
+    sig_keys = []
+    for k in ['invention_title', 'title', 'name', 'project_title', 'book_title', 'paper_title']:
+        if k in r and r[k] is not None and r[k] != "":
+            sig_keys.append((k, str(r[k]).strip().lower()))
+    for k in ['date_of_filing', 'date', 'filing_date', 'publication_date']:
+        if k in r and r[k] is not None and r[k] != "":
+            sig_keys.append((k, str(r[k]).strip()[:10]))
+            
+    if sig_keys:
+        return tuple(sorted(sig_keys))
+    else:
+        non_empty = [(k, str(v).strip()) for k, v in r.items() if v is not None and str(v).strip() != ""]
+        return tuple(sorted(non_empty))
+
+
+def _deduplicate_rows(rows: list[dict]) -> list[dict]:
+    by_sig = {}
+    for r in rows:
+        sig = _row_signature(r)
+        if sig not in by_sig:
+            by_sig[sig] = []
+        by_sig[sig].append(r)
+        
+    deduped = []
+    for sig, group in by_sig.items():
+        best_row = max(group, key=lambda r: len([v for v in r.values() if v is not None and v != ""]))
+        deduped.append(best_row)
+    return deduped
+
+
 # Standard TimeDimension import or helper definition
 class TimeDimension:
     YEARLY = "yearly"
@@ -112,7 +162,8 @@ async def create_custom_report(db: AsyncSession, org_id: int, data: CustomReport
         show_odoo_button=data.show_odoo_button,
         odoo_sync_kpi_ids=data.odoo_sync_kpi_ids,
         apply_further_processing_based_on_mli_filter=data.apply_further_processing_based_on_mli_filter,
-
+        scalar_font_family=data.scalar_font_family,
+        mli_font_family=data.mli_font_family,
     )
     db.add(report)
     await db.flush()
@@ -199,7 +250,8 @@ async def duplicate_custom_report(db: AsyncSession, id: int, org_id: int) -> Cus
         show_odoo_button=orig.show_odoo_button,
         odoo_sync_kpi_ids=orig.odoo_sync_kpi_ids,
         apply_further_processing_based_on_mli_filter=getattr(orig, "apply_further_processing_based_on_mli_filter", False),
-
+        scalar_font_family=getattr(orig, "scalar_font_family", "Inter"),
+        mli_font_family=getattr(orig, "mli_font_family", "Inter"),
     )
     db.add(new_report)
     await db.flush()
@@ -247,7 +299,8 @@ async def save_custom_report_layout(
     show_odoo_button: bool | None = None,
     odoo_sync_kpi_ids: list[int] | None = None,
     apply_further_processing_based_on_mli_filter: bool | None = None,
-
+    scalar_font_family: str | None = None,
+    mli_font_family: str | None = None,
 ) -> bool:
     report = await get_custom_report(db, id, org_id)
     if not report:
@@ -271,6 +324,10 @@ async def save_custom_report_layout(
         report.scalar_font_size = scalar_font_size
     if mli_font_size is not None:
         report.mli_font_size = mli_font_size
+    if scalar_font_family is not None:
+        report.scalar_font_family = scalar_font_family
+    if mli_font_family is not None:
+        report.mli_font_family = mli_font_family
     if show_odoo_button is not None:
         report.show_odoo_button = show_odoo_button
     # odoo_sync_kpi_ids can be set to empty list or None explicitly
@@ -478,7 +535,7 @@ def evaluate_report_table_footer_rows(
             continue
 
         eval_cells = []
-        for cell in cells:
+        for cell_idx, cell in enumerate(cells):
             if not isinstance(cell, dict):
                 continue
             colspan = cell.get("colspan", 1)
@@ -488,7 +545,9 @@ def evaluate_report_table_footer_rows(
                 colspan = 1
 
             content_type = cell.get("content_type", "text")
-            align = cell.get("align", "left")
+            align = cell.get("align")
+            if not align:
+                align = "left" if cell_idx == 0 else "center"
             bold = cell.get("bold", True)
             dec_places = cell.get("decimal_places", 2)
 
@@ -580,6 +639,12 @@ async def generate_custom_report_data(
         return None
 
     selected_period = year
+    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and not by_default:
+        if not selected_period or selected_period == "by_default":
+            config = getattr(custom_report, "date_fetching_config", None) or {}
+            def_period = config.get("default_period")
+            selected_period = def_period if def_period else "2025/26"
+
     date_range = None
     entry_start_year: int | None = None  # calendar start year of the period (e.g. 2026 for "2026/27")
     if custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period and not by_default:
@@ -595,6 +660,18 @@ async def generate_custom_report_data(
                 pass
 
     yr = _parse_year_int(year)
+    yr_display = selected_period if (custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period and not by_default) else yr
+
+    # Resolve period type and period_info metadata
+    resolved_period_type = "Data Entry"
+    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and not by_default:
+        resolved_period_type = period_type or (custom_report.date_fetching_config or {}).get("default_period_type") or (custom_report.date_fetching_config or {}).get("period_type") or "Data Entry"
+        if resolved_period_type == "by_default":
+            resolved_period_type = "Data Entry"
+    
+    # Capitalize first letter of each word to make it look premium (e.g. "Data Entry", "Fiscal Year")
+    resolved_period_type = " ".join(word.capitalize() for word in str(resolved_period_type).split())
+    period_info = f"{resolved_period_type} : {yr_display}"
 
     # 1. Identify all referenced KPIs and Attachment fields
     referenced_kpi_ids = set()
@@ -625,7 +702,9 @@ async def generate_custom_report_data(
             "report_header_id": custom_report.report_header_id,
             "show_report_name": custom_report.show_report_name,
             "branding_title": custom_report.branding_title,
-            "year": yr,
+            "year": yr_display,
+            "period_type": resolved_period_type,
+            "period_info": period_info,
             "sections": [],
             "unique_kpi_count": unique_kpi_count,
         }
@@ -944,6 +1023,7 @@ async def generate_custom_report_data(
                 combined_rows = []
                 for rows_list in recalculated_batch.values():
                     combined_rows.extend(rows_list)
+                combined_rows = _deduplicate_rows(combined_rows)
                 ml_rows_by_field_id[mf.id] = {target_eid: combined_rows}
                 recalculated_kpi_mli_data[(kpi.id, mf.key)] = combined_rows
             else:
@@ -952,6 +1032,7 @@ async def generate_custom_report_data(
                 for rlist in recalculated_batch.values():
                     if isinstance(rlist, list):
                         all_rows.extend(rlist)
+                all_rows = _deduplicate_rows(all_rows)
                 recalculated_kpi_mli_data[(kpi.id, mf.key)] = all_rows
 
         if on_progress:
@@ -1086,11 +1167,14 @@ async def generate_custom_report_data(
             kpi_data = kpi_evaluated_data.get(kfield.kpi_id, {})
             field_eval = kpi_data.get(kfield.key, {})
 
+            cfg = getattr(f, "config", None) or {}
+            custom_name = cfg.get("custom_name") or kfield.name
+
             field_payload = {
                 "id": f.id,
                 "kpi_field_id": f.kpi_field_id,
                 "field_key": kfield.key,
-                "field_name": kfield.name,
+                "field_name": custom_name,
                 "field_type": kfield.field_type.value if hasattr(kfield.field_type, "value") else str(kfield.field_type),
                 "number": f_num,
                 "value": field_eval.get("value"),
@@ -1159,18 +1243,21 @@ async def generate_custom_report_data(
 
                 
                 # Query total count of rows
-                from sqlalchemy import func
-                total_cnt = 0
-                if entries_sorted:
-                    entry = entries_sorted[0]
-                    total_cnt = (
-                        await db.execute(
-                            select(func.count(KpiMultiLineRow.id)).where(
-                                KpiMultiLineRow.entry_id == entry.id,
-                                KpiMultiLineRow.field_id == kfield.id,
+                if date_range or (raw_filters and raw_filters.get("conditions")):
+                    total_cnt = len(filtered_value_items)
+                else:
+                    from sqlalchemy import func
+                    total_cnt = 0
+                    if entries_sorted:
+                        entry = entries_sorted[0]
+                        total_cnt = (
+                            await db.execute(
+                                select(func.count(KpiMultiLineRow.id)).where(
+                                    KpiMultiLineRow.entry_id == entry.id,
+                                    KpiMultiLineRow.field_id == kfield.id,
+                                )
                             )
-                        )
-                    ).scalar_one() or 0
+                        ).scalar_one() or 0
 
                 if preview:
                     filtered_value_items = filtered_value_items[:50]
@@ -1223,7 +1310,9 @@ async def generate_custom_report_data(
         "scalar_bold": custom_report.scalar_bold,
         "scalar_font_size": custom_report.scalar_font_size,
         "mli_font_size": custom_report.mli_font_size,
-        "year": yr,
+        "year": yr_display,
+        "period_type": resolved_period_type,
+        "period_info": period_info,
         "sections": sections_out,
         "attachments": attachments_out,
         "unique_kpi_count": unique_kpi_count,
@@ -1246,6 +1335,8 @@ async def render_custom_report_html(
         )
     if not data:
         return None
+
+    period_info = data.get("period_info") or f"Data Entry : {data.get('year') or year or ''}"
 
     # Load custom report header if present
     custom_header_model = None
@@ -1287,6 +1378,9 @@ async def render_custom_report_html(
       }
     </style>''')
 
+    if not custom_header_model:
+        out.append(f'<div style="text-align: right; font-size: 0.85rem; font-weight: bold; color: #475569; margin-bottom: 1.5rem;">{html.escape(period_info)}</div>')
+
     # Render Header at the top
     if custom_header_model:
         from app.storage.service import get_file_stream as storage_get_file_stream
@@ -1315,7 +1409,7 @@ async def render_custom_report_html(
             except Exception:
                 logo2_src = f"/api/reports/headers/{custom_header_model.id}/logo2"
 
-        out.append('<div class="report-header-container" style="display: flex; justify-content: space-between; align-items: center; width: 100%; margin-bottom: 2rem; border-bottom: 2px solid #e5e7eb; padding-bottom: 1rem;">')
+        out.append('<div class="report-header-container" style="display: flex; justify-content: space-between; align-items: center; width: 100%; margin-bottom: 2.25rem; border-bottom: 2px solid #e5e7eb; padding-bottom: 1rem; position: relative;">')
         
         # Left Logo Slot (Pinned Left)
         out.append('<div style="flex: 0 0 auto; display: flex; justify-content: flex-start; align-items: center;">')
@@ -1340,10 +1434,11 @@ async def render_custom_report_html(
             out.append(f'<div style="margin-top: 0.25rem; font-size: {sub_fs}px; color: {sub_color}; text-align: {sub_align}; font-family: {sub_ff}; font-style: italic;">{html.escape(custom_header_model.sub_heading)}</div>')
         out.append('</div>')
 
-        # Right Logo Slot (Pinned Right)
-        out.append('<div style="flex: 0 0 auto; display: flex; justify-content: flex-end; align-items: center;">')
+        # Right Logo Slot (Pinned Right) with Period Metadata below Logo 2
+        out.append('<div style="flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; justify-content: center;">')
         if logo2_src:
-            out.append(f'<img src="{logo2_src}" style="max-height: 70px; max-width: 140px; object-fit: contain;" alt="Logo 2" />')
+            out.append(f'<img src="{logo2_src}" style="max-height: 70px; max-width: 140px; object-fit: contain; margin-bottom: 4px;" alt="Logo 2" />')
+        out.append(f'<div style="font-size: 0.85rem; font-weight: bold; color: #475569; white-space: nowrap; margin-top: 4px;">{html.escape(period_info)}</div>')
         out.append('</div>')
 
         out.append('</div>')
@@ -1401,8 +1496,11 @@ async def render_custom_report_html(
                     out.append('<thead>')
                     out.append(f'<tr style="background-color: {h1_color}; color: #ffffff; border-bottom: 2px solid {h1_color}; font-size: {mli_font_size}pt;">')
                     out.append(f'<th style="border: 1px solid #d1d5db; padding: 6px 5px; text-align: center; font-weight: 600; color: #ffffff; word-break: normal; overflow-wrap: normal; white-space: normal; hyphens: none; vertical-align: middle;">S.No</th>')
+                    col_alignments = (f.get("config") or {}).get("column_alignments") or {}
                     for s_idx, sub in enumerate(f["sub_fields"]):
-                        align_css = "left" if s_idx == 0 else "center"
+                        align_css = col_alignments.get(sub["key"])
+                        if not align_css:
+                            align_css = "left" if s_idx == 0 else "center"
                         out.append(f'<th style="border: 1px solid #d1d5db; padding: 6px 5px; text-align: {align_css}; font-weight: 600; color: #ffffff; word-break: normal; overflow-wrap: normal; white-space: normal; hyphens: none; vertical-align: middle;">{sub["name"]}</th>')
                     out.append('</tr>')
                     out.append('</thead>')
@@ -1413,7 +1511,9 @@ async def render_custom_report_html(
                         out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #4b5563; text-align: center;">{r_idx + 1}</td>')
                         for s_idx, sub in enumerate(f["sub_fields"]):
                             rval = clean_numeric_value_string(row.get(sub["key"]))
-                            align_css = "left" if s_idx == 0 else "center"
+                            align_css = col_alignments.get(sub["key"])
+                            if not align_css:
+                                align_css = "left" if s_idx == 0 else "center"
                             out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #111827; text-align: {align_css};">{rval}</td>')
                         out.append('</tr>')
                     out.append('</tbody>')
@@ -1453,16 +1553,20 @@ async def export_custom_report_file(
     year: str | int,
     format: str,
     by_default: bool = False,
+    period_type: str | None = None,
 ) -> tuple[bytes, str, str]:
     """Export custom report as PDF, DOCX, or XLSX bytes, with name and content-type."""
     import re
     import io
 
     # Generate custom report data
-    data = await generate_custom_report_data(db, custom_report_id, org_id, year=year, include_drafts=False, by_default=by_default)
+    data = await generate_custom_report_data(
+        db, custom_report_id, org_id, year=year, include_drafts=False, by_default=by_default, period_type=period_type
+    )
     if not data:
         raise ValueError("Report data generation failed")
     report_name = data.get("template_name", "Custom Report")
+    period_info = data.get("period_info") or f"Data Entry : {data.get('year') or year or ''}"
     # Clean filename
     clean_report_name = re.sub(r'[^\w\s-]', '', report_name).strip().replace(' ', '_')
 
@@ -1504,13 +1608,13 @@ async def export_custom_report_file(
 
             # Title Block
             ws.merge_cells("A1:D1")
-            ws["A1"] = f"{report_name} - {sec_name}"
+            ws["A1"] = clean_excel_value(f"{report_name} - {sec_name}")
             ws["A1"].font = title_font
             ws["A1"].alignment = Alignment(vertical="center")
             ws.row_dimensions[1].height = 28
 
-            ws["A2"] = f"Year: {year}"
-            ws["A2"].font = Font(name="Calibri", size=10, italic=True)
+            ws["A2"] = period_info
+            ws["A2"].font = Font(name="Calibri", size=10, bold=True, color="475569")
             ws.row_dimensions[2].height = 18
 
             row_num = 4
@@ -1527,9 +1631,9 @@ async def export_custom_report_file(
                 row_num += 1
 
                 for f in scalars:
-                    ws.cell(row=row_num, column=1, value=f.get("field_name")).font = label_font
+                    ws.cell(row=row_num, column=1, value=clean_excel_value(f.get("field_name"))).font = label_font
                     ws.cell(row=row_num, column=1).border = thin_border
-                    ws.cell(row=row_num, column=2, value=f.get("value") if f.get("value") is not None else "—").font = normal_font
+                    ws.cell(row=row_num, column=2, value=clean_excel_value(f.get("value") if f.get("value") is not None else "—")).font = normal_font
                     ws.cell(row=row_num, column=2).border = thin_border
                     ws.row_dimensions[row_num].height = 18
                     row_num += 1
@@ -1609,12 +1713,16 @@ async def export_custom_report_file(
                         sr_val_c.border = thin_border
                         sr_val_c.alignment = Alignment(horizontal="center", vertical="center")
 
+                        col_alignments = (f.get("config") or {}).get("column_alignments") or {}
                         for col_idx, sf in enumerate(sub_fields):
                             val = item.get(sf.get("key"))
-                            c = ws.cell(row=row_num, column=col_idx+2, value=val if val is not None else "—")
+                            c = ws.cell(row=row_num, column=col_idx+2, value=clean_excel_value(val if val is not None else "—"))
                             c.font = normal_font
                             c.border = thin_border
-                            c.alignment = Alignment(horizontal="left" if col_idx == 0 else "center", vertical="center")
+                            col_align = col_alignments.get(sf.get("key"))
+                            if col_align not in ["left", "center", "right"]:
+                                col_align = "left" if col_idx == 0 else "center"
+                            c.alignment = Alignment(horizontal=col_align, vertical="center")
                         ws.row_dimensions[row_num].height = 18
                         row_num += 1
 
@@ -1760,11 +1868,30 @@ async def export_custom_report_file(
             from docx.oxml import OxmlElement
             from docx.oxml.ns import qn
             
-            header_table = doc.add_table(rows=1, cols=3)
-            header_table.autofit = False
-            header_table.columns[0].width = Inches(1.1)
-            header_table.columns[1].width = Inches(7.2 if use_landscape else 4.3)
-            header_table.columns[2].width = Inches(1.1)
+            if use_landscape:
+                heading_len = len(custom_header.main_heading)
+                sub_heading_len = len(custom_header.sub_heading) if custom_header.sub_heading else 0
+                max_len = max(heading_len, sub_heading_len)
+                font_sz = custom_header.font_size or 16
+                char_w = (font_sz * 0.45) / 72.0
+                est_w = max_len * char_w + 0.1
+                max_allowed = 7.2
+                mid_w_val = min(max_allowed, max(1.5, est_w))
+                
+                header_table = doc.add_table(rows=1, cols=3)
+                header_table.autofit = False
+                header_table.columns[0].width = Inches(1.1)
+                header_table.columns[1].width = Inches(mid_w_val)
+                header_table.columns[2].width = Inches(1.1)
+                
+                from docx.enum.table import WD_TABLE_ALIGNMENT
+                header_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            else:
+                header_table = doc.add_table(rows=1, cols=3)
+                header_table.autofit = False
+                header_table.columns[0].width = Inches(1.1)
+                header_table.columns[1].width = Inches(4.3)
+                header_table.columns[2].width = Inches(1.1)
             cell_logo = header_table.cell(0, 0)
             cell_text = header_table.cell(0, 1)
             cell_logo2 = header_table.cell(0, 2)
@@ -1787,6 +1914,15 @@ async def export_custom_report_file(
                     p_logo2.add_run().add_picture(io.BytesIO(logo_bytes2), width=Inches(1.1))
                 except Exception:
                     pass
+
+                # Add period info to the right cell, right-aligned, below the logo if logo exists
+                p_period = cell_logo2.add_paragraph()
+                p_period.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                run_period = p_period.add_run(period_info)
+                run_period.font.size = Pt(8.5)
+                run_period.font.bold = True
+                run_period.font.name = docx_font
+                run_period.font.color.rgb = RGBColor(71, 85, 105)
 
             header_align_str = (custom_header.text_align or "center").lower()
             if header_align_str == "left":
@@ -1858,6 +1994,15 @@ async def export_custom_report_file(
                 r_elem_sub.append(rFonts_sub)
 
             # Spacer
+            doc.add_paragraph()
+        else:
+            p_period = doc.add_paragraph()
+            p_period.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            run_period = p_period.add_run(period_info)
+            run_period.font.size = Pt(9.5)
+            run_period.font.bold = True
+            run_period.font.name = docx_font
+            run_period.font.color.rgb = RGBColor(71, 85, 105)
             doc.add_paragraph()
 
         # Configurable report name just below header (only if more than 1 KPI)
@@ -1999,6 +2144,7 @@ async def export_custom_report_file(
                                 hdr_cells[col_idx + 1].text = sf.get("name") or sf.get("key")
                                 style_cell_run(hdr_cells[col_idx + 1])
 
+                        col_alignments = (f.get("config") or {}).get("column_alignments") or {}
                         for item_idx, item in enumerate(value_items):
                             row_cells = table.add_row().cells
                             row_cells[0].text = str(item_idx + 1)
@@ -2009,7 +2155,15 @@ async def export_custom_report_file(
                                 row_cells[col_idx + 1].text = clean_numeric_value_string(item.get(sf.get("key")))
                                 if row_cells[col_idx + 1].paragraphs:
                                     p = row_cells[col_idx + 1].paragraphs[0]
-                                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT if col_idx == 0 else WD_ALIGN_PARAGRAPH.CENTER
+                                    col_align = col_alignments.get(sf.get("key"))
+                                    if col_align == "left":
+                                        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                                    elif col_align == "right":
+                                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                                    elif col_align == "center":
+                                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    else:
+                                        p.alignment = WD_ALIGN_PARAGRAPH.LEFT if col_idx == 0 else WD_ALIGN_PARAGRAPH.CENTER
                                     if p.runs:
                                         run = p.runs[0]
                                         run.font.size = Pt(mli_font_size)
@@ -2337,6 +2491,11 @@ async def export_custom_report_file(
                 header_elements.append(sub_p)
 
             if img and img2:
+                if use_landscape:
+                    from reportlab.pdfbase import pdfmetrics
+                    text_w = pdfmetrics.stringWidth(custom_header.main_heading, font_name_bold, pdf_main_fs)
+                    sub_w = pdfmetrics.stringWidth(custom_header.sub_heading, sub_font_name_italic, sub_font_size) if custom_header.sub_heading else 0
+                    mid_w = min(available_width - w1 - w2, max(text_w, sub_w) + 6)
                 header_table = Table(
                     [[img, header_elements, img2]],
                     colWidths=[w1, mid_w, w2],
@@ -2354,6 +2513,11 @@ async def export_custom_report_file(
             elif img:
                 w1 = logo_w + 8
                 mid_w = available_width - w1
+                if use_landscape:
+                    from reportlab.pdfbase import pdfmetrics
+                    text_w = pdfmetrics.stringWidth(custom_header.main_heading, font_name_bold, pdf_main_fs)
+                    sub_w = pdfmetrics.stringWidth(custom_header.sub_heading, sub_font_name_italic, sub_font_size) if custom_header.sub_heading else 0
+                    mid_w = min(available_width - w1, max(text_w, sub_w) + 6)
                 header_table = Table(
                     [[img, header_elements]],
                     colWidths=[w1, mid_w],
@@ -2370,6 +2534,11 @@ async def export_custom_report_file(
             elif img2:
                 w2 = logo_w2 + 8
                 mid_w = available_width - w2
+                if use_landscape:
+                    from reportlab.pdfbase import pdfmetrics
+                    text_w = pdfmetrics.stringWidth(custom_header.main_heading, font_name_bold, pdf_main_fs)
+                    sub_w = pdfmetrics.stringWidth(custom_header.sub_heading, sub_font_name_italic, sub_font_size) if custom_header.sub_heading else 0
+                    mid_w = min(available_width - w2, max(text_w, sub_w) + 6)
                 header_table = Table(
                     [[header_elements, img2]],
                     colWidths=[mid_w, w2],
@@ -2390,6 +2559,12 @@ async def export_custom_report_file(
                     hAlign='CENTER'
                 )
             story.append(header_table)
+            period_p = Paragraph(f"<font face='{font_name_bold}' size='9' color='#475569'><b>{html.escape(period_info)}</b></font>", h2_right_style)
+            story.append(period_p)
+            story.append(Spacer(1, 10))
+        else:
+            period_p = Paragraph(f"<font face='{font_name_bold}' size='9' color='#475569'><b>{html.escape(period_info)}</b></font>", h2_right_style)
+            story.append(period_p)
             story.append(Spacer(1, 10))
 
         # Configurable report name just below header (only if more than 1 KPI)
@@ -2460,6 +2635,11 @@ async def export_custom_report_file(
                             parent=cur_hdr_style,
                             alignment=TA_LEFT
                         )
+                        cur_hdr_style_right = ParagraphStyle(
+                            f"CustomTblHdrStyleRight_{col_count}",
+                            parent=cur_hdr_style,
+                            alignment=TA_RIGHT
+                        )
                         cur_body_style_center = ParagraphStyle(
                             f"CustomTblBodyStyleCenter_{col_count}",
                             parent=styles["Normal"],
@@ -2475,6 +2655,14 @@ async def export_custom_report_file(
                             fontSize=tbl_font_size,
                             leading=tbl_font_size + 1.5,
                             alignment=TA_LEFT
+                        )
+                        cur_body_style_right = ParagraphStyle(
+                            f"CustomTblBodyStyleRight_{col_count}",
+                            parent=styles["Normal"],
+                            fontName=font_name_regular,
+                            fontSize=tbl_font_size,
+                            leading=tbl_font_size + 1.5,
+                            alignment=TA_RIGHT
                         )
 
                         # Expand printable table width into side margins for wide tables (> 10 columns)
@@ -2531,6 +2719,29 @@ async def export_custom_report_file(
                                 col_widths = [sr_no_width] + [w * scale for w in raw_widths]
 
                         merged_headers = f.get("config", {}).get("merged_headers") or []
+                        col_alignments = (f.get("config") or {}).get("column_alignments") or {}
+
+                        def get_pdf_hdr_style(col_key, idx):
+                            align = col_alignments.get(col_key)
+                            if align == "left":
+                                return cur_hdr_style_left
+                            elif align == "right":
+                                return cur_hdr_style_right
+                            elif align == "center":
+                                return cur_hdr_style
+                            else:
+                                return cur_hdr_style_left if idx == 0 else cur_hdr_style
+
+                        def get_pdf_body_style(col_key, idx):
+                            align = col_alignments.get(col_key)
+                            if align == "left":
+                                return cur_body_style_left
+                            elif align == "right":
+                                return cur_body_style_right
+                            elif align == "center":
+                                return cur_body_style_center
+                            else:
+                                return cur_body_style_left if idx == 0 else cur_body_style_center
                         
                         t_style_cmds = [
                             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -2547,7 +2758,7 @@ async def export_custom_report_file(
                             covered_cols = set()
 
                             row_0 = [Paragraph("", cur_hdr_style) for _ in range(len(sub_fields) + 1)]
-                            row_1 = [Paragraph("Sr. No.", cur_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), cur_hdr_style_left if s_idx == 0 else cur_hdr_style) for s_idx, sf in enumerate(sub_fields)]
+                            row_1 = [Paragraph("Sr. No.", cur_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), get_pdf_hdr_style(sf.get("key"), s_idx)) for s_idx, sf in enumerate(sub_fields)]
                             
                             t_style_cmds.append(("BACKGROUND", (0, 0), (-1, 1), colors.HexColor(h1_color_hex)))
                             
@@ -2573,14 +2784,14 @@ async def export_custom_report_file(
                             for idx, sf in enumerate(sub_fields):
                                 c_idx = idx + 1
                                 if c_idx not in covered_cols:
-                                    hdr_st = cur_hdr_style_left if idx == 0 else cur_hdr_style
+                                    hdr_st = get_pdf_hdr_style(sf.get("key"), idx)
                                     row_0[c_idx] = Paragraph(sf.get("name") or sf.get("key"), hdr_st)
                                     t_style_cmds.append(("SPAN", (c_idx, 0), (c_idx, 1)))
 
                             pdf_table_data = [row_0, row_1]
                         else:
                             t_style_cmds.append(("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(h1_color_hex)))
-                            hdr_row = [Paragraph("Sr. No.", cur_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), cur_hdr_style_left if s_idx == 0 else cur_hdr_style) for s_idx, sf in enumerate(sub_fields)]
+                            hdr_row = [Paragraph("Sr. No.", cur_hdr_style)] + [Paragraph(sf.get("name") or sf.get("key"), get_pdf_hdr_style(sf.get("key"), s_idx)) for s_idx, sf in enumerate(sub_fields)]
                             pdf_table_data = [hdr_row]
 
                         for item_idx, item in enumerate(value_items):
@@ -2588,7 +2799,7 @@ async def export_custom_report_file(
                             for s_idx, sf in enumerate(sub_fields):
                                 val = item.get(sf.get("key"))
                                 val_str = clean_numeric_value_string(val)
-                                cell_st = cur_body_style_left if s_idx == 0 else cur_body_style_center
+                                cell_st = get_pdf_body_style(sf.get("key"), s_idx)
                                 row.append(Paragraph(val_str, cell_st))
                             pdf_table_data.append(row)
 
@@ -2747,6 +2958,11 @@ async def stream_custom_report_data(
         return
 
     selected_period = year
+    if custom_report and getattr(custom_report, "fetch_data_with_date", False):
+        if not selected_period or by_default or selected_period == "by_default":
+            selected_period = "2025/26"
+            by_default = False
+
     date_range = None
     entry_start_year: int | None = None  # calendar start year of the period (e.g. 2026 for "2026/27")
     if custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period and not by_default:
@@ -2762,6 +2978,7 @@ async def stream_custom_report_data(
                 pass
 
     yr = _parse_year_int(year)
+    yr_display = selected_period if (custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period) else yr
 
     # Yield metadata
     yield {
@@ -2769,7 +2986,7 @@ async def stream_custom_report_data(
         "custom_report_id": custom_report.id,
         "custom_report_name": custom_report.name,
         "custom_report_description": custom_report.description,
-        "year": yr,
+        "year": yr_display,
     }
 
     # 1. Identify all referenced KPIs
@@ -2930,6 +3147,7 @@ async def stream_custom_report_data(
                     combined_rows = []
                     for rows_list in ml_rows.values():
                         combined_rows.extend(rows_list)
+                    combined_rows = _deduplicate_rows(combined_rows)
                     multi_line_items_data[mf.key] = combined_rows
                 else:
                     multi_line_items_data[mf.key] = ml_rows.get(entry.id, [])
@@ -3001,14 +3219,17 @@ async def stream_custom_report_data(
             f_num = f"{sec_num}.{f_idx + 1}"
             kfield = f.kpi_field
 
+            cfg = getattr(f, "config", None) or {}
+            custom_name = cfg.get("custom_name") or kfield.name
+
             field_payload = {
                 "id": f.id,
                 "kpi_field_id": f.kpi_field_id,
                 "field_key": kfield.key,
-                "field_name": kfield.name,
+                "field_name": custom_name,
                 "field_type": kfield.field_type.value if hasattr(kfield.field_type, "value") else str(kfield.field_type),
                 "number": f_num,
-                "config": getattr(f, "config", None) or {},
+                "config": cfg,
             }
             if kfield.field_type == FieldType.multi_line_items:
                 sub_fields_orm = getattr(kfield, "sub_fields") or []
@@ -3089,6 +3310,7 @@ async def stream_custom_report_data(
                 combined_rows = []
                 for rows_list in batch_res.values():
                     combined_rows.extend(rows_list)
+                combined_rows = _deduplicate_rows(combined_rows)
                 total_count = len(combined_rows)
                 
                 yield {
@@ -3381,7 +3603,7 @@ async def export_custom_report_attachments(
             for r_idx, item in enumerate(chunk_rows):
                 ws.cell(row=r_idx+2, column=1, value=r_idx + 1)
                 for col_idx, sf in enumerate(sub_fields):
-                    ws.cell(row=r_idx+2, column=col_idx+2, value=str(item.get(sf["key"], "")))
+                    ws.cell(row=r_idx+2, column=col_idx+2, value=clean_excel_value(str(item.get(sf["key"], ""))))
             
             out_io = io.BytesIO()
             wb.save(out_io)

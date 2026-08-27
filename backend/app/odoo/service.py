@@ -331,13 +331,21 @@ def detect_odoo_list_columns(
     return out
 
 
+_ILLEGAL_CHARACTERS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+def clean_excel_value(val: Any) -> Any:
+    if isinstance(val, str):
+        return _ILLEGAL_CHARACTERS_RE.sub("", val)
+    return val
+
+
 def serialize_odoo_cell_for_xlsx(value: Any) -> Any:
     """Make Odoo cell values safe for openpyxl (lists/dicts as JSON text)."""
     if value is None:
         return ""
     if isinstance(value, (dict, list, tuple)):
-        return json.dumps(value, ensure_ascii=False, default=str)
-    return value
+        return clean_excel_value(json.dumps(value, ensure_ascii=False, default=str))
+    return clean_excel_value(value)
 
 
 def build_odoo_sample_xlsx_bytes(items: list[dict], columns: list[str]) -> bytes:
