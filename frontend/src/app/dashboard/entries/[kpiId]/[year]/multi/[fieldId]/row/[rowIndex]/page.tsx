@@ -11,6 +11,7 @@ import toast from "react-hot-toast";
 import MultiReferenceInput from "@/components/MultiReferenceInput";
 import { isSubFieldVisible as evaluateSubFieldVisible } from "@/lib/conditionalRules";
 import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
+import { CustomDatePicker } from "@/components/CustomDatePicker";
 
 function asWidgets(layout: any): Widget[] {
   if (!layout) return [];
@@ -1360,10 +1361,9 @@ export default function MultiItemRowDetail() {
                         {sf.name}
                         {sf.is_required ? " *" : ""}
                       </label>
-                      <input
-                        type="date"
+                      <CustomDatePicker
                         value={typeof val === "string" ? val : ""}
-                        onChange={(e) => handleChangeCell(key, e.target.value || undefined)}
+                        onChange={(nextVal) => handleChangeCell(key, nextVal || undefined)}
                       />
                     </div>
                   );

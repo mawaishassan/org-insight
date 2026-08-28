@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
+import { CustomDatePicker } from "@/components/CustomDatePicker";
 import {
   buildReferenceAttributeOptions,
   computeChainKpiIds,
@@ -343,11 +344,10 @@ export function MultiLineReportFilterPanel({ organizationId, token, dashboardId,
                     placeholder="Number"
                   />
                 ) : ftCond === "date" ? (
-                  <input
-                    type="date"
+                  <CustomDatePicker
                     value={c.value.length >= 10 ? c.value.slice(0, 10) : c.value}
-                    onChange={(e) => setRow({ value: e.target.value })}
-                    style={{ maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                    onChange={(nextVal) => setRow({ value: nextVal || "" })}
+                    style={{ maxWidth: "200px" }}
                   />
                 ) : ftCond === "reference" && sourceKpiIdForRef ? (
                   termKey ? (

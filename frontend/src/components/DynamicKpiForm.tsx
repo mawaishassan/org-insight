@@ -5,8 +5,9 @@
  * Renders inputs based on field type (single_line_text, number, date, boolean, multi_line_items, formula).
  */
 
-import { useFormContext } from "react-hook-form";
+import { useFormContext, Controller } from "react-hook-form";
 import MixedListInput from "@/components/MixedListInput";
+import { CustomDatePicker } from "@/components/CustomDatePicker";
 
 export type FieldType =
   | "single_line_text"
@@ -35,7 +36,7 @@ interface Props {
 }
 
 export default function DynamicKpiForm({ fields, disabled }: Props) {
-  const { register, setValue, watch, formState: { errors } } = useFormContext();
+  const { register, setValue, watch, control, formState: { errors } } = useFormContext();
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
@@ -108,11 +109,17 @@ export default function DynamicKpiForm({ fields, disabled }: Props) {
           return (
             <div key={f.id} className="form-group">
               <label htmlFor={name}>{f.name}{f.is_required ? " *" : ""}</label>
-              <input
-                id={name}
-                type="date"
-                {...register(`${name}.value_date`)}
-                disabled={disabled}
+              <Controller
+                control={control}
+                name={`${name}.value_date`}
+                render={({ field }) => (
+                  <CustomDatePicker
+                    id={name}
+                    value={field.value}
+                    onChange={field.onChange}
+                    disabled={disabled}
+                  />
+                )}
               />
               {err && <p className="form-error">{(err as { message?: string }).message}</p>}
             </div>
