@@ -52,9 +52,17 @@ export default function DashboardPage() {
         if (dashboards.length === 1) {
           // If only right on a single dashboard, go directly to that dashboard view page
           router.replace(`/dashboard/dashboards/${dashboards[0].id}?organization_id=${orgId}`);
-        } else {
-          // If multiple (or 0) dashboards, go to the list page
+        } else if (dashboards.length > 1) {
+          // If multiple dashboards, go to the list page
           router.replace(`/dashboard/dashboards?organization_id=${orgId}`);
+        } else {
+          // No KPIs and no Dashboards: check Reports access
+          const role = me.role;
+          if (role === "REPORT_VIEWER" || role === "USER" || role === "ORG_ADMIN") {
+            router.replace(`/dashboard/reports`);
+          } else {
+            router.replace("/dashboard/no-access");
+          }
         }
       } catch {
         router.replace("/dashboard/no-access");

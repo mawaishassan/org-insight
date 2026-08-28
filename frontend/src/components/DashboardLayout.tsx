@@ -539,18 +539,59 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       ? `/dashboard/entries?organization_id=${selectedOrgId}`
       : user.organization_id != null
         ? `/dashboard/entries?organization_id=${user.organization_id}`
-        : "/dashboard/entries";
-  const customReportsHref =
+        : "/dashboard/entries";  const customReportsHref =
     selectedOrgId != null
       ? `/dashboard/custom-reports?organization_id=${selectedOrgId}`
       : user.organization_id != null
         ? `/dashboard/custom-reports?organization_id=${user.organization_id}`
         : "/dashboard/custom-reports";
 
+  const reportsHref =
+    selectedOrgId != null
+      ? `/dashboard/reports?organization_id=${selectedOrgId}`
+      : user.organization_id != null
+        ? `/dashboard/reports?organization_id=${user.organization_id}`
+        : "/dashboard/reports";
+
+  const getLandingPath = () => {
+    if (isSuperAdmin) return "/dashboard/organizations";
+    if (hasKpiRights) return kpisHref;
+    return dashboardsHref;
+  };
+
+  const navItems = [
+    {
+      href: kpisHref,
+      label: "KPIs",
+      active: pathname === "/dashboard/entries" || pathname.startsWith("/dashboard/entries/kpi/") || pathname.match(/^\/dashboard\/entries\/\d+\/\d+/),
+      show: isSuperAdmin ? (selectedOrgId != null) : (role === "ORG_ADMIN" || (role === "USER" && hasKpiRights)),
+    },
+    {
+      href: dashboardsHref,
+      label: "Dashboards",
+      active: pathname.startsWith("/dashboard/dashboards"),
+      show: isSuperAdmin ? (selectedOrgId != null) : true,
+    },
+    {
+      href: reportsHref,
+      label: "Reports",
+      active: pathname.startsWith("/dashboard/reports") || pathname.includes("/report-builder"),
+      show: isSuperAdmin ? false : canViewReports(role),
+    },
+    ...(isSuperAdmin && selectedOrgId != null ? [
+      {
+        href: customReportsHref,
+        label: "Custom Reports",
+        active: pathname.startsWith("/dashboard/custom-reports"),
+        show: true,
+      }
+    ] : []),
+  ].filter((x) => x.show);
+
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
     { href: kpisHref, label: "KPIs", show: role === "ORG_ADMIN" || role === "SUPER_ADMIN" },
     { href: dashboardsHref, label: "Dashboards", show: true },
-    { href: "/dashboard/reports", label: "Reports", show: !isSuperAdmin && canViewReports(role) },
+    { href: reportsHref, label: "Reports", show: !isSuperAdmin && canViewReports(role) },
     { href: customReportsHref, label: "Custom Reports", show: isSuperAdmin && selectedOrgId != null },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },
   ].filter((x) => x.show);
@@ -619,138 +660,50 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh" }}>
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "1rem",
-          padding: "0.6rem 1rem",
-          borderBottom: "1px solid var(--border)",
-          background: "var(--surface)",
-          flexWrap: "wrap",
-        }}
-      >
-        <nav style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.95rem", flexWrap: "wrap" }} aria-label="Breadcrumb">
-          {breadcrumbs.length === 0 ? (
-            hasKpiRights ? (
-              <Link
-                href={isSuperAdmin ? "/dashboard/organizations" : "/dashboard/entries"}
-                style={{
-                  fontWeight: 700,
-                  fontSize: "1rem",
-                  color: (isSuperAdmin ? pathname === "/dashboard/organizations" : pathname === "/dashboard/entries") ? "var(--accent)" : "var(--text)",
-                  textDecoration: "none",
-                }}
-              >
-                Home
-              </Link>
-            ) : null
-          ) : (
-            breadcrumbs.map((crumb, i) => {
-              const isLast = i === breadcrumbs.length - 1;
-              return (
-                <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
-                  {i > 0 && <span style={{ color: "var(--muted)", marginRight: "0.15rem" }} aria-hidden>{"\u203A"}</span>}
-                  <Link
-                    href={crumb.href}
-                    style={{
-                      color: isLast ? "var(--text)" : "var(--muted)",
-                      textDecoration: "none",
-                      fontWeight: isLast ? 600 : undefined,
-                    }}
-                  >
-                    {crumb.label}
-                  </Link>
-                </span>
-              );
-            })
-          )}
-        </nav>
-
-        {onEntries && canEnter && (
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <label htmlFor="menu-year" style={{ fontSize: "0.85rem", color: "var(--muted)", whiteSpace: "nowrap" }}>
-              Year
-            </label>
-            <select
-              id="menu-year"
-              value={year}
-              onChange={(e) => updateEntriesParams({ year: e.target.value })}
-              style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.9rem", minWidth: 80 }}
-            >
-              {yearOptions.map((y) => (
-                <option key={y} value={y}>{y}</option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {canShowFilters && (
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", flex: 1, minWidth: 0 }}>
-            <KpiSearchInput
-              placeholder="Search KPIs..."
-              value={searchParams.get("q") ?? ""}
-              onChange={(val) => updateEntriesParams({ q: val || undefined })}
+      <header className="main-header">
+        <div style={{ display: "flex", alignItems: "center", gap: "1rem", minWidth: 0 }}>
+          {/* Logo / Branding */}
+          <Link href={getLandingPath()} className="logo-link" style={{ display: "flex", alignItems: "center", gap: "0.5rem", textDecoration: "none", color: "var(--text)" }}>
+            <img
+              src="/ustadex-logo.png"
+              alt="Ustadex Insights Logo"
               style={{
-                padding: "0.35rem 0.6rem",
-                borderRadius: 6,
-                border: "1px solid var(--border)",
-                fontSize: "0.85rem",
-                width: "clamp(120px, 20vw, 200px)",
+                width: "28px",
+                height: "28px",
+                objectFit: "contain",
+                flexShrink: 0
               }}
             />
-            <select
-              value={searchParams.get("domain_id") ?? ""}
-              onChange={(e) => updateEntriesParams({ domain_id: e.target.value || undefined, category_id: undefined })}
-              style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 100 }}
-            >
-              <option value="">All domains</option>
-              {domains.map((d) => (
-                <option key={d.id} value={d.id}>{d.name}</option>
-              ))}
-            </select>
-            <select
-              value={searchParams.get("category_id") ?? ""}
-              onChange={(e) => updateEntriesParams({ category_id: e.target.value || undefined })}
-              style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 100 }}
-            >
-              <option value="">All categories</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-            <select
-              value={searchParams.get("status") ?? "all"}
-              onChange={(e) => updateEntriesParams({ status: e.target.value === "all" ? undefined : e.target.value })}
-              style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 140 }}
-            >
-              <option value="all">All status</option>
-              <option value="submitted">Submitted</option>
-              <option value="draft">Drafted</option>
-              <option value="not_entered">Not entered</option>
-              <option value="no_user_assigned">No user assigned</option>
-            </select>
-            {orgTags.length > 0 && (
-              <select
-                value={searchParams.get("tag_id") ?? ""}
-                onChange={(e) => updateEntriesParams({ tag_id: e.target.value || undefined })}
-                style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem", minWidth: 90 }}
-              >
-                <option value="">All tags</option>
-                {orgTags.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
-            )}
-          </div>
-        )}
+            <span className="logo-text">Ustadex Insights</span>
+          </Link>
 
-        <div style={{ marginLeft: "auto", position: "relative" }} ref={menuRef}>
+          {/* Org context indicator (if Super Admin inside an org) */}
+          {isSuperAdmin && selectedOrgId && selectedOrgName && (
+            <span className="org-indicator-tag">
+              {selectedOrgName}
+            </span>
+          )}
+        </div>
+
+        {/* Main Top Navigation (Desktop Centered) */}
+        <nav className="desktop-nav">
+          {navItems.map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`nav-item-link ${item.active ? "active" : ""}`}
+            >
+              {item.label}
+            </Link>
+          ))}
+        </nav>
+
+        {/* Right Actions */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexShrink: 0 }}>
           {isDashboardWidgetFull && dashboardWidgetFullDashboardId ? (
             <Link
               href={`/dashboard/dashboards/${dashboardWidgetFullDashboardId}?${qs({ organization_id: selectedOrgId ?? undefined })}`}
-              className="btn"
-              style={{ marginRight: "0.5rem" }}
+              className="btn btn-sm"
               onClick={() => setMenuOpen(false)}
             >
               Back to dashboard
@@ -759,8 +712,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           {isSuperAdmin && isDashboardView && dashboardViewId ? (
             <Link
               href={`/dashboard/dashboards/${dashboardViewId}/design?${qs({ organization_id: selectedOrgId ?? undefined })}`}
-              className="btn btn-primary"
-              style={{ marginRight: "0.5rem" }}
+              className="btn btn-primary btn-sm"
               onClick={() => setMenuOpen(false)}
             >
               Design mode
@@ -772,139 +724,51 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 organization_id: selectedOrgId ?? undefined,
                 add_widget: 1,
               })}`}
-              className="btn btn-primary"
-              style={{ marginRight: "0.5rem" }}
+              className="btn btn-primary btn-sm"
               onClick={() => setMenuOpen(false)}
             >
               + Add widget
             </Link>
           ) : null}
-          <button
-            type="button"
-            onClick={() => setMenuOpen((o) => !o)}
-            style={{
-              padding: "0.4rem 0.6rem",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              background: "var(--surface)",
-              cursor: "pointer",
-              fontSize: "1.1rem",
-            }}
-            aria-label="Menu"
-          >
-            ☰
-          </button>
-          {menuOpen && (
-            <div
+
+          {/* User Menu Dropdown */}
+          <div style={{ position: "relative" }} ref={menuRef}>
+            <button
+              type="button"
+              onClick={() => setMenuOpen((o) => !o)}
               style={{
-                position: "absolute",
-                top: "100%",
-                right: 0,
-                marginTop: 4,
-                minWidth: 200,
-                padding: "0.5rem 0",
-                background: "var(--surface)",
+                padding: "0.35rem 0.55rem",
                 border: "1px solid var(--border)",
-                borderRadius: 8,
-                boxShadow: "var(--shadow-md)",
-                zIndex: 100,
+                borderRadius: 6,
+                background: "var(--surface)",
+                cursor: "pointer",
+                fontSize: "1rem",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center"
               }}
+              aria-label="Menu"
             >
-              {isSuperAdmin && selectedOrgId ? (
-                <>
-                  <Link
-                    href="/dashboard/organizations"
-                    style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Home
-                  </Link>
-                  <div style={{ borderTop: "1px solid var(--border)", margin: "0.35rem 0" }} />
-                  <div style={{ padding: "0.35rem 1rem", fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>
-                    {selectedOrgName ?? `Organization #${selectedOrgId}`}
-                  </div>
-                  <Link
-                    href={`/dashboard/organizations/${selectedOrgId}?tab=kpis`}
-                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    KPIs
-                  </Link>
-                  <Link
-                    href={`/dashboard/organizations/${selectedOrgId}?tab=domains`}
-                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Domains
-                  </Link>
-                  <Link
-                    href={`/dashboard/organizations/${selectedOrgId}?tab=reports`}
-                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Reports
-                  </Link>
-                  <Link
-                    href={`/dashboard/reports/headers?organization_id=${selectedOrgId}`}
-                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Report Headers
-                  </Link>
-                  <Link
-                    href={`/dashboard/custom-reports?organization_id=${selectedOrgId}`}
-                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Custom Reports
-                  </Link>
-                  <Link
-                    href={dashboardsHref}
-                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Dashboards
-                  </Link>
-                  {/* Legacy per-organization access page removed in favor of /dashboard/access */}
-                  <Link
-                    href={`/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage`}
-                    style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    Settings
-                  </Link>
-                  <div style={{ borderTop: "1px solid var(--border)", margin: "0.35rem 0" }} />
-                  <div style={{ padding: "0.35rem 1rem", fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>
-                    Account
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      clearTokens();
-                      router.push("/login");
-                      router.refresh();
-                    }}
-                    style={{
-                      display: "block",
-                      width: "100%",
-                      padding: "0.5rem 1rem",
-                      paddingLeft: "1.5rem",
-                      textAlign: "left",
-                      border: "none",
-                      background: "none",
-                      font: "inherit",
-                      color: "var(--text)",
-                      cursor: "pointer",
-                      fontSize: "0.9rem",
-                    }}
-                  >
-                    Logout
-                  </button>
-                </>
-              ) : (
-                <>
-                  {canManageOrgs(role) && (
+              ☰
+            </button>
+            {menuOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  right: 0,
+                  marginTop: 4,
+                  minWidth: 200,
+                  padding: "0.5rem 0",
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  boxShadow: "var(--shadow-md)",
+                  zIndex: 100,
+                }}
+              >
+                {isSuperAdmin && selectedOrgId ? (
+                  <>
                     <Link
                       href="/dashboard/organizations"
                       style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
@@ -912,58 +776,387 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     >
                       Home
                     </Link>
-                  )}
-                  {hamburgerItems.map(({ href, label }) => (
+                    <div style={{ borderTop: "1px solid var(--border)", margin: "0.35rem 0" }} />
+                    <div style={{ padding: "0.35rem 1rem", fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>
+                      {selectedOrgName ?? `Organization #${selectedOrgId}`}
+                    </div>
                     <Link
-                      key={href}
-                      href={href}
-                      style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      href={`/dashboard/organizations/${selectedOrgId}?tab=kpis`}
+                      style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
                       onClick={() => setMenuOpen(false)}
                     >
-                      {label}
+                      KPIs
                     </Link>
-                  ))}
-                  {/* Per-organization Access control entry removed; use /dashboard/access instead */}
-                  {!isSuperAdmin && canManageDomains(role) && (
                     <Link
-                      href="/dashboard/domains"
-                      style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      href={`/dashboard/organizations/${selectedOrgId}?tab=domains`}
+                      style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
                       onClick={() => setMenuOpen(false)}
                     >
                       Domains
                     </Link>
+                    <Link
+                      href={`/dashboard/organizations/${selectedOrgId}?tab=reports`}
+                      style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      Reports
+                    </Link>
+                    <Link
+                      href={`/dashboard/reports/headers?organization_id=${selectedOrgId}`}
+                      style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      Report Headers
+                    </Link>
+                    <Link
+                      href={`/dashboard/custom-reports?organization_id=${selectedOrgId}`}
+                      style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      Custom Reports
+                    </Link>
+                    <Link
+                      href={dashboardsHref}
+                      style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      Dashboards
+                    </Link>
+                    <Link
+                      href={`/dashboard/organizations/${selectedOrgId}?tab=settings&sub=storage`}
+                      style={{ display: "block", padding: "0.5rem 1rem", paddingLeft: "1.5rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      Settings
+                    </Link>
+                    <div style={{ borderTop: "1px solid var(--border)", margin: "0.35rem 0" }} />
+                    <div style={{ padding: "0.35rem 1rem", fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>
+                      Account
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        clearTokens();
+                        router.push("/login");
+                        router.refresh();
+                      }}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        padding: "0.5rem 1rem",
+                        paddingLeft: "1.5rem",
+                        textAlign: "left",
+                        border: "none",
+                        background: "none",
+                        font: "inherit",
+                        color: "var(--text)",
+                        cursor: "pointer",
+                        fontSize: "0.9rem",
+                      }}
+                    >
+                      Logout
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {canManageOrgs(role) && (
+                      <Link
+                        href="/dashboard/organizations"
+                        style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                        onClick={() => setMenuOpen(false)}
+                      >
+                        Home
+                      </Link>
+                    )}
+                    {hamburgerItems.map(({ href, label }) => (
+                      <Link
+                        key={href}
+                        href={href}
+                        style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                        onClick={() => setMenuOpen(false)}
+                      >
+                        {label}
+                      </Link>
+                    ))}
+                    {!isSuperAdmin && canManageDomains(role) && (
+                      <Link
+                        href="/dashboard/domains"
+                        style={{ display: "block", padding: "0.5rem 1rem", color: "var(--text)", textDecoration: "none", fontSize: "0.9rem" }}
+                        onClick={() => setMenuOpen(false)}
+                      >
+                        Domains
+                      </Link>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        clearTokens();
+                        router.push("/login");
+                        router.refresh();
+                      }}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        padding: "0.5rem 1rem",
+                        textAlign: "left",
+                        border: "none",
+                        background: "none",
+                        font: "inherit",
+                        color: "var(--text)",
+                        cursor: "pointer",
+                        fontSize: "0.9rem",
+                      }}
+                    >
+                      Logout
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* Secondary Sub-Header for Breadcrumbs & Filters */}
+      {(breadcrumbs.length > 0 || (onEntries && canEnter && orgId != null)) && (
+        <div className="sub-header">
+          {/* Breadcrumbs (Left) */}
+          <nav aria-label="Breadcrumb" style={{ display: "flex", alignItems: "center", fontSize: "0.825rem", minWidth: 0 }}>
+            {breadcrumbs.map((crumb, i) => {
+              const isLast = i === breadcrumbs.length - 1;
+              const isHome = crumb.label.toLowerCase() === "home";
+              return (
+                <span key={i} style={{ display: "inline-flex", alignItems: "center", minWidth: 0 }}>
+                  {i > 0 && (
+                    <span style={{ color: "rgba(148, 163, 184, 0.45)", margin: "0 0.45rem", userSelect: "none", flexShrink: 0 }} aria-hidden>
+                      /
+                    </span>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      clearTokens();
-                      router.push("/login");
-                      router.refresh();
-                    }}
+                  <Link
+                    href={crumb.href}
                     style={{
-                      display: "block",
-                      width: "100%",
-                      padding: "0.5rem 1rem",
-                      textAlign: "left",
-                      border: "none",
-                      background: "none",
-                      font: "inherit",
-                      color: "var(--text)",
-                      cursor: "pointer",
-                      fontSize: "0.9rem",
+                      color: isLast ? "var(--text)" : "var(--muted)",
+                      textDecoration: "none",
+                      fontWeight: isLast ? 600 : 500,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      minWidth: 0,
+                      transition: "color 0.15s ease",
                     }}
+                    className="breadcrumb-item-link"
                   >
-                    Logout
-                  </button>
-                </>
+                    {crumb.label}
+                  </Link>
+                </span>
+              );
+            })}
+          </nav>
+
+          {/* Filters (Right) */}
+          {onEntries && canEnter && orgId != null && (
+            <div className="filters-container">
+              <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                <span style={{ fontSize: "0.8rem", color: "var(--muted)", whiteSpace: "nowrap" }}>Year</span>
+                <select
+                  value={year}
+                  onChange={(e) => updateEntriesParams({ year: e.target.value })}
+                  style={{ padding: "0.25rem 0.4rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.8rem", background: "var(--surface)", color: "var(--text)" }}
+                >
+                  {yearOptions.map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </div>
+
+              <KpiSearchInput
+                placeholder="Search KPIs..."
+                value={searchParams.get("q") ?? ""}
+                onChange={(val) => updateEntriesParams({ q: val || undefined })}
+                style={{
+                  padding: "0.25rem 0.5rem",
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  fontSize: "0.8rem",
+                  width: "120px",
+                  background: "var(--surface)",
+                  color: "var(--text)"
+                }}
+              />
+
+              <select
+                value={searchParams.get("domain_id") ?? ""}
+                onChange={(e) => updateEntriesParams({ domain_id: e.target.value || undefined, category_id: undefined })}
+                style={{ padding: "0.25rem 0.4rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.8rem", background: "var(--surface)", color: "var(--text)" }}
+              >
+                <option value="">All domains</option>
+                {domains.map((d) => (
+                  <option key={d.id} value={d.id}>{d.name}</option>
+                ))}
+              </select>
+
+              <select
+                value={searchParams.get("category_id") ?? ""}
+                onChange={(e) => updateEntriesParams({ category_id: e.target.value || undefined })}
+                style={{ padding: "0.25rem 0.4rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.8rem", background: "var(--surface)", color: "var(--text)" }}
+              >
+                <option value="">All categories</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+
+              <select
+                value={searchParams.get("status") ?? "all"}
+                onChange={(e) => updateEntriesParams({ status: e.target.value === "all" ? undefined : e.target.value })}
+                style={{ padding: "0.25rem 0.4rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.8rem", background: "var(--surface)", color: "var(--text)" }}
+              >
+                <option value="all">All status</option>
+                <option value="submitted">Submitted</option>
+                <option value="draft">Drafted</option>
+                <option value="not_entered">Not entered</option>
+                <option value="no_user_assigned">No user assigned</option>
+              </select>
+
+              {orgTags.length > 0 && (
+                <select
+                  value={searchParams.get("tag_id") ?? ""}
+                  onChange={(e) => updateEntriesParams({ tag_id: e.target.value || undefined })}
+                  style={{ padding: "0.25rem 0.4rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.8rem", background: "var(--surface)", color: "var(--text)" }}
+                >
+                  <option value="">All tags</option>
+                  {orgTags.map((t) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
               )}
             </div>
           )}
         </div>
-      </header>
+      )}
 
       <main style={{ flex: 1, padding: "1.5rem" }}>{children}</main>
+
+      <style jsx global>{`
+        .main-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0.6rem 1.25rem;
+          background: var(--surface);
+          border-bottom: 1px solid var(--border);
+          box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+          min-height: 52px;
+          position: relative;
+        }
+
+        .logo-link {
+          transition: opacity 0.15s ease;
+          flex-shrink: 0;
+        }
+        .logo-link:hover {
+          opacity: 0.85;
+        }
+        .logo-text {
+          font-weight: 800;
+          font-size: 1.1rem;
+          letter-spacing: -0.02em;
+        }
+
+        .org-indicator-tag {
+          font-size: 0.72rem;
+          font-weight: 600;
+          padding: 0.2rem 0.5rem;
+          border-radius: 4px;
+          background: rgba(59, 130, 246, 0.08);
+          color: var(--accent, #3182ce);
+          border: 1px solid rgba(59, 130, 246, 0.15);
+          margin-left: 0.5rem;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          max-width: 140px;
+          flex-shrink: 0;
+        }
+
+        .desktop-nav {
+          position: absolute;
+          left: 50%;
+          transform: translateX(-50%);
+          display: flex;
+          align-items: center;
+          gap: 1.5rem;
+        }
+
+        .nav-item-link {
+          font-size: 0.9rem;
+          font-weight: 500;
+          color: var(--muted);
+          text-decoration: none;
+          padding: 0.4rem 0.25rem;
+          border-bottom: 2px solid transparent;
+          transition: all 0.15s ease-in-out;
+          white-space: nowrap;
+        }
+        .nav-item-link:hover {
+          color: var(--accent);
+        }
+        .nav-item-link.active {
+          color: var(--accent);
+          font-weight: 600;
+          border-bottom: 2px solid var(--accent);
+        }
+
+        .sub-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0.6rem 1.5rem;
+          background: var(--surface);
+          border-bottom: 1px solid var(--border);
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+          flex-wrap: wrap;
+          gap: 0.75rem;
+        }
+
+        .breadcrumb-item-link {
+          transition: color 0.15s ease-in-out;
+        }
+        .breadcrumb-item-link:hover {
+          color: var(--accent) !important;
+        }
+
+        .filters-container {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          flex-wrap: wrap;
+        }
+
+        @media (max-width: 768px) {
+          .desktop-nav {
+            display: none;
+          }
+          .org-indicator-tag {
+            display: none;
+          }
+          .sub-header {
+            flex-direction: column;
+            align-items: stretch;
+          }
+          .filters-container {
+            justify-content: space-between;
+            width: 100%;
+          }
+          .logo-text {
+            font-size: 1rem;
+          }
+        }
+      `}</style>
     </div>
   );
 }

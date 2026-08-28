@@ -879,7 +879,9 @@ export default function KpiFieldsPage() {
         };
       });
       const jsonStr = JSON.stringify(cleanSubs, null, 2);
-      navigator.clipboard.writeText(jsonStr).catch(() => {});
+      if (typeof window !== "undefined" && navigator?.clipboard) {
+        navigator.clipboard.writeText(jsonStr).catch(() => {});
+      }
       const blob = new Blob([jsonStr], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -907,7 +909,9 @@ export default function KpiFieldsPage() {
     });
 
     const csvContent = "\uFEFF" + csvRows.join("\n");
-    navigator.clipboard.writeText(csvContent).catch(() => {});
+    if (typeof window !== "undefined" && navigator?.clipboard) {
+      navigator.clipboard.writeText(csvContent).catch(() => {});
+    }
 
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);

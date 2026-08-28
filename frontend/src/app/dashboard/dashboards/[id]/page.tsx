@@ -300,7 +300,52 @@ export default function DashboardViewPage() {
 
   const widgets = useMemo(() => asWidgets(dashboard?.layout), [dashboard?.layout]);
 
-  if (loading) return <WidgetSpinnerLoader size="large" text="Loading dashboard..." minHeight={300} />;
+  if (loading) {
+    return (
+      <div style={{ minHeight: "400px", position: "relative" }}>
+        <div
+          style={{
+            position: "fixed",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            zIndex: 100,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            className="effective-spinner"
+            style={{
+              width: 48,
+              height: 48,
+              borderWidth: 3.5,
+            }}
+          />
+          <span
+            className="effective-spinner-text"
+            style={{
+              marginTop: "0.85rem",
+              fontSize: "0.875rem",
+              fontWeight: 600,
+              color: "#1e293b",
+              background: "var(--surface)",
+              padding: "0.35rem 0.85rem",
+              borderRadius: 999,
+              boxShadow: "var(--shadow-md, 0 4px 12px rgba(0,0,0,0.05))",
+              border: "1px solid var(--border)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Loading dashboard data...
+          </span>
+        </div>
+      </div>
+    );
+  }
   if (error) return <p className="form-error">{error}</p>;
   if (!dashboard) return null;
 
@@ -364,7 +409,7 @@ function DashboardViewContent({
   setSelectedPeriod: (s: string) => void;
   customPeriods: any[];
   periodOptions: any[];
-}) {  const { isOrgAdmin, openGlobalModal } = useDashboardCustomization();
+}) {  const { isOrgAdmin, openGlobalModal, isAnyWidgetLoading } = useDashboardCustomization();
   const token = getAccessToken();
 
 
@@ -378,7 +423,8 @@ function DashboardViewContent({
               {dashboard.description}
             </p>
           )}
-        </div>        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
           {dashboard.fetch_data_with_date && (
             <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -450,69 +496,131 @@ function DashboardViewContent({
         </div>
       </div>
 
-      {syncInfo?.has_odoo_graphs && (
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            padding: "0.75rem 1rem",
-            background: "var(--surface)",
-            borderRadius: "var(--radius, 8px)",
-            border: "1px solid var(--border)",
-            marginBottom: "0.5rem"
-          }}
-        >
-          <div>
-            <h3 style={{ margin: 0, fontSize: "1rem", fontWeight: 600 }}>LMS Data Integration</h3>
-            <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.8rem", color: "var(--muted)" }}>
-              This dashboard contains graphs generated via LMS integrated API.
-            </p>
-          </div>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={syncing}
-            onClick={handleSync}
+      {/* Main dashboard page section with relative positioning for local loading overlays */}
+      <div style={{ position: "relative", minHeight: "220px", width: "100%" }}>
+        {syncInfo?.has_odoo_graphs && (
+          <div
             style={{
-              padding: "0.5rem 1rem",
-              borderRadius: "6px",
-              cursor: syncing ? "not-allowed" : "pointer",
-              display: "inline-flex",
+              display: "flex",
+              justifyContent: "space-between",
               alignItems: "center",
-              gap: "0.5rem",
-              fontSize: "0.875rem",
-              fontWeight: 500
+              padding: "0.75rem 1rem",
+              background: "var(--surface)",
+              borderRadius: "var(--radius, 8px)",
+              border: "1px solid var(--border)",
+              marginBottom: "1rem"
             }}
           >
-            {syncing ? "Syncing LMS..." : "Load Latest LMS Data"}
-          </button>
-        </div>
-      )}
-
-      {widgets.length === 0 ? (
-        <Card title="No widgets">
-          <p style={{ color: "var(--muted)", margin: 0 }}>This dashboard has no widgets yet.</p>
-        </Card>
-      ) : (
-        <div
-          style={{
-            display: "grid",
-            gap: "1rem",
-            gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
-          }}
-        >
-          {widgets.map((w) => (
-            <div key={`${w.id}-${refreshCount}`} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
-              <WidgetWithPeriodSelector
-                widget={w}
-                organizationId={dashboard.organization_id}
-                dashboardId={dashboard.id}
-              />
+            <div>
+              <h3 style={{ margin: 0, fontSize: "1rem", fontWeight: 600 }}>LMS Data Integration</h3>
+              <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.8rem", color: "var(--muted)" }}>
+                This dashboard contains graphs generated via LMS integrated API.
+              </p>
             </div>
-          ))}
-        </div>
-      )}
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={syncing}
+              onClick={handleSync}
+              style={{
+                padding: "0.5rem 1rem",
+                borderRadius: "6px",
+                cursor: syncing ? "not-allowed" : "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                fontSize: "0.875rem",
+                fontWeight: 500
+              }}
+            >
+              {syncing ? "Syncing LMS..." : "Load Latest LMS Data"}
+            </button>
+          </div>
+        )}
+
+        {widgets.length === 0 ? (
+          <Card title="No widgets">
+            <p style={{ color: "var(--muted)", margin: 0 }}>This dashboard has no widgets yet.</p>
+          </Card>
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gap: "1rem",
+              gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+            }}
+          >
+            {widgets.map((w) => (
+              <div key={`${w.id}-${refreshCount}`} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
+                <WidgetWithPeriodSelector
+                  widget={w}
+                  organizationId={dashboard.organization_id}
+                  dashboardId={dashboard.id}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Local Loading Overlay */}
+        {isAnyWidgetLoading && (
+          <>
+            <div
+              style={{
+                position: "absolute",
+                inset: "-0.5rem",
+                zIndex: 99,
+                background: "rgba(255, 255, 255, 0.55)",
+                backdropFilter: "blur(4px)",
+                WebkitBackdropFilter: "blur(4px)",
+                pointerEvents: "auto",
+                transition: "all 0.25s ease",
+                borderRadius: "8px",
+              }}
+            />
+            <div
+              style={{
+                position: "fixed",
+                top: "50%",
+                left: "50%",
+                transform: "translate(-50%, -50%)",
+                zIndex: 100,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                pointerEvents: "none",
+              }}
+            >
+              <div
+                className="effective-spinner"
+                style={{
+                  width: 48,
+                  height: 48,
+                  borderWidth: 3.5,
+                }}
+              />
+              <span
+                className="effective-spinner-text"
+                style={{
+                  marginTop: "0.85rem",
+                  fontSize: "0.875rem",
+                  fontWeight: 600,
+                  color: "#1e293b",
+                  background: "var(--surface)",
+                  padding: "0.35rem 0.85rem",
+                  borderRadius: 999,
+                  boxShadow: "var(--shadow-md, 0 4px 12px rgba(0,0,0,0.05))",
+                  border: "1px solid var(--border)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Loading dashboard data...
+              </span>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
