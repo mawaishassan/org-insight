@@ -1,5 +1,6 @@
 import React, { Dispatch, SetStateAction, ReactNode } from "react";
 import { api } from "@/lib/api";
+import { CustomDatePicker } from "@/components/CustomDatePicker";
 import {
   SubField,
   FieldSummary,
@@ -504,11 +505,10 @@ export default function MultiItemsAdvancedFiltersPanel({
                           }
                           if (ftCond === "date") {
                             return (
-                              <input
-                                type="date"
+                              <CustomDatePicker
                                 value={c.value.length >= 10 ? c.value.slice(0, 10) : c.value}
-                                onChange={(e) => setRow(idx, { value: e.target.value })}
-                                style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                                onChange={(nextVal) => setRow(idx, { value: nextVal || "" })}
+                                style={{ width: "100%" }}
                               />
                             );
                           }

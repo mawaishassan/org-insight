@@ -13,6 +13,7 @@ import { OdooMultiLineImportAdmin } from "@/components/OdooMultiLineImportConfig
 import { MLIExtractionRulesPanel } from "@/components/MLIExtractionRulesPanel";
 import { MliFormulaBuilderModal } from "@/components/MliFormulaBuilderModal";
 import { LinkedConfigUI } from "@/components/LinkedConfigUI";
+import { CustomDatePicker } from "@/components/CustomDatePicker";
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
   return new URLSearchParams(
@@ -7392,11 +7393,10 @@ function FormulaBuilder({
                       placeholder="Number"
                     />
                   ) : ftCond === "date" ? (
-                    <input
-                      type="date"
+                    <CustomDatePicker
                       value={c.value.length >= 10 ? c.value.slice(0, 10) : c.value}
-                      onChange={(e) => setRow({ value: e.target.value })}
-                      style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                      onChange={(nextVal) => setRow({ value: nextVal || "" })}
+                      style={{ width: "100%" }}
                     />
                   ) : ftCond === "reference" && refMetaRow ? (
                     refOptions.length > 0 ? (

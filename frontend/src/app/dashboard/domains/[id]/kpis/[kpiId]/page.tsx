@@ -18,6 +18,7 @@ import {
 import { AttachmentFieldControl } from "@/components/AttachmentFieldControl";
 import MultiReferenceInput from "@/components/MultiReferenceInput";
 import { isFieldVisible as evaluateFieldVisible } from "@/lib/conditionalRules";
+import { CustomDatePicker } from "@/components/CustomDatePicker";
 
 interface ReferenceConfig {
   reference_source_kpi_id?: number;
@@ -2724,11 +2725,10 @@ export default function DomainKpiDetailPage() {
                       return (
                         <div key={f.id} style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
                           <label style={{ minWidth: 160, fontWeight: 500 }}>{f.name}{f.is_required ? " *" : ""}</label>
-                          <input
-                            type="date"
+                          <CustomDatePicker
                             value={val?.value_date ?? ""}
-                            onChange={(e) => updateField(f.id, "value_date", e.target.value)}
-                            style={{ padding: "0.5rem", border: "1px solid var(--border)", borderRadius: 6 }}
+                            onChange={(nextVal) => updateField(f.id, "value_date", nextVal)}
+                            style={{ maxWidth: 200 }}
                           />
                         </div>
                       );
@@ -5025,15 +5025,14 @@ export default function DomainKpiDetailPage() {
                                     (() => {
                                       const cellVal = row[s.key];
                                       return (
-                                        <input
-                                          type="date"
+                                        <CustomDatePicker
                                           value={typeof cellVal === "string" ? cellVal : ""}
-                                          onChange={(e) => {
+                                          onChange={(nextVal) => {
                                             const next = [...rows];
-                                            next[rowIdx] = { ...next[rowIdx], [s.key]: e.target.value || undefined };
+                                            next[rowIdx] = { ...next[rowIdx], [s.key]: nextVal || undefined };
                                             setRows(next);
                                           }}
-                                          style={{ width: "100%", maxWidth: 140, padding: "0.35rem" }}
+                                          style={{ maxWidth: 140 }}
                                         />
                                       );
                                     })()
