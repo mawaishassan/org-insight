@@ -386,51 +386,6 @@ export function DashboardCustomizationProvider({
     >
       {children}
 
-      {/* Single Central Screen Spinner Overlay */}
-      {isAnyWidgetLoading && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 99999,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(255, 255, 255, 0.4)",
-            backdropFilter: "blur(10px)",
-            WebkitBackdropFilter: "blur(10px)",
-            pointerEvents: "none",
-            transition: "all 0.25s ease",
-          }}
-        >
-          <div
-            className="effective-spinner"
-            style={{
-              width: 52,
-              height: 52,
-              borderWidth: 4,
-            }}
-          />
-          <span
-            className="effective-spinner-text"
-            style={{
-              marginTop: "0.9rem",
-              fontSize: "0.92rem",
-              fontWeight: 600,
-              color: "#1e293b",
-              background: "rgba(255, 255, 255, 0.95)",
-              padding: "0.35rem 0.95rem",
-              borderRadius: 999,
-              boxShadow: "0 4px 18px rgba(0,0,0,0.08)",
-              border: "1px solid rgba(226,232,240,0.9)",
-            }}
-          >
-            Loading dashboard data...
-          </span>
-        </div>
-      )}
-
       {/* Individual Label Customizer Modal */}
       {activeLabelToEdit && (
         <IndividualEditModal

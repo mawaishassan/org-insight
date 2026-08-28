@@ -386,4 +386,14 @@ table.report-table th {
 .custom-report table tbody tr td:nth-child(2),
 .custom-report table thead tr th:nth-child(2) {
   text-align: left;
+}
+
+@keyframes effective-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes effective-pulse-text {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
 }
