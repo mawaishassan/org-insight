@@ -1279,7 +1279,7 @@ export default function CustomReportDesignPage() {
     kpiId?: number;
   }>({ type: "outline" });
 
-  const [activeMliTab, setActiveMliTab] = useState<"columns" | "widths" | "filters" | "footer">("columns");
+  const [activeMliTab, setActiveMliTab] = useState<"columns" | "widths" | "filters" | "footer" | "rename">("columns");
 
   // KPI Creator details state
   const [newKpiName, setNewKpiName] = useState("");
@@ -3087,7 +3087,8 @@ export default function CustomReportDesignPage() {
                                             sort_direction: f.config?.sort_direction || "asc",
                                             merged_headers: f.config?.merged_headers || [],
                                             custom_sub_field_labels: f.config?.custom_sub_field_labels || {},
-                                            column_alignments: f.config?.column_alignments || {}
+                                            column_alignments: f.config?.column_alignments || {},
+                                            custom_name: f.config?.custom_name || ""
                                           });
                                           setFilterDraft(payloadToFilterDraft((f.config?.filters || { conditions: [], _version: 2 }) as any));
                                         } else {
@@ -4054,6 +4055,11 @@ export default function CustomReportDesignPage() {
               return (
                 <div style={{ display: "grid", gap: "1rem" }}>
 
+                  {f.field_type === "multi_line_items" && (
+                    <div style={{ fontSize: "0.82rem", color: "var(--text-secondary)", borderBottom: "1px solid var(--border)", paddingBottom: "0.5rem", marginBottom: "0.25rem" }}>
+                      <strong>MLI Table:</strong> {f.field_name} (System Key: <code>{f.field_key}</code>)
+                    </div>
+                  )}
 
                   {/* Config selector for MLIs */}
                   {f.field_type === "multi_line_items" ? (
@@ -4062,6 +4068,7 @@ export default function CustomReportDesignPage() {
                       <button type="button" className={`btn btn-sm ${activeMliTab === "widths" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("widths")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>📐 Column Widths</button>
                       <button type="button" className={`btn btn-sm ${activeMliTab === "filters" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("filters")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>🔍 Row Filters & Sort</button>
                       <button type="button" className={`btn btn-sm ${activeMliTab === "footer" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("footer")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>📊 Table Footer</button>
+                      <button type="button" className={`btn btn-sm ${activeMliTab === "rename" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("rename")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>🏷️ Rename Table</button>
                     </div>
                   ) : (
                     <div style={{ display: "grid", gap: "1rem", background: "white", padding: "1rem", borderRadius: 8, border: "1px solid var(--border)" }}>
@@ -4112,6 +4119,26 @@ export default function CustomReportDesignPage() {
                           </p>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {/* MLI Tab 5: Rename Table */}
+                  {f.field_type === "multi_line_items" && activeMliTab === "rename" && editingFieldConfig && (
+                    <div style={{ display: "grid", gap: "1rem", background: "white", padding: "1rem", borderRadius: 8, border: "1px solid var(--border)" }}>
+                      <div className="form-group">
+                        <label style={{ fontWeight: 650, fontSize: "0.85rem", display: "block", marginBottom: "0.25rem" }}>Rename MLI (Table) Name (Report display only)</label>
+                        <input
+                          type="text"
+                          className="form-control"
+                          value={editingFieldConfig.custom_name || ""}
+                          onChange={(e) => setEditingFieldConfig({ ...editingFieldConfig, custom_name: e.target.value })}
+                          placeholder={f.field_name}
+                          style={{ width: "100%", padding: "0.45rem", fontSize: "0.82rem", borderRadius: 5, border: "1px solid var(--border)" }}
+                        />
+                        <p style={{ margin: "4px 0 0", fontSize: "0.73rem", color: "var(--muted)" }}>
+                          The new table name will only be presented in reports. Leave empty to use system default name.
+                        </p>
+                      </div>
                     </div>
                   )}
 
@@ -4550,7 +4577,8 @@ export default function CustomReportDesignPage() {
                                     sort_direction: editingFieldConfig.sort_direction,
                                     merged_headers: editingFieldConfig.merged_headers,
                                     custom_sub_field_labels: editingFieldConfig.custom_sub_field_labels,
-                                    column_alignments: editingFieldConfig.column_alignments || {}
+                                    column_alignments: editingFieldConfig.column_alignments || {},
+                                    custom_name: editingFieldConfig.custom_name || null
                                   }
                                 };
                                 return next;

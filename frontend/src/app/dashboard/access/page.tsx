@@ -69,9 +69,9 @@ export default function AccessDashboardPage() {
   const [externalLoginUrl, setExternalLoginUrl] = useState<string>("");
   const [externalDbName, setExternalDbName] = useState<string>("OBE");
   const [externalLoginSaving, setExternalLoginSaving] = useState(false);
-  const [externalBulkOpen, setExternalBulkOpen] = useState(false);
-  const [externalBulkMode, setExternalBulkMode] = useState<"append" | "override">("append");
-  const [externalBulkUploading, setExternalBulkUploading] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkUploading, setBulkUploading] = useState(false);
+  const [bulkErrors, setBulkErrors] = useState<string[]>([]);
 
   const orgId = me?.organization_id ?? null;
   const isOrgAdmin = me?.role === "ORG_ADMIN";
@@ -666,7 +666,7 @@ export default function AccessDashboardPage() {
             </div>
           )}
 
-          {/* External users bulk upload */}
+          {/* Unified Bulk Import Card */}
           <div className="card" style={{ padding: "0.75rem 0.9rem", marginBottom: "0.9rem" }}>
             <div
               style={{
@@ -677,35 +677,22 @@ export default function AccessDashboardPage() {
                 marginBottom: "0.5rem",
               }}
             >
-              <h3 style={{ margin: 0, fontSize: "0.95rem" }}>Bulk upload external users</h3>
-              <button type="button" className="btn" style={{ fontSize: "0.85rem" }} onClick={() => setExternalBulkOpen((v) => !v)}>
-                {externalBulkOpen ? "Hide" : "Bulk upload"}
+              <h3 style={{ margin: 0, fontSize: "0.95rem" }}>Bulk import users</h3>
+              <button
+                type="button"
+                className="btn"
+                style={{ fontSize: "0.85rem" }}
+                onClick={() => {
+                  setBulkOpen((v) => !v);
+                  setBulkErrors([]);
+                }}
+              >
+                {bulkOpen ? "Hide" : "Bulk import"}
               </button>
             </div>
 
-            {externalBulkOpen && (
+            {bulkOpen && (
               <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", alignItems: "center" }}>
-                  <label style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                    <input
-                      type="radio"
-                      name="externalBulkMode"
-                      checked={externalBulkMode === "append"}
-                      onChange={() => setExternalBulkMode("append")}
-                    />
-                    Append (create new only)
-                  </label>
-                  <label style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                    <input
-                      type="radio"
-                      name="externalBulkMode"
-                      checked={externalBulkMode === "override"}
-                      onChange={() => setExternalBulkMode("override")}
-                    />
-                    Override (update existing by username)
-                  </label>
-                </div>
-
                 <button
                   type="button"
                   className="btn"
@@ -713,7 +700,7 @@ export default function AccessDashboardPage() {
                     if (!token || orgId == null) return;
                     try {
                       const url = getApiUrl(
-                        `/users/external/template?${new URLSearchParams({
+                        `/users/bulk-template?${new URLSearchParams({
                           organization_id: String(orgId),
                         }).toString()}`
                       );
@@ -725,7 +712,7 @@ export default function AccessDashboardPage() {
                       const blob = await res.blob();
                       const a = document.createElement("a");
                       a.href = URL.createObjectURL(blob);
-                      a.download = `external_users_template_${orgId}.xlsx`;
+                      a.download = `users_import_template_${orgId}.xlsx`;
                       a.click();
                       URL.revokeObjectURL(a.href);
                     } catch {
@@ -733,40 +720,35 @@ export default function AccessDashboardPage() {
                     }
                   }}
                 >
-                  Download Excel template
+                  Download template (Excel)
                 </button>
 
                 <label
                   className="btn btn-primary"
                   style={{
-                    cursor: !externalBulkUploading ? "pointer" : "not-allowed",
-                    opacity: externalBulkUploading ? 0.7 : 1,
+                    cursor: !bulkUploading ? "pointer" : "not-allowed",
+                    opacity: bulkUploading ? 0.7 : 1,
                   }}
                 >
-                  {externalBulkUploading ? "Uploading…" : "Upload Excel"}
+                  {bulkUploading ? "Uploading…" : "Upload Excel"}
                   <input
                     type="file"
                     accept=".xlsx"
                     style={{ display: "none" }}
-                    disabled={externalBulkUploading || orgId == null}
+                    disabled={bulkUploading || orgId == null}
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
                       e.target.value = "";
                       if (!file || !token || orgId == null) return;
-                      if (externalBulkMode === "override") {
-                        const ok = window.confirm(
-                          "Override mode updates existing external users (matched by username) using the file values. Continue?"
-                        );
-                        if (!ok) return;
-                      }
-                      setExternalBulkUploading(true);
+
+                      setBulkUploading(true);
+                      setBulkErrors([]);
                       try {
                         const form = new FormData();
                         form.append("file", file);
                         const url = getApiUrl(
-                          `/users/external/bulk-upload?${new URLSearchParams({
+                          `/users/bulk-upload?${new URLSearchParams({
                             organization_id: String(orgId),
-                            append: externalBulkMode === "append" ? "true" : "false",
                           }).toString()}`
                         );
                         const res = await fetch(url, {
@@ -778,33 +760,58 @@ export default function AccessDashboardPage() {
                         if (res.ok) {
                           const payload = await res.json().catch(() => ({} as any));
                           const added = Number((payload as any)?.rows_added ?? 0);
-                          const overridden = Number((payload as any)?.rows_overridden ?? 0);
-                          const modeLabel = externalBulkMode === "append" ? "Appended" : "Updated";
-                          toast.success(
-                            overridden > 0
-                              ? `${modeLabel}: ${added} users imported (updated ${overridden} existing)`
-                              : `${modeLabel}: ${added} users imported`
-                          );
-
-                          const refreshed = await api<UserRow[]>(`/users?organization_id=${orgId}`, { token }).catch(() => null);
+                          toast.success(`Success: ${added} users created`);
+                          
+                          const refreshed = await api<any[]>(`/users?organization_id=${orgId}`, { token }).catch(() => null);
                           if (Array.isArray(refreshed)) setUsers(refreshed);
-
-                          setExternalBulkOpen(false);
+                          
+                          setBulkOpen(false);
                         } else {
                           const err = await res.json().catch(() => ({} as any));
-                          toast.error(err?.detail ?? "Bulk upload failed");
+                          const detail = err?.detail;
+                          if (detail && typeof detail === "object" && Array.isArray(detail.errors)) {
+                            setBulkErrors(detail.errors);
+                            toast.error(detail.message || "Bulk upload validation failed");
+                          } else {
+                            toast.error(typeof detail === "string" ? detail : "Bulk upload failed");
+                          }
                         }
                       } catch (ex) {
                         toast.error(ex instanceof Error ? ex.message : "Bulk upload failed");
                       } finally {
-                        setExternalBulkUploading(false);
+                        setBulkUploading(false);
                       }
                     }}
                   />
                 </label>
 
+                {bulkErrors.length > 0 && (
+                  <div
+                    style={{
+                      maxHeight: "150px",
+                      overflowY: "auto",
+                      backgroundColor: "rgba(239, 68, 68, 0.05)",
+                      border: "1px solid rgba(239, 68, 68, 0.2)",
+                      borderRadius: "6px",
+                      padding: "0.5rem 0.75rem",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "0.25rem",
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, color: "var(--error)", fontSize: "0.85rem" }}>
+                      Upload Validation Errors ({bulkErrors.length}):
+                    </div>
+                    {bulkErrors.map((errStr, idx) => (
+                      <div key={idx} style={{ fontSize: "0.85rem", color: "var(--error)", lineHeight: "1.2" }}>
+                        • {errStr}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
-                  Expected columns: `username`, `full_name`, `description`, `is_active`
+                  Expected columns: `user_name`, `password`, `unique_user_key`, `full_name`, `email`, `role` (optional)
                 </div>
               </div>
             )}

@@ -12,6 +12,7 @@ export interface UserRow {
   is_active: boolean;
   description?: string | null;
   is_external?: boolean;
+  unique_user_key?: string | null;
 }
 
 export interface KpiOption {

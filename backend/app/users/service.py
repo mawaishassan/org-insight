@@ -34,6 +34,7 @@ async def create_user(
         hashed_password=get_password_hash(data.password),
         role=data.role,
         is_active=True,
+        unique_user_key=data.unique_user_key,
     )
     db.add(user)
     await db.flush()
@@ -155,6 +156,9 @@ async def update_user(
         user.role = data.role
     if data.is_active is not None:
         user.is_active = data.is_active
+    if data.unique_user_key is not None:
+        val = data.unique_user_key.strip()
+        user.unique_user_key = val if val else None
     if data.kpi_assignments is not None:
         await db.execute(delete(KPIAssignment).where(KPIAssignment.user_id == user_id))
         for a in data.kpi_assignments:

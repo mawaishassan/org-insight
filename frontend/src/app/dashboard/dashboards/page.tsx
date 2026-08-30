@@ -79,6 +79,9 @@ export default function DashboardsPage() {
         if (userRole !== "SUPER_ADMIN" && dashboards.length === 1) {
           const orgQuery = organizationId ? `?organization_id=${organizationId}` : "";
           router.replace(`/dashboard/dashboards/${dashboards[0].id}${orgQuery}`);
+        } else if (userRole !== "SUPER_ADMIN" && userRole !== "ORG_ADMIN" && dashboards.length === 0) {
+          const orgQuery = organizationId ? `?organization_id=${organizationId}` : "";
+          router.replace(`/dashboard/reports${orgQuery}`);
         }
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))

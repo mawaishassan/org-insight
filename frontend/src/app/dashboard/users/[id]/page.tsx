@@ -32,6 +32,7 @@ const updateSchema = z.object({
   password: z.string().min(8, "Min 8 characters").optional().or(z.literal("")),
   role: z.enum(["USER", "REPORT_VIEWER"]),
   is_active: z.boolean(),
+  unique_user_key: z.string().optional().or(z.literal("")),
 });
 
 type UpdateFormData = z.infer<typeof updateSchema>;
@@ -56,6 +57,7 @@ export default function UserDetailPage() {
       password: "",
       role: "USER",
       is_active: true,
+      unique_user_key: "",
     },
   });
 
@@ -83,6 +85,7 @@ export default function UserDetailPage() {
           password: "",
           role: (u.role === "USER" || u.role === "REPORT_VIEWER" ? u.role : "USER") as "USER" | "REPORT_VIEWER",
           is_active: u.is_active,
+          unique_user_key: u.unique_user_key ?? "",
         });
       })
       .catch((e) => {
@@ -104,6 +107,7 @@ export default function UserDetailPage() {
         full_name: data.full_name || null,
         role: data.role,
         is_active: data.is_active,
+        unique_user_key: data.unique_user_key || null,
       };
       if (data.password && data.password.length >= 8) body.password = data.password;
       const updated = await api<UserRow>(`/users/${user.id}`, {
@@ -145,11 +149,11 @@ export default function UserDetailPage() {
           <h2 style={{ fontSize: "1rem", margin: 0, fontWeight: 600 }}>General information</h2>
           <button type="button" className="btn" onClick={onDelete} style={{ color: "var(--error)", fontSize: "0.85rem", padding: "0.35rem 0.6rem" }}>Delete user</button>
         </div>
-        <form onSubmit={form.handleSubmit(onSaveGeneral)}>
+        <form onSubmit={form.handleSubmit(onSaveGeneral)} autoComplete="off">
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "0.5rem 1.25rem", maxWidth: "560px" }}>
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label style={{ fontSize: "0.85rem" }}>Username *</label>
-              <input {...form.register("username")} style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
+              <input {...form.register("username")} autoComplete="username-off" style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
               {form.formState.errors.username && <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>{form.formState.errors.username.message}</p>}
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
@@ -161,7 +165,7 @@ export default function UserDetailPage() {
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label style={{ fontSize: "0.85rem" }}>Email</label>
-              <input type="email" {...form.register("email")} style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
+              <input type="email" {...form.register("email")} autoComplete="email-off" style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
               {form.formState.errors.email && <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>{form.formState.errors.email.message}</p>}
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
@@ -169,8 +173,12 @@ export default function UserDetailPage() {
               <input {...form.register("full_name")} style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
+              <label style={{ fontSize: "0.85rem" }}>Unique user key</label>
+              <input {...form.register("unique_user_key")} style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} placeholder="e.g. CS-001" />
+            </div>
+            <div className="form-group" style={{ marginBottom: 0 }}>
               <label style={{ fontSize: "0.85rem" }}>New password (leave blank to keep)</label>
-              <input type="password" {...form.register("password")} style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
+              <input type="password" {...form.register("password")} autoComplete="new-password" style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
               {form.formState.errors.password && <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>{form.formState.errors.password.message}</p>}
             </div>
             <div className="form-group" style={{ marginBottom: 0, display: "flex", alignItems: "flex-end", gap: "0.5rem" }}>

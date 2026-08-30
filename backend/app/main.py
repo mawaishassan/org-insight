@@ -21,6 +21,7 @@ from app.fields.routes import router as fields_router
 from app.entries.routes import router as entries_router
 from app.reports.routes import router as reports_router
 from app.reports.custom_routes import router as custom_reports_router
+from app.reports.custom_report_groups.routes import router as custom_report_groups_router
 from app.chat.routes import router as chat_router
 from app.dashboards.routes import router as dashboards_router
 from app.widget_data.routes import router as widget_data_router
@@ -55,6 +56,7 @@ app.include_router(fields_router, prefix="/api")
 app.include_router(entries_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(custom_reports_router, prefix="/api")
+app.include_router(custom_report_groups_router, prefix="/api")
 app.include_router(dashboards_router, prefix="/api")
 app.include_router(widget_data_router, prefix="/api")
 app.include_router(mli_extraction_router, prefix="/api")

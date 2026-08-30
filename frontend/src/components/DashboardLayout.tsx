@@ -55,7 +55,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [categories, setCategories] = useState<CategoryRow[]>([]);
   const [orgTags, setOrgTags] = useState<OrgTagRow[]>([]);
   const [selectedOrgName, setSelectedOrgName] = useState<string | null>(null);
-  const [hasKpiRights, setHasKpiRights] = useState<boolean>(true);
+  const [hasKpiRights, setHasKpiRights] = useState<boolean>(false);
+  const [hasDashboards, setHasDashboards] = useState<boolean>(false);
   /** For routes outside /dashboard/organizations/[id] that still have org context (e.g. kpis/[id]/fields?organization_id=3). */
   const [breadcrumbTail, setBreadcrumbTail] = useState<{ orgId: number; orgName: string | null; segments: { label: string; href: string }[] } | null>(null);
   /** Ignore stale breadcrumb API responses when pathname/query changes quickly (avoids clearing tail or showing wrong year). */
@@ -176,6 +177,26 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       })
       .catch(() => {
         setHasKpiRights(false);
+      });
+  }, [orgId, user]);
+
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token || !orgId || !user) return;
+    const role = user.role as UserRole;
+    if (role === "SUPER_ADMIN" || role === "ORG_ADMIN") {
+      setHasDashboards(true);
+      return;
+    }
+    api<Array<{ id: number }>>(
+      `/dashboards?organization_id=${orgId}`,
+      { token }
+    )
+      .then((dashboards) => {
+        setHasDashboards(Array.isArray(dashboards) && dashboards.length > 0);
+      })
+      .catch(() => {
+        setHasDashboards(false);
       });
   }, [orgId, user]);
 
@@ -570,7 +591,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       href: dashboardsHref,
       label: "Dashboards",
       active: pathname.startsWith("/dashboard/dashboards"),
-      show: isSuperAdmin ? false : true,
+      show: isSuperAdmin ? false : hasDashboards,
     },
     {
       href: reportsHref,
@@ -582,7 +603,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
     { href: kpisHref, label: "KPIs", show: role === "ORG_ADMIN" || role === "SUPER_ADMIN" },
-    { href: dashboardsHref, label: "Dashboards", show: true },
+    { href: dashboardsHref, label: "Dashboards", show: isSuperAdmin ? false : hasDashboards },
     { href: reportsHref, label: "Reports", show: !isSuperAdmin && canViewReports(role) },
     { href: customReportsHref, label: "Custom Reports", show: isSuperAdmin && selectedOrgId != null },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },

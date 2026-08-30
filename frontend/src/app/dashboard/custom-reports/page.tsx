@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Fragment } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
@@ -11,10 +11,18 @@ import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 interface CustomReportRow {
   id: number;
   organization_id: number;
+  group_id: number | null;
   name: string;
   description: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface CustomReportGroup {
+  id: number;
+  organization_id: number;
+  name: string;
+  sort_order: number;
 }
 
 function qs(params: Record<string, string | number | undefined>) {
@@ -51,12 +59,22 @@ export default function CustomReportsPage() {
   const [renameTemplate, setRenameTemplate] = useState<CustomReportRow | null>(null);
   const [renameName, setRenameName] = useState("");
   const [renameDescription, setRenameDescription] = useState("");
+  const [renameGroupId, setRenameGroupId] = useState<number | null>(null);
   const [renameSaving, setRenameSaving] = useState(false);
 
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [addName, setAddName] = useState("");
   const [addDescription, setAddDescription] = useState("");
+  const [addGroupId, setAddGroupId] = useState<number | null>(null);
   const [addSaving, setAddSaving] = useState(false);
+
+  const [groups, setGroups] = useState<CustomReportGroup[]>([]);
+  const [manageGroupsOpen, setManageGroupsOpen] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
+  const [editingGroupName, setEditingGroupName] = useState("");
+  const [updatingGroup, setUpdatingGroup] = useState(false);
 
   const [organizations, setOrganizations] = useState<{ id: number; name: string }[]>([]);
 
@@ -82,6 +100,7 @@ export default function CustomReportsPage() {
   }, [router]);
 
   useEffect(() => {
+    if (userRole !== "SUPER_ADMIN") return;
     const token = getAccessToken();
     if (!token) return;
 
@@ -96,7 +115,7 @@ export default function CustomReportsPage() {
         }
       })
       .catch(() => setOrganizations([]));
-  }, [orgIdParam]);
+  }, [orgIdParam, userRole]);
 
   useEffect(() => {
     const token = getAccessToken();
@@ -114,10 +133,82 @@ export default function CustomReportsPage() {
       .finally(() => setLoading(false));
   }, [selectedOrgId, userRole, orgKey]);
 
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token || userRole !== "SUPER_ADMIN" || selectedOrgId === null) return;
+
+    api<CustomReportGroup[]>(`/custom-report-groups?organization_id=${selectedOrgId}`, { token })
+      .then((data) => setGroups(data))
+      .catch(() => setGroups([]));
+  }, [selectedOrgId, userRole]);
+
+  const handleCreateGroup = async () => {
+    const token = getAccessToken();
+    if (!token || selectedOrgId === null || !newGroupName.trim()) return;
+
+    setCreatingGroup(true);
+    try {
+      const created = await api<CustomReportGroup>(`/custom-report-groups?organization_id=${selectedOrgId}`, {
+        method: "POST",
+        token,
+        body: JSON.stringify({ name: newGroupName.trim() }),
+      });
+      setGroups((prev) => [...prev, created]);
+      setNewGroupName("");
+      toast.success("Section created successfully");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create section");
+    } finally {
+      setCreatingGroup(false);
+    }
+  };
+
+  const handleUpdateGroup = async (g: CustomReportGroup) => {
+    const token = getAccessToken();
+    if (!token || selectedOrgId === null || !editingGroupName.trim()) return;
+
+    setUpdatingGroup(true);
+    try {
+      const updated = await api<CustomReportGroup>(`/custom-report-groups/${g.id}?organization_id=${selectedOrgId}`, {
+        method: "PUT",
+        token,
+        body: JSON.stringify({ name: editingGroupName.trim() }),
+      });
+      setGroups((prev) => prev.map((x) => (x.id === g.id ? updated : x)));
+      setEditingGroupId(null);
+      setEditingGroupName("");
+      toast.success("Section updated successfully");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update section");
+    } finally {
+      setUpdatingGroup(false);
+    }
+  };
+
+  const handleDeleteGroup = async (g: CustomReportGroup) => {
+    const token = getAccessToken();
+    if (!token || selectedOrgId === null) return;
+
+    if (!confirm(`Delete section "${g.name}"? Reports in this section will be moved to uncategorized.`)) return;
+
+    try {
+      await api(`/custom-report-groups/${g.id}?organization_id=${selectedOrgId}`, {
+        method: "DELETE",
+        token,
+      });
+      setGroups((prev) => prev.filter((x) => x.id !== g.id));
+      setList((prev) => prev.map((x) => (x.group_id === g.id ? { ...x, group_id: null } : x)));
+      toast.success("Section deleted successfully");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete section");
+    }
+  };
+
   const openRenameModal = (t: CustomReportRow) => {
     setRenameTemplate(t);
     setRenameName(t.name);
     setRenameDescription(t.description ?? "");
+    setRenameGroupId(t.group_id);
     setError(null);
   };
 
@@ -136,10 +227,10 @@ export default function CustomReportsPage() {
       const updated = await api<CustomReportRow>(`/custom-reports/${t.id}?${query}`, {
         method: "PATCH",
         token,
-        body: JSON.stringify({ name, description: renameDescription.trim() || null }),
+        body: JSON.stringify({ name, description: renameDescription.trim() || null, group_id: renameGroupId }),
       });
       setList((prev) => {
-        const next = prev.map((x) => (x.id === t.id ? { ...x, name: updated.name, description: updated.description } : x));
+        const next = prev.map((x) => (x.id === t.id ? { ...x, name: updated.name, description: updated.description, group_id: updated.group_id } : x));
         const key = t.organization_id ? String(t.organization_id) : "all";
         cachedCustomReports[key] = next;
         return next;
@@ -210,6 +301,7 @@ export default function CustomReportsPage() {
   const openAddModal = () => {
     setAddName("");
     setAddDescription("");
+    setAddGroupId(null);
     setError(null);
     setAddModalOpen(true);
   };
@@ -225,7 +317,7 @@ export default function CustomReportsPage() {
       const created = await api<CustomReportRow>(`/custom-reports?${query}`, {
         method: "POST",
         token,
-        body: JSON.stringify({ name: addName.trim(), description: addDescription.trim() || null }),
+        body: JSON.stringify({ name: addName.trim(), description: addDescription.trim() || null, group_id: addGroupId }),
       });
       setList((prev) => {
         const next = [created, ...prev];
@@ -245,6 +337,76 @@ export default function CustomReportsPage() {
 
   if (userRole !== "SUPER_ADMIN") return <p style={{ padding: "1.5rem" }}>Loading authorization...</p>;
 
+  // Group reports by group_id
+  const groupedReports = (() => {
+    const map: Record<string, CustomReportRow[]> = {
+      uncategorized: [],
+    };
+    groups.forEach((g) => {
+      map[g.id] = [];
+    });
+    list.forEach((r) => {
+      if (r.group_id && map[r.group_id]) {
+        map[r.group_id].push(r);
+      } else {
+        map.uncategorized.push(r);
+      }
+    });
+    return map;
+  })();
+
+  const renderReportRow = (t: CustomReportRow) => (
+    <tr key={t.id} style={{ borderBottom: "1px solid var(--border)" }}>
+      <td style={{ padding: "1rem" }}>
+        <div style={{ fontWeight: 600, fontSize: "1.05rem", color: "var(--text)" }}>{t.name}</div>
+        {t.description && <div style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.2rem" }}>{t.description}</div>}
+      </td>
+      <td style={{ padding: "1rem", textAlign: "right" }}>
+        <div style={{ display: "flex", gap: "0.4rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
+          <Link
+            className="btn btn-primary"
+            href={`/dashboard/custom-reports/${t.id}/design?organization_id=${t.organization_id}`}
+            style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
+          >
+            Design Layout
+          </Link>
+          <Link
+            className="btn"
+            href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`}
+            style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
+          >
+            Assign Users
+          </Link>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => handleDuplicate(t)}
+            style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
+          >
+            Duplicate
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => openRenameModal(t)}
+            style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
+          >
+            Rename
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={deletingId === t.id}
+            onClick={() => handleDelete(t)}
+            style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem", color: "var(--error)" }}
+          >
+            {deletingId === t.id ? "Deleting..." : "Delete"}
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 1rem 1rem" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem", flexWrap: "wrap", gap: "1rem" }}>
@@ -254,15 +416,26 @@ export default function CustomReportsPage() {
             Design and organize reusable report templates for university tenants.
           </p>
         </div>
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={openAddModal}
-          disabled={selectedOrgId == null}
-          style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", padding: "0.6rem 1.2rem", fontWeight: 500 }}
-        >
-          <span>+ Create Template</span>
-        </button>
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setManageGroupsOpen(true)}
+            disabled={selectedOrgId == null}
+            style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", padding: "0.6rem 1.2rem", fontWeight: 500 }}
+          >
+            <span>Manage Sections</span>
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={openAddModal}
+            disabled={selectedOrgId == null}
+            style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", padding: "0.6rem 1.2rem", fontWeight: 500 }}
+          >
+            <span>+ Create Template</span>
+          </button>
+        </div>
       </div>
 
       {error && <p className="form-error" style={{ marginBottom: "1.5rem" }}>{error}</p>}
@@ -283,50 +456,47 @@ export default function CustomReportsPage() {
               </tr>
             </thead>
             <tbody>
-              {list.map((t) => (
-                <tr key={t.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                  <td style={{ padding: "1rem" }}>
-                    <div style={{ fontWeight: 600, fontSize: "1.05rem", color: "var(--text)" }}>{t.name}</div>
-                    {t.description && <div style={{ fontSize: "0.85rem", color: "var(--muted)", marginTop: "0.2rem" }}>{t.description}</div>}
-                  </td>
-                  <td style={{ padding: "1rem", textAlign: "right" }}>
-                    <div style={{ display: "flex", gap: "0.4rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
-                      <Link
-                        className="btn btn-primary"
-                        href={`/dashboard/custom-reports/${t.id}/design?organization_id=${t.organization_id}`}
-                        style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
-                      >
-                        Design Layout
-                      </Link>
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => handleDuplicate(t)}
-                        style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
-                      >
-                        Duplicate
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => openRenameModal(t)}
-                        style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
-                      >
-                        Rename
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={deletingId === t.id}
-                        onClick={() => handleDelete(t)}
-                        style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem", color: "var(--error)" }}
-                      >
-                        {deletingId === t.id ? "Deleting..." : "Delete"}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {groups.map((g) => {
+                const groupReports = groupedReports[g.id] || [];
+                return (
+                  <Fragment key={g.id}>
+                    <tr style={{ background: "#f1f5f9", borderBottom: "1px solid var(--border)" }}>
+                      <td colSpan={2} style={{ padding: "0.75rem 1rem", fontWeight: 700, color: "#1e293b", fontSize: "0.95rem" }}>
+                        {g.name}
+                      </td>
+                    </tr>
+                    {groupReports.length === 0 ? (
+                      <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                        <td colSpan={2} style={{ padding: "1rem", color: "var(--muted)", fontSize: "0.9rem", fontStyle: "italic" }}>
+                          No reports in this section.
+                        </td>
+                      </tr>
+                    ) : (
+                      groupReports.map((t) => renderReportRow(t))
+                    )}
+                  </Fragment>
+                );
+              })}
+              
+              {/* Uncategorized Reports */}
+              {(groupedReports.uncategorized.length > 0 || groups.length === 0) && (
+                <>
+                  <tr style={{ background: "#f1f5f9", borderBottom: "1px solid var(--border)" }}>
+                    <td colSpan={2} style={{ padding: "0.75rem 1rem", fontWeight: 700, color: "#1e293b", fontSize: "0.95rem" }}>
+                      Uncategorized Reports
+                    </td>
+                  </tr>
+                  {groupedReports.uncategorized.length === 0 ? (
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td colSpan={2} style={{ padding: "1rem", color: "var(--muted)", fontSize: "0.9rem", fontStyle: "italic" }}>
+                        No uncategorized reports.
+                      </td>
+                    </tr>
+                  ) : (
+                    groupedReports.uncategorized.map((t) => renderReportRow(t))
+                  )}
+                </>
+              )}
             </tbody>
           </table>
         </div>
@@ -379,6 +549,23 @@ export default function CustomReportsPage() {
                 placeholder="e.g. Annual Academic & Research Report"
                 style={{ width: "100%", padding: "0.5rem 0.6rem" }}
               />
+            </div>
+
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
+              <label htmlFor="add-report-group" style={{ fontWeight: 500 }}>Report Section</label>
+              <select
+                id="add-report-group"
+                value={addGroupId || ""}
+                onChange={(e) => setAddGroupId(e.target.value ? Number(e.target.value) : null)}
+                style={{ width: "100%", padding: "0.5rem 0.6rem", border: "1px solid var(--border)", borderRadius: "4px", background: "var(--surface)" }}
+              >
+                <option value="">Uncategorized</option>
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div className="form-group" style={{ marginBottom: "1.25rem" }}>
@@ -446,6 +633,23 @@ export default function CustomReportsPage() {
               />
             </div>
 
+            <div className="form-group" style={{ marginBottom: "1rem" }}>
+              <label htmlFor="rename-report-group" style={{ fontWeight: 500 }}>Report Section</label>
+              <select
+                id="rename-report-group"
+                value={renameGroupId || ""}
+                onChange={(e) => setRenameGroupId(e.target.value ? Number(e.target.value) : null)}
+                style={{ width: "100%", padding: "0.5rem 0.6rem", border: "1px solid var(--border)", borderRadius: "4px", background: "var(--surface)" }}
+              >
+                <option value="">Uncategorized</option>
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div className="form-group" style={{ marginBottom: "1.25rem" }}>
               <label htmlFor="rename-report-description" style={{ fontWeight: 500 }}>Description</label>
               <textarea
@@ -468,6 +672,124 @@ export default function CustomReportsPage() {
                 onClick={handleRenameSave}
               >
                 {renameSaving ? "Saving..." : "Save Changes"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {manageGroupsOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.5)",
+            padding: "1.5rem",
+          }}
+          onClick={(e) => e.target === e.currentTarget && setManageGroupsOpen(false)}
+        >
+          <div
+            className="card"
+            style={{ maxWidth: 500, width: "100%", maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.15)", background: "var(--surface)", padding: "1.5rem" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ margin: "0 0 0.5rem 0", fontSize: "1.3rem", fontWeight: 600 }}>
+              Manage Report Sections
+            </h3>
+            <p style={{ color: "var(--muted)", fontSize: "0.85rem", margin: "0 0 1.25rem 0" }}>
+              Add, rename, or delete categories to organize custom reports for this organization.
+            </p>
+
+            <div style={{ flex: 1, overflowY: "auto", marginBottom: "1.25rem", border: "1px solid var(--border)", borderRadius: "6px", padding: "0.5rem" }}>
+              {groups.length === 0 ? (
+                <p style={{ color: "var(--muted)", textAlign: "center", padding: "1.5rem 0", margin: 0, fontSize: "0.9rem" }}>
+                  No sections created yet.
+                </p>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  {groups.map((g) => (
+                    <div key={g.id} style={{ display: "flex", alignItems: "center", justifyItems: "center", gap: "0.5rem", padding: "0.5rem", borderBottom: "1px solid #f1f5f9" }}>
+                      {editingGroupId === g.id ? (
+                        <>
+                          <input
+                            value={editingGroupName}
+                            onChange={(e) => setEditingGroupName(e.target.value)}
+                            style={{ flex: 1, padding: "0.3rem 0.5rem", fontSize: "0.9rem" }}
+                          />
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={updatingGroup || !editingGroupName.trim()}
+                            onClick={() => handleUpdateGroup(g)}
+                            style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => setEditingGroupId(null)}
+                            style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <span style={{ flex: 1, fontWeight: 500, color: "var(--text)", fontSize: "0.95rem" }}>{g.name}</span>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => {
+                              setEditingGroupId(g.id);
+                              setEditingGroupName(g.name);
+                            }}
+                            style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem" }}
+                          >
+                            Rename
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => handleDeleteGroup(g)}
+                            style={{ padding: "0.3rem 0.6rem", fontSize: "0.8rem", color: "var(--error)" }}
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1.5rem" }}>
+              <input
+                value={newGroupName}
+                onChange={(e) => setNewGroupName(e.target.value)}
+                placeholder="New section name (e.g. Finance)"
+                style={{ flex: 1, padding: "0.5rem 0.6rem" }}
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={creatingGroup || !newGroupName.trim()}
+                onClick={handleCreateGroup}
+              >
+                {creatingGroup ? "Adding..." : "Add"}
+              </button>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button type="button" className="btn" onClick={() => setManageGroupsOpen(false)}>
+                Close
               </button>
             </div>
           </div>
