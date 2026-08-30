@@ -337,8 +337,13 @@ class User(Base):
     full_name = Column(String(255), nullable=True)
     role = Column(Enum(UserRole), nullable=False, default=UserRole.USER)
     is_active = Column(Boolean, default=True, nullable=False)
+    unique_user_key = Column(String(100), nullable=True, index=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "unique_user_key", name="uq_org_unique_user_key"),
+    )
 
     organization = relationship("Organization", back_populates="users")
     kpi_assignments = relationship("KPIAssignment", back_populates="user", lazy="selectin", cascade="all, delete-orphan")
@@ -1304,6 +1309,25 @@ class CaptchaChallenge(Base):
     attempts = Column(Integer, default=0, nullable=False)
 
 
+class CustomReportGroup(Base):
+    """Group/Category for Custom Reports managed by Super Admin."""
+
+    __tablename__ = "custom_report_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(255), nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False)
+
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    organization = relationship("Organization")
+    reports = relationship("CustomReport", back_populates="group", order_by="CustomReport.name")
+
+
 class CustomReport(Base):
     """Custom report template designed by Super Admin."""
 
@@ -1312,6 +1336,9 @@ class CustomReport(Base):
     id = Column(Integer, primary_key=True, index=True)
     organization_id = Column(
         Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    group_id = Column(
+        Integer, ForeignKey("custom_report_groups.id", ondelete="SET NULL"), nullable=True, index=True
     )
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
@@ -1337,6 +1364,7 @@ class CustomReport(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     report_header = relationship("CustomReportHeader", lazy="joined")
+    group = relationship("CustomReportGroup", back_populates="reports", lazy="selectin")
 
     organization = relationship("Organization")
     sections = relationship(
@@ -1357,6 +1385,13 @@ class CustomReport(Base):
         back_populates="custom_report",
         lazy="selectin",
         order_by="CustomReportAttachment.sort_order",
+        cascade="all, delete-orphan",
+    )
+    filter_config = relationship(
+        "ReportUserFilterConfiguration",
+        uselist=False,
+        back_populates="custom_report",
+        lazy="selectin",
         cascade="all, delete-orphan",
     )
 
@@ -1434,6 +1469,36 @@ class CustomReportAssignment(Base):
 
     custom_report = relationship("CustomReport", back_populates="assignments")
     user = relationship("User")
+
+
+class ReportUserFilterConfiguration(Base):
+    """Configuration for user-specific dynamic data filtering on Custom Reports."""
+
+    __tablename__ = "report_user_filter_configurations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_id = Column(
+        Integer, ForeignKey("custom_reports.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    enabled = Column(Boolean, default=False, nullable=False)
+    kpi_id = Column(
+        Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    mli_id = Column(
+        Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    field_id = Column(
+        Integer, ForeignKey("kpi_field_sub_fields.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    operator = Column(String(50), default="=", nullable=False)
+    dynamic_value_source = Column(String(100), default="CURRENT_USER_UNIQUE_KEY", nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+    custom_report = relationship("CustomReport", back_populates="filter_config")
+    kpi = relationship("KPI")
+    mli = relationship("KPIField")
+    sub_field = relationship("KPIFieldSubField")
 
 
 class CustomReportAttachment(Base):

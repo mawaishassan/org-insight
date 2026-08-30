@@ -3762,15 +3762,26 @@ async def sync_multi_items_from_linked(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-line field not found")
 
     can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
-    can_edit = await user_can_edit_multi_line_field(db, current_user.id, field.kpi_id, field.id)
+    can_edit = await user_can_edit_multi_line_field(db, current_user.id, field.kpi_id, field)
     if not can_add and not can_edit:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
-    cfg = getattr(field, "config", None) or {}
-    linked_subfields = [
-        sf for sf in (field.sub_fields or [])
-        if (sf.config or {}).get("data_source") == "linked"
-    ]
+    field_cfg = field.config or {}
+    is_parent_linked = field_cfg.get("data_source") == "linked" and field_cfg.get("link_source")
+    
+    if is_parent_linked:
+        link_cfg = field_cfg["link_source"]
+        mappings = link_cfg.get("column_mappings") or {}
+        linked_subfields = [
+            sf for sf in (field.sub_fields or [])
+            if sf.key in mappings
+        ]
+    else:
+        linked_subfields = [
+            sf for sf in (field.sub_fields or [])
+            if (sf.config or {}).get("data_source") == "linked"
+        ]
+        
     if not linked_subfields:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No linked columns configured for this field")
 
@@ -3793,6 +3804,21 @@ async def sync_multi_items_from_linked(
         .options(selectinload(KpiMultiLineRow.cells))
     )
     rows_orm = list(rows_res.scalars().all())
+    rows_orm = sorted(rows_orm, key=lambda x: x.row_index)
+
+    # Synchronize database rows count with resolved rows count (needed for parent-linked tables)
+    if len(rows_orm) < len(resolved_list):
+        for idx in range(len(rows_orm), len(resolved_list)):
+            new_r = KpiMultiLineRow(entry_id=entry_id, field_id=field_id, row_index=idx)
+            db.add(new_r)
+            rows_orm.append(new_r)
+        await db.flush()
+    elif len(rows_orm) > len(resolved_list):
+        extra_rows = rows_orm[len(resolved_list):]
+        for er in extra_rows:
+            await db.delete(er)
+        rows_orm = rows_orm[:len(resolved_list)]
+        await db.flush()
 
     # Map database row index to list index
     for r in rows_orm:

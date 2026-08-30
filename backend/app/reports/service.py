@@ -192,13 +192,13 @@ def _kpi_multi_line_orm_row_to_dict(r: KpiMultiLineRow) -> dict:
 
 
 async def _load_multi_line_items_rows_batch(
-    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None, resolving_linked_fields: set[int] = None, resolve_links: bool = False
+    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None, resolving_linked_fields: set[int] = None, resolve_links: bool = False, custom_report_id: int | None = None, current_user: User | None = None
 ) -> dict[int, list[dict]]:
     """Optimized direct load of multi-line rows and cells to handle large datasets efficiently without ORM eager load overhead."""
     if not entry_ids:
         return {}
         
-    from app.core.models import KPI
+    from app.core.models import KPI, ReportUserFilterConfiguration, KPIFieldSubField, KpiMultiLineCell
     kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
     kpi = kpi_res.scalar_one_or_none()
         
@@ -238,6 +238,39 @@ async def _load_multi_line_items_rows_batch(
                     if rd and start_date <= rd < end_date:
                         filtered_rows.append(row)
                 combined_rows = filtered_rows
+
+            # User-based filtering for joined fields
+            u_key = None
+            if current_user is not None:
+                if "unique_user_key" in current_user.__dict__:
+                    u_key = current_user.unique_user_key
+                else:
+                    from app.core.models import User
+                    u_key = (await db.execute(select(User.unique_user_key).where(User.id == current_user.id))).scalar_one_or_none()
+
+            if custom_report_id is not None and current_user is not None and u_key is not None:
+                filter_config_res = await db.execute(
+                    select(ReportUserFilterConfiguration)
+                    .where(
+                        ReportUserFilterConfiguration.report_id == custom_report_id,
+                        ReportUserFilterConfiguration.enabled == True,
+                        ReportUserFilterConfiguration.mli_id == field.id
+                    )
+                )
+                filter_config = filter_config_res.scalar_one_or_none()
+                if filter_config and filter_config.field_id is not None:
+                    sf_res = await db.execute(select(KPIFieldSubField).where(KPIFieldSubField.id == filter_config.field_id))
+                    sf = sf_res.scalar_one_or_none()
+                    if sf:
+                        sf_key = sf.key
+                        val_str = u_key.lower().strip()
+                        filtered = []
+                        for row in combined_rows:
+                            row_val = str(row.get(sf_key, "")).lower().strip()
+                            if row_val == val_str:
+                                filtered.append(row)
+                        combined_rows = filtered
+
             start = offset if offset is not None else 0
             end = (start + limit) if limit is not None else len(combined_rows)
             out_batch[eid] = combined_rows[start:end]
@@ -252,6 +285,44 @@ async def _load_multi_line_items_rows_batch(
         )
         .order_by(KpiMultiLineRow.entry_id, KpiMultiLineRow.row_index)
     )
+    u_key = None
+    if current_user is not None:
+        if "unique_user_key" in current_user.__dict__:
+            u_key = current_user.unique_user_key
+        else:
+            from app.core.models import User
+            u_key = (await db.execute(select(User.unique_user_key).where(User.id == current_user.id))).scalar_one_or_none()
+
+    if custom_report_id is not None and current_user is not None and u_key is not None:
+        from sqlalchemy import and_, or_
+        filter_config_res = await db.execute(
+            select(ReportUserFilterConfiguration)
+            .where(
+                ReportUserFilterConfiguration.report_id == custom_report_id,
+                ReportUserFilterConfiguration.enabled == True,
+                ReportUserFilterConfiguration.mli_id == field.id
+            )
+        )
+        filter_config = filter_config_res.scalar_one_or_none()
+        if filter_config and filter_config.field_id is not None:
+            stmt = stmt.join(
+                KpiMultiLineCell,
+                and_(
+                    KpiMultiLineCell.row_id == KpiMultiLineRow.id,
+                    KpiMultiLineCell.sub_field_id == filter_config.field_id
+                )
+            )
+            val_str = u_key
+            conditions = [KpiMultiLineCell.value_text == val_str]
+            try:
+                val_float = float(val_str)
+                conditions.append(KpiMultiLineCell.value_number == val_float)
+            except ValueError:
+                pass
+            val_bool = val_str.lower() in ("true", "1", "yes", "y")
+            if val_bool or val_str.lower() in ("false", "0", "no", "n"):
+                conditions.append(KpiMultiLineCell.value_boolean == val_bool)
+            stmt = stmt.where(or_(*conditions))
     if date_range:
         start_date, end_date, date_col_key = date_range
         sf_res = await db.execute(

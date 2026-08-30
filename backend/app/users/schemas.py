@@ -27,6 +27,7 @@ class UserCreate(BaseModel):
     email: str | None = None
     full_name: str | None = None
     role: UserRole = UserRole.USER
+    unique_user_key: str | None = None
     kpi_ids: list[int] = Field(default_factory=list, description="Legacy: assign as data_entry")
     kpi_assignments: list[UserKpiAssignment] | None = Field(
         default=None,
@@ -53,6 +54,7 @@ class UserUpdate(BaseModel):
     password: str | None = None
     role: UserRole | None = None
     is_active: bool | None = None
+    unique_user_key: str | None = None
     kpi_ids: list[int] | None = Field(None, description="Legacy: replace with data_entry")
     kpi_assignments: list[UserKpiAssignment] | None = Field(
         None,
@@ -71,6 +73,7 @@ class UserResponse(BaseModel):
     role: UserRole
     organization_id: int | None
     is_active: bool
+    unique_user_key: str | None = None
     description: str | None = None
     is_external: bool = False
 

@@ -5,14 +5,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_org_admin
-from app.core.models import User, CustomReport, CustomReportAssignment
+from app.core.models import User, CustomReport, CustomReportAssignment, ReportUserFilterConfiguration
 from app.reports.custom_schemas import (
     CustomReportCreate,
     CustomReportUpdate,
     CustomReportResponse,
     CustomReportLayoutSave,
     CustomReportAssignmentRequest,
-    CustomReportAssignmentResponse
+    CustomReportAssignmentResponse,
+    CustomReportBulkAssignmentRequest,
+    ReportUserFilterConfigCreateUpdate,
+    ReportUserFilterConfigResponse,
 )
 from app.reports.custom_service import (
     create_custom_report,
@@ -30,7 +33,8 @@ from app.reports.custom_service import (
     CUSTOM_REPORT_CACHE,
     REPORT_TASKS,
     run_background_generation_task,
-    stream_custom_report_data
+    stream_custom_report_data,
+    bulk_assign_custom_report,
 )
 
 router = APIRouter(prefix="/custom-reports", tags=["custom-reports"])
@@ -555,6 +559,15 @@ async def generate_report(
     year_key = str(year).strip() if year is not None else "current"
     cache_key = (id, org_id, year_key, "preview" if preview else "full", include_attachments, by_default, period_type or "", "v3")
 
+    filter_config = (
+        await db.execute(
+            select(ReportUserFilterConfiguration)
+            .where(ReportUserFilterConfiguration.report_id == id, ReportUserFilterConfiguration.enabled == True)
+        )
+    ).scalar_one_or_none()
+    if filter_config:
+        cache_key = cache_key + (current_user.id,)
+
     # The _t parameter is a cache-buster.  Historically the frontend sent _t=Date.now()
     # on EVERY request (including routine period shifts), which meant the cache was never
     # used at all.  We now only skip the cache when _t is explicitly a post-sync token
@@ -576,7 +589,7 @@ async def generate_report(
             return cached
 
     data = await generate_custom_report_data(
-        db, id, org_id, year=year, include_drafts=False, preview=preview, include_attachments=include_attachments, by_default=by_default, period_type=period_type
+        db, id, org_id, year=year, include_drafts=False, preview=preview, include_attachments=include_attachments, by_default=by_default, period_type=period_type, current_user=current_user
     )
     if not data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
@@ -663,6 +676,112 @@ async def assign_user(
     )
 
 
+@router.post("/{id}/bulk-assign", response_model=list[CustomReportAssignmentResponse])
+async def bulk_assign_users_route(
+    id: int,
+    body: CustomReportBulkAssignmentRequest,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Assign custom report to multiple users (Org Admin / Super Admin)."""
+    org_id = _org_id(current_user, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "assign"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+    perms = await bulk_assign_custom_report(
+        db,
+        custom_report_id=id,
+        user_ids=body.user_ids,
+        can_view=body.can_view,
+        can_print=body.can_print,
+        can_export=body.can_export,
+    )
+    await db.commit()
+
+    # Load user metadata for the response
+    user_ids = body.user_ids
+    users_res = await db.execute(select(User).where(User.id.in_(user_ids)))
+    users_by_id = {u.id: u for u in users_res.scalars().all()}
+
+    out = []
+    for p in perms:
+        u = users_by_id.get(p.user_id)
+        out.append(
+            CustomReportAssignmentResponse(
+                id=p.id,
+                custom_report_id=p.custom_report_id,
+                user_id=p.user_id,
+                can_view=p.can_view,
+                can_print=p.can_print,
+                can_export=p.can_export,
+                created_at=p.created_at,
+                user_name=u.full_name or u.username if u else None,
+                user_role=u.role.value if u else None
+            )
+        )
+    return out
+
+
+@router.get("/{id}/filter-config", response_model=ReportUserFilterConfigResponse | None)
+async def get_report_filter_config(
+    id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get user-based dynamic filtering configuration for custom report."""
+    org_id = _org_id(current_user, organization_id)
+    report = await get_custom_report(db, id, org_id)
+    if not report:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+
+    config = (
+        await db.execute(
+            select(ReportUserFilterConfiguration)
+            .where(ReportUserFilterConfiguration.report_id == id)
+        )
+    ).scalar_one_or_none()
+    return config
+
+
+@router.post("/{id}/filter-config", response_model=ReportUserFilterConfigResponse)
+async def upsert_report_filter_config(
+    id: int,
+    body: ReportUserFilterConfigCreateUpdate,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Configure or update user-based dynamic filtering for custom report (Org Admin / Super Admin)."""
+    org_id = _org_id(current_user, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "assign"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+    config = (
+        await db.execute(
+            select(ReportUserFilterConfiguration)
+            .where(ReportUserFilterConfiguration.report_id == id)
+        )
+    ).scalar_one_or_none()
+
+    if not config:
+        config = ReportUserFilterConfiguration(report_id=id)
+        db.add(config)
+
+    config.enabled = body.enabled
+    config.kpi_id = body.kpi_id
+    config.mli_id = body.mli_id
+    config.field_id = body.field_id
+    config.operator = body.operator
+    config.dynamic_value_source = body.dynamic_value_source
+
+    await db.commit()
+    await db.refresh(config)
+    CUSTOM_REPORT_CACHE.invalidate_report(id)
+    return config
+
+
 @router.delete("/{id}/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def unassign_user_route(
     id: int,
@@ -707,12 +826,12 @@ async def export_custom_report(
         if parsed_att_ids:
             from app.reports.custom_service import export_custom_report_attachments
             file_bytes, filename, content_type = await export_custom_report_attachments(
-                db, id, org_id, year, format, attachment_ids=parsed_att_ids
+                db, id, org_id, year, format, attachment_ids=parsed_att_ids, current_user=current_user
             )
         else:
             from app.reports.custom_service import export_custom_report_file
             file_bytes, filename, content_type = await export_custom_report_file(
-                db, id, org_id, year, format, by_default=by_default, period_type=period_type
+                db, id, org_id, year, format, by_default=by_default, period_type=period_type, current_user=current_user
             )
     except Exception as e:
         import traceback

@@ -154,6 +154,7 @@ class TimeDimension:
 async def create_custom_report(db: AsyncSession, org_id: int, data: CustomReportCreate) -> CustomReport:
     report = CustomReport(
         organization_id=org_id,
+        group_id=data.group_id,
         name=data.name,
         description=data.description,
         report_header_id=data.report_header_id,
@@ -202,6 +203,8 @@ async def update_custom_report(db: AsyncSession, id: int, org_id: int, data: Cus
         return None
     report.name = data.name
     report.description = data.description
+    if "group_id" in data.model_fields_set:
+        report.group_id = data.group_id
     if getattr(data, "fetch_data_with_date", None) is not None:
         report.fetch_data_with_date = data.fetch_data_with_date
     if getattr(data, "date_fetching_config", None) is not None:
@@ -408,6 +411,41 @@ async def assign_custom_report(
     return perm
 
 
+async def bulk_assign_custom_report(
+    db: AsyncSession,
+    custom_report_id: int,
+    user_ids: list[int],
+    can_view: bool = True,
+    can_print: bool = True,
+    can_export: bool = True,
+) -> list[CustomReportAssignment]:
+    """Assign custom report to multiple users simultaneously inside a single transaction."""
+    result = await db.execute(
+        select(CustomReportAssignment)
+        .where(
+            CustomReportAssignment.custom_report_id == custom_report_id,
+            CustomReportAssignment.user_id.in_(user_ids),
+        )
+    )
+    existing_list = result.scalars().all()
+    existing_by_user_id = {a.user_id: a for a in existing_list}
+
+    out = []
+    for uid in user_ids:
+        perm = existing_by_user_id.get(uid)
+        if not perm:
+            perm = CustomReportAssignment(custom_report_id=custom_report_id, user_id=uid)
+            db.add(perm)
+        perm.can_view = can_view
+        perm.can_print = can_print
+        perm.can_export = can_export
+        out.append(perm)
+
+    await db.flush()
+    CUSTOM_REPORT_CACHE.invalidate_report(custom_report_id)
+    return out
+
+
 async def unassign_custom_report(db: AsyncSession, custom_report_id: int, user_id: int) -> bool:
     result = await db.execute(
         select(CustomReportAssignment)
@@ -586,7 +624,9 @@ def evaluate_report_table_footer_rows(
                 else:
                     res_val = sum(nums) if nums else 0.0
 
-                if dec_places is not None and str(dec_places).lower() != "auto":
+                if isinstance(res_val, (int, float)) and res_val % 1 == 0:
+                    val_str = f"{int(res_val):,}"
+                elif dec_places is not None and str(dec_places).lower() != "auto":
                     try:
                         dp = int(dec_places)
                         res_val = round(res_val, dp)
@@ -631,6 +671,7 @@ async def generate_custom_report_data(
     include_attachments: bool = True,
     by_default: bool = False,
     period_type: str | None = None,
+    current_user: User | None = None,
 ) -> dict[str, Any] | None:
     if on_progress:
         on_progress(10)
@@ -942,7 +983,7 @@ async def generate_custom_report_data(
 
             target_entry_ids = [e.id for e in all_entries if e.id] if (date_range and mf_date_range) else entry_ids_sorted
             batch_res = await _load_multi_line_items_rows_batch(
-                db, entry_ids=target_entry_ids, field=mf, limit=limit_val, date_range=mf_date_range
+                db, entry_ids=target_entry_ids, field=mf, limit=limit_val, date_range=mf_date_range, custom_report_id=id, current_user=current_user
             )
             # Re-evaluate any formula subfields on MLI rows
             sub_fields_orm = getattr(mf, "sub_fields", []) or []
@@ -1569,6 +1610,7 @@ async def export_custom_report_file(
     format: str,
     by_default: bool = False,
     period_type: str | None = None,
+    current_user: User | None = None,
 ) -> tuple[bytes, str, str]:
     """Export custom report as PDF, DOCX, or XLSX bytes, with name and content-type."""
     import re
@@ -1576,7 +1618,7 @@ async def export_custom_report_file(
 
     # Generate custom report data
     data = await generate_custom_report_data(
-        db, custom_report_id, org_id, year=year, include_drafts=False, by_default=by_default, period_type=period_type
+        db, custom_report_id, org_id, year=year, include_drafts=False, by_default=by_default, period_type=period_type, current_user=current_user
     )
     if not data:
         raise ValueError("Report data generation failed")
@@ -2913,6 +2955,11 @@ class CustomReportCache:
         for k in keys_to_del:
             self._cache.pop(k, None)
 
+    def invalidate_user(self, user_id: int):
+        keys_to_del = [k for k in self._cache if isinstance(k, tuple) and len(k) == 9 and k[-1] == user_id]
+        for k in keys_to_del:
+            self._cache.pop(k, None)
+
     def invalidate_all(self):
         self._cache.clear()
 
@@ -3156,7 +3203,7 @@ async def stream_custom_report_data(
 
                 target_entry_ids = [e.id for e in all_entries if e.id] if (date_range and mf_date_range) else [entry.id]
                 ml_rows = await _load_multi_line_items_rows_batch(
-                    db, entry_ids=target_entry_ids, field=mf, date_range=mf_date_range
+                    db, entry_ids=target_entry_ids, field=mf, date_range=mf_date_range, custom_report_id=id, current_user=current_user
                 )
                 if date_range and mf_date_range:
                     combined_rows = []
@@ -3475,14 +3522,14 @@ async def stream_custom_report_data(
 
 
 async def export_custom_report_attachments(
-    db, custom_report_id: int, org_id: int, year: int, format: str, attachment_ids: list[int]
+    db, custom_report_id: int, org_id: int, year: int, format: str, attachment_ids: list[int], current_user: User | None = None
 ) -> tuple[bytes, str, str]:
     import io
     import zipfile
     import datetime
     import re
     from sqlalchemy import select
-    from app.core.models import CustomReport, KPI, KPIEntry, KpiMultiLineRow, KpiMultiLineCell, KPIFieldSubField
+    from app.core.models import CustomReport, KPI, KPIEntry, KpiMultiLineRow, KpiMultiLineCell, KPIFieldSubField, User
     from sqlalchemy.orm import selectinload, noload
 
     report = await get_custom_report(db, custom_report_id, org_id)
@@ -3525,6 +3572,46 @@ async def export_custom_report_attachments(
             )
             .order_by(KpiMultiLineRow.row_index)
         )
+        u_key = None
+        if current_user is not None:
+            if "unique_user_key" in current_user.__dict__:
+                u_key = current_user.unique_user_key
+            else:
+                from app.core.models import User
+                u_key = (await db.execute(select(User.unique_user_key).where(User.id == current_user.id))).scalar_one_or_none()
+
+        if current_user is not None and u_key is not None:
+            from app.core.models import ReportUserFilterConfiguration
+            from sqlalchemy import and_, or_
+            filter_config_res = await db.execute(
+                select(ReportUserFilterConfiguration)
+                .where(
+                    ReportUserFilterConfiguration.report_id == custom_report_id,
+                    ReportUserFilterConfiguration.enabled == True,
+                    ReportUserFilterConfiguration.mli_id == kfield.id
+                )
+            )
+            filter_config = filter_config_res.scalar_one_or_none()
+            if filter_config and filter_config.field_id is not None:
+                rows_stmt = rows_stmt.join(
+                    KpiMultiLineCell,
+                    and_(
+                        KpiMultiLineCell.row_id == KpiMultiLineRow.id,
+                        KpiMultiLineCell.sub_field_id == filter_config.field_id
+                    )
+                )
+                val_str = u_key
+                conditions = [KpiMultiLineCell.value_text == val_str]
+                try:
+                    val_float = float(val_str)
+                    conditions.append(KpiMultiLineCell.value_number == val_float)
+                except ValueError:
+                    pass
+                val_bool = val_str.lower() in ("true", "1", "yes", "y")
+                if val_bool or val_str.lower() in ("false", "0", "no", "n"):
+                    conditions.append(KpiMultiLineCell.value_boolean == val_bool)
+                rows_stmt = rows_stmt.where(or_(*conditions))
+
         rows_list = (await db.execute(rows_stmt)).all()
         
         chunk_rows = []

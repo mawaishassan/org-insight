@@ -59,6 +59,7 @@ async def list_org_users(
                 role=u.role,
                 organization_id=u.organization_id,
                 is_active=u.is_active,
+                unique_user_key=u.unique_user_key,
                 description=eu.description if eu else None,
                 is_external=eu is not None,
             )
@@ -267,6 +268,202 @@ async def upload_external_users_excel(
     return {"rows_added": rows_added, "rows_overridden": rows_overridden, "append": append}
 
 
+@router.get("/bulk-template")
+async def download_standard_users_template(
+    organization_id: int | None = Query(None, description="Required for Super Admin"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Download an Excel template for bulk importing standard database users."""
+    from openpyxl import Workbook
+    from io import BytesIO
+
+    org_id = _org_id(current_user, organization_id)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Users Import"
+    ws.append(["user_name", "password", "unique_user_key", "full_name", "email", "role"])
+    # Example rows
+    ws.append(["user1", "Password123", "CS-001", "John Doe", "john@example.com", "USER"])
+    ws.append(["user2", "Password123", "CS-002", "Jane Smith", "jane@example.com", "REPORT_VIEWER"])
+
+    import uuid
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"users_template_{org_id}_{uuid.uuid4().hex[:6]}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/bulk-upload")
+async def upload_standard_users_excel(
+    file: UploadFile = File(...),
+    organization_id: int | None = Query(None, description="Required for Super Admin"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Bulk import standard users from Excel (.xlsx) with strict validation and bulk database insertion."""
+    from openpyxl import load_workbook
+    from io import BytesIO
+    from app.core.security import get_password_hash
+    from sqlalchemy import select
+
+    org_id = _org_id(current_user, organization_id)
+    content = await file.read()
+
+    try:
+        wb = load_workbook(filename=BytesIO(content), data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid Excel file: {e}")
+
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows or len(rows) < 2:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty Excel file or missing data rows")
+
+    # Read header and locate columns
+    header = [str(c).strip().lower() if c is not None else "" for c in rows[0]]
+    header_index: dict[str, int] = {h: i for i, h in enumerate(header) if h}
+
+    def _idx(*names: str) -> int | None:
+        for n in names:
+            if n in header_index:
+                return header_index[n]
+        return None
+
+    idx_username = _idx("user_name", "username")
+    idx_password = _idx("password", "pass")
+    idx_unique_key = _idx("unique_user_key", "unique_key", "user_key")
+    idx_full_name = _idx("full_name", "full name", "fullname", "name")
+    idx_email = _idx("email", "mail")
+    idx_role = _idx("role", "user_role")
+
+    if idx_username is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required column: user_name")
+    if idx_password is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required column: password")
+    if idx_unique_key is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required column: unique_user_key")
+
+    errors = []
+    parsed_users = []
+    seen_usernames = set()
+    seen_keys = set()
+
+    for row_idx, r in enumerate(rows[1:], start=2):
+        if all(c is None or str(c).strip() == "" for c in r):
+            continue
+
+        username = str(r[idx_username] if idx_username < len(r) and r[idx_username] is not None else "").strip()
+        password = str(r[idx_password] if idx_password < len(r) and r[idx_password] is not None else "").strip()
+        unique_key = str(r[idx_unique_key] if idx_unique_key < len(r) and r[idx_unique_key] is not None else "").strip()
+        full_name = str(r[idx_full_name] if idx_full_name is not None and idx_full_name < len(r) and r[idx_full_name] is not None else "").strip() or None
+        email = str(r[idx_email] if idx_email is not None and idx_email < len(r) and r[idx_email] is not None else "").strip() or None
+        role_str = str(r[idx_role] if idx_role is not None and idx_role < len(r) and r[idx_role] is not None else "").strip().upper()
+
+        if role_str:
+            if role_str not in ("ORG_ADMIN", "USER", "REPORT_VIEWER"):
+                errors.append(f"Row {row_idx}: Invalid role '{role_str}'. Allowed values: ORG_ADMIN, USER, REPORT_VIEWER")
+        else:
+            role_str = "USER"
+
+        # Validation: Required fields
+        if not username:
+            errors.append(f"Row {row_idx}: user_name is required")
+        if not password:
+            errors.append(f"Row {row_idx}: password is required")
+        elif len(password) < 8:
+            errors.append(f"Row {row_idx}: password must be at least 8 characters long")
+
+        # Validation: Duplicates in upload sheet
+        if username:
+            if username.lower() in seen_usernames:
+                errors.append(f"Row {row_idx}: Duplicate user_name '{username}' in template")
+            seen_usernames.add(username.lower())
+
+        if unique_key:
+            if unique_key.lower() in seen_keys:
+                errors.append(f"Row {row_idx}: Duplicate unique_user_key '{unique_key}' in template")
+            seen_keys.add(unique_key.lower())
+
+        parsed_users.append({
+            "row_idx": row_idx,
+            "username": username,
+            "password": password,
+            "unique_user_key": unique_key or None,
+            "full_name": full_name,
+            "email": email,
+            "role": role_str
+        })
+
+    if not parsed_users and not errors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid data rows found")
+
+    # If errors found, return them directly
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Validation failed", "errors": errors}
+        )
+
+    # Database validation against existing records
+    usernames_list = [p["username"] for p in parsed_users if p["username"]]
+    unique_keys_list = [p["unique_user_key"] for p in parsed_users if p["unique_user_key"]]
+
+    # Check existing usernames in org
+    existing_username_res = await db.execute(
+        select(User.username).where(User.organization_id == org_id, User.username.in_(usernames_list))
+    )
+    existing_usernames = {u.lower() for u in existing_username_res.scalars().all()}
+
+    # Check existing unique keys in org
+    existing_keys = set()
+    if unique_keys_list:
+        existing_keys_res = await db.execute(
+            select(User.unique_user_key).where(
+                User.organization_id == org_id, User.unique_user_key.in_(unique_keys_list)
+            )
+        )
+        existing_keys = {k.lower() for k in existing_keys_res.scalars().all()}
+
+    for p in parsed_users:
+        row_idx = p["row_idx"]
+        username = p["username"]
+        key = p["unique_user_key"]
+
+        if username and username.lower() in existing_usernames:
+            errors.append(f"Row {row_idx}: Username '{username}' already exists in this organization")
+        if key and key.lower() in existing_keys:
+            errors.append(f"Row {row_idx}: unique_user_key '{key}' already exists in this organization")
+
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Validation failed", "errors": errors}
+        )
+
+    # Perform optimized bulk insert
+    for p in parsed_users:
+        u = User(
+            organization_id=org_id,
+            username=p["username"],
+            email=p["email"],
+            hashed_password=get_password_hash(p["password"]),
+            role=UserRole(p["role"]),
+            is_active=True,
+            unique_user_key=p["unique_user_key"],
+            full_name=p["full_name"]
+        )
+        db.add(u)
+
+    await db.commit()
+    return {"ok": True, "rows_added": len(parsed_users)}
+
+
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_org_user(
     user_id: int,
@@ -289,6 +486,7 @@ async def get_org_user(
         role=user.role,
         organization_id=user.organization_id,
         is_active=user.is_active,
+        unique_user_key=user.unique_user_key,
         description=eu.description if eu else None,
         is_external=eu is not None,
     )
@@ -322,6 +520,11 @@ async def update_org_user(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     await db.commit()
     await db.refresh(user)
+
+    # Invalidate cache entries associated with this user ID
+    from app.reports.custom_service import CUSTOM_REPORT_CACHE
+    CUSTOM_REPORT_CACHE.invalidate_user(user_id)
+
     return UserResponse.model_validate(user)
 
 

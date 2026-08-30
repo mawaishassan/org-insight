@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 class CustomReportCreate(BaseModel):
     name: str = Field(..., max_length=255)
     description: str | None = None
+    group_id: int | None = None
     fetch_data_with_date: bool = False
     date_fetching_config: dict | None = None
     report_header_id: int | None = None
@@ -23,6 +24,7 @@ class CustomReportCreate(BaseModel):
 class CustomReportUpdate(BaseModel):
     name: str = Field(..., max_length=255)
     description: str | None = None
+    group_id: int | None = None
     fetch_data_with_date: bool | None = None
     date_fetching_config: dict | None = None
     report_header_id: int | None = None
@@ -45,6 +47,36 @@ class CustomReportAssignmentRequest(BaseModel):
     can_export: bool = True
 
 
+class CustomReportBulkAssignmentRequest(BaseModel):
+    user_ids: list[int]
+    can_view: bool = True
+    can_print: bool = True
+    can_export: bool = True
+
+
+class ReportUserFilterConfigCreateUpdate(BaseModel):
+    enabled: bool = False
+    kpi_id: int | None = None
+    mli_id: int | None = None
+    field_id: int | None = None
+    operator: str = "="
+    dynamic_value_source: str = "CURRENT_USER_UNIQUE_KEY"
+
+
+class ReportUserFilterConfigResponse(BaseModel):
+    id: int
+    report_id: int
+    enabled: bool
+    kpi_id: int | None = None
+    mli_id: int | None = None
+    field_id: int | None = None
+    operator: str
+    dynamic_value_source: str
+
+    class Config:
+        from_attributes = True
+
+
 class CustomReportAssignmentResponse(BaseModel):
     id: int
     custom_report_id: int
@@ -63,6 +95,7 @@ class CustomReportAssignmentResponse(BaseModel):
 class CustomReportResponse(BaseModel):
     id: int
     organization_id: int
+    group_id: int | None = None
     name: str
     description: str | None
     fetch_data_with_date: bool = False
