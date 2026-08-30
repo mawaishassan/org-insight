@@ -14,6 +14,7 @@ from app.core.models import (
     KPIEntry,
     KPIFieldValue,
     KPIField,
+    KPIFieldSubField,
     KPI,
     KPIAssignment,
     KpiRoleAssignment,
@@ -262,25 +263,73 @@ async def resolve_linked_columns_in_rows_batch(
     return rows_by_entry_id
 
 
-async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField) -> list[dict]:
+async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: KPIField, resolve_links: bool = False) -> list[dict]:
     """Load relational multi_line_items rows into legacy list-of-dicts shape."""
-    res = await db.execute(
-        select(KpiMultiLineRow)
+    # Fast path for large datasets to bypass extremely slow SQLAlchemy ORM object materialization
+    count_res = await db.execute(
+        select(func.count(KpiMultiLineRow.id))
         .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
-        .order_by(KpiMultiLineRow.row_index)
-        .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
     )
-    rows_orm = list(res.scalars().all())
-    out: list[dict] = []
-    for r in rows_orm:
-        d: dict[str, Any] = {}
-        for c in getattr(r, "cells", None) or []:
-            sf = getattr(c, "sub_field", None)
-            key = getattr(sf, "key", None) if sf is not None else None
-            if not key:
-                continue
-            d[str(key)] = _ml_cell_raw(c)
-        out.append(d)
+    total_count = count_res.scalar() or 0
+
+    if total_count > 500:
+        q = (
+            select(
+                KpiMultiLineRow.id,
+                KpiMultiLineRow.row_index,
+                KPIFieldSubField.key,
+                KpiMultiLineCell.value_text,
+                KpiMultiLineCell.value_number,
+                KpiMultiLineCell.value_json,
+                KpiMultiLineCell.value_boolean,
+                KpiMultiLineCell.value_date
+            )
+            .join(KpiMultiLineCell, KpiMultiLineCell.row_id == KpiMultiLineRow.id)
+            .join(KPIFieldSubField, KPIFieldSubField.id == KpiMultiLineCell.sub_field_id)
+            .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
+            .order_by(KpiMultiLineRow.row_index)
+        )
+        res = await db.execute(q)
+        flat_results = res.all()
+
+        rows_map = {}
+        for r_id, r_idx, sf_key, val_text, val_number, val_json, val_boolean, val_date in flat_results:
+            if r_idx not in rows_map:
+                rows_map[r_idx] = {}
+            val = None
+            if val_json is not None:
+                val = val_json
+            elif val_text is not None:
+                val = val_text
+            elif val_number is not None:
+                val = val_number
+            elif val_boolean is not None:
+                val = val_boolean
+            elif val_date is not None:
+                try:
+                    val = val_date.isoformat()
+                except Exception:
+                    val = str(val_date)
+            rows_map[r_idx][str(sf_key)] = val
+        out = [rows_map[idx] for idx in sorted(rows_map.keys())]
+    else:
+        res = await db.execute(
+            select(KpiMultiLineRow)
+            .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field.id)
+            .order_by(KpiMultiLineRow.row_index)
+            .options(selectinload(KpiMultiLineRow.cells).selectinload(KpiMultiLineCell.sub_field))
+        )
+        rows_orm = list(res.scalars().all())
+        out: list[dict] = []
+        for r in rows_orm:
+            d: dict[str, Any] = {}
+            for c in getattr(r, "cells", None) or []:
+                sf = getattr(c, "sub_field", None)
+                key = getattr(sf, "key", None) if sf is not None else None
+                if not key:
+                    continue
+                d[str(key)] = _ml_cell_raw(c)
+            out.append(d)
 
     # Apply text extraction rules if configured for this field
     try:
@@ -293,14 +342,15 @@ async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: 
         import logging
         logging.getLogger("app").warning("MLI extraction skipped in load_multi_line_items_rows: %s", exc)
 
-    # Resolve linked columns dynamically
-    res_dict = await resolve_linked_columns_in_rows_batch(
-        db,
-        entry_ids=[entry_id],
-        field=field,
-        rows_by_entry_id={entry_id: out}
-    )
-    out = res_dict.get(entry_id, [])
+    if resolve_links:
+        # Resolve linked columns dynamically
+        res_dict = await resolve_linked_columns_in_rows_batch(
+            db,
+            entry_ids=[entry_id],
+            field=field,
+            rows_by_entry_id={entry_id: out}
+        )
+        out = res_dict.get(entry_id, [])
 
     return out
 
@@ -3374,7 +3424,9 @@ def extract_cross_kpi_mli_references(expression: str) -> set[tuple[int, str]]:
             func_name = node.func.id
             if func_name in (
                 "SUM_KPI_ITEMS", "AVG_KPI_ITEMS", "COUNT_KPI_ITEMS", "MIN_KPI_ITEMS", "MAX_KPI_ITEMS",
+                "COUNT_UNIQUE_KPI_ITEMS", "UNIQUE_COUNT_KPI_ITEMS", "COUNT_DISTINCT_KPI_ITEMS",
                 "SUM_KPI_ITEMS_WHERE", "AVG_KPI_ITEMS_WHERE", "COUNT_KPI_ITEMS_WHERE", "MIN_KPI_ITEMS_WHERE", "MAX_KPI_ITEMS_WHERE",
+                "COUNT_UNIQUE_KPI_ITEMS_WHERE", "UNIQUE_COUNT_KPI_ITEMS_WHERE", "COUNT_DISTINCT_KPI_ITEMS_WHERE",
                 "KPI_FIELD", "KPI_GROUP_BY", "GROUP_BY_KPI", "FETCH_KPI_ITEMS_WHERE"
             ):
                 if len(node.args) >= 2:
@@ -3621,6 +3673,7 @@ async def recompute_mli_formula_subfields(
     entry_id: int,
     org_id: int,
     field_id: int | None = None,
+    on_progress: Any | None = None,
 ) -> None:
     """Recompute and persist all formula subfield values for an entry's multi_line_items fields."""
     entry = await db.get(KPIEntry, entry_id)
@@ -3718,18 +3771,33 @@ async def recompute_mli_formula_subfields(
             rows_orm = list(rows_res.scalars().all())
             rows_orm = sorted(rows_orm, key=lambda x: x.row_index)
 
-            # Ensure multi_line_items_data is initialized and matching rows
+            # Ensure multi_line_items_data is initialized
             if f.key not in multi_line_items_data or not isinstance(multi_line_items_data[f.key], list):
                 multi_line_items_data[f.key] = []
-            while len(multi_line_items_data[f.key]) < len(rows_orm):
-                multi_line_items_data[f.key].append({})
+
+            # Synchronize database rows count with dynamic rows count (e.g. for linked fields)
+            if len(rows_orm) < len(multi_line_items_data[f.key]):
+                for idx in range(len(rows_orm), len(multi_line_items_data[f.key])):
+                    new_r = KpiMultiLineRow(entry_id=entry.id, field_id=f.id, row_index=idx)
+                    db.add(new_r)
+                    rows_orm.append(new_r)
+                await db.flush()
+            elif len(rows_orm) > len(multi_line_items_data[f.key]):
+                extra_rows = rows_orm[len(multi_line_items_data[f.key]):]
+                for er in extra_rows:
+                    await db.delete(er)
+                rows_orm = rows_orm[:len(multi_line_items_data[f.key])]
+                await db.flush()
 
             # Populate working rows with existing cell values (if not already present)
             cells_by_row_and_sub: dict[int, dict[int, KpiMultiLineCell]] = {}
             for idx, r in enumerate(rows_orm):
                 cells_by_row_and_sub[r.id] = {}
+                if idx >= len(multi_line_items_data[f.key]):
+                    multi_line_items_data[f.key].append({})
                 working_row = multi_line_items_data[f.key][idx]
-                for cell in getattr(r, "cells", None) or []:
+                cells_list = r.__dict__.get("cells") or []
+                for cell in cells_list:
                     sf_ref = getattr(cell, "sub_field", None)
                     if sf_ref:
                         cells_by_row_and_sub[r.id][sf_ref.id] = cell
@@ -3755,9 +3823,19 @@ async def recompute_mli_formula_subfields(
                         s_name = (sub_item.name or "").strip()
                         s_key = (sub_item.key or "").strip()
                         if s_name and s_key and s_name != s_key:
-                            norm_expr = re.sub(r'\b' + re.escape(s_name) + r'\b', s_key, norm_expr)
+                            pattern = r'("[^"]*"|\'[^\']*\')|\b' + re.escape(s_name) + r'\b'
+                            norm_expr = re.sub(pattern, lambda m: m.group(1) if m.group(1) is not None else s_key, norm_expr)
 
+                    total_rows = len(rows_orm)
                     for idx, r in enumerate(rows_orm):
+                        if on_progress and (idx % 10 == 0 or idx == total_rows - 1):
+                            msg = f"Calculating formula for row {idx + 1} of {total_rows}..."
+                            import inspect
+                            if inspect.iscoroutinefunction(on_progress):
+                                await on_progress(idx + 1, total_rows, msg)
+                            else:
+                                on_progress(idx + 1, total_rows, msg)
+
                         working_row = multi_line_items_data[f.key][idx]
                         computed = evaluate_formula(
                             norm_expr,
@@ -3773,6 +3851,8 @@ async def recompute_mli_formula_subfields(
                             computed = apply_conditional_logic(computed, cond_logic)
 
                         dec_places = cfg.get("decimal_places") if isinstance(cfg, dict) else None
+                        if dec_places is None:
+                            dec_places = 2
                         if dec_places is not None and str(dec_places).lower() != "auto":
                             try:
                                 dp = int(dec_places)
@@ -3807,6 +3887,43 @@ async def recompute_mli_formula_subfields(
                                 cell.value_number = float(computed)
                             else:
                                 cell.value_text = str(computed)
+
+            # Persist linked subfield values to database cells
+            f_cfg = f.config or {}
+            link_cfg = f_cfg.get("link_source") or {} if isinstance(f_cfg, dict) else {}
+            mappings = link_cfg.get("column_mappings") or {}
+
+            for sf in sub_fields:
+                cfg = sf.config or {}
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                is_sf_linked = (cfg.get("data_source") == "linked") or (sf.key in mappings)
+                if is_sf_linked:
+                    for idx, r in enumerate(rows_orm):
+                        if idx < len(multi_line_items_data[f.key]):
+                            working_row = multi_line_items_data[f.key][idx]
+                            val = working_row.get(sf.key)
+                            
+                            cell = cells_by_row_and_sub[r.id].get(sf.id)
+                            if cell is None:
+                                cell = KpiMultiLineCell(row_id=r.id, sub_field_id=sf.id)
+                                db.add(cell)
+                                cells_by_row_and_sub[r.id][sf.id] = cell
+                            
+                            cell.value_text = None
+                            cell.value_number = None
+                            cell.value_json = None
+                            cell.value_boolean = None
+                            cell.value_date = None
+                            
+                            if val is not None:
+                                if isinstance(val, bool):
+                                    cell.value_boolean = val
+                                    cell.value_text = "True" if val else "False"
+                                elif isinstance(val, (int, float)):
+                                    cell.value_number = float(val)
+                                else:
+                                    cell.value_text = str(val)
 
         await db.flush()
     finally:

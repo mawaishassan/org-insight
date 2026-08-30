@@ -1,5 +1,6 @@
 """KPI field CRUD with tenant isolation via KPI -> domain -> org."""
 
+from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
 from sqlalchemy.orm import selectinload
@@ -88,10 +89,158 @@ async def _validate_conditional_config(db: AsyncSession, kpi_id: int, config: di
                     raise ValueError("dependent_fields must be a list")
 
 
+async def _validate_field_formulas(
+    db: AsyncSession,
+    kpi_id: int,
+    field_type: Any,
+    formula_expression: Optional[str],
+    sub_fields: Optional[list[Any]],
+    target_field_key: Optional[str] = None
+) -> None:
+    import re
+    from app.formula_engine.validation import (
+        validate_formula_syntax,
+        validate_formula_references,
+        validate_formula_types,
+        FormulaValidationError
+    )
+    from app.core.models import KPIField
+    from app.formula_engine.circular_validation import (
+        extract_formula_dependencies,
+        extract_formula_dependencies_split,
+    )
+    
+    # 1. Validate standard KPI field formula
+    ftype_str = field_type.value if hasattr(field_type, "value") else str(field_type)
+    if ftype_str == "formula" and formula_expression:
+        expr = formula_expression.strip()
+        validate_formula_syntax(expr)
+        
+        # Get all fields on this KPI
+        fields_res = await db.execute(
+            select(KPIField).where(KPIField.kpi_id == kpi_id)
+        )
+        kpi_fields = fields_res.scalars().all()
+        
+        # Build available fields map
+        available_fields = {}
+        for f in kpi_fields:
+            if f.key:
+                ft = f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type)
+                available_fields[f.key] = ft
+                
+        if target_field_key and target_field_key not in available_fields:
+            available_fields[target_field_key] = "formula"
+
+        # Normalize expression (replace name references with keys)
+        normalized_expr = expr
+        for f in kpi_fields:
+            if f.name and f.name != f.key:
+                pattern = r'\b' + re.escape(f.name) + r'\b'
+                normalized_expr = re.sub(pattern, f.key, normalized_expr)
+
+        deps = validate_formula_references(normalized_expr, available_fields)
+        validate_formula_types(normalized_expr, available_fields)
+
+        if target_field_key and target_field_key in deps:
+            raise ValueError("Target field cannot reference itself directly in the formula.")
+
+        # Check circular dependencies across standard KPI fields
+        dep_map = {}
+        for f in kpi_fields:
+            if not f.key:
+                continue
+            ft = f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type)
+            if f.key == target_field_key:
+                dep_map[f.key] = deps
+            elif ft == "formula":
+                if f.formula_expression:
+                    dep_map[f.key] = extract_formula_dependencies(f.formula_expression)
+                else:
+                    dep_map[f.key] = set()
+            else:
+                dep_map[f.key] = set()
+
+        if target_field_key and target_field_key not in dep_map:
+            dep_map[target_field_key] = deps
+
+        visited = {}
+        def dfs(u: str, path: list[str]) -> None:
+            visited[u] = 1
+            path.append(u)
+            for v in dep_map.get(u, []):
+                if v not in dep_map:
+                    continue
+                if visited.get(v, 0) == 1:
+                    cycle_start_idx = path.index(v)
+                    cycle_path = path[cycle_start_idx:] + [v]
+                    loop_str = " -> ".join(cycle_path)
+                    raise ValueError(f"Circular dependency detected in KPI fields: {loop_str}")
+                if visited.get(v, 0) == 0:
+                    dfs(v, path)
+            path.pop()
+            visited[u] = 2
+
+        for key in dep_map:
+            if visited.get(key, 0) == 0:
+                dfs(key, [])
+
+    # 2. Validate MLI subfield formulas
+    if ftype_str == "multi_line_items" and sub_fields:
+        available_subfields = {}
+        for sub in sub_fields:
+            sub_key = getattr(sub, "key", None) or (sub.get("key") if isinstance(sub, dict) else None)
+            sub_ftype = getattr(sub, "field_type", None) or (sub.get("field_type") if isinstance(sub, dict) else None)
+            if sub_key:
+                ft_str = sub_ftype.value if hasattr(sub_ftype, "value") else str(sub_ftype)
+                available_subfields[sub_key] = ft_str
+
+        for sub in sub_fields:
+            sub_key = getattr(sub, "key", None) or (sub.get("key") if isinstance(sub, dict) else None)
+            sub_config = getattr(sub, "config", None) or (sub.get("config") if isinstance(sub, dict) else None)
+            sub_ftype = getattr(sub, "field_type", None) or (sub.get("field_type") if isinstance(sub, dict) else None)
+            if not sub_key:
+                continue
+
+            sub_ftype_str = sub_ftype.value if hasattr(sub_ftype, "value") else str(sub_ftype)
+            if sub_ftype_str == "formula":
+                expr = None
+                if hasattr(sub_config, "get"):
+                    expr = sub_config.get("formula_expression")
+                elif isinstance(sub_config, dict):
+                    expr = sub_config.get("formula_expression")
+
+                if expr:
+                    validate_formula_syntax(expr)
+                    # Use split extraction: only validate local refs against
+                    # available_subfields; cross-KPI column names are skipped.
+                    local_refs, _cross_kpi_refs = extract_formula_dependencies_split(expr)
+                    missing_local = [r for r in local_refs if r not in available_subfields]
+                    if missing_local:
+                        from app.formula_engine.validation import FormulaValidationError
+                        raise FormulaValidationError(
+                            f"Reference error: Column(s) '{', '.join(missing_local)}' do not exist "
+                            f"in this MLI's subfields. If referencing another KPI's columns, use a "
+                            f"cross-KPI function like COUNT_UNIQUE_KPI_ITEMS_WHERE."
+                        )
+                    validate_formula_types(expr, available_subfields)
+
+
 async def create_field(db: AsyncSession, org_id: int, data: KPIFieldCreate) -> KPIField | None:
     """Create KPI field (KPI must belong to org)."""
     if await _kpi_org_id(db, data.kpi_id) != org_id:
         return None
+
+    # Validate formulas first
+    await _validate_field_formulas(
+        db,
+        data.kpi_id,
+        data.field_type,
+        data.formula_expression,
+        data.sub_fields,
+        target_field_key=data.key
+    )
+
     if data.config:
         await _validate_conditional_config(db, data.kpi_id, data.config)
     if data.field_type == FieldType.multi_line_items:
@@ -333,6 +482,18 @@ async def update_field(
     field = await get_field(db, field_id, org_id)
     if not field:
         return None
+    # Validate formulas first
+    next_field_type = data.field_type if data.field_type is not None else field.field_type
+    next_expr = data.formula_expression if data.formula_expression is not None else field.formula_expression
+    await _validate_field_formulas(
+        db,
+        field.kpi_id,
+        next_field_type,
+        next_expr,
+        data.sub_fields if hasattr(data, "sub_fields") else None,
+        target_field_key=field.key
+    )
+
     prev_type = field.field_type
     prev_subfields = {sf.key: sf.field_type for sf in (field.sub_fields or [])}
 

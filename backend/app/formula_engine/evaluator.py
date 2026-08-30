@@ -29,6 +29,27 @@ OtherKpiValues = dict[tuple[int, str], float]
 _AST_CACHE: dict[str, Any] = {}
 
 
+# ── Custom exceptions ──────────────────────────────────────────────────────────
+class FormulaError(Exception):
+    """Base class for all formula evaluation errors."""
+
+
+class FormulaSyntaxError(FormulaError):
+    """Raised when the formula expression has a syntax error."""
+
+
+class UndefinedFieldError(FormulaError):
+    """Raised when a field referenced in the formula does not exist."""
+
+
+class DivisionByZeroError(FormulaError):
+    """Raised on division-by-zero during evaluation (returns None gracefully)."""
+
+
+class TypeMismatchError(FormulaError):
+    """Raised when incompatible data types are combined in a formula."""
+
+
 def _clean_num(val: Any) -> Any:
     if isinstance(val, float) and val.is_integer():
         return int(val)
@@ -65,7 +86,7 @@ class AggSpec:
                 if not isinstance(r, dict):
                     continue
                 v = r.get(self.field)
-                if v is not None and v != "":
+                if v is not None and str(v).strip() != "":
                     cnt += 1
             return cnt
 
@@ -77,13 +98,17 @@ class AggSpec:
                 if not isinstance(r, dict):
                     continue
                 v = r.get(self.field)
-                if v is not None and v != "":
-                    if isinstance(v, dict):
-                        v_norm = str(v.get("value") or v.get("id") or v.get("label") or str(v)).strip()
+                if v is not None:
+                    n_val = _to_num(v)
+                    if n_val is not None:
+                        seen.add(n_val)
                     else:
-                        v_norm = str(v).strip()
-                    if v_norm != "":
-                        seen.add(v_norm)
+                        if isinstance(v, dict):
+                            v_norm = str(v.get("value") or v.get("id") or v.get("label") or str(v)).strip()
+                        else:
+                            v_norm = str(v).strip()
+                        if v_norm != "":
+                            seen.add(v_norm)
             return len(seen)
 
         elif self.func == "SUM":
@@ -207,20 +232,17 @@ class GroupNode:
                     continue
                 match = True
                 for g_field in group_fields:
-                    v_cur = _get_current_row_val(current_row, g_field)
-                    if v_cur is None:
-                        # Field is not present in current_row (e.g. inner level field not in summary row), skip matching
-                        continue
                     v_row = r.get(g_field)
                     if isinstance(v_row, dict):
                         s_row = str(v_row.get("value") or v_row.get("id") or v_row.get("label") or str(v_row)).strip()
                     else:
                         s_row = str(v_row).strip() if v_row is not None else ""
 
+                    v_cur = _get_current_row_val(current_row, g_field)
                     if isinstance(v_cur, dict):
                         s_cur = str(v_cur.get("value") or v_cur.get("id") or v_cur.get("label") or str(v_cur)).strip()
                     else:
-                        s_cur = str(v_cur).strip()
+                        s_cur = str(v_cur).strip() if v_cur is not None else ""
 
                     if s_row != s_cur:
                         match = False
@@ -421,9 +443,16 @@ def _to_num(x: Any) -> float | None:
         return float(x)
     if isinstance(x, str):
         try:
-            return float(x.strip())
+            cleaned = x.strip().replace(",", "")
+            if not cleaned:
+                return None
+            return float(cleaned)
         except ValueError:
             return None
+    if isinstance(x, dict):
+        val = x.get("value") or x.get("id") or x.get("label")
+        if val is not None:
+            return _to_num(val)
     return None
 
 
@@ -790,19 +819,80 @@ def _parse_where_args(args: tuple[Any, ...], start_idx: int) -> tuple[list[Any],
     return conditions, links
 
 
+def _get_cell_key_val(cell: Any) -> Any:
+    """Normalize cell value for hash index key matching."""
+    if cell is None:
+        return None
+    if isinstance(cell, dict):
+        for k in ("value", "id", "label", "text", "name"):
+            if k in cell and cell[k] is not None:
+                return _get_cell_key_val(cell[k])
+    if isinstance(cell, (int, float)):
+        return float(cell)
+    n = _to_num(cell)
+    if n is not None:
+        return n
+    return str(cell).strip().lower()
+
+
+_DATASET_ROW_INDEX_CACHE: dict[tuple[int, tuple[str, ...]], dict[tuple[Any, ...], list[dict[str, Any]]]] = {}
+
+
 def _rows_where_multi(
     data: MultiLineItemsData,
     field_key: str,
     args: tuple[Any, ...],
     start_idx: int,
 ) -> list[dict[str, Any]]:
-    """Get rows matching one or more WHERE conditions (with and/or links)."""
+    """Get rows matching one or more WHERE conditions (with and/or links). Optimized with O(1) index caching."""
     rows = data.get(field_key) if isinstance(data, dict) else []
-    if not isinstance(rows, list):
+    if not isinstance(rows, list) or not rows:
         return []
     conditions, links = _parse_where_args(args, start_idx)
     if not conditions:
         return []
+
+    # Fast-path for large datasets (> 30 rows): index equality conditions for O(1) hash lookup
+    if len(rows) > 30 and (not links or all(l == "and" for l in links)):
+        eq_conditions = []
+        for cond in conditions:
+            if isinstance(cond, tuple) and len(cond) == 3:
+                sk, op, val = cond
+                op_norm = str(op).strip().lower()
+                if op_norm.startswith("op_"):
+                    op_norm = op_norm[3:]
+                if op_norm in ("eq", "equals"):
+                    eq_conditions.append((sk, val))
+
+        if eq_conditions:
+            eq_cols = tuple(c[0] for c in eq_conditions)
+            cache_key = (id(rows), eq_cols)
+            row_index = _DATASET_ROW_INDEX_CACHE.get(cache_key)
+
+            if row_index is None:
+                row_index = {}
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    r_key = tuple(_get_cell_key_val(r.get(c)) for c in eq_cols)
+                    if r_key not in row_index:
+                        row_index[r_key] = []
+                    row_index[r_key].append(r)
+                # Keep cache size bounded (flush if too large)
+                if len(_DATASET_ROW_INDEX_CACHE) > 500:
+                    _DATASET_ROW_INDEX_CACHE.clear()
+                _DATASET_ROW_INDEX_CACHE[cache_key] = row_index
+
+            target_key = tuple(_get_cell_key_val(v) for _, v in eq_conditions)
+            candidate_rows = row_index.get(target_key, [])
+
+            if len(eq_conditions) == len(conditions):
+                return candidate_rows
+            return [
+                r for r in candidate_rows
+                if _row_matches_conditions(r, conditions, links)
+            ]
+
     return [
         r
         for r in rows
@@ -1446,10 +1536,16 @@ def evaluate_formula(
             return _clean_num(result.evaluate(rows, current_row=current_row))
         return None
     except ZeroDivisionError:
-        logger.debug("Division by zero evaluating formula '%s'", expression)
+        logger.debug("Division by zero in formula '%s'", expression)
         return None
-    except (NameNotDefined, TypeError, KeyError, SyntaxError, ValueError) as exc:
-        logger.warning("Formula evaluation exception for '%s': %s", expression, exc)
+    except NameNotDefined as exc:
+        logger.warning("Undefined field in formula '%s': %s", expression, exc)
+        return None
+    except (TypeError, KeyError) as exc:
+        logger.warning("Type/key error in formula '%s': %s", expression, exc)
+        return None
+    except (SyntaxError, ValueError) as exc:
+        logger.warning("Syntax/value error in formula '%s': %s", expression, exc)
         return None
 
 

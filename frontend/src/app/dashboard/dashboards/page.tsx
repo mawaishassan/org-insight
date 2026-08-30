@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 interface DashboardRow {
   id: number;
@@ -21,10 +22,17 @@ function qs(params: Record<string, string | number | undefined>) {
   return new URLSearchParams(entries).toString();
 }
 
+let cachedDashboards: Record<string, DashboardRow[]> = {};
+
 export default function DashboardsPage() {
   const router = useRouter();
-  const [list, setList] = useState<DashboardRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const searchParams = useSearchParams();
+  const orgIdParam = searchParams.get("organization_id");
+  const queryOrgId = orgIdParam ? Number(orgIdParam) : null;
+  const orgKey = queryOrgId ? String(queryOrgId) : "all";
+
+  const [list, setList] = useState<DashboardRow[]>(() => cachedDashboards[orgKey] ?? []);
+  const [loading, setLoading] = useState(() => !cachedDashboards[orgKey]);
   const [error, setError] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [organizationId, setOrganizationId] = useState<number | null>(null);
@@ -63,9 +71,11 @@ export default function DashboardsPage() {
   useEffect(() => {
     const token = getAccessToken();
     if (!token) return;
-    api<DashboardRow[]>("/dashboards", { token })
+    const url = queryOrgId ? `/dashboards?organization_id=${queryOrgId}` : "/dashboards";
+    api<DashboardRow[]>(url, { token })
       .then((dashboards) => {
         setList(dashboards);
+        cachedDashboards[orgKey] = dashboards;
         if (userRole !== "SUPER_ADMIN" && dashboards.length === 1) {
           const orgQuery = organizationId ? `?organization_id=${organizationId}` : "";
           router.replace(`/dashboard/dashboards/${dashboards[0].id}${orgQuery}`);
@@ -73,7 +83,7 @@ export default function DashboardsPage() {
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
-  }, [userRole, organizationId, router]);
+  }, [userRole, organizationId, queryOrgId, orgKey, router]);
 
   useEffect(() => {
     if (!addModalOpen || userRole !== "SUPER_ADMIN" || organizationId != null) return;
@@ -92,7 +102,7 @@ export default function DashboardsPage() {
   const openAddModal = () => {
     setAddName("");
     setAddDescription("");
-    setAddOrgId(organizationId ?? null);
+    setAddOrgId(queryOrgId ?? organizationId ?? null);
     setError(null);
     setAddModalOpen(true);
   };
@@ -115,7 +125,12 @@ export default function DashboardsPage() {
         token,
         body: JSON.stringify({ name: addName.trim(), description: addDescription.trim() || null, layout: { widgets: [] } }),
       });
-      setList((prev) => [created, ...prev]);
+      setList((prev) => {
+        const next = [created, ...prev];
+        const key = effectiveAddOrgId ? String(effectiveAddOrgId) : "all";
+        cachedDashboards[key] = next;
+        return next;
+      });
       setAddModalOpen(false);
       toast.success("Dashboard created");
     } catch (e) {
@@ -141,7 +156,12 @@ export default function DashboardsPage() {
         token,
         body: JSON.stringify({ name, description: renameDescription.trim() || null }),
       });
-      setList((prev) => prev.map((x) => (x.id === d.id ? { ...x, name: updated.name, description: updated.description } : x)));
+      setList((prev) => {
+        const next = prev.map((x) => (x.id === d.id ? { ...x, name: updated.name, description: updated.description } : x));
+        const key = d.organization_id ? String(d.organization_id) : "all";
+        cachedDashboards[key] = next;
+        return next;
+      });
       setRenameDashboard(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update dashboard");
@@ -158,7 +178,12 @@ export default function DashboardsPage() {
     setError(null);
     try {
       await api(`/dashboards/${d.id}?${qs({ organization_id: d.organization_id })}`, { method: "DELETE", token });
-      setList((prev) => prev.filter((x) => x.id !== d.id));
+      setList((prev) => {
+        const next = prev.filter((x) => x.id !== d.id);
+        const key = d.organization_id ? String(d.organization_id) : "all";
+        cachedDashboards[key] = next;
+        return next;
+      });
       toast.success("Dashboard deleted");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to delete dashboard";
@@ -169,7 +194,14 @@ export default function DashboardsPage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
+  if (loading && list.length === 0) {
+    return (
+      <div>
+        <h1 style={{ marginBottom: "1rem", fontSize: "1.5rem" }}>Dashboards</h1>
+        <WidgetSpinnerLoader text="Loading dashboards..." minHeight={300} />
+      </div>
+    );
+  }
   if (error) return <p className="form-error">{error}</p>;
 
   return (
@@ -233,7 +265,7 @@ export default function DashboardsPage() {
         <div className="modal-backdrop">
           <div className="modal" style={{ maxWidth: 520 }}>
             <h2 style={{ marginTop: 0 }}>Add dashboard</h2>
-            {organizationId == null && userRole === "SUPER_ADMIN" && (
+            {organizationId == null && userRole === "SUPER_ADMIN" && queryOrgId == null && (
               <div style={{ marginBottom: "0.75rem" }}>
                 <label style={{ display: "block", fontSize: "0.9rem", marginBottom: "0.35rem" }}>Organization</label>
                 <select value={effectiveAddOrgId ?? ""} onChange={(e) => setAddOrgId(Number(e.target.value))} style={{ width: "100%", padding: "0.5rem" }}>

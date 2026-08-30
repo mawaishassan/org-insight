@@ -359,6 +359,7 @@ export default function KpiFieldsPage() {
     ui_section: string;
     config: ReferenceConfig;
   }>({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: "", config: {} });
+  const [isSavingSubField, setIsSavingSubField] = useState(false);
   const [inlineEditFieldIds, setInlineEditFieldIds] = useState<Record<number, boolean>>({});
   const [inlineSubfieldDrafts, setInlineSubfieldDrafts] = useState<
     Record<number, Array<{ id?: number; name: string; key: string; field_type: string; is_required: boolean; ui_section?: string; formula_expression?: string }>>
@@ -836,9 +837,16 @@ export default function KpiFieldsPage() {
       };
     });
 
-    await onUpdateSubmit(field.id, buildMultiLineUpdateFromField(field), nextSubs as any, undefined);
-    setInlineEditFieldIds((prev) => ({ ...prev, [field.id]: false }));
-    toast.success("Sub-fields updated successfully");
+    setIsSavingSubField(true);
+    try {
+      await onUpdateSubmit(field.id, buildMultiLineUpdateFromField(field), nextSubs as any, undefined);
+      setInlineEditFieldIds((prev) => ({ ...prev, [field.id]: false }));
+      toast.success("Sub-fields updated successfully");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to update sub-fields");
+    } finally {
+      setIsSavingSubField(false);
+    }
   };
 
   const handleExportStructure = (field: KpiField, format: "csv" | "json" = "csv") => {
@@ -3547,7 +3555,9 @@ export default function KpiFieldsPage() {
                                       backgroundColor: inlineEditFieldIds[f.id] ? "#10b981" : undefined,
                                       borderColor: inlineEditFieldIds[f.id] ? "#059669" : undefined,
                                       color: inlineEditFieldIds[f.id] ? "white" : undefined,
+                                      opacity: isSavingSubField ? 0.6 : 1,
                                     }}
+                                    disabled={isSavingSubField}
                                     onClick={() => {
                                       if (inlineEditFieldIds[f.id]) {
                                         handleSaveInlineEdit(f);
@@ -3556,13 +3566,14 @@ export default function KpiFieldsPage() {
                                       }
                                     }}
                                   >
-                                    {inlineEditFieldIds[f.id] ? "Save Editing" : "Edit Mode"}
+                                    {isSavingSubField && inlineEditFieldIds[f.id] ? "Saving..." : inlineEditFieldIds[f.id] ? "Save Editing" : "Edit Mode"}
                                   </button>
                                   <button
                                     type="button"
                                     className="btn"
                                     onClick={() => handleExportStructure(f)}
                                     title="Export Sub-fields structure to Excel CSV or JSON file"
+                                    disabled={isSavingSubField}
                                   >
                                     Export Structure
                                   </button>
@@ -3578,6 +3589,7 @@ export default function KpiFieldsPage() {
                                       });
                                     }}
                                     title="Import Sub-fields structure from Excel CSV file or text"
+                                    disabled={isSavingSubField}
                                   >
                                     Import Structure
                                   </button>
@@ -3586,11 +3598,12 @@ export default function KpiFieldsPage() {
                                     className="btn btn-primary"
                                     onClick={() => {
                                       const nextUiSection = activeSection === "Other" ? "" : activeSection;
-                                      setAddSubFieldDraft({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: nextUiSection, config: {} });
+                                      setAddSubFieldDraft({ name: "", key: "", keyTouched: false, field_type: "single_line_text", is_required: false, ui_section: nextUiSection, config: { decimal_places: 2 } });
                                       setAddSubFieldModal({ fieldId: f.id, activeSection });
                                     }}
+                                    disabled={isSavingSubField}
                                   >
-                                    + Add Sub Field
+                                    Add Sub-field
                                   </button>
                                 </div>
                               </div>
@@ -3976,6 +3989,7 @@ export default function KpiFieldsPage() {
                                                       is_required: !!(s as any).is_required,
                                                       ui_section: uiSec,
                                                       config: {
+                                                        decimal_places: cfgObj.decimal_places !== undefined ? cfgObj.decimal_places : 2,
                                                         ...cfgObj,
                                                         reference_source_kpi_id: cfgObj.reference_source_kpi_id,
                                                         reference_source_field_key: cfgObj.reference_source_field_key,
@@ -4877,7 +4891,11 @@ export default function KpiFieldsPage() {
                           setAddSubFieldDraft((p) => ({
                             ...p,
                             field_type: nextType,
-                            config: nextType === "reference" || nextType === "multi_reference" ? p.config : {},
+                            config: nextType === "reference" || nextType === "multi_reference" 
+                               ? p.config 
+                               : nextType === "formula" 
+                               ? { ...p.config, decimal_places: p.config.decimal_places !== undefined ? p.config.decimal_places : 2 } 
+                               : {},
                           }));
                         }}
                         style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
@@ -4910,6 +4928,30 @@ export default function KpiFieldsPage() {
                       />
                       Required
                     </label>
+
+                    {addSubFieldDraft.field_type === "formula" && (
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                        <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>Decimal Digits:</span>
+                        <select
+                          value={addSubFieldDraft.config.decimal_places !== undefined ? addSubFieldDraft.config.decimal_places : 2}
+                          onChange={(e) => {
+                            const val = e.target.value === "auto" ? "auto" : Number(e.target.value);
+                            setAddSubFieldDraft((p) => ({
+                              ...p,
+                              config: { ...p.config, decimal_places: val }
+                            }));
+                          }}
+                          style={{ padding: "0.25rem 0.5rem", border: "1px solid var(--border)", borderRadius: 10, fontSize: "0.85rem" }}
+                        >
+                          <option value={2}>2 (e.g. 14.43)</option>
+                          <option value={0}>0 (e.g. 14)</option>
+                          <option value={1}>1 (e.g. 14.4)</option>
+                          <option value={3}>3 (e.g. 14.429)</option>
+                          <option value={4}>4 (e.g. 14.4286)</option>
+                          <option value="auto">Auto (Full precision)</option>
+                        </select>
+                      </div>
+                    )}
                   </div>
 
 
@@ -4966,15 +5008,25 @@ export default function KpiFieldsPage() {
                           config={addSubFieldDraft.config}
                           onChangeConfig={(newCfg) => setAddSubFieldDraft((p) => ({ ...p, config: newCfg }))}
                         />
+
+                        <FormulaPreviewSection
+                          kpiId={kpiId}
+                          fieldId={addSubFieldModal.fieldId}
+                          orgId={orgId}
+                          formulaExpression={addSubFieldDraft.config.formula_expression || ""}
+                          decimalPlaces={addSubFieldDraft.config.decimal_places}
+                          conditionalLogic={addSubFieldDraft.config.conditional_logic}
+                        />
                       </div>
                     );
                   })()}
 
                   <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
-                    <button type="button" className="btn" onClick={() => setAddSubFieldModal(null)}>Cancel</button>
+                    <button type="button" className="btn" disabled={isSavingSubField} onClick={() => setAddSubFieldModal(null)}>Cancel</button>
                     <button
                       type="button"
                       className="btn btn-primary"
+                      disabled={isSavingSubField}
                       onClick={async () => {
                         const modal = addSubFieldModal;
                         if (!modal) return;
@@ -5050,11 +5102,18 @@ export default function KpiFieldsPage() {
                           full_page_multi_items: !!field.full_page_multi_items,
                           multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
                         };
-                        await onUpdateSubmit(modal.fieldId, update, [...existingSubs, nextSub] as any, undefined);
-                        setAddSubFieldModal(null);
+                        setIsSavingSubField(true);
+                        try {
+                          await onUpdateSubmit(modal.fieldId, update, [...existingSubs, nextSub] as any, undefined);
+                          setAddSubFieldModal(null);
+                        } catch (e) {
+                          toast.error(e instanceof Error ? e.message : "Failed to add sub-field");
+                        } finally {
+                          setIsSavingSubField(false);
+                        }
                       }}
                     >
-                      Add
+                      {isSavingSubField ? "Adding..." : "Add"}
                     </button>
                   </div>
                 </>
@@ -5129,7 +5188,11 @@ export default function KpiFieldsPage() {
                           setEditSubFieldDraft((p) => ({
                             ...p,
                             field_type: nextType,
-                            config: nextType === "reference" || nextType === "multi_reference" ? p.config : {},
+                            config: nextType === "reference" || nextType === "multi_reference" 
+                              ? p.config 
+                              : nextType === "formula" 
+                              ? { ...p.config, decimal_places: p.config.decimal_places !== undefined ? p.config.decimal_places : 2 } 
+                              : {},
                           }));
                         }}
                         style={{ width: "100%", padding: "0.45rem 0.55rem", border: "1px solid var(--border)", borderRadius: 10 }}
@@ -5162,6 +5225,30 @@ export default function KpiFieldsPage() {
                       />
                       Required
                     </label>
+
+                    {editSubFieldDraft.field_type === "formula" && (
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                        <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>Decimal Digits:</span>
+                        <select
+                          value={editSubFieldDraft.config.decimal_places !== undefined ? editSubFieldDraft.config.decimal_places : 2}
+                          onChange={(e) => {
+                            const val = e.target.value === "auto" ? "auto" : Number(e.target.value);
+                            setEditSubFieldDraft((p) => ({
+                              ...p,
+                              config: { ...p.config, decimal_places: val }
+                            }));
+                          }}
+                          style={{ padding: "0.25rem 0.5rem", border: "1px solid var(--border)", borderRadius: 10, fontSize: "0.85rem" }}
+                        >
+                          <option value={2}>2 (e.g. 14.43)</option>
+                          <option value={0}>0 (e.g. 14)</option>
+                          <option value={1}>1 (e.g. 14.4)</option>
+                          <option value={3}>3 (e.g. 14.429)</option>
+                          <option value={4}>4 (e.g. 14.4286)</option>
+                          <option value="auto">Auto (Full precision)</option>
+                        </select>
+                      </div>
+                    )}
                   </div>
 
 
@@ -5218,15 +5305,25 @@ export default function KpiFieldsPage() {
                           config={editSubFieldDraft.config}
                           onChangeConfig={(newCfg) => setEditSubFieldDraft((p) => ({ ...p, config: newCfg }))}
                         />
+
+                        <FormulaPreviewSection
+                          kpiId={kpiId}
+                          fieldId={editSubFieldModal.fieldId}
+                          orgId={orgId}
+                          formulaExpression={editSubFieldDraft.config.formula_expression || ""}
+                          decimalPlaces={editSubFieldDraft.config.decimal_places}
+                          conditionalLogic={editSubFieldDraft.config.conditional_logic}
+                        />
                       </div>
                     );
                   })()}
 
                   <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
-                    <button type="button" className="btn" onClick={() => setEditSubFieldModal(null)}>Cancel</button>
+                    <button type="button" className="btn" disabled={isSavingSubField} onClick={() => setEditSubFieldModal(null)}>Cancel</button>
                     <button
                       type="button"
                       className="btn btn-primary"
+                      disabled={isSavingSubField}
                       onClick={async () => {
                         const modal = editSubFieldModal;
                         if (!modal) return;
@@ -5327,11 +5424,18 @@ export default function KpiFieldsPage() {
                           full_page_multi_items: !!field.full_page_multi_items,
                           multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
                         };
-                        await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
-                        setEditSubFieldModal(null);
+                        setIsSavingSubField(true);
+                        try {
+                          await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
+                          setEditSubFieldModal(null);
+                        } catch (e) {
+                          toast.error(e instanceof Error ? e.message : "Failed to save sub-field");
+                        } finally {
+                          setIsSavingSubField(false);
+                        }
                       }}
                     >
-                      Save
+                      {isSavingSubField ? "Saving..." : "Save"}
                     </button>
                   </div>
                 </>
@@ -5498,12 +5602,13 @@ export default function KpiFieldsPage() {
             </div>
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
-              <button type="button" className="btn" onClick={() => setDeleteSubFieldModal(null)}>Cancel</button>
+              <button type="button" className="btn" disabled={isSavingSubField} onClick={() => setDeleteSubFieldModal(null)}>Cancel</button>
               <button
                 type="button"
                 className="btn btn-primary"
-                style={{ background: "var(--error)", borderColor: "var(--error)" }}
+                style={{ background: "var(--error)", borderColor: "var(--error)", opacity: isSavingSubField ? 0.6 : 1 }}
                 disabled={
+                  isSavingSubField ||
                   deleteSubFieldConfirm.name.trim() !== deleteSubFieldModal.name.trim() ||
                   deleteSubFieldConfirm.key.trim() !== deleteSubFieldModal.key.trim()
                 }
@@ -5542,11 +5647,18 @@ export default function KpiFieldsPage() {
                     full_page_multi_items: !!field.full_page_multi_items,
                     multi_items_api_endpoint_url: (field.config as any)?.multi_items_api_endpoint_url ?? "",
                   };
-                  await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
-                  setDeleteSubFieldModal(null);
+                  setIsSavingSubField(true);
+                  try {
+                    await onUpdateSubmit(modal.fieldId, update, nextSubs as any, undefined);
+                    setDeleteSubFieldModal(null);
+                  } catch (e) {
+                    toast.error(e instanceof Error ? e.message : "Failed to delete sub-field");
+                  } finally {
+                    setIsSavingSubField(false);
+                  }
                 }}
               >
-                Delete
+                {isSavingSubField ? "Deleting..." : "Delete"}
               </button>
             </div>
           </div>
@@ -6867,7 +6979,7 @@ function FormulaBuilder({
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
             <select
-              style={{ flex: "1 1 240px", padding: "0.38rem 0.55rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+              style={{ flex: "1 1 240px", minWidth: 0, maxWidth: "100%", padding: "0.38rem 0.55rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
               value=""
               onChange={(e) => {
                 const val = e.target.value;
@@ -7508,6 +7620,124 @@ function FormulaBuilder({
     </div>
   );
 }
+
+function FormulaPreviewSection({
+  kpiId,
+  fieldId,
+  orgId,
+  formulaExpression,
+  decimalPlaces,
+  conditionalLogic,
+}: {
+  kpiId: number;
+  fieldId: number;
+  orgId: number | null;
+  formulaExpression: string;
+  decimalPlaces?: number | string;
+  conditionalLogic?: any;
+}) {
+  const [rows, setRows] = useState<Array<{ label: string; result: any }> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reset preview when formula or config changes
+  useEffect(() => {
+    setRows(null);
+    setError(null);
+  }, [formulaExpression, decimalPlaces, JSON.stringify(conditionalLogic)]);
+
+  const handleShowPreview = async () => {
+    const token = getAccessToken();
+    if (!token || orgId == null) {
+      toast.error("Authentication token or Organization ID is missing.");
+      return;
+    }
+    if (!formulaExpression.trim()) {
+      toast.error("Please enter a formula expression first.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api<{ ok: boolean; rows: Array<{ label: string; result: any }> }>(
+        "/entries/multi-items/preview-formula",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            kpi_id: kpiId,
+            field_id: fieldId,
+            organization_id: orgId,
+            formula_expression: formulaExpression,
+            decimal_places: decimalPlaces,
+            conditional_logic: conditionalLogic,
+          }),
+          token,
+        }
+      );
+      setRows(res.rows || []);
+    } catch (err: any) {
+      setError(err?.detail || err?.message || "Failed to calculate preview.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: "1rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+        <span style={{ fontSize: "0.85rem", fontWeight: 650 }}>Formula Output Live Preview (First 5 Rows)</span>
+        <button
+          type="button"
+          className="btn btn-primary"
+          style={{ padding: "0.3rem 0.65rem", fontSize: "0.8rem", height: "30px", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+          onClick={handleShowPreview}
+          disabled={loading}
+        >
+          {loading ? "Calculating..." : "Show Preview"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ padding: "0.5rem", borderRadius: 8, background: "rgba(239, 68, 68, 0.1)", color: "#b91c1c", fontSize: "0.8rem", border: "1px solid rgba(239, 68, 68, 0.2)", marginTop: "0.5rem" }}>
+          {error}
+        </div>
+      )}
+
+      {rows !== null && (
+        <div style={{ marginTop: "0.5rem" }}>
+          {rows.length === 0 ? (
+            <div style={{ padding: "0.75rem", textAlign: "center", background: "var(--bg-subtle, #f3f4f6)", borderRadius: 8, border: "1px solid var(--border)", color: "var(--muted)", fontSize: "0.85rem" }}>
+              No result (No rows found in this KPI entry)
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  <th style={{ textAlign: "left", padding: "0.4rem 0.5rem", fontWeight: 600, color: "var(--muted)" }}>Row (Key Column)</th>
+                  <th style={{ textAlign: "right", padding: "0.4rem 0.5rem", fontWeight: 600, color: "var(--muted)" }}>Calculated Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, idx) => (
+                  <tr key={idx} style={{ borderBottom: idx < rows.length - 1 ? "1px solid var(--border-light, #f3f4f6)" : "none" }}>
+                    <td style={{ padding: "0.4rem 0.5rem", color: "var(--foreground)" }}>{row.label}</td>
+                    <td style={{ padding: "0.4rem 0.5rem", textAlign: "right", fontWeight: 650, color: "var(--primary)" }}>
+                      {row.result === null || row.result === undefined ? "—" : String(row.result)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FieldEditForm({
   field,
   list,

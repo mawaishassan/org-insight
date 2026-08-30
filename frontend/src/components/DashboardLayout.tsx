@@ -229,7 +229,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       setSelectedOrgName(null);
       return;
     }
-    api<{ id: number; name: string }>(`/organizations/${selectedOrgId}`, { token: getAccessToken()! })
+    api<{ id: number; name: string }>(`/organizations/${selectedOrgId}`, { token: getAccessToken()!, useCache: true })
       .then((org) => setSelectedOrgName(org.name))
       .catch(() => setSelectedOrgName(null));
   }, [selectedOrgId, user?.role]);
@@ -564,13 +564,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       href: kpisHref,
       label: "KPIs",
       active: pathname === "/dashboard/entries" || pathname.startsWith("/dashboard/entries/kpi/") || pathname.match(/^\/dashboard\/entries\/\d+\/\d+/),
-      show: isSuperAdmin ? (selectedOrgId != null) : (role === "ORG_ADMIN" || (role === "USER" && hasKpiRights)),
+      show: isSuperAdmin ? false : (role === "ORG_ADMIN" || (role === "USER" && hasKpiRights)),
     },
     {
       href: dashboardsHref,
       label: "Dashboards",
       active: pathname.startsWith("/dashboard/dashboards"),
-      show: isSuperAdmin ? (selectedOrgId != null) : true,
+      show: isSuperAdmin ? false : true,
     },
     {
       href: reportsHref,
@@ -578,14 +578,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       active: pathname.startsWith("/dashboard/reports") || pathname.includes("/report-builder"),
       show: isSuperAdmin ? false : canViewReports(role),
     },
-    ...(isSuperAdmin && selectedOrgId != null ? [
-      {
-        href: customReportsHref,
-        label: "Custom Reports",
-        active: pathname.startsWith("/dashboard/custom-reports"),
-        show: true,
-      }
-    ] : []),
   ].filter((x) => x.show);
 
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [

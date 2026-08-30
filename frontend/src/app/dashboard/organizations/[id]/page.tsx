@@ -11,6 +11,7 @@ import { getAccessToken, clearTokens, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { KpiSearchInput } from "@/components/KpiSearchInput";
 import { ApiExportContent } from "./ApiExportContent";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 import {
   buildReportPrintDocument,
   openReportPrintWindow,
@@ -374,6 +375,8 @@ const SETTINGS_SUB_IDS: SettingsSubId[] = [
   "mli_symbols",
 ];
 
+let cachedOverviewSummaries: Record<number, any> = {};
+
 export default function OrganizationDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
@@ -413,6 +416,7 @@ export default function OrganizationDetailPage() {
   const [kpiFilterCategoryId, setKpiFilterCategoryId] = useState<number | null>(null);
   const [kpiFilterTagId, setKpiFilterTagId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  const [kpisLoading, setKpisLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const latestKpiSearchIdRef = useRef(0);
 
@@ -453,7 +457,9 @@ export default function OrganizationDetailPage() {
     reportCount: number;
     dashboardCount: number;
     customReportCount: number;
-  } | null>(null);
+  } | null>(() => {
+    return cachedOverviewSummaries[orgId] ?? null;
+  });
 
   useEffect(() => {
     setTimeDimension(org?.time_dimension ?? "yearly");
@@ -461,19 +467,20 @@ export default function OrganizationDetailPage() {
 
   useEffect(() => {
     if (!token || !orgId) return;
+    setOverviewSummary(cachedOverviewSummaries[orgId] ?? null);
     Promise.all([
-      api<DomainWithSummary[]>(`/domains?${qs({ organization_id: orgId, with_summary: true })}`, { token }),
-      api<KpiRow[]>(`/kpis?${qs({ organization_id: orgId })}`, { token }),
-      api<OrgTagRow[]>(`/organizations/${orgId}/tags`, { token }),
-      api<{ id: number }[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token }),
-      api<{ id: number }[]>(`/dashboards?${qs({ organization_id: orgId })}`, { token }),
-      api<{ id: number }[]>(`/custom-reports?${qs({ organization_id: orgId })}`, { token }),
+      api<DomainWithSummary[]>(`/domains?${qs({ organization_id: orgId, with_summary: true })}`, { token, useCache: true }),
+      api<KpiRow[]>(`/kpis?${qs({ organization_id: orgId })}`, { token, useCache: true }),
+      api<OrgTagRow[]>(`/organizations/${orgId}/tags`, { token, useCache: true }),
+      api<{ id: number }[]>(`/reports/templates?${qs({ organization_id: orgId })}`, { token, useCache: true }),
+      api<{ id: number }[]>(`/dashboards?${qs({ organization_id: orgId })}`, { token, useCache: true }),
+      api<{ id: number }[]>(`/custom-reports?${qs({ organization_id: orgId })}`, { token, useCache: true }),
     ])
       .then(([domainsList, kpisList, tagsList, reportsList, dashboardsList, customReportsList]) => {
         const categoryCount = domainsList.reduce((s, d) => s + (d.summary?.category_count ?? 0), 0);
         const kpiManual = kpisList.filter((k) => (k.entry_mode ?? "manual") === "manual").length;
         const kpiApi = kpisList.filter((k) => k.entry_mode === "api").length;
-        setOverviewSummary({
+        const summaryData = {
           domainCount: domainsList.length,
           categoryCount,
           kpiTotal: kpisList.length,
@@ -483,14 +490,16 @@ export default function OrganizationDetailPage() {
           reportCount: reportsList.length,
           dashboardCount: dashboardsList.length,
           customReportCount: customReportsList.length,
-        });
+        };
+        setOverviewSummary(summaryData);
+        cachedOverviewSummaries[orgId] = summaryData;
       })
       .catch(() => setOverviewSummary(null));
   }, [orgId, token]);
 
   const loadOrg = () => {
     if (!token || !orgId) return;
-    api<OrgInfo>(`/organizations/${orgId}`, { token })
+    api<OrgInfo>(`/organizations/${orgId}`, { token, useCache: true })
       .then(setOrg)
       .catch(() => setOrg(null));
   };
@@ -520,13 +529,14 @@ export default function OrganizationDetailPage() {
   const loadKpis = () => {
     if (!token || !orgId) return;
     setError(null);
+    setKpisLoading(true);
     const searchId = ++latestKpiSearchIdRef.current;
     const params: Record<string, string | number> = { organization_id: orgId };
     if (kpiFilterName?.trim()) params.name = kpiFilterName.trim();
     if (kpiFilterDomainId != null) params.domain_id = kpiFilterDomainId;
     if (kpiFilterCategoryId != null) params.category_id = kpiFilterCategoryId;
     if (kpiFilterTagId != null) params.organization_tag_id = kpiFilterTagId;
-    api<KpiRow[]>(`/kpis?${qs(params)}`, { token })
+    api<KpiRow[]>(`/kpis?${qs(params)}`, { token, useCache: true })
       .then((data) => {
         if (searchId === latestKpiSearchIdRef.current) {
           setKpis(data);
@@ -535,6 +545,11 @@ export default function OrganizationDetailPage() {
       .catch((e) => {
         if (searchId === latestKpiSearchIdRef.current) {
           setError(e instanceof Error ? e.message : "Failed");
+        }
+      })
+      .finally(() => {
+        if (searchId === latestKpiSearchIdRef.current) {
+          setKpisLoading(false);
         }
       });
   };
@@ -626,6 +641,7 @@ export default function OrganizationDetailPage() {
           filterTagId={kpiFilterTagId}
           setFilterTagId={setKpiFilterTagId}
           list={kpis}
+          loading={kpisLoading}
           loadList={loadKpis}
           showCreate={kpiShowCreate}
           setShowCreate={setKpiShowCreate}
@@ -717,7 +733,7 @@ function OrganizationOverviewCards({
   userRole: UserRole | null;
 }) {
   if (!summary) {
-    return <p style={{ color: "var(--muted)" }}>Loading overview…</p>;
+    return <WidgetSpinnerLoader text="Loading overview..." minHeight={300} />;
   }
   const cards: { id: string; title: string; icon: React.ReactNode; lines: string[]; href?: string; onClick?: () => void }[] = [
     {
@@ -2980,6 +2996,7 @@ function KpisSection({
   filterTagId,
   setFilterTagId,
   list,
+  loading,
   loadList,
   showCreate,
   setShowCreate,
@@ -3003,6 +3020,7 @@ function KpisSection({
   filterTagId: number | null;
   setFilterTagId: (v: number | null) => void;
   list: KpiRow[];
+  loading: boolean;
   loadList: () => void;
   showCreate: boolean;
   setShowCreate: (v: boolean) => void;
@@ -3358,7 +3376,9 @@ function KpisSection({
           </form>
         </div>
       )}
-      {list.length === 0 ? (
+      {loading && list.length === 0 ? (
+        <WidgetSpinnerLoader text="Loading KPIs..." minHeight={200} />
+      ) : list.length === 0 ? (
         <div className="card">
           <p style={{ color: "var(--muted)" }}>No KPIs yet. Add one above.</p>
         </div>

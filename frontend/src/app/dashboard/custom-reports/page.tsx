@@ -6,6 +6,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 interface CustomReportRow {
   id: number;
@@ -23,13 +24,25 @@ function qs(params: Record<string, string | number | undefined>) {
   return new URLSearchParams(entries).toString();
 }
 
+let cachedCustomReports: Record<string, CustomReportRow[]> = {};
+
 export default function CustomReportsPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const orgIdParam = searchParams.get("organization_id");
 
-  const [list, setList] = useState<CustomReportRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [selectedOrgId, setSelectedOrgId] = useState<number | null>(() => {
+    return orgIdParam ? Number(orgIdParam) : null;
+  });
+
+  const orgKey = selectedOrgId ? String(selectedOrgId) : "all";
+
+  const [list, setList] = useState<CustomReportRow[]>(() => {
+    return cachedCustomReports[orgKey] ?? [];
+  });
+  const [loading, setLoading] = useState(() => {
+    return !cachedCustomReports[orgKey];
+  });
   const [error, setError] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [userOrgId, setUserOrgId] = useState<number | null>(null);
@@ -46,7 +59,6 @@ export default function CustomReportsPage() {
   const [addSaving, setAddSaving] = useState(false);
 
   const [organizations, setOrganizations] = useState<{ id: number; name: string }[]>([]);
-  const [selectedOrgId, setSelectedOrgId] = useState<number | null>(null);
 
   useEffect(() => {
     const token = getAccessToken();
@@ -88,18 +100,19 @@ export default function CustomReportsPage() {
 
   useEffect(() => {
     const token = getAccessToken();
-    if (!token || userRole !== "SUPER_ADMIN") return;
+    if (!token || userRole !== "SUPER_ADMIN" || selectedOrgId === null) return;
 
     setLoading(true);
-    const query = selectedOrgId ? `?organization_id=${selectedOrgId}` : "";
+    const query = `?organization_id=${selectedOrgId}`;
     api<CustomReportRow[]>(`/custom-reports${query}`, { token })
       .then((data) => {
         setList(data);
+        cachedCustomReports[orgKey] = data;
         setError(null);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load custom reports"))
       .finally(() => setLoading(false));
-  }, [selectedOrgId, userRole]);
+  }, [selectedOrgId, userRole, orgKey]);
 
   const openRenameModal = (t: CustomReportRow) => {
     setRenameTemplate(t);
@@ -125,9 +138,12 @@ export default function CustomReportsPage() {
         token,
         body: JSON.stringify({ name, description: renameDescription.trim() || null }),
       });
-      setList((prev) =>
-        prev.map((x) => (x.id === t.id ? { ...x, name: updated.name, description: updated.description } : x))
-      );
+      setList((prev) => {
+        const next = prev.map((x) => (x.id === t.id ? { ...x, name: updated.name, description: updated.description } : x));
+        const key = t.organization_id ? String(t.organization_id) : "all";
+        cachedCustomReports[key] = next;
+        return next;
+      });
       setRenameTemplate(null);
       toast.success("Report template updated successfully");
     } catch (err) {
@@ -152,7 +168,12 @@ export default function CustomReportsPage() {
         method: "DELETE",
         token,
       });
-      setList((prev) => prev.filter((x) => x.id !== t.id));
+      setList((prev) => {
+        const next = prev.filter((x) => x.id !== t.id);
+        const key = t.organization_id ? String(t.organization_id) : "all";
+        cachedCustomReports[key] = next;
+        return next;
+      });
       toast.success("Template deleted successfully");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete report");
@@ -173,7 +194,12 @@ export default function CustomReportsPage() {
         method: "POST",
         token,
       });
-      setList((prev) => [duplicated, ...prev]);
+      setList((prev) => {
+        const next = [duplicated, ...prev];
+        const key = t.organization_id ? String(t.organization_id) : "all";
+        cachedCustomReports[key] = next;
+        return next;
+      });
       toast.success("Template duplicated successfully");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to duplicate report");
@@ -201,7 +227,12 @@ export default function CustomReportsPage() {
         token,
         body: JSON.stringify({ name: addName.trim(), description: addDescription.trim() || null }),
       });
-      setList((prev) => [created, ...prev]);
+      setList((prev) => {
+        const next = [created, ...prev];
+        const key = selectedOrgId ? String(selectedOrgId) : "all";
+        cachedCustomReports[key] = next;
+        return next;
+      });
       setAddModalOpen(false);
       toast.success("Custom report template created successfully");
     } catch (err) {
@@ -236,8 +267,8 @@ export default function CustomReportsPage() {
 
       {error && <p className="form-error" style={{ marginBottom: "1.5rem" }}>{error}</p>}
 
-      {loading ? (
-        <p style={{ color: "var(--muted)" }}>Loading templates...</p>
+      {loading && list.length === 0 ? (
+        <WidgetSpinnerLoader text="Loading templates..." minHeight={200} />
       ) : list.length === 0 ? (
         <div className="card" style={{ padding: "2rem", textAlign: "center", background: "var(--surface)" }}>
           <p style={{ color: "var(--muted)", margin: 0 }}>No custom report templates designed for this organization yet.</p>
