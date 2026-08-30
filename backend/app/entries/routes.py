@@ -20,6 +20,7 @@ from sqlalchemy.sql import nulls_last
 from sqlalchemy.types import String
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
+import uuid
 import httpx
 
 from app.core.database import get_db
@@ -1604,17 +1605,80 @@ class RecomputeFormulasRequest(BaseModel):
     organization_id: int | None = None
 
 
+class PreviewFormulaRequest(BaseModel):
+    kpi_id: int
+    field_id: int
+    organization_id: int
+    formula_expression: str
+    decimal_places: int | str | None = 2
+    conditional_logic: dict | None = None
+
+
+async def run_background_recompute_task(
+    task_id: str,
+    entry_id: int,
+    org_id: int,
+    field_id: int,
+):
+    from app.kpis.routes import FORMULA_PROGRESS_TASKS
+    from app.core.database import AsyncSessionLocal
+    FORMULA_PROGRESS_TASKS[task_id] = {
+        "status": "processing",
+        "progress_percent": 0.0,
+        "processed_rows": 0,
+        "total_rows": 0,
+        "message": "Loading referenced KPI data (up to 60s for huge tables)...",
+    }
+
+    try:
+        async with AsyncSessionLocal() as db:
+            async def on_progress(current: int, total: int, msg: str):
+                pct = float(current) / float(total) * 100.0 if total > 0 else 0.0
+                FORMULA_PROGRESS_TASKS[task_id].update({
+                    "progress_percent": pct,
+                    "processed_rows": current,
+                    "total_rows": total,
+                    "message": msg,
+                })
+
+            from app.entries.service import recompute_mli_formula_subfields, propagate_formula_recalculations
+            await recompute_mli_formula_subfields(
+                db,
+                entry_id=entry_id,
+                org_id=org_id,
+                field_id=field_id,
+                on_progress=on_progress
+            )
+            await propagate_formula_recalculations(db, entry_id=entry_id, org_id=org_id)
+            await db.commit()
+
+            FORMULA_PROGRESS_TASKS[task_id].update({
+                "status": "completed",
+                "progress_percent": 100.0,
+                "message": "Complete",
+            })
+    except Exception as e:
+        logger.exception("Error in background recompute task: %s", task_id)
+        FORMULA_PROGRESS_TASKS[task_id].update({
+            "status": "failed",
+            "progress_percent": 100.0,
+            "message": f"Error: {str(e)}",
+        })
+
+
 @router.post("/multi-items/recompute-formulas")
 async def recompute_mli_formulas(
     body: RecomputeFormulasRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Manually trigger MLI formula recomputation for a KPI entry + field.
 
-    Used when auto_compute_formulas is disabled on the KPI. Runs both the
-    local sub-field formula engine and cross-KPI formula propagation.
+    Runs asynchronously in a background task to avoid blocking the HTTP thread.
+    Returns a task_id for progress polling.
     """
+    from fastapi import BackgroundTasks
     org_id = _org_id(current_user, body.organization_id)
     # Verify entry exists and belongs to org
     entry_res = await db.execute(
@@ -1627,13 +1691,164 @@ async def recompute_mli_formulas(
     field = await _load_multi_items_field(db, org_id, body.field_id)
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
-    # Run local MLI formula recompute
-    from app.entries.service import recompute_mli_formula_subfields
-    await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id, field_id=field.id)
-    # Run cross-KPI formula propagation (same as after a row save)
-    await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
-    await db.commit()
-    return {"ok": True}
+
+    task_id = str(uuid.uuid4())
+    background_tasks.add_task(
+        run_background_recompute_task,
+        task_id=task_id,
+        entry_id=entry.id,
+        org_id=org_id,
+        field_id=field.id,
+    )
+
+    return {"ok": True, "task_id": task_id}
+
+
+@router.post("/multi-items/preview-formula")
+async def preview_formula_output(
+    body: PreviewFormulaRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Evaluate a formula expression against the first 5 rows of the latest entry 
+    for the given KPI and organization. Returns live preview output.
+    """
+    from app.entries.service import (
+        load_multi_line_items_rows,
+        resolve_linked_columns_in_rows_batch,
+        _load_other_kpi_values,
+        _load_other_kpi_multi_line_data,
+        extract_cross_kpi_mli_references,
+    )
+    from app.formula_engine.evaluator import evaluate_formula, apply_conditional_logic
+    from sqlalchemy.orm import selectinload
+    
+    org_id = _org_id(current_user, body.organization_id)
+    
+    # 1. Locate the latest KPIEntry for this KPI and organization
+    entry_res = await db.execute(
+        select(KPIEntry)
+        .where(KPIEntry.kpi_id == body.kpi_id, KPIEntry.organization_id == org_id)
+        .order_by(KPIEntry.year.desc(), KPIEntry.id.desc())
+        .limit(1)
+    )
+    entry = entry_res.scalar_one_or_none()
+    if not entry:
+        return {"ok": True, "rows": []}  # No entry exists to preview
+        
+    # 2. Load the parent KPI field and its subfields
+    field_res = await db.execute(
+        select(KPIField)
+        .where(KPIField.id == body.field_id, KPIField.kpi_id == body.kpi_id)
+        .options(selectinload(KPIField.sub_fields))
+    )
+    field = field_res.scalar_one_or_none()
+    if not field or field.field_type != FieldType.multi_line_items:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-line field not found")
+
+    # 3. Load all rows from the database for this field in the selected entry
+    # (Without dynamically resolving linked columns, since we only sync them manually now)
+    raw_rows = await load_multi_line_items_rows(db, entry_id=entry.id, field=field, resolve_links=False)
+    if not raw_rows:
+        return {"ok": True, "rows": []}
+        
+    # Get the first 5 rows
+    preview_source_rows = raw_rows[:5]
+
+    # 4. Set up the formula execution environment matching this entry
+    # Load scalar values of this entry for formula variables namespace
+    fv_res = await db.execute(
+        select(KPIFieldValue)
+        .where(KPIFieldValue.entry_id == entry.id)
+        .options(selectinload(KPIFieldValue.field))
+    )
+    fv_list = list(fv_res.scalars().all())
+    value_by_key: dict[str, float | int] = {}
+    for fv in fv_list:
+        if fv.field and fv.field.field_type in (FieldType.number, FieldType.formula) and fv.value_number is not None:
+            try:
+                value_by_key[fv.field.key] = float(fv.value_number)
+            except (TypeError, ValueError):
+                pass
+
+    # Load scalar values of other KPIs for cross-KPI scalar refs
+    other_kpi_values = await _load_other_kpi_values(
+        db, entry.year, org_id, entry.kpi_id, period_key=entry.period_key, is_draft=entry.is_draft, owner_user_id=entry.user_id
+    )
+
+    # Extract cross-KPI multi-line dependencies
+    refs = set(extract_cross_kpi_mli_references(body.formula_expression))
+    other_kpi_mli_data = await _load_other_kpi_multi_line_data(
+        db, entry.year, org_id, refs, period_key=entry.period_key, is_draft=entry.is_draft, owner_user_id=entry.user_id
+    )
+
+    # 5. Normalize formula expression (translate human-readable subfield names to keys)
+    norm_expr = str(body.formula_expression)
+    sorted_all_subs = sorted(field.sub_fields or [], key=lambda s: len(s.name or ""), reverse=True)
+    for sub_item in sorted_all_subs:
+        s_name = (sub_item.name or "").strip()
+        s_key = (sub_item.key or "").strip()
+        if s_name and s_key and s_name != s_key:
+            pattern = r'("[^"]*"|\'[^\']*\')|\b' + re.escape(s_name) + r'\b'
+            norm_expr = re.sub(pattern, lambda m: m.group(1) if m.group(1) is not None else s_key, norm_expr)
+
+    # Load all MLI field rows in the current entry so formulas can reference other MLI fields in the same entry
+    multi_line_items_data: dict[str, list[dict]] = {
+        field.key: raw_rows
+    }
+    
+    # Evaluate formula on each row
+    preview_results = []
+    for idx, r in enumerate(preview_source_rows):
+        # 1. Determine a neat label for the row
+        label = f"Row {idx + 1}"
+        for label_key in ["faculty_name", "name", "title", "label", "description", "subject"]:
+            if label_key in r and r[label_key]:
+                label = str(r[label_key])
+                break
+        else:
+            for key, val in r.items():
+                if val and isinstance(val, str) and len(val) < 60:
+                    label = val
+                    break
+        
+        # 2. Evaluate
+        computed = evaluate_formula(
+            norm_expr,
+            value_by_key,
+            multi_line_items_data,
+            other_kpi_values,
+            current_row=r,
+            other_kpi_multi_line_data=other_kpi_mli_data,
+        )
+
+        # Apply conditional logic if enabled
+        if body.conditional_logic and body.conditional_logic.get("enabled"):
+            try:
+                computed = apply_conditional_logic(computed, body.conditional_logic)
+            except Exception as e:
+                # Fallback to the computed raw result if conditional logic parsing fails during draft edit
+                pass
+
+        # 3. Apply rounding logic
+        dp = body.decimal_places
+        if dp is None:
+            dp = 2
+        if str(dp).lower() != "auto":
+            try:
+                computed = round(float(computed), int(dp))
+                if int(dp) == 0:
+                    computed = int(computed)
+            except:
+                pass
+                
+        preview_results.append({
+            "label": label,
+            "result": computed
+        })
+        
+    return {"ok": True, "rows": preview_results}
 
 
 @router.get("/multi-items/rows", response_model=MultiItemsListResponse)
@@ -1689,17 +1904,7 @@ async def list_multi_items_rows(
         if str(ft_val) == "formula" or cfg.get("is_formula") or cfg.get("formula_expression"):
             has_formula_sub = True
 
-    if has_formula_sub:
-        # Respect the KPI-level auto_compute_formulas flag (Super Admin setting).
-        # Load the KPI to check if auto-compute is enabled (default True).
-        from sqlalchemy import select as _select
-        from app.core.models import KPI as _KPI
-        _kpi_res = await db.execute(_select(_KPI).where(_KPI.id == entry.kpi_id))
-        _kpi = _kpi_res.scalar_one_or_none()
-        _auto_compute = getattr(_kpi, "auto_compute_formulas", True)
-        if _auto_compute:
-            from app.entries.service import recompute_mli_formula_subfields
-            await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id, field_id=field.id)
+
 
     if fetch_all and search:
         raise HTTPException(
@@ -1994,7 +2199,15 @@ async def list_multi_items_rows(
         (sf.config or {}).get("data_source") == "linked" for sf in getattr(field, "sub_fields", None) or []
     )
     if is_linked:
-        use_fast_sql_paging = False
+        db_rows_exist_res = await db.execute(
+            select(func.count(KpiMultiLineRow.id)).where(
+                KpiMultiLineRow.entry_id == entry.id,
+                KpiMultiLineRow.field_id == field.id,
+            )
+        )
+        db_rows_exist = (db_rows_exist_res.scalar() or 0) > 0
+        if not db_rows_exist:
+            use_fast_sql_paging = False
     if kpi and getattr(kpi, "is_joined", False):
         use_fast_sql_paging = False
     rows: list[tuple[int, dict]] = []
@@ -3094,6 +3307,21 @@ async def preview_row_formulas(
                 cond_logic = cfg.get("conditional_logic") if isinstance(cfg, dict) else None
                 if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
                     computed = apply_conditional_logic(computed, cond_logic)
+                
+                if computed is not None:
+                    dec_places = cfg.get("decimal_places") if isinstance(cfg, dict) else None
+                    if dec_places is None:
+                        dec_places = 2
+                    if dec_places is not None and str(dec_places).lower() != "auto":
+                        try:
+                            dp = int(dec_places)
+                            if isinstance(computed, (float, int)) and not isinstance(computed, bool):
+                                computed = round(float(computed), dp)
+                                if dp == 0:
+                                    computed = int(computed)
+                        except (ValueError, TypeError):
+                            pass
+
             working_row[sf.key] = computed
             computed_formulas[sf.key] = computed
 
@@ -3421,10 +3649,12 @@ async def multi_items_import_capabilities(
     from app.odoo.config_service import get_org_odoo_config, get_kpi_odoo_config
 
     org_id = _org_id(current_user, organization_id)
+    from sqlalchemy.orm import selectinload
     field_res = await db.execute(
         select(KPIField)
         .join(KPI, KPI.id == KPIField.kpi_id)
         .where(KPIField.id == field_id, KPIField.kpi_id == kpi_id, KPI.organization_id == org_id)
+        .options(selectinload(KPIField.sub_fields))
     )
     field = field_res.scalar_one_or_none()
     if not field or field.field_type != FieldType.multi_line_items:
@@ -3436,6 +3666,13 @@ async def multi_items_import_capabilities(
         channels = ["excel", "api", "previous_year"]
     else:
         channels = ["excel", "previous_year"]
+
+    # Check if this field contains any linked columns
+    is_linked = (cfg.get("data_source") == "linked") or any(
+        ((sf.config or {}).get("data_source") == "linked") for sf in getattr(field, "sub_fields", None) or []
+    )
+    if is_linked:
+        channels.append("linked_mli")
 
     org_odoo = await get_org_odoo_config(db, org_id)
     kpi_odoo = await get_kpi_odoo_config(db, kpi_id)
@@ -3489,6 +3726,113 @@ async def get_sync_progress(
     """Retrieve the in-memory sync progress for a KPI entry or dashboard sync task."""
     from app.core.sync_progress import get_sync_stage
     return get_sync_stage(entity_type, entity_id)
+
+
+@router.post("/multi-items/sync-from-linked")
+async def sync_multi_items_from_linked(
+    entry_id: int = Query(...),
+    field_id: int = Query(...),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Manually sync values from linked KPIs into this multi_line_items field.
+    Resolves values using `resolve_linked_columns_in_rows_batch` and stores them in the DB.
+    """
+    from sqlalchemy.orm import selectinload
+    from app.entries.service import (
+        user_can_add_row_multi_line_field,
+        user_can_edit_multi_line_field,
+        load_multi_line_items_rows,
+        resolve_linked_columns_in_rows_batch,
+        recompute_mli_formula_subfields,
+        propagate_formula_recalculations,
+    )
+    
+    org_id = _org_id(current_user, organization_id)
+    provided_entry = await db.get(KPIEntry, entry_id)
+    if not provided_entry or provided_entry.organization_id != org_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+    if provided_entry.is_locked:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Entry not editable")
+
+    field = await _load_multi_items_field(db, org_id, field_id)
+    if not field or field.kpi_id != provided_entry.kpi_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-line field not found")
+
+    can_add = await user_can_add_row_multi_line_field(db, current_user.id, field.kpi_id, field.id)
+    can_edit = await user_can_edit_multi_line_field(db, current_user.id, field.kpi_id, field.id)
+    if not can_add and not can_edit:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    cfg = getattr(field, "config", None) or {}
+    linked_subfields = [
+        sf for sf in (field.sub_fields or [])
+        if (sf.config or {}).get("data_source") == "linked"
+    ]
+    if not linked_subfields:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No linked columns configured for this field")
+
+    # Load existing rows from the database (without dynamically resolving linked columns again)
+    raw_rows = await load_multi_line_items_rows(db, entry_id=entry_id, field=field, resolve_links=False)
+    
+    # Run the batch linked resolution to pull from source KPIs
+    resolved_rows = await resolve_linked_columns_in_rows_batch(
+        db,
+        entry_ids=[entry_id],
+        field=field,
+        rows_by_entry_id={entry_id: raw_rows}
+    )
+    resolved_list = resolved_rows.get(entry_id, [])
+
+    # Fetch corresponding KpiMultiLineRow objects from DB to persist
+    rows_res = await db.execute(
+        select(KpiMultiLineRow)
+        .where(KpiMultiLineRow.entry_id == entry_id, KpiMultiLineRow.field_id == field_id)
+        .options(selectinload(KpiMultiLineRow.cells))
+    )
+    rows_orm = list(rows_res.scalars().all())
+
+    # Map database row index to list index
+    for r in rows_orm:
+        if r.row_index < len(resolved_list):
+            resolved_row_dict = resolved_list[r.row_index]
+            for sf in linked_subfields:
+                val = resolved_row_dict.get(sf.key)
+                
+                # Find or create the cell for this subfield
+                cell = next((c for c in r.cells if c.sub_field_id == sf.id), None)
+                if cell is None:
+                    cell = KpiMultiLineCell(row_id=r.id, sub_field_id=sf.id)
+                    db.add(cell)
+                    r.cells.append(cell)
+                
+                # Clear previous values
+                cell.value_text = None
+                cell.value_number = None
+                cell.value_json = None
+                cell.value_boolean = None
+                cell.value_date = None
+                
+                # Set new value
+                if val is not None:
+                    if isinstance(val, bool):
+                        cell.value_boolean = val
+                    elif isinstance(val, (int, float)):
+                        cell.value_number = float(val)
+                    elif isinstance(val, dict) or isinstance(val, list):
+                        import json
+                        cell.value_json = json.dumps(val)
+                    else:
+                        cell.value_text = str(val)
+
+    # Recompute all formula fields since the linked data has updated
+    await recompute_mli_formula_subfields(db, entry_id=entry_id, org_id=org_id, field_id=field_id)
+    await propagate_formula_recalculations(db, entry_id=entry_id, org_id=org_id)
+    
+    await db.commit()
+    return {"ok": True, "message": f"Successfully synced {len(linked_subfields)} linked columns across {len(rows_orm)} rows"}
 
 
 @router.post("/multi-items/sync-from-odoo")

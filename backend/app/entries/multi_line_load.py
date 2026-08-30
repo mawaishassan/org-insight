@@ -41,6 +41,7 @@ async def load_multi_line_row_dicts(
     row_indices: list[int] | None = None,
     current_user_id: int | None = None,
     date_range: tuple[datetime.date, datetime.date, str] | None = None,
+    resolve_links: bool = False,
 ) -> list[tuple[int, dict]]:
     """Optimized direct load of multi_line rows and cells to scale efficiently for large entries."""
     import datetime
@@ -219,7 +220,7 @@ async def load_multi_line_row_dicts(
             rows_by_entry[eid] = [r for _, r in sorted_e_rows]
             row_index_map[eid] = [r_idx for r_idx, _ in sorted_e_rows]
 
-    if is_linked:
+    if is_linked and resolve_links:
         from app.entries.service import resolve_linked_columns_in_rows_batch
         rows_by_entry = await resolve_linked_columns_in_rows_batch(
             db,

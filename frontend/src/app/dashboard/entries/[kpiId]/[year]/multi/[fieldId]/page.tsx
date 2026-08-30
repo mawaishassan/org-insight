@@ -49,6 +49,7 @@ import {
 } from "@/lib/multiItemsFiltersHelper";
 
 import MultiItemsAdvancedFiltersPanel from "@/components/MultiItemsAdvancedFiltersPanel";
+import FormulaProgressModal from "@/components/FormulaProgressModal";
 
 function asWidgets(layout: any): Widget[] {
   if (!layout) return [];
@@ -191,6 +192,8 @@ export default function FullPageMultiItems() {
   const bulkUploadTickRef = useRef<number | null>(null);
   const [autoComputeFormulas, setAutoComputeFormulas] = useState<boolean>(true);
   const [recomputingFormulas, setRecomputingFormulas] = useState<boolean>(false);
+  const [activeFormulaTaskId, setActiveFormulaTaskId] = useState<string | null>(null);
+  const [showFormulaProgress, setShowFormulaProgress] = useState(false);
 
   const pageBusy = exportingCsv || exportingXlsx || exportingPdf || downloadingTemplate || loading || uploading || saving || recomputingFormulas;
   const busyLabel = exportingCsv
@@ -242,7 +245,7 @@ export default function FullPageMultiItems() {
   const [uploadTaskErrorMsg, setUploadTaskErrorMsg] = useState<string | null>(null);
   const [uploadTaskValidationErrors, setUploadTaskValidationErrors] = useState<any[]>([]);
   const [uploadTaskStats, setUploadTaskStats] = useState<{added: number; updated: number; overridden: number} | null>(null);
-  const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | "odoo" | "previous_year" | null>(null);
+  const [bulkChannel, setBulkChannel] = useState<"excel" | "api" | "odoo" | "previous_year" | "linked_mli" | null>(null);
   const [importCapabilities, setImportCapabilities] = useState<{
     channels: string[];
     odoo_ready: boolean;
@@ -439,23 +442,28 @@ export default function FullPageMultiItems() {
 
   const handleRecomputeFormulas = async () => {
     if (!token || !entryId || !fieldId) return;
-    setRecomputingFormulas(true);
     try {
-      await api("/entries/multi-items/recompute-formulas", {
-        method: "POST",
-        token,
-        body: JSON.stringify({
-          entry_id: entryId,
-          field_id: fieldId,
-          organization_id: effectiveOrgId ?? null,
-        }),
-      });
-      toast.success("Formula columns recomputed successfully");
-      await loadRows({ force: true });
+      const res = await api<{ ok: boolean; task_id?: string }>(
+        "/entries/multi-items/recompute-formulas",
+        {
+          method: "POST",
+          token,
+          body: JSON.stringify({
+            entry_id: entryId,
+            field_id: fieldId,
+            organization_id: effectiveOrgId ?? null,
+          }),
+        }
+      );
+      if (res.task_id) {
+        setActiveFormulaTaskId(res.task_id);
+        setShowFormulaProgress(true);
+      } else {
+        toast.success("Formula columns recomputed successfully");
+        await loadRows({ force: true });
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Formula recomputation failed");
-    } finally {
-      setRecomputingFormulas(false);
     }
   };
 
@@ -1696,6 +1704,18 @@ export default function FullPageMultiItems() {
                     )}
                   </p>
                 )}
+                {importCapabilities?.channels.includes("linked_mli") && (
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+                    <input
+                      type="radio"
+                      name="uploadChannel"
+                      checked={bulkChannel === "linked_mli"}
+                      onChange={() => setBulkChannel("linked_mli")}
+                      disabled={!entryId}
+                    />
+                    Linked KPI
+                  </label>
+                )}
                 <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
                   <input
                     type="radio"
@@ -2300,6 +2320,51 @@ export default function FullPageMultiItems() {
             </div>
           )}
 
+          {bulkChannel === "linked_mli" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--muted)" }}>
+                This will pull fresh data from the linked KPI(s) for the configured columns and update this table. 
+                Any formulas depending on these columns will also be automatically recalculated.
+              </p>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={!entryId || uploading}
+                style={{
+                  alignSelf: "flex-start",
+                  opacity: entryId && !uploading ? 1 : 0.55,
+                  cursor: entryId && !uploading ? "pointer" : "not-allowed",
+                }}
+                onClick={async () => {
+                  if (!token || !entryId || !fieldId || effectiveOrgId == null) return;
+                  setUploading(true);
+                  const toastId = toast.loading("Syncing from linked KPIs...");
+                  try {
+                    const params = new URLSearchParams({
+                      entry_id: String(entryId),
+                      field_id: String(fieldId),
+                      organization_id: String(effectiveOrgId),
+                    });
+                    const res = await api<{ ok: boolean; message?: string }>(
+                      `/entries/multi-items/sync-from-linked?${params.toString()}`,
+                      { method: "POST", token }
+                    );
+                    toast.dismiss(toastId);
+                    toast.success(res?.message || "Successfully synced linked columns.");
+                    await refreshRows();
+                  } catch (e) {
+                    toast.dismiss(toastId);
+                    toast.error(e instanceof Error ? e.message : "Sync from linked KPIs failed.");
+                  } finally {
+                    setUploading(false);
+                  }
+                }}
+              >
+                {uploading ? "Syncing..." : "Sync from Linked KPI"}
+              </button>
+            </div>
+          )}
+
           {/* Import from previous year */}
           {bulkChannel === "previous_year" && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "flex-end", justifyContent: "space-between" }}>
@@ -2599,6 +2664,21 @@ export default function FullPageMultiItems() {
               </div>
             </div>
           </>
+        )}
+        {showFormulaProgress && activeFormulaTaskId && (
+          <FormulaProgressModal
+            taskId={activeFormulaTaskId}
+            isOpen={showFormulaProgress}
+            onComplete={async () => {
+              setShowFormulaProgress(false);
+              toast.success("Formula columns recomputed successfully");
+              await loadRows({ force: true });
+            }}
+            onClose={async () => {
+              setShowFormulaProgress(false);
+              await loadRows({ force: true });
+            }}
+          />
         )}
         {showExportDialog && (
           <>

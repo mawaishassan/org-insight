@@ -56,6 +56,8 @@ from app.kpis.schemas import (
     KpiSectionResponse,
     KpiSectionFieldIdsBody,
     KPIReportHeaderRef,
+    KPIFormulaValidateRequest,
+    KPIFormulaValidateResponse,
 )
 from app.kpis.service import (
     create_kpi,
@@ -2396,6 +2398,12 @@ async def validate_subfield_formula(
 
     from app.formula_engine.circular_validation import extract_formula_dependencies, validate_mli_circular_dependencies
     from app.formula_engine.evaluator import evaluate_formula
+    from app.formula_engine.validation import (
+        validate_formula_syntax,
+        validate_formula_references,
+        validate_formula_types,
+        FormulaValidationError
+    )
 
     # Build subfield maps
     sf_by_key = {sf.key: sf for sf in body.sub_fields if sf.key}
@@ -2408,18 +2416,17 @@ async def validate_subfield_formula(
             pattern = r'\b' + re.escape(sf.name) + r'\b'
             normalized_expr = re.sub(pattern, sf.key, normalized_expr)
 
-    # 1. Extract dependencies
-    deps = extract_formula_dependencies(normalized_expr)
-    missing_cols = []
-    for d in deps:
-        if d not in sf_by_key:
-            missing_cols.append(d)
-
-    if missing_cols:
+    # 1. Syntactic and Semantic Reference checks
+    try:
+        validate_formula_syntax(expr)
+        available_fields = {sf.key: sf.field_type for sf in body.sub_fields if sf.key}
+        deps = validate_formula_references(normalized_expr, available_fields)
+        validate_formula_types(normalized_expr, available_fields)
+    except FormulaValidationError as ve:
         return SubFieldFormulaValidateResponse(
             is_valid=False,
-            error=f"Column(s) '{', '.join(missing_cols)}' do not exist in this MLI.",
-            referenced_sub_keys=list(deps)
+            error=str(ve),
+            referenced_sub_keys=list(extract_formula_dependencies(normalized_expr))
         )
 
     # 2. Check self-reference
@@ -2491,6 +2498,22 @@ async def validate_subfield_formula(
             referenced_sub_keys=list(deps)
         )
 
+    # Apply rounding to the sample preview result
+    target_sf = next((sf for sf in body.sub_fields if sf.key == body.target_sub_key), None)
+    target_cfg = target_sf.config if (target_sf and target_sf.config) else {}
+    dec_places = target_cfg.get("decimal_places")
+    if dec_places is None:
+        dec_places = 2
+    if dec_places is not None and str(dec_places).lower() != "auto":
+        try:
+            dp = int(dec_places)
+            if isinstance(sample_result, (float, int)) and not isinstance(sample_result, bool):
+                sample_result = round(float(sample_result), dp)
+                if dp == 0:
+                    sample_result = int(sample_result)
+        except (ValueError, TypeError):
+            pass
+
     # Formulate readable sample equation preview
     eq_str = expr
     for k in deps:
@@ -2506,6 +2529,158 @@ async def validate_subfield_formula(
         referenced_sub_keys=list(deps),
         sample_result=sample_result,
         sample_equation=sample_equation
+    )
+
+
+@router.post("/validate-formula", response_model=KPIFormulaValidateResponse)
+async def validate_kpi_formula(
+    body: KPIFormulaValidateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+) -> KPIFormulaValidateResponse:
+    """
+    Validate a KPI-level formula:
+    - Check syntax
+    - Check that referenced columns exist in the KPI definition
+    - Validate circular dependencies
+    - Pre-evaluate on mock values to verify safety.
+    """
+    expr = (body.formula_expression or "").strip()
+    if not expr:
+        return KPIFormulaValidateResponse(is_valid=False, error="Formula expression cannot be empty")
+
+    from app.formula_engine.circular_validation import extract_formula_dependencies
+    from app.formula_engine.evaluator import evaluate_formula
+    from app.formula_engine.validation import (
+        validate_formula_syntax,
+        validate_formula_references,
+        validate_formula_types,
+        FormulaValidationError
+    )
+    from app.core.models import KPIField
+
+    # Fetch all KPI fields from database
+    fields_res = await db.execute(
+        select(KPIField).where(KPIField.kpi_id == body.kpi_id)
+    )
+    kpi_fields = fields_res.scalars().all()
+
+    # Build available fields map
+    available_fields = {}
+    for f in kpi_fields:
+        if f.key:
+            ft = f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type)
+            available_fields[f.key] = ft
+
+    # Normalize expression (replace user-typed Name references with keys if needed)
+    normalized_expr = expr
+    for f in kpi_fields:
+        if f.name and f.name != f.key:
+            pattern = r'\b' + re.escape(f.name) + r'\b'
+            normalized_expr = re.sub(pattern, f.key, normalized_expr)
+
+    # 1. Syntactic and Semantic Reference checks
+    try:
+        validate_formula_syntax(expr)
+        deps = validate_formula_references(normalized_expr, available_fields)
+        validate_formula_types(normalized_expr, available_fields)
+    except FormulaValidationError as ve:
+        return KPIFormulaValidateResponse(
+            is_valid=False,
+            error=str(ve),
+            referenced_keys=list(extract_formula_dependencies(normalized_expr))
+        )
+
+    # 2. Check self-reference
+    if body.target_field_key and body.target_field_key in deps:
+        return KPIFormulaValidateResponse(
+            is_valid=False,
+            error="Target field cannot reference itself directly in the formula.",
+            referenced_keys=list(deps)
+        )
+
+    # 3. Check circular dependencies across standard KPI fields
+    dep_map = {}
+    for f in kpi_fields:
+        if not f.key:
+            continue
+        ft = f.field_type.value if hasattr(f.field_type, "value") else str(f.field_type)
+        if f.key == body.target_field_key:
+            dep_map[f.key] = deps
+        elif ft == "formula":
+            if f.formula_expression:
+                dep_map[f.key] = extract_formula_dependencies(f.formula_expression)
+            else:
+                dep_map[f.key] = set()
+        else:
+            dep_map[f.key] = set()
+
+    if body.target_field_key and body.target_field_key not in dep_map:
+        dep_map[body.target_field_key] = deps
+
+    visited = {}
+    def dfs(u: str, path: list[str]) -> None:
+        visited[u] = 1
+        path.append(u)
+        for v in dep_map.get(u, []):
+            if v not in dep_map:
+                continue
+            if visited.get(v, 0) == 1:
+                cycle_start_idx = path.index(v)
+                cycle_path = path[cycle_start_idx:] + [v]
+                loop_str = " -> ".join(cycle_path)
+                raise ValueError(f"Circular dependency detected in KPI fields: {loop_str}")
+            if visited.get(v, 0) == 0:
+                dfs(v, path)
+        path.pop()
+        visited[u] = 2
+
+    try:
+        for key in dep_map:
+            if visited.get(key, 0) == 0:
+                dfs(key, [])
+    except ValueError as val_err:
+        return KPIFormulaValidateResponse(
+            is_valid=False,
+            error=str(val_err),
+            referenced_keys=list(deps)
+        )
+
+    # 4. Evaluate sample values for preview
+    sample_row = body.sample_values or {}
+    sample_vals = {}
+    sample_values_seq = [10, 20, 30, 40, 50, 15, 25, 5]
+    val_idx = 0
+
+    for f in kpi_fields:
+        if not f.key or f.key == body.target_field_key:
+            continue
+        if f.key in sample_row and sample_row[f.key] is not None:
+            sample_vals[f.key] = sample_row[f.key]
+        else:
+            sample_vals[f.key] = sample_values_seq[val_idx % len(sample_values_seq)]
+            val_idx += 1
+
+    try:
+        sample_result = evaluate_formula(
+            normalized_expr,
+            field_values=sample_vals,
+            multi_line_items_data={},
+            other_kpi_values={},
+            current_row=sample_vals
+        )
+    except Exception as eval_err:
+        return KPIFormulaValidateResponse(
+            is_valid=False,
+            error=f"Formula evaluation preview error: {eval_err}",
+            referenced_keys=list(deps)
+        )
+
+    return KPIFormulaValidateResponse(
+        is_valid=True,
+        error=None,
+        referenced_keys=list(deps),
+        sample_result=sample_result
     )
 
 
@@ -2579,3 +2754,32 @@ async def get_subfield_unique_values(
         sub_field_key=sub_field_key,
         unique_values=unique_vals
     )
+
+
+FORMULA_PROGRESS_TASKS: dict[str, dict[str, Any]] = {}
+
+
+@router.get("/formula-progress/{task_id}")
+async def get_formula_progress(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Get formula recalculation task progress."""
+    task = FORMULA_PROGRESS_TASKS.get(task_id)
+    if not task:
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "progress_percent": 100.0,
+            "processed_rows": 0,
+            "total_rows": 0,
+            "message": "Complete",
+        }
+    return {
+        "task_id": task_id,
+        "status": task.get("status", "processing"),
+        "progress_percent": task.get("progress_percent", 0.0),
+        "processed_rows": task.get("processed_rows", 0),
+        "total_rows": task.get("total_rows", 0),
+        "message": task.get("message", "Processing..."),
+    }

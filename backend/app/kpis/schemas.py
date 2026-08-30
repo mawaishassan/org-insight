@@ -443,6 +443,20 @@ class SubFieldFormulaValidateResponse(BaseModel):
     sample_equation: str | None = Field(None, description="Sample formatted preview equation string")
 
 
+class KPIFormulaValidateRequest(BaseModel):
+    kpi_id: int = Field(..., description="The KPI ID")
+    formula_expression: str = Field(..., description="The formula expression to validate")
+    target_field_key: str | None = Field(None, description="The key of the field being defined")
+    sample_values: dict[str, Any] | None = Field(default=None, description="Optional custom sample values")
+
+
+class KPIFormulaValidateResponse(BaseModel):
+    is_valid: bool = Field(..., description="Whether the formula syntax and references are valid")
+    error: str | None = Field(None, description="Error message if invalid")
+    referenced_keys: list[str] = Field(default_factory=list, description="Fields referenced in the formula")
+    sample_result: Any | None = Field(None, description="Sample calculation preview result")
+
+
 class SubFieldUniqueValuesResponse(BaseModel):
     field_id: int = Field(..., description="KPI field ID")
     sub_field_key: str = Field(..., description="Subfield column key")

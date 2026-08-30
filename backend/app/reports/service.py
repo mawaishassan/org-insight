@@ -192,7 +192,7 @@ def _kpi_multi_line_orm_row_to_dict(r: KpiMultiLineRow) -> dict:
 
 
 async def _load_multi_line_items_rows_batch(
-    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None, resolving_linked_fields: set[int] = None
+    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None, resolving_linked_fields: set[int] = None, resolve_links: bool = False
 ) -> dict[int, list[dict]]:
     """Optimized direct load of multi-line rows and cells to handle large datasets efficiently without ORM eager load overhead."""
     if not entry_ids:
@@ -377,15 +377,16 @@ async def _load_multi_line_items_rows_batch(
     except Exception as exc:
         logger.warning("MLI extraction skipped in _load_multi_line_items_rows_batch: %s", exc)
 
-    # Resolve linked columns batch-wise
-    from app.entries.service import resolve_linked_columns_in_rows_batch
-    by_entry = await resolve_linked_columns_in_rows_batch(
-        db,
-        entry_ids=entry_ids,
-        field=field,
-        rows_by_entry_id=by_entry,
-        resolving_linked_fields=resolving_linked_fields
-    )
+    if resolve_links:
+        # Resolve linked columns batch-wise
+        from app.entries.service import resolve_linked_columns_in_rows_batch
+        by_entry = await resolve_linked_columns_in_rows_batch(
+            db,
+            entry_ids=entry_ids,
+            field=field,
+            rows_by_entry_id=by_entry,
+            resolving_linked_fields=resolving_linked_fields
+        )
 
     return dict(by_entry)
 
@@ -2413,14 +2414,14 @@ async def generate_report_data(
                 cond_logic = cfg.get("conditional_logic")
                 sft = getattr(sf.field_type, "value", str(sf.field_type))
                 if sft == "formula" or expr:
-                    formula_sfs.append((sf.key, expr, cond_logic))
+                    formula_sfs.append((sf.key, expr, cond_logic, cfg))
 
             recalculated_batch = {}
             for eid, rows_list in batch_res.items():
                 if formula_sfs:
                     sorted_formula_sfs = _sort_formula_subfields(formula_sfs)
                     current_rows = [dict(r) for r in rows_list]
-                    for sf_key, expr, cond_logic in sorted_formula_sfs:
+                    for sf_key, expr, cond_logic, cfg in sorted_formula_sfs:
                         for r_copy in current_rows:
                             if expr:
                                 new_val = evaluate_formula(
@@ -2433,6 +2434,21 @@ async def generate_report_data(
                                 )
                                 if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
                                     new_val = apply_conditional_logic(new_val, cond_logic)
+                                
+                                if new_val is not None:
+                                    dec_places = cfg.get("decimal_places") if isinstance(cfg, dict) else None
+                                    if dec_places is None:
+                                        dec_places = 2
+                                    if dec_places is not None and str(dec_places).lower() != "auto":
+                                        try:
+                                            dp = int(dec_places)
+                                            if isinstance(new_val, (float, int)) and not isinstance(new_val, bool):
+                                                new_val = round(float(new_val), dp)
+                                                if dp == 0:
+                                                    new_val = int(new_val)
+                                        except (ValueError, TypeError):
+                                            pass
+                                
                                 r_copy[sf_key] = new_val if new_val is not None else 0
                     recalculated_batch[eid] = current_rows
                 else:

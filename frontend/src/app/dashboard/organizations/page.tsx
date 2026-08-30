@@ -8,6 +8,7 @@ import { z } from "zod";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 /** Settings icon (gear) for organization card - links to org Settings tab. */
 function SettingsIcon({ orgId }: { orgId: number }) {
@@ -44,9 +45,11 @@ const createSchema = z.object({
 
 type CreateFormData = z.infer<typeof createSchema>;
 
+let cachedOrgs: OrgListItem[] = [];
+
 export default function OrganizationsPage() {
-  const [list, setList] = useState<OrgListItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [list, setList] = useState<OrgListItem[]>(() => cachedOrgs);
+  const [loading, setLoading] = useState(() => cachedOrgs.length === 0);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
 
@@ -57,7 +60,10 @@ export default function OrganizationsPage() {
     setLoading(true);
     // This page only needs the organizations list; summary counts are expensive (and grow with data volume).
     api<OrgListItem[]>(`/organizations`, { token })
-      .then(setList)
+      .then((data) => {
+        setList(data);
+        cachedOrgs = data;
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
   };
@@ -105,7 +111,16 @@ export default function OrganizationsPage() {
     }
   };
 
-  if (loading && list.length === 0) return <p>Loading…</p>;
+  if (loading && list.length === 0) {
+    return (
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+          <h1 style={{ fontSize: "1.5rem" }}>Organizations</h1>
+        </div>
+        <WidgetSpinnerLoader text="Loading organizations..." minHeight={300} />
+      </div>
+    );
+  }
 
   return (
     <div>

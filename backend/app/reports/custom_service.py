@@ -953,14 +953,14 @@ async def generate_custom_report_data(
                 cond_logic = cfg.get("conditional_logic")
                 sft = getattr(sf.field_type, "value", str(sf.field_type))
                 if sft == "formula" or expr:
-                    formula_sfs.append((sf.key, expr, cond_logic))
+                    formula_sfs.append((sf.key, expr, cond_logic, cfg))
 
             recalculated_batch = {}
             for eid, rows_list in batch_res.items():
                 if formula_sfs:
                     sorted_formula_sfs = _sort_formula_subfields(formula_sfs)
                     current_rows = [dict(r) for r in rows_list]
-                    for sf_key, expr, cond_logic in sorted_formula_sfs:
+                    for sf_key, expr, cond_logic, cfg in sorted_formula_sfs:
                         if not expr:
                             continue
                         # Build the multi-line context ONCE per formula subfield
@@ -978,6 +978,21 @@ async def generate_custom_report_data(
                             )
                             if cond_logic and isinstance(cond_logic, dict) and cond_logic.get("enabled"):
                                 new_val = apply_conditional_logic(new_val, cond_logic)
+                            
+                            if new_val is not None:
+                                dec_places = cfg.get("decimal_places") if isinstance(cfg, dict) else None
+                                if dec_places is None:
+                                    dec_places = 2
+                                if dec_places is not None and str(dec_places).lower() != "auto":
+                                    try:
+                                        dp = int(dec_places)
+                                        if isinstance(new_val, (float, int)) and not isinstance(new_val, bool):
+                                            new_val = round(float(new_val), dp)
+                                            if dp == 0:
+                                                new_val = int(new_val)
+                                    except (ValueError, TypeError):
+                                        pass
+
                             r_copy[sf_key] = new_val if new_val is not None else 0
                     recalculated_batch[eid] = current_rows
                 else:
