@@ -532,7 +532,7 @@ export default function CustomReportViewPage() {
                 </select>
               </div>
             )
-          )})}
+          )}
 
           <div style={{ display: "flex", gap: "0.5rem" }}>
             {userRole === "SUPER_ADMIN" && (
