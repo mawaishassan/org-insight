@@ -19,6 +19,7 @@ interface TemplateRow {
   name: string;
   description: string | null;
   fetch_data_with_date?: boolean;
+  can_change_period?: boolean;
   date_fetching_config?: {
     default_period_type?: string;
     default_period?: string;
