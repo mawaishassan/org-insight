@@ -60,7 +60,7 @@ async def check_custom_report_access(db: AsyncSession, user: User, custom_report
         return False
 
     if user.role.value == "ORG_ADMIN":
-        if action in ("view", "assign", "generate", "print", "export"):
+        if action in ("view", "assign", "generate", "print", "export", "change_period"):
             return True
         return False
 
@@ -81,6 +81,8 @@ async def check_custom_report_access(db: AsyncSession, user: User, custom_report
         return assignment.can_print
     elif action == "export":
         return assignment.can_export
+    elif action == "change_period":
+        return assignment.can_change_period
 
     return False
 
@@ -95,20 +97,34 @@ async def list_reports(
     if current_user.role.value == "SUPER_ADMIN" and organization_id is None:
         # Super Admin sees all reports
         result = await db.execute(select(CustomReport).order_by(CustomReport.name))
-        return list(result.scalars().all())
+        reports = list(result.scalars().all())
+    else:
+        org_id = _org_id(current_user, organization_id)
+        reports = await list_custom_reports(db, org_id)
 
-    org_id = _org_id(current_user, organization_id)
-    reports = await list_custom_reports(db, org_id)
-
-    # Filter for non-admin roles based on assignments
-    if current_user.role.value not in ("ORG_ADMIN", "SUPER_ADMIN"):
-        allowed = []
-        for r in reports:
-            if await check_custom_report_access(db, current_user, r.id, "view"):
-                allowed.append(r)
-        reports = allowed
-
-    return reports
+    # Filter/populate permissions for non-admin roles based on assignments
+    result_reports = []
+    for r in reports:
+        if current_user.role.value in ("SUPER_ADMIN", "ORG_ADMIN"):
+            r.can_view = True
+            r.can_print = True
+            r.can_export = True
+            r.can_change_period = True
+            result_reports.append(r)
+        else:
+            assignment = (
+                await db.execute(
+                    select(CustomReportAssignment)
+                    .where(CustomReportAssignment.custom_report_id == r.id, CustomReportAssignment.user_id == current_user.id)
+                )
+            ).scalar_one_or_none()
+            if assignment and assignment.can_view:
+                r.can_view = assignment.can_view
+                r.can_print = assignment.can_print
+                r.can_export = assignment.can_export
+                r.can_change_period = assignment.can_change_period
+                result_reports.append(r)
+    return result_reports
 
 
 @router.post("", response_model=CustomReportResponse, status_code=status.HTTP_201_CREATED)
@@ -166,6 +182,25 @@ async def get_report_metadata(
     report = await get_custom_report(db, id, org_id)
     if not report:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+
+    if current_user.role.value in ("SUPER_ADMIN", "ORG_ADMIN"):
+        report.can_view = True
+        report.can_print = True
+        report.can_export = True
+        report.can_change_period = True
+    else:
+        assignment = (
+            await db.execute(
+                select(CustomReportAssignment)
+                .where(CustomReportAssignment.custom_report_id == id, CustomReportAssignment.user_id == current_user.id)
+            )
+        ).scalar_one_or_none()
+        if assignment:
+            report.can_view = assignment.can_view
+            report.can_print = assignment.can_print
+            report.can_export = assignment.can_export
+            report.can_change_period = assignment.can_change_period
+
     return report
 
 
@@ -224,6 +259,17 @@ async def get_report_details(
             "field_name": att.kpi_field.name if att.kpi_field else f"Field #{att.kpi_field_id}"
         })
 
+    can_change_period = True
+    if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
+        assignment = (
+            await db.execute(
+                select(CustomReportAssignment)
+                .where(CustomReportAssignment.custom_report_id == id, CustomReportAssignment.user_id == current_user.id)
+            )
+        ).scalar_one_or_none()
+        if assignment:
+            can_change_period = assignment.can_change_period
+
     return {
         "id": report.id,
         "organization_id": report.organization_id,
@@ -239,6 +285,7 @@ async def get_report_details(
         "attachments": attachments_data,
         "fetch_data_with_date": getattr(report, "fetch_data_with_date", False),
         "date_fetching_config": getattr(report, "date_fetching_config", None) or {},
+        "can_change_period": can_change_period,
     }
 
 
@@ -431,6 +478,13 @@ async def sync_odoo_data_for_report_internal(
             errors.append(f"Could not get/create entry for KPI {kpi_id}")
             continue
 
+        if entry.is_draft:
+            from datetime import datetime
+            entry.is_draft = False
+            entry.submitted_at = datetime.utcnow()
+            entry.submitted_by_user_id = user_id
+            await db.flush()
+
         for field in odoo_fields:
             try:
                 cfg = getattr(field, "config", None) or {}
@@ -553,11 +607,27 @@ async def generate_report(
     if not report:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
 
+    # Enforce period shifting permission for non-admins
+    if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
+        can_shift = await check_custom_report_access(db, current_user, id, "change_period")
+        if not can_shift:
+            config = getattr(report, "date_fetching_config", None) or {}
+            admin_period_type = (config.get("default_period_type") or config.get("period_type") or "").strip() or None
+            admin_period = (config.get("default_period") or config.get("period") or "").strip() or None
+            if admin_period_type or admin_period:
+                year = admin_period
+                period_type = admin_period_type
+                by_default = (admin_period_type == "by_default" or not getattr(report, "fetch_data_with_date", False))
+            else:
+                year = None
+                period_type = None
+                by_default = True
+
 
     # Cache key includes all dimensions that determine the unique output.
     # Use normalized year string + period_type so "2026/27" and 2027 don't collide.
     year_key = str(year).strip() if year is not None else "current"
-    cache_key = (id, org_id, year_key, "preview" if preview else "full", include_attachments, by_default, period_type or "", "v3")
+    cache_key = (id, org_id, year_key, "preview" if preview else "full", include_attachments, by_default, period_type or "", "v4")
 
     filter_config = (
         await db.execute(
@@ -632,6 +702,7 @@ async def list_assignments(
                 can_view=a.can_view,
                 can_print=a.can_print,
                 can_export=a.can_export,
+                can_change_period=a.can_change_period,
                 created_at=a.created_at,
                 user_name=a.user.full_name or a.user.username if a.user else None,
                 user_role=a.user.role.value if a.user else None,
@@ -654,7 +725,7 @@ async def assign_user(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
     perm = await assign_custom_report(
-        db, id, body.user_id, can_view=body.can_view, can_print=body.can_print, can_export=body.can_export
+        db, id, body.user_id, can_view=body.can_view, can_print=body.can_print, can_export=body.can_export, can_change_period=body.can_change_period
     )
     await db.commit()
     await db.refresh(perm)
@@ -670,6 +741,7 @@ async def assign_user(
         can_view=perm.can_view,
         can_print=perm.can_print,
         can_export=perm.can_export,
+        can_change_period=perm.can_change_period,
         created_at=perm.created_at,
         user_name=user.full_name or user.username if user else None,
         user_role=user.role.value if user else None,
@@ -696,6 +768,7 @@ async def bulk_assign_users_route(
         can_view=body.can_view,
         can_print=body.can_print,
         can_export=body.can_export,
+        can_change_period=body.can_change_period,
     )
     await db.commit()
 
@@ -715,6 +788,7 @@ async def bulk_assign_users_route(
                 can_view=p.can_view,
                 can_print=p.can_print,
                 can_export=p.can_export,
+                can_change_period=p.can_change_period,
                 created_at=p.created_at,
                 user_name=u.full_name or u.username if u else None,
                 user_role=u.role.value if u else None
@@ -804,7 +878,7 @@ async def unassign_user_route(
 @router.get("/{id}/export")
 async def export_custom_report(
     id: int,
-    year: str | int = Query(...),
+    year: str | int | None = Query(None),
     format: str = Query("pdf"), # "pdf" | "docx" | "xlsx"
     organization_id: int | None = Query(None),
     attachment_ids: str | None = Query(None),
@@ -817,6 +891,27 @@ async def export_custom_report(
     org_id = _org_id(current_user, organization_id)
     if not await check_custom_report_access(db, current_user, id, "export"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+    # Fetch report metadata
+    report = await get_custom_report(db, id, org_id)
+    if not report:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+
+    # Enforce period shifting permission for non-admins
+    if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
+        can_shift = await check_custom_report_access(db, current_user, id, "change_period")
+        if not can_shift:
+            config = getattr(report, "date_fetching_config", None) or {}
+            admin_period_type = (config.get("default_period_type") or config.get("period_type") or "").strip() or None
+            admin_period = (config.get("default_period") or config.get("period") or "").strip() or None
+            if admin_period_type or admin_period:
+                year = admin_period
+                period_type = admin_period_type
+                by_default = (admin_period_type == "by_default" or not getattr(report, "fetch_data_with_date", False))
+            else:
+                year = None
+                period_type = None
+                by_default = True
 
     parsed_att_ids = None
     if attachment_ids:

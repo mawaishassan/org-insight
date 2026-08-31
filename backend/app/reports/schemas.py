@@ -48,6 +48,7 @@ class ReportAccessAssign(BaseModel):
     can_view: bool = True
     can_print: bool = True
     can_export: bool = True
+    can_change_period: bool = True
 
 
 class ReportAssignmentResponse(BaseModel):
@@ -59,6 +60,7 @@ class ReportAssignmentResponse(BaseModel):
     can_view: bool
     can_print: bool
     can_export: bool
+    can_change_period: bool
 
 
 class ReportTemplateResponse(BaseModel):
@@ -70,6 +72,10 @@ class ReportTemplateResponse(BaseModel):
     description: str | None
     fetch_data_with_date: bool = False
     date_fetching_config: dict | None = None
+    can_view: bool = True
+    can_print: bool = True
+    can_export: bool = True
+    can_change_period: bool = True
 
     class Config:
         from_attributes = True

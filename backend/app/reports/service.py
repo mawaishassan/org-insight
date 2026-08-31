@@ -294,7 +294,6 @@ async def _load_multi_line_items_rows_batch(
             u_key = (await db.execute(select(User.unique_user_key).where(User.id == current_user.id))).scalar_one_or_none()
 
     if custom_report_id is not None and current_user is not None and u_key is not None:
-        from sqlalchemy import and_, or_
         filter_config_res = await db.execute(
             select(ReportUserFilterConfiguration)
             .where(
@@ -713,6 +712,7 @@ async def assign_report_to_user(
     can_view: bool = True,
     can_print: bool = True,
     can_export: bool = True,
+    can_change_period: bool = True,
 ) -> ReportAccessPermission | None:
     """Assign report template to user (upsert). Template and user must be in same org."""
     rt = await get_report_template(db, template_id, org_id)
@@ -733,6 +733,7 @@ async def assign_report_to_user(
         existing.can_view = can_view
         existing.can_print = can_print
         existing.can_export = can_export
+        existing.can_change_period = can_change_period
         await db.flush()
         return existing
     perm = ReportAccessPermission(
@@ -741,6 +742,7 @@ async def assign_report_to_user(
         can_view=can_view,
         can_print=can_print,
         can_export=can_export,
+        can_change_period=can_change_period,
     )
     db.add(perm)
     await db.flush()
@@ -839,6 +841,8 @@ async def user_can_access_report(
         return perm.can_print
     if action == "export":
         return perm.can_export
+    if action == "change_period":
+        return perm.can_change_period
     return False
 
 
@@ -2106,14 +2110,56 @@ async def generate_report_data(
         return None
 
     selected_period = year
-    if rt and getattr(rt, "fetch_data_with_date", False):
-        if not selected_period or by_default or selected_period == "by_default":
-            selected_period = "2025/26"
-            by_default = False
+    # Only enter date-based period resolution when NOT in "Data Entry" (by_default) mode.
+    # by_default=True means the user explicitly chose "Data Entry" — bypass ALL date-column
+    # filtering and resolve entries purely by entry year (KPIEntry.year == yr).
+    if rt and getattr(rt, "fetch_data_with_date", False) and not by_default:
+        if not selected_period or selected_period == "by_default":
+            config = getattr(rt, "date_fetching_config", None) or {}
+            def_period = config.get("default_period")
+            if def_period:
+                selected_period = def_period
+            else:
+                import datetime
+                import math
+                today = datetime.date.today()
+                start_month = int(config.get("custom_period_start_month") or config.get("start_month") or 1)
+                if today.month >= start_month:
+                    start_year = today.year
+                else:
+                    start_year = today.year - 1
+
+                prefix = config.get("custom_period_prefix") or config.get("prefix") or ""
+                suffix = config.get("custom_period_suffix") or config.get("suffix") or ""
+                display_format = config.get("custom_period_display_format") or config.get("display_format") or "YYYY"
+                duration = int(config.get("custom_period_duration_months") or config.get("duration_months") or 12)
+
+                if display_format == "YYYY":
+                    body = str(start_year)
+                elif display_format == "YYYY/YY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{start_year}/{str(end_year % 100).zfill(2)}"
+                elif display_format == "YYYY-YY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{start_year}-{str(end_year % 100).zfill(2)}"
+                elif display_format == "YYYY-YYYY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{start_year}-{end_year}"
+                elif display_format == "YYYY–YYYY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{start_year}–{end_year}"
+                elif display_format == "YY/YYYY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{str(start_year % 100).zfill(2)}/{end_year}"
+                else:
+                    body = str(start_year)
+
+                selected_period = f"{prefix}{body}{suffix}"
 
     date_range = None
     entry_start_year: int | None = None  # calendar start year of the period (e.g. 2026 for "2026/27")
-    if rt and getattr(rt, "fetch_data_with_date", False) and selected_period and not by_default:
+    # Only build date_range for custom periods (not Data Entry / by_default mode)
+    if rt and getattr(rt, "fetch_data_with_date", False) and not by_default and selected_period:
         org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
         if org:
             try:
@@ -2126,7 +2172,8 @@ async def generate_report_data(
                 pass
 
     yr = _parse_year_int(year)
-    yr_display = selected_period if (rt and getattr(rt, "fetch_data_with_date", False) and selected_period) else yr
+    # yr_display: for custom periods show the period label; for Data Entry show the numeric year
+    yr_display = selected_period if (rt and getattr(rt, "fetch_data_with_date", False) and not by_default and selected_period) else yr
     t0 = time.perf_counter()
     cache_key = (template_id, org_id, int(yr), bool(include_drafts), by_default, selected_period, period_type, "v4")
     if not bypass_cache:
@@ -2375,6 +2422,7 @@ async def generate_report_data(
         total_entries_query_ms += (time.perf_counter() - t_eq0) * 1000.0
         all_entries = list(entries_result.scalars().all())
         
+        td_scope = "date_range"
         if date_range:
             # Count multi-line rows for these entries to prioritize populated entries
             entry_ids = [e.id for e in all_entries]

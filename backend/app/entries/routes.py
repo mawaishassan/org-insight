@@ -3748,6 +3748,7 @@ async def sync_multi_items_from_linked(
         resolve_linked_columns_in_rows_batch,
         recompute_mli_formula_subfields,
         propagate_formula_recalculations,
+        mark_entry_modified,
     )
     
     org_id = _org_id(current_user, organization_id)
@@ -3856,6 +3857,7 @@ async def sync_multi_items_from_linked(
     # Recompute all formula fields since the linked data has updated
     await recompute_mli_formula_subfields(db, entry_id=entry_id, org_id=org_id, field_id=field_id)
     await propagate_formula_recalculations(db, entry_id=entry_id, org_id=org_id)
+    await mark_entry_modified(db, provided_entry, current_user.id)
     
     await db.commit()
     return {"ok": True, "message": f"Successfully synced {len(linked_subfields)} linked columns across {len(rows_orm)} rows"}
@@ -3929,9 +3931,15 @@ async def sync_multi_items_from_odoo(
             await db.flush()
         
         provided_entry.is_draft = False
+        provided_entry.submitted_at = datetime.utcnow()
+        provided_entry.submitted_by_user_id = current_user.id
         await db.flush()
         
     entry = provided_entry
+    if entry.submitted_at is None:
+        entry.submitted_at = datetime.utcnow()
+        entry.submitted_by_user_id = current_user.id
+        await db.flush()
 
     cfg = getattr(field, "config", None) or {}
     channel = (cfg.get("multi_items_import_channel") or "").strip().lower()

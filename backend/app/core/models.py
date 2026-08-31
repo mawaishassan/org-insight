@@ -1183,6 +1183,7 @@ class ReportAccessPermission(Base):
     can_view = Column(Boolean, default=True, nullable=False)
     can_print = Column(Boolean, default=True, nullable=False)
     can_export = Column(Boolean, default=True, nullable=False)
+    can_change_period = Column(Boolean, default=True, nullable=False, server_default="true")
     created_at = Column(DateTime, default=utc_now)
 
     __table_args__ = (
@@ -1461,6 +1462,7 @@ class CustomReportAssignment(Base):
     can_view = Column(Boolean, default=True, nullable=False)
     can_print = Column(Boolean, default=True, nullable=False)
     can_export = Column(Boolean, default=True, nullable=False)
+    can_change_period = Column(Boolean, default=True, nullable=False, server_default="true")
     created_at = Column(DateTime, default=utc_now)
 
     __table_args__ = (

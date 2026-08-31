@@ -388,7 +388,7 @@ async def save_custom_report_layout(
 
 
 async def assign_custom_report(
-    db: AsyncSession, custom_report_id: int, user_id: int, can_view: bool, can_print: bool, can_export: bool
+    db: AsyncSession, custom_report_id: int, user_id: int, can_view: bool, can_print: bool, can_export: bool, can_change_period: bool = True
 ) -> CustomReportAssignment:
     # Check if assignment already exists
     result = await db.execute(
@@ -406,6 +406,7 @@ async def assign_custom_report(
     perm.can_view = can_view
     perm.can_print = can_print
     perm.can_export = can_export
+    perm.can_change_period = can_change_period
     await db.flush()
     CUSTOM_REPORT_CACHE.invalidate_report(custom_report_id)
     return perm
@@ -418,6 +419,7 @@ async def bulk_assign_custom_report(
     can_view: bool = True,
     can_print: bool = True,
     can_export: bool = True,
+    can_change_period: bool = True,
 ) -> list[CustomReportAssignment]:
     """Assign custom report to multiple users simultaneously inside a single transaction."""
     result = await db.execute(
@@ -434,11 +436,16 @@ async def bulk_assign_custom_report(
     for uid in user_ids:
         perm = existing_by_user_id.get(uid)
         if not perm:
-            perm = CustomReportAssignment(custom_report_id=custom_report_id, user_id=uid)
+            perm = CustomReportAssignment(
+                custom_report_id=custom_report_id,
+                user_id=uid,
+                can_change_period=can_change_period,
+            )
             db.add(perm)
         perm.can_view = can_view
         perm.can_print = can_print
         perm.can_export = can_export
+        perm.can_change_period = can_change_period
         out.append(perm)
 
     await db.flush()
@@ -680,15 +687,56 @@ async def generate_custom_report_data(
         return None
 
     selected_period = year
+    # Only enter date-based period resolution when NOT in "Data Entry" (by_default) mode.
+    # by_default=True means the user explicitly chose "Data Entry" — bypass ALL date-column
+    # filtering and resolve entries purely by entry year (KPIEntry.year == yr).
     if custom_report and getattr(custom_report, "fetch_data_with_date", False) and not by_default:
         if not selected_period or selected_period == "by_default":
             config = getattr(custom_report, "date_fetching_config", None) or {}
             def_period = config.get("default_period")
-            selected_period = def_period if def_period else "2025/26"
+            if def_period:
+                selected_period = def_period
+            else:
+                import datetime
+                import math
+                today = datetime.date.today()
+                start_month = int(config.get("custom_period_start_month") or config.get("start_month") or 1)
+                if today.month >= start_month:
+                    start_year = today.year
+                else:
+                    start_year = today.year - 1
+
+                prefix = config.get("custom_period_prefix") or config.get("prefix") or ""
+                suffix = config.get("custom_period_suffix") or config.get("suffix") or ""
+                display_format = config.get("custom_period_display_format") or config.get("display_format") or "YYYY"
+                duration = int(config.get("custom_period_duration_months") or config.get("duration_months") or 12)
+
+                if display_format == "YYYY":
+                    body = str(start_year)
+                elif display_format == "YYYY/YY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{start_year}/{str(end_year % 100).zfill(2)}"
+                elif display_format == "YYYY-YY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{start_year}-{str(end_year % 100).zfill(2)}"
+                elif display_format == "YYYY-YYYY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{start_year}-{end_year}"
+                elif display_format == "YYYY–YYYY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{start_year}–{end_year}"
+                elif display_format == "YY/YYYY":
+                    end_year = start_year + math.ceil(duration / 12)
+                    body = f"{str(start_year % 100).zfill(2)}/{end_year}"
+                else:
+                    body = str(start_year)
+
+                selected_period = f"{prefix}{body}{suffix}"
 
     date_range = None
     entry_start_year: int | None = None  # calendar start year of the period (e.g. 2026 for "2026/27")
-    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period and not by_default:
+    # Only build date_range for custom periods (not Data Entry / by_default mode)
+    if custom_report and getattr(custom_report, "fetch_data_with_date", False) and not by_default and selected_period:
         org = (await db.execute(select(Organization).where(Organization.id == org_id))).scalar_one_or_none()
         if org:
             try:
@@ -701,7 +749,8 @@ async def generate_custom_report_data(
                 pass
 
     yr = _parse_year_int(year)
-    yr_display = selected_period if (custom_report and getattr(custom_report, "fetch_data_with_date", False) and selected_period and not by_default) else yr
+    # yr_display: for custom periods show the period label; for Data Entry show the numeric year
+    yr_display = selected_period if (custom_report and getattr(custom_report, "fetch_data_with_date", False) and not by_default and selected_period) else yr
 
     # Resolve period type and period_info metadata
     resolved_period_type = "Data Entry"
@@ -709,7 +758,7 @@ async def generate_custom_report_data(
         resolved_period_type = period_type or (custom_report.date_fetching_config or {}).get("default_period_type") or (custom_report.date_fetching_config or {}).get("period_type") or "Data Entry"
         if resolved_period_type == "by_default":
             resolved_period_type = "Data Entry"
-    
+
     # Capitalize first letter of each word to make it look premium (e.g. "Data Entry", "Fiscal Year")
     resolved_period_type = " ".join(word.capitalize() for word in str(resolved_period_type).split())
     period_info = f"{resolved_period_type} : {yr_display}"
@@ -1606,7 +1655,7 @@ async def export_custom_report_file(
     db: AsyncSession,
     custom_report_id: int,
     org_id: int,
-    year: str | int,
+    year: str | int | None,
     format: str,
     by_default: bool = False,
     period_type: str | None = None,
@@ -3522,7 +3571,7 @@ async def stream_custom_report_data(
 
 
 async def export_custom_report_attachments(
-    db, custom_report_id: int, org_id: int, year: int, format: str, attachment_ids: list[int], current_user: User | None = None
+    db, custom_report_id: int, org_id: int, year: int | str | None, format: str, attachment_ids: list[int], current_user: User | None = None
 ) -> tuple[bytes, str, str]:
     import io
     import zipfile
