@@ -198,7 +198,9 @@ export default function CustomReportViewPage() {
     }
 
     const isByDefault = selectedPeriodType === "by_default";
-    const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
+    // For Data Entry mode, always send the numeric reportYear (e.g. 2026).
+    // For custom periods (e.g. "2026/27"), send the selectedPeriod string so the backend can resolve the date range.
+    const yr = isByDefault ? reportYear : (selectedPeriod || reportYear);
     const url = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`;
     api<any>(url, { token, cache: "no-store" })
       .then((res) => {
@@ -238,7 +240,8 @@ export default function CustomReportViewPage() {
     const toastId = toast.loading(`Exporting as ${format.toUpperCase()}...`);
     try {
       const isByDefault = selectedPeriodType === "by_default";
-      const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
+      // For Data Entry mode, always send the numeric reportYear; for custom periods send the period string.
+      const yr = isByDefault ? reportYear : (selectedPeriod || reportYear);
       let url = getApiUrl(`/custom-reports/${id}/export?year=${yr}&format=${format}&organization_id=${orgId}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}`);
       if (selectedAttachmentIds.length > 0) {
         url += `&attachment_ids=${selectedAttachmentIds.join(",")}`;
@@ -348,7 +351,8 @@ export default function CustomReportViewPage() {
 
     try {
       const isByDefault = selectedPeriodType === "by_default";
-      const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
+      // For Data Entry mode, always send the numeric reportYear; for custom periods send the period string.
+      const yr = isByDefault ? reportYear : (selectedPeriod || reportYear);
       const pTypeParam = isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`;
       const res = await api<any>(
         `/custom-reports/${id}/sync-odoo?year=${yr}&organization_id=${orgId}${pTypeParam}`,
@@ -459,75 +463,76 @@ export default function CustomReportViewPage() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-          {/* Period & Year selector */}
-          {showDatePeriods ? (
-            <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Period Type:</label>
-                <select
-                  value={selectedPeriodType}
-                  onChange={(e) => setSelectedPeriodType(e.target.value)}
-                  disabled={loading || isShiftingPeriod}
-                  style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: (loading || isShiftingPeriod) ? "not-allowed" : "pointer", opacity: (loading || isShiftingPeriod) ? 0.6 : 1, fontWeight: 500 }}
-                >
-                  <option value="by_default">Data entry</option>
-                  {customPeriods.map((cp: any) => (
-                    <option key={cp.custom_period_name} value={cp.custom_period_name}>
-                      {cp.custom_period_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {selectedPeriodType === "by_default" ? (
+          {/* Period & Year selector */}          {template?.can_change_period !== false && (
+            showDatePeriods ? (
+              <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Reporting period:</label>
+                  <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Period Type:</label>
                   <select
-                    value={reportYear}
-                    onChange={(e) => setReportYear(Number(e.target.value))}
+                    value={selectedPeriodType}
+                    onChange={(e) => setSelectedPeriodType(e.target.value)}
                     disabled={loading || isShiftingPeriod}
                     style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: (loading || isShiftingPeriod) ? "not-allowed" : "pointer", opacity: (loading || isShiftingPeriod) ? 0.6 : 1, fontWeight: 500 }}
                   >
-                    {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
-                      <option key={y} value={y}>{y}</option>
+                    <option value="by_default">Data entry</option>
+                    {customPeriods.map((cp: any) => (
+                      <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                        {cp.custom_period_name}
+                      </option>
                     ))}
                   </select>
                 </div>
-              ) : (
-                periodOptions.length > 0 && (
+
+                {selectedPeriodType === "by_default" ? (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                     <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Reporting period:</label>
                     <select
-                      value={selectedPeriod}
-                      onChange={(e) => setSelectedPeriod(e.target.value)}
+                      value={reportYear}
+                      onChange={(e) => setReportYear(Number(e.target.value))}
                       disabled={loading || isShiftingPeriod}
                       style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: (loading || isShiftingPeriod) ? "not-allowed" : "pointer", opacity: (loading || isShiftingPeriod) ? 0.6 : 1, fontWeight: 500 }}
                     >
-                      {periodOptions.map((opt: any) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
+                      {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                        <option key={y} value={y}>{y}</option>
                       ))}
                     </select>
                   </div>
-                )
-              )}
-            </div>
-          ) : (
-            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-              <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Year:</label>
-              <select
-                value={reportYear}
-                onChange={(e) => setReportYear(Number(e.target.value))}
-                disabled={loading || isShiftingPeriod}
-                style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: (loading || isShiftingPeriod) ? "not-allowed" : "pointer", opacity: (loading || isShiftingPeriod) ? 0.6 : 1, fontWeight: 500 }}
-              >
-                {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
-                  <option key={y} value={y}>{y}</option>
-                ))}
-              </select>
-            </div>
-          )}
+                ) : (
+                  periodOptions.length > 0 && (
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Reporting period:</label>
+                      <select
+                        value={selectedPeriod}
+                        onChange={(e) => setSelectedPeriod(e.target.value)}
+                        disabled={loading || isShiftingPeriod}
+                        style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: (loading || isShiftingPeriod) ? "not-allowed" : "pointer", opacity: (loading || isShiftingPeriod) ? 0.6 : 1, fontWeight: 500 }}
+                      >
+                        {periodOptions.map((opt: any) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )
+                )}
+              </div>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <label style={{ fontSize: "0.9rem", color: "#93c5fd", fontWeight: 600 }}>Year:</label>
+                <select
+                  value={reportYear}
+                  onChange={(e) => setReportYear(Number(e.target.value))}
+                  disabled={loading || isShiftingPeriod}
+                  style={{ padding: "0.35rem 0.75rem", borderRadius: 8, border: "1px solid #3b82f6", background: "#1e3a8a", color: "white", fontSize: "0.9rem", cursor: (loading || isShiftingPeriod) ? "not-allowed" : "pointer", opacity: (loading || isShiftingPeriod) ? 0.6 : 1, fontWeight: 500 }}
+                >
+                  {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </div>
+            )
+          )})}
 
           <div style={{ display: "flex", gap: "0.5rem" }}>
             {userRole === "SUPER_ADMIN" && (

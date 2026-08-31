@@ -276,17 +276,19 @@ export default function ReportsPage() {
     }
   }, [activePeriodOptions, selectedPeriodType, activeReport, genModalOpen]);
 
-  const handleGenerateReport = async () => {
+  const handleGenerateReport = async (reportOverride?: TemplateRow, periodTypeOverride?: string, periodOverride?: string) => {
     const token = getAccessToken();
-    if (!token || !activeReport) return;
+    const active = reportOverride || activeReport;
+    if (!token || !active) return;
     setGenerateLoading(true);
     setGenerateStep("Accessing report database...");
     
-    const isByDefault = selectedPeriodType === "by_default";
-    const yr = selectedPeriod;
-    let url = `/reports/templates/${activeReport.id}/generate?format=json&year=${yr}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`;
-    if (activeReport.organization_id) {
-      url += `&organization_id=${activeReport.organization_id}`;
+    const pType = periodTypeOverride || selectedPeriodType;
+    const yr = periodOverride || selectedPeriod;
+    const isByDefault = pType === "by_default";
+    let url = `/reports/templates/${active.id}/generate?format=json&year=${yr}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(pType)}`}&_t=${Date.now()}`;
+    if (active.organization_id) {
+      url += `&organization_id=${active.organization_id}`;
     }
 
     try {
@@ -304,20 +306,23 @@ export default function ReportsPage() {
       setGenModalOpen(false);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to generate report");
+      setGenModalOpen(false);
     } finally {
       setGenerateLoading(false);
     }
   };
 
-  const handleGenerateCustomReport = async () => {
+  const handleGenerateCustomReport = async (reportOverride?: TemplateRow, periodTypeOverride?: string, periodOverride?: string) => {
     const token = getAccessToken();
-    if (!token || !activeReport) return;
+    const active = reportOverride || activeReport;
+    if (!token || !active) return;
     setGenerateLoading(true);
     setGenerateStep("Accessing custom report database...");
 
-    const isByDefault = selectedPeriodType === "by_default";
-    const yr = selectedPeriod;
-    let url = getApiUrl(`/custom-reports/${activeReport.id}/export?year=${yr}&format=pdf&organization_id=${activeReport.organization_id || organizationId}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}`);
+    const pType = periodTypeOverride || selectedPeriodType;
+    const yr = periodOverride || selectedPeriod;
+    const isByDefault = pType === "by_default";
+    let url = getApiUrl(`/custom-reports/${active.id}/export?year=${yr}&format=pdf&organization_id=${active.organization_id || organizationId}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(pType)}`}`);
 
     try {
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -329,12 +334,13 @@ export default function ReportsPage() {
       const blob = await res.blob();
       const link = document.createElement("a");
       link.href = window.URL.createObjectURL(blob);
-      link.download = `${activeReport.name}_${yr}.pdf`;
+      link.download = `${active.name}_${yr}.pdf`;
       link.click();
       toast.success("PDF report generated successfully!");
       setGenModalOpen(false);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to generate custom report");
+      setGenModalOpen(false);
     } finally {
       setGenerateLoading(false);
     }
@@ -356,21 +362,29 @@ export default function ReportsPage() {
     const adminPeriodType = config?.default_period_type || config?.period_type;
     const adminPeriod = config?.default_period || config?.period;
     
+    let resolvedPeriodType = "by_default";
     if (t.fetch_data_with_date && adminPeriodType) {
-      setSelectedPeriodType(adminPeriodType);
-    } else {
-      setSelectedPeriodType("by_default");
+      resolvedPeriodType = adminPeriodType;
     }
     
-    if (adminPeriod) {
-      setSelectedPeriod(adminPeriod);
-    } else {
-      setSelectedPeriod(String(new Date().getFullYear()));
-    }
+    let resolvedPeriod = adminPeriod || String(new Date().getFullYear());
     
+    setSelectedPeriodType(resolvedPeriodType);
+    setSelectedPeriod(resolvedPeriod);
     setGenerateLoading(false);
     setGenerateStep("");
-    setGenModalOpen(true);
+    
+    if (t.can_change_period === false) {
+      // Directly generate the report and bypass the modal config
+      setGenModalOpen(true); // Open the loading overlay
+      if (type === "custom") {
+        void handleGenerateCustomReport(t, resolvedPeriodType, resolvedPeriod);
+      } else {
+        void handleGenerateReport(t, resolvedPeriodType, resolvedPeriod);
+      }
+    } else {
+      setGenModalOpen(true);
+    }
   };
 
   const groupedCustomReports = useMemo(() => {

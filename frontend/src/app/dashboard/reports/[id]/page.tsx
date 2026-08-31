@@ -178,36 +178,14 @@ export default function ReportViewPage() {
     <div style={{ padding: "0 1rem 1rem" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem" }}>
         <h1 style={{ fontSize: "1.5rem", margin: 0 }}>Report</h1>
-        {(template?.fetch_data_with_date || customPeriods.length > 0) ? (
-          <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Period Type:</label>
-              <select
-                value={selectedPeriodType}
-                onChange={(e) => setSelectedPeriodType(e.target.value)}
-                style={{
-                  padding: "0.35rem 0.5rem",
-                  borderRadius: "4px",
-                  border: "1px solid var(--border)",
-                  fontSize: "0.875rem",
-                  background: "var(--surface)"
-                }}
-              >
-                <option value="by_default">Default</option>
-                {customPeriods.map((cp: any) => (
-                  <option key={cp.custom_period_name} value={cp.custom_period_name}>
-                    {cp.custom_period_name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {selectedPeriodType === "by_default" ? (
+        {template?.can_change_period !== false && (
+          (template?.fetch_data_with_date || customPeriods.length > 0) ? (
+            <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Year</label>
+                <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Period Type:</label>
                 <select
-                  value={reportYear}
-                  onChange={(e) => setReportYear(Number(e.target.value))}
+                  value={selectedPeriodType}
+                  onChange={(e) => setSelectedPeriodType(e.target.value)}
                   style={{
                     padding: "0.35rem 0.5rem",
                     borderRadius: "4px",
@@ -216,18 +194,21 @@ export default function ReportViewPage() {
                     background: "var(--surface)"
                   }}
                 >
-                  {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
-                    <option key={y} value={y}>{y}</option>
+                  <option value="by_default">Default</option>
+                  {customPeriods.map((cp: any) => (
+                    <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                      {cp.custom_period_name}
+                    </option>
                   ))}
                 </select>
               </div>
-            ) : (
-              periodOptions.length > 0 && (
+
+              {selectedPeriodType === "by_default" ? (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Reporting Period:</label>
+                  <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Year</label>
                   <select
-                    value={selectedPeriod}
-                    onChange={(e) => setSelectedPeriod(e.target.value)}
+                    value={reportYear}
+                    onChange={(e) => setReportYear(Number(e.target.value))}
                     style={{
                       padding: "0.35rem 0.5rem",
                       borderRadius: "4px",
@@ -236,29 +217,50 @@ export default function ReportViewPage() {
                       background: "var(--surface)"
                     }}
                   >
-                    {periodOptions.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
+                    {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                      <option key={y} value={y}>{y}</option>
                     ))}
                   </select>
                 </div>
-              )
-            )}
-          </div>
-        ) : (
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Year</label>
-            <select
-              value={reportYear}
-              onChange={(e) => setReportYear(Number(e.target.value))}
-              style={{ padding: "0.35rem 0.5rem" }}
-            >
-              {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
-                <option key={y} value={y}>{y}</option>
-              ))}
-            </select>
-          </div>
+              ) : (
+                periodOptions.length > 0 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Reporting Period:</label>
+                    <select
+                      value={selectedPeriod}
+                      onChange={(e) => setSelectedPeriod(e.target.value)}
+                      style={{
+                        padding: "0.35rem 0.5rem",
+                        borderRadius: "4px",
+                        border: "1px solid var(--border)",
+                        fontSize: "0.875rem",
+                        background: "var(--surface)"
+                      }}
+                    >
+                      {periodOptions.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )
+              )}
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Year</label>
+              <select
+                value={reportYear}
+                onChange={(e) => setReportYear(Number(e.target.value))}
+                style={{ padding: "0.35rem 0.5rem" }}
+              >
+                {Array.from({ length: 11 }, (_, i) => new Date().getFullYear() - 5 + i).map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+            </div>
+          )
         )}
         {userRole === "SUPER_ADMIN" && (
           <Link className="btn" href={`/dashboard/reports/${id}/design`} style={{ fontSize: "0.9rem" }}>

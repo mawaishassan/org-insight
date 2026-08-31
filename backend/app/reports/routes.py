@@ -89,15 +89,32 @@ async def list_templates(
     else:
         org_id = _org_id(current_user, organization_id)
         templates = await list_report_templates(db, org_id)
-    if current_user.role.value not in ("ORG_ADMIN", "SUPER_ADMIN"):
-        from sqlalchemy import select
-        from app.core.models import ReportAccessPermission
-        allowed = set()
-        for t in templates:
-            if await user_can_access_report(db, current_user.id, t.id, "view"):
-                allowed.add(t.id)
-        templates = [t for t in templates if t.id in allowed]
-    return [ReportTemplateResponse.model_validate(t) for t in templates]
+
+    from sqlalchemy import select
+    from app.core.models import ReportAccessPermission
+
+    result_templates = []
+    for t in templates:
+        if current_user.role.value in ("SUPER_ADMIN", "ORG_ADMIN"):
+            t.can_view = True
+            t.can_print = True
+            t.can_export = True
+            t.can_change_period = True
+            result_templates.append(t)
+        else:
+            perm = (await db.execute(
+                select(ReportAccessPermission).where(
+                    ReportAccessPermission.report_template_id == t.id,
+                    ReportAccessPermission.user_id == current_user.id
+                )
+            )).scalar_one_or_none()
+            if perm and perm.can_view:
+                t.can_view = perm.can_view
+                t.can_print = perm.can_print
+                t.can_export = perm.can_export
+                t.can_change_period = perm.can_change_period
+                result_templates.append(t)
+    return result_templates
 
 
 @router.post("/templates", response_model=ReportTemplateResponse, status_code=status.HTTP_201_CREATED)
@@ -122,16 +139,35 @@ async def get_template(
     template_id: int,
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
-  current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Get report template (if allowed)."""
     org_id = await _org_id_for_template(db, current_user, template_id, organization_id)
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
-    can = await user_can_access_report(db, current_user.id, template_id, "view")
-    if not can:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+    if current_user.role.value in ("SUPER_ADMIN", "ORG_ADMIN"):
+        rt.can_view = True
+        rt.can_print = True
+        rt.can_export = True
+        rt.can_change_period = True
+    else:
+        from sqlalchemy import select
+        from app.core.models import ReportAccessPermission
+        perm = (await db.execute(
+            select(ReportAccessPermission).where(
+                ReportAccessPermission.report_template_id == template_id,
+                ReportAccessPermission.user_id == current_user.id
+            )
+        )).scalar_one_or_none()
+        if not perm or not perm.can_view:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+        rt.can_view = perm.can_view
+        rt.can_print = perm.can_print
+        rt.can_export = perm.can_export
+        rt.can_change_period = perm.can_change_period
+
     return ReportTemplateResponse.model_validate(rt)
 
 
@@ -240,11 +276,12 @@ async def assign_user(
     perm = await assign_report_to_user(
         db, template_id, org_id, body.user_id,
         can_view=body.can_view, can_print=body.can_print, can_export=body.can_export,
+        can_change_period=body.can_change_period,
     )
     if not perm:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template or user not found")
     await db.commit()
-    return {"user_id": perm.user_id, "template_id": perm.report_template_id, "can_view": perm.can_view, "can_print": perm.can_print, "can_export": perm.can_export}
+    return {"user_id": perm.user_id, "template_id": perm.report_template_id, "can_view": perm.can_view, "can_print": perm.can_print, "can_export": perm.can_export, "can_change_period": perm.can_change_period}
 
 
 @router.get("/templates/{template_id}/users", response_model=list[ReportAssignmentResponse])
@@ -332,9 +369,27 @@ async def generate_report(
     can = await user_can_access_report(db, current_user.id, template_id, "export" if format == "csv" else "view")
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+
+    # Enforce period shifting permission for non-admins
+    if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
+        can_shift = await user_can_access_report(db, current_user.id, template_id, "change_period")
+        if not can_shift:
+            config = getattr(rt, "date_fetching_config", None) or {}
+            admin_period_type = (config.get("default_period_type") or config.get("period_type") or "").strip() or None
+            admin_period = (config.get("default_period") or config.get("period") or "").strip() or None
+            if admin_period_type or admin_period:
+                year = admin_period
+                period_type = admin_period_type
+                by_default = (admin_period_type == "by_default" or not getattr(rt, "fetch_data_with_date", False))
+            else:
+                year = None
+                period_type = None
+                by_default = True
+
     bypass = (_t is not None)
     data = await generate_report_data(db, template_id, rt.organization_id, year=year, include_drafts=False, by_default=by_default, period_type=period_type, bypass_cache=bypass)
     # If the template has a body_template or body_blocks (visual builder), render HTML

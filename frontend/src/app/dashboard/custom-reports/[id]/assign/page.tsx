@@ -21,6 +21,7 @@ interface CustomReportAssignment {
   can_view: boolean;
   can_print: boolean;
   can_export: boolean;
+  can_change_period: boolean;
   created_at: string;
   user_name?: string | null;
   user_role?: string | null;
@@ -72,6 +73,7 @@ export default function CustomReportAssignPage() {
   const [bulkView, setBulkView] = useState(true);
   const [bulkPrint, setBulkPrint] = useState(true);
   const [bulkExport, setBulkExport] = useState(true);
+  const [bulkChangePeriod, setBulkChangePeriod] = useState(true);
 
   // User-based dynamic filtering states
   const [filteringEnabled, setFilteringEnabled] = useState(false);
@@ -197,6 +199,7 @@ export default function CustomReportAssignPage() {
         can_view: bulkView,
         can_print: bulkPrint,
         can_export: bulkExport,
+        can_change_period: bulkChangePeriod,
       };
       const newAssigns = await api<CustomReportAssignment[]>(
         `/custom-reports/${id}/bulk-assign?organization_id=${orgId}`,
@@ -398,6 +401,15 @@ export default function CustomReportAssignPage() {
                 />
                 Export
               </label>
+              <label style={{ display: "flex", gap: "0.5rem", alignItems: "center", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={bulkChangePeriod}
+                  onChange={(e) => setBulkChangePeriod(e.target.checked)}
+                  style={{ transform: "scale(1.1)" }}
+                />
+                Allow Period Shifting
+              </label>
             </div>
           </div>
 
@@ -550,6 +562,7 @@ export default function CustomReportAssignPage() {
                   <th style={{ textAlign: "center", padding: "0.75rem 1rem", fontSize: "0.8rem", textTransform: "uppercase", color: "var(--muted)" }}>View</th>
                   <th style={{ textAlign: "center", padding: "0.75rem 1rem", fontSize: "0.8rem", textTransform: "uppercase", color: "var(--muted)" }}>Print</th>
                   <th style={{ textAlign: "center", padding: "0.75rem 1rem", fontSize: "0.8rem", textTransform: "uppercase", color: "var(--muted)" }}>Export</th>
+                  <th style={{ textAlign: "center", padding: "0.75rem 1rem", fontSize: "0.8rem", textTransform: "uppercase", color: "var(--muted)" }}>Allow Period Shifting</th>
                   <th style={{ textAlign: "right", padding: "0.75rem 1rem", fontSize: "0.8rem", textTransform: "uppercase", color: "var(--muted)" }}>Action</th>
                 </tr>
               </thead>
@@ -568,6 +581,9 @@ export default function CustomReportAssignPage() {
                     </td>
                     <td style={{ padding: "0.75rem 1rem", textAlign: "center" }}>
                       <input type="checkbox" checked={assign.can_export} disabled style={{ transform: "scale(1.1)" }} />
+                    </td>
+                    <td style={{ padding: "0.75rem 1rem", textAlign: "center" }}>
+                      <input type="checkbox" checked={assign.can_change_period} disabled style={{ transform: "scale(1.1)" }} />
                     </td>
                     <td style={{ padding: "0.75rem 1rem", textAlign: "right" }}>
                       <button

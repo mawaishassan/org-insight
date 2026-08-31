@@ -45,6 +45,7 @@ class CustomReportAssignmentRequest(BaseModel):
     can_view: bool = True
     can_print: bool = True
     can_export: bool = True
+    can_change_period: bool = True
 
 
 class CustomReportBulkAssignmentRequest(BaseModel):
@@ -52,6 +53,7 @@ class CustomReportBulkAssignmentRequest(BaseModel):
     can_view: bool = True
     can_print: bool = True
     can_export: bool = True
+    can_change_period: bool = True
 
 
 class ReportUserFilterConfigCreateUpdate(BaseModel):
@@ -84,6 +86,7 @@ class CustomReportAssignmentResponse(BaseModel):
     can_view: bool
     can_print: bool
     can_export: bool
+    can_change_period: bool
     created_at: datetime
     user_name: str | None = None
     user_role: str | None = None
@@ -114,6 +117,10 @@ class CustomReportResponse(BaseModel):
     mli_font_family: str = "Inter"
     created_at: datetime
     updated_at: datetime
+    can_view: bool = True
+    can_print: bool = True
+    can_export: bool = True
+    can_change_period: bool = True
 
     class Config:
         from_attributes = True

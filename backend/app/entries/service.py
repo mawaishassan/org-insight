@@ -1146,6 +1146,46 @@ async def mark_entry_modified(db: AsyncSession, entry: KPIEntry, user_id: int) -
     entry.user_id = user_id
     entry.updated_at = datetime.utcnow()
     
+    # Check if the user is an admin (Super Admin or Org Admin)
+    is_admin = False
+    if user_id:
+        user_res = await db.execute(select(User).where(User.id == user_id))
+        user = user_res.scalar_one_or_none()
+        if user:
+            is_admin = getattr(user.role, "value", user.role) in ("SUPER_ADMIN", "ORG_ADMIN")
+            
+    if is_admin:
+        if entry.is_draft:
+            # Check if a published entry already exists for this period group
+            pub_res = await db.execute(
+                select(KPIEntry).where(
+                    KPIEntry.organization_id == entry.organization_id,
+                    KPIEntry.kpi_id == entry.kpi_id,
+                    KPIEntry.year == entry.year,
+                    KPIEntry.period_key == entry.period_key,
+                    KPIEntry.is_draft == False,
+                )
+            )
+            pub_entry = pub_res.scalar_one_or_none()
+            if pub_entry and pub_entry.id != entry.id:
+                from app.core.models import KpiFile
+                # Delete old published entry atomically to avoid conflicts
+                await db.execute(delete(KPIFieldValue).where(KPIFieldValue.entry_id == pub_entry.id))
+                await db.execute(delete(KpiMultiLineRowAccess).where(KpiMultiLineRowAccess.entry_id == pub_entry.id))
+                await db.execute(delete(KpiFile).where(KpiFile.entry_id == pub_entry.id))
+                await db.execute(delete(KpiMultiLineRow).where(KpiMultiLineRow.entry_id == pub_entry.id))
+                await db.execute(delete(KPIEntry).where(KPIEntry.id == pub_entry.id))
+                await db.flush()
+            
+            entry.is_draft = False
+            entry.submitted_at = datetime.utcnow()
+            entry.submitted_by_user_id = user_id
+            await db.flush()
+        elif entry.submitted_at is None:
+            entry.submitted_at = datetime.utcnow()
+            entry.submitted_by_user_id = user_id
+            await db.flush()
+    
     if entry.is_draft:
         entry.is_modified_after_submission = True
     else:
@@ -1172,7 +1212,7 @@ async def get_or_create_entry(
     # Check role
     user_res = await db.execute(select(User).where(User.id == user_id))
     user = user_res.scalar_one_or_none()
-    is_org_admin = (getattr(user.role, "value", user.role) == "ORG_ADMIN") if user else False
+    is_org_admin = (getattr(user.role, "value", user.role) in ("ORG_ADMIN", "SUPER_ADMIN")) if user else False
     
     # Check edit access
     can_edit = await user_can_edit_kpi(db, user_id, kpi_id, org_id)
@@ -1206,6 +1246,8 @@ async def get_or_create_entry(
             period_key=pk,
             is_draft=False,
             is_modified_after_submission=False,
+            submitted_at=datetime.utcnow(),
+            submitted_by_user_id=user_id,
         )
         db.add(entry)
         await db.flush()

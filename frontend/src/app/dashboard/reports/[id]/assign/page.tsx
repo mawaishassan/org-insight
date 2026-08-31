@@ -27,6 +27,7 @@ interface AssignmentRow {
   can_view: boolean;
   can_print: boolean;
   can_export: boolean;
+  can_change_period: boolean;
 }
 
 interface UserRow {
@@ -37,7 +38,7 @@ interface UserRow {
   role: string;
 }
 
-type Rights = { can_view: boolean; can_print: boolean; can_export: boolean };
+type Rights = { can_view: boolean; can_print: boolean; can_export: boolean; can_change_period: boolean };
 
 export default function ReportAssignPage() {
   const params = useParams();
@@ -72,8 +73,8 @@ export default function ReportAssignPage() {
           users.forEach((u) => {
             const existing = a.find((x) => x.user_id === u.id);
             initial[u.id] = existing
-              ? { can_view: existing.can_view, can_print: existing.can_print, can_export: existing.can_export }
-              : { can_view: false, can_print: false, can_export: false };
+              ? { can_view: existing.can_view, can_print: existing.can_print, can_export: existing.can_export, can_change_period: existing.can_change_period }
+              : { can_view: false, can_print: false, can_export: false, can_change_period: true };
           });
           setRightsByUserId(initial);
         });
@@ -96,7 +97,7 @@ export default function ReportAssignPage() {
   const setRights = (userId: number, patch: Partial<Rights>) => {
     setRightsByUserId((prev) => ({
       ...prev,
-      [userId]: { ...(prev[userId] ?? { can_view: false, can_print: false, can_export: false }), ...patch },
+      [userId]: { ...(prev[userId] ?? { can_view: false, can_print: false, can_export: false, can_change_period: true }), ...patch },
     }));
   };
 
@@ -108,7 +109,7 @@ export default function ReportAssignPage() {
       const orgId = template.organization_id;
       const base = `?${qs({ organization_id: orgId })}`;
       for (const u of orgUsers) {
-        const r = rightsByUserId[u.id] ?? { can_view: false, can_print: false, can_export: false };
+        const r = rightsByUserId[u.id] ?? { can_view: false, can_print: false, can_export: false, can_change_period: true };
         const hadAssignment = assignments.some((a) => a.user_id === u.id);
         if (r.can_view || r.can_print || r.can_export) {
           await api(`/reports/templates/${id}/assign${base}`, {
@@ -119,6 +120,7 @@ export default function ReportAssignPage() {
               can_view: r.can_view,
               can_print: r.can_print,
               can_export: r.can_export,
+              can_change_period: r.can_change_period,
             }),
           });
         } else if (hadAssignment) {
@@ -131,8 +133,8 @@ export default function ReportAssignPage() {
       orgUsers.forEach((u) => {
         const a = next.find((x) => x.user_id === u.id);
         updated[u.id] = a
-          ? { can_view: a.can_view, can_print: a.can_print, can_export: a.can_export }
-          : { can_view: false, can_print: false, can_export: false };
+          ? { can_view: a.can_view, can_print: a.can_print, can_export: a.can_export, can_change_period: a.can_change_period }
+          : { can_view: false, can_print: false, can_export: false, can_change_period: true };
       });
       setRightsByUserId(updated);
     } catch (e) {
@@ -150,7 +152,7 @@ export default function ReportAssignPage() {
     <div style={{ padding: "0 1rem 1rem" }}>
       <h1 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>Assign users: {template.name}</h1>
       <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
-        Set view, print, and export rights per user. Only users in this organization are listed. Save to apply changes.
+        Set view, print, export, and period shifting rights per user. Only users in this organization are listed. Save to apply changes.
       </p>
 
       <div className="card">
@@ -176,11 +178,12 @@ export default function ReportAssignPage() {
                 <th style={{ padding: "0.5rem 0.75rem" }}>View</th>
                 <th style={{ padding: "0.5rem 0.75rem" }}>Print</th>
                 <th style={{ padding: "0.5rem 0.75rem" }}>Export</th>
+                <th style={{ padding: "0.5rem 0.75rem" }}>Allow Period Shifting</th>
               </tr>
             </thead>
             <tbody>
               {filteredUsers.map((u) => {
-                const r = rightsByUserId[u.id] ?? { can_view: false, can_print: false, can_export: false };
+                const r = rightsByUserId[u.id] ?? { can_view: false, can_print: false, can_export: false, can_change_period: true };
                 const display = u.full_name || u.email || u.username || `User #${u.id}`;
                 return (
                   <tr key={u.id} style={{ borderBottom: "1px solid var(--border)" }}>
@@ -207,6 +210,14 @@ export default function ReportAssignPage() {
                         checked={r.can_export}
                         onChange={(e) => setRights(u.id, { can_export: e.target.checked })}
                         aria-label={`Export for ${display}`}
+                      />
+                    </td>
+                    <td style={{ padding: "0.5rem 0.75rem" }}>
+                      <input
+                        type="checkbox"
+                        checked={r.can_change_period}
+                        onChange={(e) => setRights(u.id, { can_change_period: e.target.checked })}
+                        aria-label={`Allow Period Shifting for ${display}`}
                       />
                     </td>
                   </tr>
