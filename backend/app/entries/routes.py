@@ -3854,6 +3854,9 @@ async def sync_multi_items_from_linked(
                     else:
                         cell.value_text = str(val)
 
+    # Flush all newly added rows and cells so they are available in DB for formula queries
+    await db.flush()
+
     # Recompute all formula fields since the linked data has updated
     await recompute_mli_formula_subfields(db, entry_id=entry_id, org_id=org_id, field_id=field_id)
     await propagate_formula_recalculations(db, entry_id=entry_id, org_id=org_id)
