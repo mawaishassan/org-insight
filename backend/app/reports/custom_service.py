@@ -1163,7 +1163,14 @@ async def generate_custom_report_data(
                 evaluated_fields[f.key] = field_payload
         else:
             entry = entries_sorted[0]
-            fv_by_field = {fv.field_id: fv for fv in entry.field_values}
+            if kpi and getattr(kpi, "is_joined", False):
+                from app.entries.load_joined import load_joined_scalar_values
+                entry_fvs = await load_joined_scalar_values(
+                    db, joined_kpi=kpi, entry_id=entry.id, current_user_id=current_user.id if current_user else None
+                )
+                fv_by_field = {fv.field_id: fv for fv in entry_fvs}
+            else:
+                fv_by_field = {fv.field_id: fv for fv in (entry.field_values or [])}
             value_by_key = {}
             multi_line_items_data = {}
 

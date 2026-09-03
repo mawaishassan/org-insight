@@ -375,30 +375,38 @@ export default function DashboardViewPage() {
         }}
       >
         <div
-          className="effective-spinner"
           style={{
-            width: 52,
-            height: 52,
-            borderWidth: 4,
-          }}
-        />
-        <span
-          className="effective-spinner-text"
-          style={{
-            marginTop: "1rem",
-            fontSize: "0.9rem",
-            fontWeight: 600,
-            color: "#1e293b",
+            width: "320px",
+            height: "155px",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
             background: "var(--surface, #ffffff)",
-            padding: "0.4rem 1rem",
-            borderRadius: 999,
-            boxShadow: "0 4px 14px rgba(0,0,0,0.08)",
+            borderRadius: "1rem",
+            boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
             border: "1px solid var(--border, #e2e8f0)",
-            whiteSpace: "nowrap",
+            pointerEvents: "none",
           }}
         >
-          Loading dashboard data...
-        </span>
+          <div
+            className="effective-spinner"
+            style={{ width: 50, height: 50, borderWidth: 4 }}
+          />
+          <span
+            className="effective-spinner-text"
+            style={{
+              marginTop: "0.85rem",
+              fontSize: "1.15rem",
+              fontWeight: 700,
+              color: "#0f172a",
+              letterSpacing: "0.01em",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Loading dashboard data...
+          </span>
+        </div>
       </div>
     );
   }
@@ -481,6 +489,7 @@ function DashboardViewContent({
     isOrgAdmin,
     openGlobalModal,
     isAnyWidgetLoading,
+    isGlobalFilterLoading,
     isInitialLoad,
     hasNeverLoaded,
     selectedColumnValue,
@@ -562,20 +571,25 @@ function DashboardViewContent({
 
           {/* Date-based reporting period selectors */}
           {dashboard.fetch_data_with_date && (
-            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>Period Type:</span>
+            <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                <span style={{ fontSize: "1.05rem", color: "var(--text, #0f172a)", fontWeight: 700, letterSpacing: "-0.01em" }}>
+                  Period Type:
+                </span>
                 <select
                   value={selectedPeriodType}
                   disabled={!userPermissions.can_change_period}
                   onChange={(e) => setSelectedPeriodType(e.target.value)}
                   style={{
-                    padding: "0.4rem 0.75rem",
-                    borderRadius: "6px",
-                    border: "1px solid var(--border)",
-                    fontSize: "0.875rem",
-                    background: "var(--surface)",
+                    padding: "0.45rem 0.85rem",
+                    borderRadius: "8px",
+                    border: "1.5px solid var(--border, #cbd5e1)",
+                    fontSize: "0.95rem",
+                    fontWeight: 600,
+                    color: "var(--text, #0f172a)",
+                    background: "var(--surface, #ffffff)",
                     outline: "none",
+                    boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
                     opacity: !userPermissions.can_change_period ? 0.65 : 1,
                     cursor: !userPermissions.can_change_period ? "not-allowed" : "pointer",
                   }}
@@ -600,19 +614,24 @@ function DashboardViewContent({
                   })()}
                 </select>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>Reporting Period:</span>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                <span style={{ fontSize: "1.05rem", color: "var(--text, #0f172a)", fontWeight: 700, letterSpacing: "-0.01em" }}>
+                  Reporting Period:
+                </span>
                 <select
                   value={selectedPeriod}
                   disabled={!userPermissions.can_change_period}
                   onChange={(e) => setSelectedPeriod(e.target.value)}
                   style={{
-                    padding: "0.4rem 0.75rem",
-                    borderRadius: "6px",
-                    border: "1px solid var(--border)",
-                    fontSize: "0.875rem",
-                    background: "var(--surface)",
+                    padding: "0.45rem 0.85rem",
+                    borderRadius: "8px",
+                    border: "1.5px solid var(--border, #cbd5e1)",
+                    fontSize: "0.95rem",
+                    fontWeight: 600,
+                    color: "var(--text, #0f172a)",
+                    background: "var(--surface, #ffffff)",
                     outline: "none",
+                    boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
                     opacity: !userPermissions.can_change_period ? 0.65 : 1,
                     cursor: !userPermissions.can_change_period ? "not-allowed" : "pointer",
                   }}
@@ -720,33 +739,45 @@ function DashboardViewContent({
           }}
         >
           <div
-            className="effective-spinner"
-            style={{ width: 52, height: 52, borderWidth: 4 }}
-          />
-          <span
-            className="effective-spinner-text"
             style={{
-              marginTop: "1rem",
-              fontSize: "0.9rem",
-              fontWeight: 600,
-              color: "#1e293b",
+              width: "320px",
+              height: "155px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
               background: "var(--surface, #ffffff)",
-              padding: "0.4rem 1rem",
-              borderRadius: 999,
-              boxShadow: "0 4px 14px rgba(0,0,0,0.08)",
+              borderRadius: "1rem",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
               border: "1px solid var(--border, #e2e8f0)",
-              whiteSpace: "nowrap",
+              pointerEvents: "none",
             }}
           >
-            Loading dashboard data...
-          </span>
+            <div
+              className="effective-spinner"
+              style={{ width: 50, height: 50, borderWidth: 4 }}
+            />
+            <span
+              className="effective-spinner-text"
+              style={{
+                marginTop: "0.85rem",
+                fontSize: "1.15rem",
+                fontWeight: 700,
+                color: "#0f172a",
+                letterSpacing: "0.01em",
+                whiteSpace: "nowrap",
+              }}
+            >
+              Loading dashboard data...
+            </span>
+          </div>
         </div>
       )}
 
       {/* Main dashboard page section with relative positioning for local backdrop blur */}
       <div style={{ position: "relative", minHeight: "220px", width: "100%" }}>
-        {/* === REFRESH OVERLAY: shown during filter/period re-fetches over widgets only (header remains clear and sharp) === */}
-        {isAnyWidgetLoading && !isInitialLoad && !hasNeverLoaded && (
+        {/* === REFRESH OVERLAY: shown only during GLOBAL filter/period re-fetches over widgets only (header remains clear; local widget filters do not blur the page) === */}
+        {isGlobalFilterLoading && !isInitialLoad && !hasNeverLoaded && (
           <>
             {/* Backdrop blur covering widgets area */}
             <div
@@ -761,7 +792,7 @@ function DashboardViewContent({
                 pointerEvents: "auto",
               }}
             />
-            {/* Centered spinner badge pinned to the viewport center */}
+            {/* Centered spinner badge pinned to the viewport center — exact same 320x155px size */}
             <div
               style={{
                 position: "fixed",
@@ -769,12 +800,13 @@ function DashboardViewContent({
                 left: "50%",
                 transform: "translate(-50%, -50%)",
                 zIndex: 100,
+                width: "320px",
+                height: "155px",
                 display: "flex",
                 flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
                 background: "var(--surface, #ffffff)",
-                padding: "1.25rem 2rem",
                 borderRadius: "1rem",
                 boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
                 border: "1px solid var(--border, #e2e8f0)",

@@ -343,8 +343,104 @@ async def load_joined_scalar_values(
                 value_boolean=src_fv.value_boolean,
                 value_date=src_fv.value_date
             )
-            mock_fv.field = j_field
-            mock_fv.entry = entry
             virtual_values.append(mock_fv)
-            
+
+    # Resolve and evaluate formula fields defined on the Joined KPI itself
+    all_kpi_fields = list(joined_kpi.fields or [])
+    if not all_kpi_fields:
+        f_res = await db.execute(
+            select(KPIField)
+            .where(KPIField.kpi_id == joined_kpi.id)
+            .options(selectinload(KPIField.sub_fields))
+        )
+        all_kpi_fields = list(f_res.scalars().all())
+
+    from app.core.models import FieldType
+    formula_fields = [
+        f for f in all_kpi_fields
+        if (
+            f.field_type == FieldType.formula
+            or (isinstance(f.config, dict) and (f.config.get("is_formula") or f.config.get("formula_expression")))
+        )
+        and (f.formula_expression or (f.config.get("formula_expression") if isinstance(f.config, dict) else ""))
+    ]
+
+    if formula_fields:
+        from app.entries.service import (
+            _load_other_kpi_values,
+            _load_other_kpi_multi_line_data,
+            extract_cross_kpi_mli_references,
+        )
+        from app.formula_engine.evaluator import evaluate_formula
+
+        value_by_key: dict[str, Any] = {}
+        for vf in virtual_values:
+            f_key = joined_fields_by_key.get(vf.field_id).key if vf.field_id in joined_fields_by_key else None
+            if f_key and vf.value_number is not None:
+                value_by_key[f_key] = vf.value_number
+
+        multi_line_items_data: dict[str, list[dict]] = {}
+        for fld in all_kpi_fields:
+            if fld.field_type == FieldType.multi_line_items:
+                fld.kpi = joined_kpi
+                rows = await load_joined_multi_line_rows(
+                    db,
+                    joined_field=fld,
+                    organization_id=entry.organization_id,
+                    year=entry.year,
+                    period_key=entry.period_key or "",
+                    current_user_id=current_user_id,
+                )
+                multi_line_items_data[fld.key] = rows
+
+        other_kpi_values = await _load_other_kpi_values(
+            db, entry.year, entry.organization_id, joined_kpi.id, period_key=entry.period_key or "", is_draft=entry.is_draft
+        )
+
+        refs = set()
+        for ff in formula_fields:
+            expr = ff.formula_expression or (ff.config.get("formula_expression") if isinstance(ff.config, dict) else "")
+            if expr:
+                refs.update(extract_cross_kpi_mli_references(expr))
+
+        other_kpi_mli_data = {}
+        if refs:
+            other_kpi_mli_data = await _load_other_kpi_multi_line_data(
+                db, entry.year, entry.organization_id, refs, period_key=entry.period_key or "", is_draft=entry.is_draft
+            )
+
+        # Sort formula fields by sort_order
+        ordered_formula_fields = sorted(formula_fields, key=lambda f: (getattr(f, "sort_order", 0), getattr(f, "id", 0)))
+        for ff in ordered_formula_fields:
+            expr = ff.formula_expression or (ff.config.get("formula_expression") if isinstance(ff.config, dict) else "")
+            if not expr:
+                continue
+            computed = evaluate_formula(
+                expr,
+                value_by_key,
+                multi_line_items_data,
+                other_kpi_values,
+                other_kpi_multi_line_data=other_kpi_mli_data,
+            )
+            n_val = None
+            if computed is not None:
+                try:
+                    n_val = float(computed)
+                    if n_val.is_integer():
+                        n_val = int(n_val)
+                except (ValueError, TypeError):
+                    pass
+
+            mock_fv = KPIFieldValue(
+                id=ff.id + 60000000,
+                entry_id=entry_id,
+                field_id=ff.id,
+                value_number=n_val,
+                value_text=str(computed) if computed is not None and n_val is None else None,
+            )
+            virtual_values.append(mock_fv)
+            if n_val is not None:
+                value_by_key[ff.key] = n_val
+
     return virtual_values
+

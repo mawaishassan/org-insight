@@ -56,6 +56,8 @@ interface DashboardCustomizationContextProps {
   requestGeneration: number;
   setWidgetLoading: (widgetId: string | number, isLoading: boolean) => void;
   isAnyWidgetLoading: boolean;
+  /** True when a global dashboard-wide filter (period, column, or dashboard filter) is actively re-fetching. */
+  isGlobalFilterLoading: boolean;
   /** True until every registered widget has completed its very first data fetch.
    *  Stays false on subsequent filter/period refreshes, allowing the UI to show
    *  a slim progress bar instead of a full-page overlay on re-fetches. */
@@ -99,6 +101,7 @@ export function useDashboardCustomization() {
       requestGeneration: 0,
       setWidgetLoading: () => {},
       isAnyWidgetLoading: false,
+      isGlobalFilterLoading: false,
       isInitialLoad: true,
       hasNeverLoaded: true,
     };
@@ -145,12 +148,18 @@ export function DashboardCustomizationProvider({
   // Monotonically increasing counter — increments on period, column, or filter changes
   const [requestGeneration, setRequestGeneration] = useState(0);
   const prevConfigRef = useRef("");
+  const isFirstMountRef = useRef(true);
+  const [isGlobalFilterLoading, setIsGlobalFilterLoading] = useState(false);
 
   useEffect(() => {
     const filterKey = JSON.stringify(selectedDashboardFilterValues);
     const key = `${selectedPeriodType}::${selectedPeriod}::${selectedColumnValue}::${filterKey}`;
     if (prevConfigRef.current !== key) {
       prevConfigRef.current = key;
+      if (!isFirstMountRef.current) {
+        setIsGlobalFilterLoading(true);
+      }
+      isFirstMountRef.current = false;
       setRequestGeneration((g) => g + 1);
     }
   }, [selectedPeriodType, selectedPeriod, selectedColumnValue, selectedDashboardFilterValues]);
@@ -398,12 +407,43 @@ export function DashboardCustomizationProvider({
   const isInitialLoad = isAnyWidgetLoading &&
     Array.from(loadingWidgets).some((id) => !everLoadedRef.current.has(id));
 
-  // Flip hasNeverLoaded → false once initial load is complete
+  // Flip hasNeverLoaded → false once initial cold load has actually finished (at least one widget loaded and none pending)
   useEffect(() => {
-    if (hasNeverLoaded && !isInitialLoad && !isAnyWidgetLoading) {
+    if (hasNeverLoaded && everLoadedRef.current.size > 0 && !isAnyWidgetLoading) {
       setHasNeverLoaded(false);
     }
-  }, [hasNeverLoaded, isInitialLoad, isAnyWidgetLoading]);
+  }, [hasNeverLoaded, isAnyWidgetLoading]);
+
+  const observedLoadingSinceFilterRef = useRef(false);
+
+  // Clear isGlobalFilterLoading only after widgets have started AND finished loading,
+  // or after a fallback grace delay if resolved synchronously from memory cache.
+  useEffect(() => {
+    if (!isGlobalFilterLoading) {
+      observedLoadingSinceFilterRef.current = false;
+      return;
+    }
+
+    if (isAnyWidgetLoading) {
+      observedLoadingSinceFilterRef.current = true;
+      return;
+    }
+
+    if (observedLoadingSinceFilterRef.current && !isAnyWidgetLoading) {
+      setIsGlobalFilterLoading(false);
+      observedLoadingSinceFilterRef.current = false;
+      return;
+    }
+
+    const fallbackTimer = setTimeout(() => {
+      if (!isAnyWidgetLoading) {
+        setIsGlobalFilterLoading(false);
+        observedLoadingSinceFilterRef.current = false;
+      }
+    }, 300);
+
+    return () => clearTimeout(fallbackTimer);
+  }, [isGlobalFilterLoading, isAnyWidgetLoading]);
 
   const openEditModal = (originalLabel: string, widgetId?: string) => {
     setActiveLabelToEdit({ originalLabel, widgetId });
@@ -445,6 +485,7 @@ export function DashboardCustomizationProvider({
         requestGeneration,
         setWidgetLoading,
         isAnyWidgetLoading,
+        isGlobalFilterLoading,
         isInitialLoad,
         hasNeverLoaded,
       }}

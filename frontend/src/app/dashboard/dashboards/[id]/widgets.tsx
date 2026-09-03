@@ -29,15 +29,31 @@ import {
   postWidgetData,
 } from "@/lib/widgetData";
 
-function WidgetBlurPlaceholder({ minHeight = 120 }: { minHeight?: number | string }) {
+function WidgetBlurPlaceholder({ minHeight = 120, showSpinner = true }: { minHeight?: number | string; showSpinner?: boolean }) {
+  const { isGlobalFilterLoading, hasNeverLoaded, isInitialLoad } = useDashboardCustomization();
+  // Never show individual widget spinners during global period shifting or initial load (the centered badge handles it)
+  const shouldSpin = showSpinner && !isGlobalFilterLoading && !hasNeverLoaded && !isInitialLoad;
   return (
     <div
       style={{
         width: "100%",
         minHeight,
         borderRadius: 12,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(248, 250, 252, 0.4)",
+        position: "relative",
       }}
-    />
+    >
+      {shouldSpin && (
+        <div
+          className="effective-spinner"
+          style={{ width: 36, height: 36, borderWidth: 3.5 }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -664,10 +680,22 @@ const pendingUniversalBatches = new Map<
   UniversalBatchKey,
   { timer: any; items: PendingUniversal[] }
 >();
+const CLIENT_WIDGET_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const clientWidgetMemoryCache = new Map<string, { data: any; ts: number }>();
+
+export function clearClientWidgetCache(): void {
+  clientWidgetMemoryCache.clear();
+}
 
 export function enqueueDashboardUniversalBatch(
   req: Omit<PendingUniversal, "resolve" | "reject">
 ): Promise<any> {
+  const cacheKey = `${req.dashboardId}::${req.widgetId}::${JSON.stringify(req.overrides ?? {})}`;
+  const cached = clientWidgetMemoryCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < CLIENT_WIDGET_CACHE_TTL_MS) {
+    return Promise.resolve(cached.data);
+  }
+
   const key = `${req.token}::${req.organizationId}::${req.dashboardId}`;
   return new Promise((resolve, reject) => {
     const item: PendingUniversal = { ...req, resolve, reject };
@@ -693,8 +721,13 @@ export function enqueueDashboardUniversalBatch(
           items.forEach((x, idx) => {
             const k = x.widgetId || `idx:${idx}`;
             const r = res?.results?.[k] ?? res?.results?.[`idx:${idx}`];
-            if (r && r.ok) x.resolve(r);
-            else x.reject(new Error(r?.error || "Universal batch failed"));
+            if (r && r.ok) {
+              const itemCacheKey = `${x.dashboardId}::${x.widgetId}::${JSON.stringify(x.overrides ?? {})}`;
+              clientWidgetMemoryCache.set(itemCacheKey, { data: r, ts: Date.now() });
+              x.resolve(r);
+            } else {
+              x.reject(new Error(r?.error || "Universal batch failed"));
+            }
           });
         } catch (e) {
           items.forEach((x) => x.reject(e));
@@ -2003,12 +2036,11 @@ function KpiCardSingleValueWidget({
   const display = value ? `${prefix}${value}${suffix}` : "";
   const bgStyle = bg.startsWith("linear-gradient") ? ({ backgroundImage: bg } as const) : ({ background: bg } as const);
 
-  // Show skeleton only when genuinely no data yet; keep previous value dimmed while refreshing
-  const showSkeleton = loading && !previousValueRef.current;
+  const { isGlobalFilterLoading, setWidgetLoading } = useDashboardCustomization();
+  // During global period shifting, keep previous value rendered under the blur overlay instead of showing a placeholder
+  const showSkeleton = loading && (!previousValueRef.current || !isGlobalFilterLoading);
   const showRefreshing = refreshing || (loading && !!previousValueRef.current);
 
-
-  const { setWidgetLoading } = useDashboardCustomization();
   useEffect(() => {
     setWidgetLoading(widget.id, loading || refreshing);
     return () => setWidgetLoading(widget.id, false);
@@ -2157,15 +2189,18 @@ function KpiLineChartWidget({
   const minV = values.length ? Math.min(...values) : 0;
   const maxV = values.length ? Math.max(...values) : 1;
 
-  const { setWidgetLoading } = useDashboardCustomization();
+  const { isGlobalFilterLoading, setWidgetLoading } = useDashboardCustomization();
   useEffect(() => {
     setWidgetLoading(widget.id, loading);
     return () => setWidgetLoading(widget.id, false);
   }, [widget.id, loading, setWidgetLoading]);
 
+  const hasPoints = points.length > 0;
+  const showLinePlaceholder = loading && !hasPoints;
+
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
-      {loading ? (
+      {showLinePlaceholder ? (
         <WidgetBlurPlaceholder minHeight={150} />
       ) : error ? (
         <p className="form-error">{error}</p>
@@ -3121,15 +3156,19 @@ function KpiBarChartWidgetInner({
     }
   }, [mode, groups, bars, widget.id, registerWidgetLabels]);
 
-  const { setWidgetLoading } = useDashboardCustomization();
+  const { isGlobalFilterLoading, setWidgetLoading } = useDashboardCustomization();
   useEffect(() => {
     setWidgetLoading(widget.id, loading);
     return () => setWidgetLoading(widget.id, false);
   }, [widget.id, loading, setWidgetLoading]);
 
+  const hasChartData = groups.length > 0 || bars.length > 0 || (sqlAggBuckets != null && sqlAggBuckets.length > 0) || rawMultiLineItems.length > 0;
+  // Keep existing chart rendered in-place while refreshing so it blurs smoothly without collapsing
+  const showChartPlaceholder = loading && !hasChartData;
+
   return (
     <>
-      {loading ? (
+      {showChartPlaceholder ? (
         <WidgetBlurPlaceholder minHeight={200} />
       ) : error ? (
         <p className="form-error">{error}</p>
@@ -3939,15 +3978,18 @@ function KpiTrendWidgetInner({
     }
   }, [mode, categories, widget.field_keys, widget.id, registerWidgetLabels]);
 
-  const { setWidgetLoading } = useDashboardCustomization();
+  const { isGlobalFilterLoading, setWidgetLoading } = useDashboardCustomization();
   useEffect(() => {
     setWidgetLoading(widget.id, loading);
     return () => setWidgetLoading(widget.id, false);
   }, [widget.id, loading, setWidgetLoading]);
 
+  const hasTrendData = categories.length > 0 || Object.keys(seriesByYear).length > 0;
+  const showTrendPlaceholder = loading && !hasTrendData;
+
   return (
     <>
-      {loading ? (
+      {showTrendPlaceholder ? (
         <WidgetBlurPlaceholder minHeight={200} />
       ) : error ? (
         <p className="form-error">{error}</p>

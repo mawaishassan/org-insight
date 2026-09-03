@@ -1951,10 +1951,10 @@ async def sync_joined_kpi_fields(db: AsyncSession, kpi: KPI):
                 if sf_key not in active_sf_keys:
                     await db.delete(sf_obj)
                     
-    # Delete removed fields
+    # Delete removed mapped fields (preserve custom formula fields on the joined KPI)
     for f_key, field in existing_fields.items():
-        if f_key not in active_keys:
+        if f_key not in active_keys and field.field_type != FieldType.formula and not (isinstance(field.config, dict) and field.config.get("is_formula")):
             await db.delete(field)
-            
+
     await db.flush()
 

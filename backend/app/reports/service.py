@@ -2658,7 +2658,14 @@ async def generate_report_data(
             for entry in entries_sorted:
                 _pk = getattr(entry, "period_key", "") or ""
                 _pd = _report_period_display(yr, _pk, effective_td)
-                fv_by_field = {fv.field_id: fv for fv in entry.field_values}
+                if kpi and getattr(kpi, "is_joined", False):
+                    from app.entries.load_joined import load_joined_scalar_values
+                    entry_fvs = await load_joined_scalar_values(
+                        db, joined_kpi=kpi, entry_id=entry.id, current_user_id=current_user_id
+                    )
+                    fv_by_field = {fv.field_id: fv for fv in entry_fvs}
+                else:
+                    fv_by_field = {fv.field_id: fv for fv in (entry.field_values or [])}
                 value_by_key = {}
                 field_values_out = []
                 multi_line_items_data = {}
@@ -3322,9 +3329,15 @@ async def generate_kpi_pdf_report(
         raise ValueError(f"KPI Entry for year {year} and period '{period_key}' not found")
 
     # 3. Fetch Scalar Values
-    scalar_values_query = select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id)
-    scalar_values_res = await db.execute(scalar_values_query)
-    scalar_values = scalar_values_res.scalars().all()
+    if kpi and getattr(kpi, "is_joined", False):
+        from app.entries.load_joined import load_joined_scalar_values
+        scalar_values = await load_joined_scalar_values(
+            db, joined_kpi=kpi, entry_id=entry.id, current_user_id=requesting_user_id
+        )
+    else:
+        scalar_values_query = select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id)
+        scalar_values_res = await db.execute(scalar_values_query)
+        scalar_values = scalar_values_res.scalars().all()
     
     values_by_field_id = {}
     for val in scalar_values:
@@ -4268,9 +4281,15 @@ async def generate_kpi_docx_report(
         raise ValueError(f"KPI Entry for year {year} and period '{period_key}' not found")
 
     # 3. Fetch Scalar Values
-    scalar_values_query = select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id)
-    scalar_values_res = await db.execute(scalar_values_query)
-    scalar_values = scalar_values_res.scalars().all()
+    if kpi and getattr(kpi, "is_joined", False):
+        from app.entries.load_joined import load_joined_scalar_values
+        scalar_values = await load_joined_scalar_values(
+            db, joined_kpi=kpi, entry_id=entry.id, current_user_id=requesting_user_id
+        )
+    else:
+        scalar_values_query = select(KPIFieldValue).where(KPIFieldValue.entry_id == entry.id)
+        scalar_values_res = await db.execute(scalar_values_query)
+        scalar_values = scalar_values_res.scalars().all()
     
     values_by_field_id = {}
     for val in scalar_values:

@@ -486,16 +486,19 @@ async def fetch_multiline_bar_agg_buckets(
 async def fetch_multiline_single_value_agg(
     db: AsyncSession,
     *,
-    entry_id: int,
+    entry_id: int | list[int] | tuple[int, ...] | set[int],
     multiline_field_id: int,
     value_sub_field_id: int | None = None,
     agg: str = "count",
     filter_where_sql: str | None = None,
     filter_params: dict[str, Any] | None = None,
     filter_sid_params: list[str] | None = None,
+    date_sub_field_id: int | None = None,
+    date_range: tuple[date, date, str] | None = None,
 ) -> float | None:
     """
     Computes count, sum, or avg for a multi-line field in a single SQL query.
+    Supports date-range filtering and single or multiple entry_ids.
     """
     agg = (agg or "count").strip().lower()
     if agg in ("count_rows", "count"):
@@ -514,6 +517,23 @@ async def fetch_multiline_single_value_agg(
         for p in filter_sid_params:
             alias = _wf_alias(p)
             extra_joins += f" LEFT JOIN kpi_multi_line_cells {alias} ON {alias}.row_id = r.id AND {alias}.sub_field_id = :{p}\n"
+
+    # Date range filtering join & where clause
+    date_join = ""
+    date_where = ""
+    if date_sub_field_id and date_range:
+        date_join = "LEFT JOIN kpi_multi_line_cells c_dt ON c_dt.row_id = r.id AND c_dt.sub_field_id = :dt_sid\n"
+        date_where = """AND (
+            (c_dt.value_date IS NOT NULL AND c_dt.value_date >= :dt_start AND c_dt.value_date < :dt_end)
+            OR
+            (c_dt.value_text IS NOT NULL AND TRIM(c_dt.value_text) <> '' AND TRIM(c_dt.value_text) >= :dt_start_str AND TRIM(c_dt.value_text) < :dt_end_str)
+        )\n"""
+
+    is_multi_entry = isinstance(entry_id, (list, tuple, set))
+    if is_multi_entry:
+        entry_where = "r.entry_id = ANY(:eids)"
+    else:
+        entry_where = "r.entry_id = :eid"
 
     if agg == "count":
         agg_expr = "COUNT(*)::double precision"
@@ -534,18 +554,33 @@ async def fetch_multiline_single_value_agg(
           FROM kpi_multi_line_rows r
           {join_cv}
           {extra_joins}
-          WHERE r.entry_id = :eid AND r.field_id = :mfid
+          {date_join}
+          WHERE {entry_where} AND r.field_id = :mfid
+            {date_where}
             {("AND (" + filter_where_sql + ")") if (filter_where_sql and str(filter_where_sql).strip()) else ""}
         ) x
         """
     )
 
     params: dict[str, Any] = {
-        "eid": int(entry_id),
         "mfid": int(multiline_field_id),
     }
+    if is_multi_entry:
+        params["eids"] = list(entry_id)
+    else:
+        params["eid"] = int(entry_id)
+
     if value_sub_field_id and agg in ("sum", "avg"):
         params["vid"] = int(value_sub_field_id)
+
+    if date_sub_field_id and date_range:
+        dt_start, dt_end, _ = date_range
+        params["dt_sid"] = int(date_sub_field_id)
+        params["dt_start"] = dt_start
+        params["dt_end"] = dt_end
+        params["dt_start_str"] = str(dt_start)
+        params["dt_end_str"] = str(dt_end)
+
     if filter_params:
         params.update(filter_params)
 
