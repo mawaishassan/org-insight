@@ -93,6 +93,7 @@ from app.fields.service import list_fields as list_kpi_fields_service
 from app.kpis.service import sync_kpi_entry_from_api
 from app.entries.multi_item_filters import row_passes_filters
 from app.entries.multi_line_load import load_multi_line_row_dicts as _load_multi_line_row_dicts
+from app.widget_data.service import invalidate_all_widget_caches
 from app.entries.reference_filter_resolve import build_reference_resolution_map
 
 router = APIRouter(prefix="/entries", tags=["entries"])
@@ -2206,10 +2207,25 @@ async def list_multi_items_rows(
             )
         )
         db_rows_exist = (db_rows_exist_res.scalar() or 0) > 0
+    if kpi and getattr(kpi, "is_joined", False):
+        db_rows_exist_res = await db.execute(
+            select(func.count(KpiMultiLineRow.id)).where(
+                KpiMultiLineRow.entry_id == entry.id,
+                KpiMultiLineRow.field_id == field.id,
+            )
+        )
+        db_rows_exist = (db_rows_exist_res.scalar() or 0) > 0
+        if not db_rows_exist:
+            try:
+                from app.entries.joined_sync import sync_joined_kpi_physical_data
+                synced = await sync_joined_kpi_physical_data(db, kpi, year=entry.year, period_key=entry.period_key, current_user_id=current_user.id)
+                if synced > 0:
+                    await db.commit()
+                    db_rows_exist = True
+            except Exception as ex:
+                logger.error("Failed to sync joined KPI on-demand: %s", ex)
         if not db_rows_exist:
             use_fast_sql_paging = False
-    if kpi and getattr(kpi, "is_joined", False):
-        use_fast_sql_paging = False
     rows: list[tuple[int, dict]] = []
 
     # Restrict to sub_fields (columns) the user can view.
@@ -2882,6 +2898,7 @@ async def add_multi_items_row(
     await mark_entry_modified(db, entry, current_user.id)
     await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
+    invalidate_all_widget_caches()
     return MultiItemsRow(index=new_index, data=normalized_row)
 
 
@@ -3038,6 +3055,7 @@ async def update_multi_items_row(
     await mark_entry_modified(db, entry, current_user.id)
     await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
+    invalidate_all_widget_caches()
     # Return row in legacy dict shape
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
     data = rows[0][1] if rows else {}
@@ -3625,6 +3643,11 @@ async def sync_multi_items_from_api(
     await _replace_multi_line_rows_from_dicts(db, entry_id=entry.id, field=field, rows=new_rows)
     await mark_entry_modified(db, entry, current_user.id)
     await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
+    try:
+        from app.entries.joined_sync import trigger_dependent_joined_kpi_sync
+        await trigger_dependent_joined_kpi_sync(db, source_kpi_id=entry.kpi_id, year=entry.year, period_key=entry.period_key)
+    except Exception as ex:
+        logger.error("Failed to sync dependent joined KPIs: %s", ex)
     await db.commit()
     out: dict = {
         "entry_id": entry.id,
@@ -6016,6 +6039,7 @@ async def create_or_update_entry(
     except EntryValidationError:
         raise  # Handled by app exception_handler; returns 400 with errors list
     await db.commit()
+    invalidate_all_widget_caches()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
     return await _entry_to_response(db, entry, current_user.id)
 

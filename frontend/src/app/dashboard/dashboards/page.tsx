@@ -217,11 +217,18 @@ export default function DashboardsPage() {
               ? "Create dashboards (Super Admin) and share view/edit access with users in an organization."
               : "Dashboards shared with you. Open a dashboard to view its widgets."}
           </p>
-          {canAddDashboard && (
-            <button type="button" className="btn btn-primary" onClick={openAddModal}>
-              + Add dashboard
-            </button>
-          )}
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            {canManageAssignments && (
+              <Link className="btn btn-secondary" href="/dashboard/dashboards/assign" style={{ fontSize: "0.875rem" }}>
+                👥 Bulk Assign Dashboards
+              </Link>
+            )}
+            {canAddDashboard && (
+              <button type="button" className="btn btn-primary" onClick={openAddModal}>
+                + Add dashboard
+              </button>
+            )}
+          </div>
         </div>
 
         {list.length === 0 ? (
@@ -239,7 +246,7 @@ export default function DashboardsPage() {
                   Open
                 </Link>
                 {canManageAssignments && (
-                  <Link className="btn" href={`/dashboard/dashboards/${d.id}/assign?organization_id=${d.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                  <Link className="btn" href={`/dashboard/dashboards/assign?dashboard_id=${d.id}&organization_id=${d.organization_id}`} style={{ fontSize: "0.85rem" }}>
                     Assign users
                   </Link>
                 )}

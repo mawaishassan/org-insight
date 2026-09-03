@@ -120,7 +120,7 @@ async def load_joined_multi_line_rows(
     # Apply key-based joins (if defined on the mapping/config)
     joins = mapping.get("joins") or config.get("joins") or []
     if joins and combined_rows:
-        from sqlalchemy import and_, cast, String, func
+        from sqlalchemy import and_, cast, String, func, or_
         from app.core.models import KPIFieldSubField, KpiMultiLineRow, KpiMultiLineCell
         from app.widget_data.service import get_entry_id_updated, get_field_with_subfields_only
         
@@ -168,13 +168,36 @@ async def load_joined_multi_line_rows(
             jr = KpiMultiLineRow.__table__.alias("jr")
             jc = KpiMultiLineCell.__table__.alias("jc")
             
+            needed_strs = set(needed)
+            needed_nums = set()
+            for x in needed:
+                try:
+                    fval = float(x)
+                    needed_nums.add(fval)
+                    if fval.is_integer():
+                        needed_strs.add(str(int(fval)))
+                        needed_strs.add(f"{int(fval)}.0")
+                except (ValueError, TypeError):
+                    pass
+
+            key_expr = func.coalesce(
+                func.nullif(func.trim(jc.c.value_text), ''),
+                func.trim(func.to_char(jc.c.value_number, 'FM9999999999990'))
+            )
+
+            conds = [key_expr.in_(list(needed_strs))]
+            if needed_nums:
+                conds.append(jc.c.value_number.in_(list(needed_nums)))
+            if needed_strs:
+                conds.append(jc.c.value_text.in_(list(needed_strs)))
+
             # Grouped query to match unique keys
             jbase = (
                 select(func.min(jr.c.id).label("id"), func.min(jr.c.row_index).label("row_index"))
                 .select_from(jr)
                 .join(jc, and_(jc.c.row_id == jr.c.id, jc.c.sub_field_id == right_sf.id))
-                .where(jr.c.entry_id == int(jeid), jr.c.field_id == int(jf_obj.id), cast(jc.c.value_text, String()).in_(needed))
-                .group_by(jc.c.value_text)
+                .where(jr.c.entry_id == int(jeid), jr.c.field_id == int(jf_obj.id), or_(*conds))
+                .group_by(key_expr)
             )
             jrows = list((await db.execute(jbase)).all())
             if not jrows:
@@ -220,19 +243,26 @@ async def load_joined_multi_line_rows(
                     raw = None
                 jrow_data[idx][str(key2)] = raw
                 
+            def _clean_key(v: Any) -> str:
+                s = str(v or "").strip()
+                if s.endswith(".0"):
+                    return s[:-2]
+                return s
+
             right_index = {}
             for idx, r_dict in jrow_data.items():
-                k_val = str(r_dict.get(right_key) or "").strip()
-                if k_val:
-                    right_index[k_val] = r_dict
-                    
+                raw_k = r_dict.get(right_key)
+                if raw_k is not None:
+                    k_val = _clean_key(raw_k)
+                    if k_val and k_val.lower() not in ("none", "false"):
+                        right_index[k_val] = r_dict
+                        
             for row in combined_rows:
-                k_val = str(row.get(left_key) or "").strip()
-                if k_val and k_val in right_index:
-                    matched = right_index[k_val]
-                    for wk in want_keys:
-                        if wk != right_key:
-                            row[wk] = matched.get(wk)
+                raw_k = row.get(left_key)
+                matched = right_index.get(_clean_key(raw_k)) if raw_k is not None else None
+                for wk in want_keys:
+                    if wk != right_key:
+                        row[wk] = matched.get(wk) if matched else None
                             
     return combined_rows
 

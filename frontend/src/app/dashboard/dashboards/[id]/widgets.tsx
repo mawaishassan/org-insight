@@ -36,11 +36,504 @@ function WidgetBlurPlaceholder({ minHeight = 120 }: { minHeight?: number | strin
         width: "100%",
         minHeight,
         borderRadius: 12,
-        background: "rgba(248, 250, 252, 0.4)",
-        backdropFilter: "blur(6px)",
-        WebkitBackdropFilter: "blur(6px)",
       }}
     />
+  );
+}
+
+const openStateByWidgetKey: Record<string, boolean> = {};
+const activeTabByWidgetKey: Record<string, string> = {};
+
+export function WidgetFilterControl({
+  filterKeys,
+  filterLabels = {},
+  availableValuesByKey = {},
+  selectedValuesByKey = {},
+  onFilterChange,
+  kpiId,
+  sourceFieldKey,
+  dashboardId,
+  widgetId,
+  placement = "down",
+  align = "right",
+}: {
+  filterKeys: string[];
+  filterLabels?: Record<string, string>;
+  availableValuesByKey?: Record<string, string[]>;
+  selectedValuesByKey?: Record<string, string[]>;
+  onFilterChange: (next: Record<string, string[]>) => void;
+  kpiId?: number;
+  sourceFieldKey?: string;
+  dashboardId?: number;
+  widgetId?: number | string;
+  placement?: "up" | "down";
+  align?: "left" | "right";
+}) {
+  const widgetKey = `${dashboardId || 0}_${widgetId || kpiId || "default"}_${filterKeys.join("_")}`;
+
+  const [isOpen, setIsOpenState] = useState<boolean>(() => Boolean(openStateByWidgetKey[widgetKey]));
+  const [activeKey, setActiveKeyState] = useState<string>(
+    () => activeTabByWidgetKey[widgetKey] || filterKeys[0] || ""
+  );
+  const [searchQuery, setSearchQuery] = useState("");
+  const [fetchedOptionsByKey, setFetchedOptionsByKey] = useState<Record<string, string[]>>({});
+  const [fetchingKey, setFetchingKey] = useState<string | null>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const setIsOpen = (val: boolean | ((prev: boolean) => boolean)) => {
+    setIsOpenState((prev) => {
+      const next = typeof val === "function" ? val(prev) : val;
+      openStateByWidgetKey[widgetKey] = next;
+      return next;
+    });
+  };
+
+  const setActiveKey = (key: string) => {
+    activeTabByWidgetKey[widgetKey] = key;
+    setActiveKeyState(key);
+  };
+
+  // Sync activeKey when filterKeys change
+  useEffect(() => {
+    if (!activeKey || !filterKeys.includes(activeKey)) {
+      setActiveKey(filterKeys[0] || "");
+    }
+  }, [filterKeys, activeKey]);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    const timer = setTimeout(() => {
+      document.addEventListener("mousedown", handleClickOutside);
+    }, 50);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isOpen]);
+
+  // Auto-fetch full column values for active tab when popover opens
+  useEffect(() => {
+    const keyToFetch = filterKeys.length === 1 ? filterKeys[0] : activeKey;
+    if (!isOpen || !keyToFetch || !dashboardId || !kpiId || !sourceFieldKey) return;
+    if (!fetchedOptionsByKey[keyToFetch] && fetchingKey !== keyToFetch) {
+      setFetchingKey(keyToFetch);
+      const token = getAccessToken();
+      const q = `?kpi_id=${kpiId}&source_field_key=${encodeURIComponent(sourceFieldKey)}&column_key=${encodeURIComponent(keyToFetch)}`;
+      api<{ ok: boolean; column_key: string; values: string[] }>(`/dashboards/${dashboardId}/column-values${q}`, { token })
+        .then((res) => {
+          if (res?.values && Array.isArray(res.values)) {
+            setFetchedOptionsByKey((prev) => ({ ...prev, [keyToFetch]: res.values }));
+          }
+        })
+        .catch(() => {})
+        .finally(() => setFetchingKey(null));
+    }
+  }, [isOpen, activeKey, filterKeys, dashboardId, kpiId, sourceFieldKey, fetchedOptionsByKey, fetchingKey]);
+
+  const effectiveAvailableValuesByKey: Record<string, string[]> = {};
+  filterKeys.forEach((k) => {
+    const combinedSet = new Set([
+      ...(availableValuesByKey[k] || []),
+      ...(fetchedOptionsByKey[k] || []),
+    ]);
+    effectiveAvailableValuesByKey[k] = Array.from(combinedSet).sort((a, b) => a.localeCompare(b));
+  });
+
+  if (!filterKeys || filterKeys.length === 0) return null;
+
+  // Single filter mode (filterKeys.length === 1): Render inline pill dropdown without "Filter" button
+  if (filterKeys.length === 1) {
+    const k = filterKeys[0];
+    const label = filterLabels[k] || k;
+    const currentSelected = selectedValuesByKey[k] || [];
+    const available = effectiveAvailableValuesByKey[k] || [];
+    const pillLabel =
+      currentSelected.length === 0 ? `All ${label}` : `${label}: ${currentSelected.length} selected`;
+
+    const filteredOptions = available.filter(
+      (v) => !searchQuery || v.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+
+    return (
+      <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+        <button
+          type="button"
+          onClick={() => {
+            setIsOpen(!isOpen);
+            setSearchQuery("");
+          }}
+          style={{
+            height: 36,
+            maxWidth: 240,
+            padding: "0 0.65rem",
+            borderRadius: 999,
+            border: currentSelected.length > 0 ? "1.5px solid var(--accent, #3b82f6)" : "1px solid var(--border)",
+            background: currentSelected.length > 0 ? "rgba(59, 130, 246, 0.08)" : "var(--surface)",
+            color: currentSelected.length > 0 ? "var(--accent, #2563eb)" : "var(--muted)",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "0.35rem",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontWeight: currentSelected.length > 0 ? 600 : 400,
+          }}
+          title={pillLabel}
+        >
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pillLabel}</span>
+          <svg style={{ width: 12, height: 12, opacity: 0.7 }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+
+        {isOpen && (
+          <div
+            ref={popoverRef}
+            style={{
+              position: "absolute",
+              ...(align === "left" ? { left: 0 } : { right: 0 }),
+              ...(placement === "up" ? { bottom: "calc(100% + 6px)" } : { top: "calc(100% + 6px)" }),
+              zIndex: 1000,
+              minWidth: 260,
+              maxWidth: "min(90vw, 340px)",
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              borderRadius: 12,
+              boxShadow: "0 12px 32px rgba(0,0,0,0.18)",
+              overflow: "hidden",
+              padding: "0.5rem",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem", paddingBottom: "0.4rem", borderBottom: "1px solid var(--border)" }}>
+              <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>Filter by {label}</span>
+              {currentSelected.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = { ...selectedValuesByKey };
+                    delete next[k];
+                    onFilterChange(next);
+                  }}
+                  style={{ border: "none", background: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500 }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search values..."
+              style={{
+                width: "100%",
+                padding: "0.35rem 0.5rem",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "var(--bg)",
+                fontSize: "0.85rem",
+                marginBottom: "0.5rem",
+                boxSizing: "border-box",
+                outline: "none",
+              }}
+            />
+
+            <div style={{ maxHeight: 200, overflowY: "auto", display: "grid", gap: "0.25rem" }}>
+              {fetchingKey === k && filteredOptions.length === 0 ? (
+                <div style={{ padding: "0.5rem", fontSize: "0.8rem", color: "var(--muted)", textAlign: "center" }}>
+                  Loading options...
+                </div>
+              ) : filteredOptions.length === 0 ? (
+                <div style={{ padding: "0.5rem", fontSize: "0.8rem", color: "var(--muted)", textAlign: "center" }}>
+                  No options found
+                </div>
+              ) : (
+                filteredOptions.map((v) => {
+                  const isChecked = currentSelected.includes(v);
+                  return (
+                    <label
+                      key={v}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.3rem 0.4rem",
+                        borderRadius: 4,
+                        fontSize: "0.85rem",
+                        cursor: "pointer",
+                        background: isChecked ? "rgba(59, 130, 246, 0.08)" : "transparent",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => {
+                          const updated = isChecked
+                            ? currentSelected.filter((x) => x !== v)
+                            : [...currentSelected, v];
+                          const next = { ...selectedValuesByKey };
+                          if (updated.length > 0) {
+                            next[k] = updated;
+                          } else {
+                            delete next[k];
+                          }
+                          onFilterChange(next);
+                        }}
+                      />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", paddingTop: "0.4rem", marginTop: "0.4rem", borderTop: "1px solid var(--border)" }}>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                onClick={() => setIsOpen(false)}
+                style={{ fontSize: "0.82rem", padding: "0.3rem 0.85rem", background: "var(--accent, #2563eb)", color: "#fff", border: "none", borderRadius: 6, fontWeight: 600, cursor: "pointer" }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Multi-filter mode (filterKeys.length > 1): Render the "Filter" button with badge
+  let totalSelectedCount = 0;
+  filterKeys.forEach((k) => {
+    if (selectedValuesByKey[k]) {
+      totalSelectedCount += selectedValuesByKey[k].length;
+    }
+  });
+
+  const activeOptions = (effectiveAvailableValuesByKey[activeKey] || []).filter(
+    (v) => !searchQuery || v.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+  const currentSelectedForActive = selectedValuesByKey[activeKey] || [];
+
+  return (
+    <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+      <button
+        type="button"
+        onClick={() => {
+          setIsOpen(!isOpen);
+          setSearchQuery("");
+        }}
+        style={{
+          height: 36,
+          padding: "0 0.75rem",
+          borderRadius: 8,
+          border: totalSelectedCount > 0 ? "1.5px solid var(--accent, #3b82f6)" : "1px solid var(--border)",
+          background: totalSelectedCount > 0 ? "rgba(59, 130, 246, 0.08)" : "var(--surface)",
+          color: totalSelectedCount > 0 ? "var(--accent, #2563eb)" : "inherit",
+          cursor: "pointer",
+          fontSize: "0.85rem",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "0.4rem",
+          fontWeight: totalSelectedCount > 0 ? 600 : 500,
+        }}
+        title="Widget Filters"
+      >
+        <svg style={{ width: 15, height: 15 }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+        </svg>
+        Filter
+        {totalSelectedCount > 0 && (
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              minWidth: 18,
+              height: 18,
+              borderRadius: 999,
+              background: "var(--accent, #3b82f6)",
+              color: "#fff",
+              fontSize: "0.72rem",
+              padding: "0 4px",
+              fontWeight: 700,
+            }}
+          >
+            {totalSelectedCount}
+          </span>
+        )}
+      </button>
+
+      {isOpen && (
+        <div
+          ref={popoverRef}
+          style={{
+            position: "absolute",
+            ...(align === "left" ? { left: 0 } : { right: 0 }),
+            ...(placement === "up" ? { bottom: "calc(100% + 6px)" } : { top: "calc(100% + 6px)" }),
+            zIndex: 1000,
+            width: 300,
+            maxWidth: "min(90vw, 340px)",
+            maxHeight: 280,
+            border: "1px solid var(--border)",
+            background: "var(--surface)",
+            borderRadius: 12,
+            boxShadow: "0 12px 32px rgba(0,0,0,0.22)",
+            overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          {/* Header */}
+          <div style={{ flex: "0 0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)", background: "rgba(0,0,0,0.02)" }}>
+            <span style={{ fontSize: "0.85rem", fontWeight: 650 }}>Filters ({filterKeys.length})</span>
+            {totalSelectedCount > 0 && (
+              <button
+                type="button"
+                onClick={() => onFilterChange({})}
+                style={{ border: "none", background: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500 }}
+              >
+                Clear all
+              </button>
+            )}
+          </div>
+
+          {/* Filter Column Tabs */}
+          <div style={{ flex: "0 0 auto", display: "flex", borderBottom: "1px solid var(--border)", overflowX: "auto", padding: "0.3rem 0.5rem", gap: "0.3rem", background: "rgba(0,0,0,0.01)" }}>
+            {filterKeys.map((k) => {
+              const label = filterLabels[k] || k;
+              const count = (selectedValuesByKey[k] || []).length;
+              const isActive = activeKey === k;
+              return (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => {
+                    setActiveKey(k);
+                    setSearchQuery("");
+                  }}
+                  style={{
+                    padding: "0.25rem 0.55rem",
+                    borderRadius: 6,
+                    border: "none",
+                    background: isActive ? "var(--accent, #3b82f6)" : "transparent",
+                    color: isActive ? "#fff" : "var(--muted)",
+                    fontSize: "0.78rem",
+                    fontWeight: isActive ? 600 : 500,
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.3rem",
+                  }}
+                >
+                  {label}
+                  {count > 0 && (
+                    <span style={{
+                      background: isActive ? "rgba(255,255,255,0.3)" : "var(--accent, #3b82f6)",
+                      color: "#fff",
+                      fontSize: "0.65rem",
+                      padding: "0.05rem 0.35rem",
+                      borderRadius: 999,
+                      fontWeight: 700,
+                    }}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Values List for active filter column */}
+          <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", padding: "0.5rem 0.75rem", display: "flex", flexDirection: "column" }}>
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={`Search ${filterLabels[activeKey] || activeKey}...`}
+              style={{
+                width: "100%",
+                padding: "0.35rem 0.5rem",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "var(--bg)",
+                fontSize: "0.82rem",
+                marginBottom: "0.4rem",
+                boxSizing: "border-box",
+                outline: "none",
+                flex: "0 0 auto",
+              }}
+            />
+
+            <div style={{ flex: "1 1 auto", overflowY: "auto", display: "grid", gap: "0.2rem" }}>
+              {activeOptions.length === 0 ? (
+                <div style={{ padding: "0.5rem", fontSize: "0.78rem", color: "var(--muted)", textAlign: "center" }}>
+                  No options found
+                </div>
+              ) : (
+                activeOptions.map((v) => {
+                  const isChecked = currentSelectedForActive.includes(v);
+                  return (
+                    <label
+                      key={v}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.45rem",
+                        padding: "0.25rem 0.4rem",
+                        borderRadius: 4,
+                        fontSize: "0.82rem",
+                        cursor: "pointer",
+                        background: isChecked ? "rgba(59, 130, 246, 0.08)" : "transparent",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => {
+                          const updated = isChecked
+                            ? currentSelectedForActive.filter((x) => x !== v)
+                            : [...currentSelectedForActive, v];
+                          const next = { ...selectedValuesByKey };
+                          if (updated.length > 0) {
+                            next[activeKey] = updated;
+                          } else {
+                            delete next[activeKey];
+                          }
+                          onFilterChange(next);
+                        }}
+                      />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          {/* Footer (Pinned at bottom) */}
+          <div style={{ flex: "0 0 auto", display: "flex", justifyContent: "flex-end", padding: "0.40rem 0.75rem", borderTop: "1px solid var(--border)", background: "var(--bg-subtle, #f8fafc)" }}>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={() => setIsOpen(false)}
+              style={{ fontSize: "0.8rem", padding: "0.3rem 0.85rem", background: "var(--accent, #2563eb)", color: "#fff", border: "none", borderRadius: 6, fontWeight: 600, cursor: "pointer", boxShadow: "0 2px 4px rgba(37, 99, 235, 0.2)" }}
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -335,6 +828,8 @@ export type Widget =
       group_by_sub_field_key?: string;
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
+      filter_sub_field_keys?: string[];
+      filter_labels?: Record<string, string>;
       /** Optional viewer-facing label for filter button */
       filter_label?: string;
       /** Advanced multi-line row filters (SUPER_ADMIN) */
@@ -374,6 +869,8 @@ export type Widget =
       group_by_sub_field_key?: string;
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
+      filter_sub_field_keys?: string[];
+      filter_labels?: Record<string, string>;
       /** Optional viewer-facing label for filter button */
       filter_label?: string;
       /** Advanced multi-line row filters (SUPER_ADMIN) */
@@ -1301,7 +1798,7 @@ function KpiCardSingleValueWidget({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
-  const { selectedPeriod, selectedPeriodType, requestGeneration } = useDashboardCustomization();
+  const { selectedPeriod, selectedPeriodType, selectedColumnValue, selectedDashboardFilterValues, requestGeneration } = useDashboardCustomization();
   const isByDefault = selectedPeriodType === "by_default";
   // Sanitize year: in Default Mode only send plain 4-digit year to prevent stale
   // custom period strings (e.g. "2025/26") from reaching the backend during React's
@@ -1309,9 +1806,13 @@ function KpiCardSingleValueWidget({
   const sanitizedCardYear = isByDefault
     ? (selectedPeriod && /^\d{4}$/.test(String(selectedPeriod)) ? selectedPeriod : undefined)
     : selectedPeriod;
-  const overrides = sanitizedCardYear
-    ? { year: sanitizedCardYear, by_default: isByDefault }
-    : isByDefault ? { by_default: true } : undefined;
+  const overrides = {
+    ...(sanitizedCardYear ? { year: sanitizedCardYear } : {}),
+    by_default: isByDefault,
+    period_type: selectedPeriodType || undefined,
+    selected_column_value: selectedColumnValue || undefined,
+    normal_filters: Object.keys(selectedDashboardFilterValues).length ? selectedDashboardFilterValues : undefined,
+  };
   const [value, setValue] = useState<string>("");
   // Keep previous value to show while refreshing (avoids blank flash)
   const previousValueRef = useRef<string>("");
@@ -1509,9 +2010,9 @@ function KpiCardSingleValueWidget({
 
   const { setWidgetLoading } = useDashboardCustomization();
   useEffect(() => {
-    setWidgetLoading(widget.id, showSkeleton);
+    setWidgetLoading(widget.id, loading || refreshing);
     return () => setWidgetLoading(widget.id, false);
-  }, [widget.id, showSkeleton, setWidgetLoading]);
+  }, [widget.id, loading, refreshing, setWidgetLoading]);
 
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id} allowFullScreen={false}>
@@ -1961,7 +2462,7 @@ function KpiBarChartWidgetInner({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
-  const { getDisplayLabel, registerWidgetLabels, fetchDataWithDate, periodOptions, selectedPeriod, selectedPeriodType, requestGeneration } = useDashboardCustomization();
+  const { getDisplayLabel, registerWidgetLabels, fetchDataWithDate, periodOptions, selectedPeriod, selectedPeriodType, selectedColumnValue, selectedDashboardFilterValues, requestGeneration } = useDashboardCustomization();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const [viewerYear, setViewerYear] = useState<any>(() => {
@@ -2010,13 +2511,28 @@ function KpiBarChartWidgetInner({
       }
     }
   }, [periodOptions, fetchDataWithDate, selectedPeriod]);
+  const configuredFilterKeys = useMemo(() => {
+    if (Array.isArray((widget as any).filter_sub_field_keys) && (widget as any).filter_sub_field_keys.length > 0) {
+      return (widget as any).filter_sub_field_keys.filter(Boolean);
+    }
+    if (widget.filter_sub_field_key) {
+      return [widget.filter_sub_field_key];
+    }
+    return [];
+  }, [widget.filter_sub_field_key, (widget as any).filter_sub_field_keys]);
+
+  const filterLabelsMap = useMemo(() => {
+    const raw = (widget as any).filter_labels || {};
+    if (widget.filter_sub_field_key && widget.filter_label) {
+      return { [widget.filter_sub_field_key]: widget.filter_label, ...raw };
+    }
+    return raw;
+  }, [widget.filter_sub_field_key, widget.filter_label, (widget as any).filter_labels]);
+
   const [bars, setBars] = useState<Array<{ key: string; label: string; value: number | null }>>([]);
   const [groups, setGroups] = useState<Array<{ label: string; value: number }>>([]);
-  const [filterValues, setFilterValues] = useState<string[]>([]);
-  const [selectedFilterValues, setSelectedFilterValues] = useState<string[]>([]);
-  const [filterSearch, setFilterSearch] = useState("");
-  const [filterEditing, setFilterEditing] = useState(false);
-  const filterInputRef = useRef<HTMLInputElement>(null);
+  const [selectedWidgetFilters, setSelectedWidgetFilters] = useState<Record<string, string[]>>({});
+  const [availableValuesByKey, setAvailableValuesByKey] = useState<Record<string, string[]>>({});
   const [viewerChartType, setViewerChartType] = useState<"bar" | "pie">(widget.chart_type || "bar");
   const [hiddenSeriesKeys, setHiddenSeriesKeys] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2035,12 +2551,10 @@ function KpiBarChartWidgetInner({
   useEffect(() => {
     setViewerChartType(widget.chart_type || "bar");
     setHiddenSeriesKeys([]);
-    setViewerYear(widget.year);
-    setSelectedFilterValues([]);
-    setFilterSearch("");
-    setFilterEditing(false);
+    setViewerYear(fetchDataWithDate && selectedPeriod ? selectedPeriod : widget.year);
+    setSelectedWidgetFilters({});
     setSqlAggBuckets(null);
-  }, [widget.id, widget.chart_type, widget.mode, widget.year]);
+  }, [widget.id, widget.chart_type, widget.mode, widget.year, fetchDataWithDate, selectedPeriod]);
 
   useEffect(() => {
     if (!token) return;
@@ -2078,12 +2592,18 @@ function KpiBarChartWidgetInner({
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
       const widgetId = String((w as any)?.id ?? "");
+      const effectivePeriod = fetchDataWithDate && selectedPeriod ? selectedPeriod : viewerYear;
       const sanitizedYear = selectedPeriodType === "by_default"
-        ? (/^\d{4}$/.test(String(viewerYear)) ? viewerYear : undefined)
-        : viewerYear;
+        ? (/^\d{4}$/.test(String(effectivePeriod)) ? effectivePeriod : undefined)
+        : effectivePeriod;
       const chartOverrides = {
         year: sanitizedYear,
-        by_default: selectedPeriodType === "by_default"
+        by_default: selectedPeriodType === "by_default",
+        period_type: selectedPeriodType || undefined,
+        selected_column_value: selectedColumnValue || undefined,
+        normal_filters: Object.keys(selectedDashboardFilterValues).length
+          ? selectedDashboardFilterValues
+          : (Object.keys(selectedWidgetFilters).length ? selectedWidgetFilters : undefined),
       };
       const fp = dashboardId != null
         ? getRequestFingerprint("chart", dashboardId, widgetId, chartOverrides, gen)
@@ -2138,36 +2658,47 @@ function KpiBarChartWidgetInner({
               const buckets = d.multi_line_agg_buckets as Array<{ g: string; f: string | null; n: number; s: number }>;
               setSqlAggBuckets(buckets);
               setRawMultiLineItems([]);
-              const filterKey = widget.filter_sub_field_key || "";
-              if (filterKey) {
+              const nextAvailable: Record<string, string[]> = {};
+              if (d.filter_column_options && typeof d.filter_column_options === "object") {
+                Object.assign(nextAvailable, d.filter_column_options);
+              }
+              const primaryKey = widget.filter_sub_field_key || configuredFilterKeys[0] || "";
+              if (primaryKey && !nextAvailable[primaryKey]) {
                 const uniq = Array.from(
                   new Set(buckets.map((b) => safeKey(b.f)).filter((v) => v && v !== "(empty)"))
                 ).sort((a, b) => a.localeCompare(b));
-                setFilterValues(uniq);
-                setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
-              } else {
-                setFilterValues([]);
-                setSelectedFilterValues([]);
+                nextAvailable[primaryKey] = uniq;
               }
+              setAvailableValuesByKey((prev) => {
+                const merged: Record<string, string[]> = { ...prev };
+                Object.keys(nextAvailable).forEach((k) => {
+                  const setCombined = new Set([...(prev[k] || []), ...(nextAvailable[k] || [])]);
+                  merged[k] = Array.from(setCombined).sort((a, b) => a.localeCompare(b));
+                });
+                return merged;
+              });
             } else {
               setSqlAggBuckets(null);
               const items = Array.isArray(d.raw_rows) ? d.raw_rows : [];
               setRawMultiLineItems(items);
-              const filterKey = widget.filter_sub_field_key || "";
-              if (filterKey) {
-                const uniq = Array.from(
+              const nextAvailable: Record<string, string[]> = {};
+              configuredFilterKeys.forEach((k: string) => {
+                nextAvailable[k] = Array.from(
                   new Set<string>(
                     items
-                      .map((r: any) => safeKey(r?.[filterKey]))
+                      .map((r: any) => safeKey(r?.[k]))
                       .filter((v: string): v is string => Boolean(v && v !== "(empty)"))
                   )
                 ).sort((a, b) => a.localeCompare(b));
-                setFilterValues(uniq);
-                setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
-              } else {
-                setFilterValues([]);
-                setSelectedFilterValues([]);
-              }
+              });
+              setAvailableValuesByKey((prev) => {
+                const merged: Record<string, string[]> = { ...prev };
+                Object.keys(nextAvailable).forEach((k) => {
+                  const setCombined = new Set([...(prev[k] || []), ...(nextAvailable[k] || [])]);
+                  merged[k] = Array.from(setCombined).sort((a, b) => a.localeCompare(b));
+                });
+                return merged;
+              });
             }
             setBars([]);
             return;
@@ -2235,7 +2766,6 @@ function KpiBarChartWidgetInner({
           const groupBy = widget.group_by_sub_field_key || "";
           const agg = widget.agg || "count_rows";
           const valueKey = widget.value_sub_field_key;
-          const filterKey = widget.filter_sub_field_key || "";
           const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
           if (!sourceId || !groupBy) {
             setRawMultiLineItems([]);
@@ -2244,16 +2774,13 @@ function KpiBarChartWidgetInner({
           }
           const items = Array.isArray(multiLineRows) ? multiLineRows : [];
           setRawMultiLineItems(items);
-          if (filterKey) {
-            const uniq = Array.from(new Set(items.map((r: any) => safeKey(r?.[filterKey])).filter((v) => v && v !== "(empty)"))).sort((a, b) =>
-              a.localeCompare(b)
-            );
-            setFilterValues(uniq);
-            setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
-          } else {
-            setFilterValues([]);
-            setSelectedFilterValues([]);
-          }
+          const nextAvailable: Record<string, string[]> = {};
+          configuredFilterKeys.forEach((k: string) => {
+            nextAvailable[k] = Array.from(
+              new Set(items.map((r: any) => safeKey(r?.[k])).filter((v) => v && v !== "(empty)"))
+            ).sort((a, b) => a.localeCompare(b));
+          });
+          setAvailableValuesByKey(nextAvailable);
           setBars([]);
           return;
         }
@@ -2274,6 +2801,8 @@ function KpiBarChartWidgetInner({
     organizationId,
     widget.kpi_id,
     viewerYear,
+    selectedPeriod,
+    fetchDataWithDate,
     widget.period_key,
     widget.mode,
     widget.chart_type,
@@ -2283,11 +2812,14 @@ function KpiBarChartWidgetInner({
     widget.agg,
     widget.value_sub_field_key,
     widget.filter_sub_field_key,
+    JSON.stringify((widget as any).filter_sub_field_keys || []),
     JSON.stringify(widget.filters ?? null),
+    JSON.stringify(selectedWidgetFilters),
     dashboardId,
     // requestGeneration is the primary trigger — changes whenever selectedPeriod/Type changes.
     requestGeneration,
     selectedPeriodType,
+    selectedColumnValue,
   ]);
 
   useEffect(() => {
@@ -2296,29 +2828,33 @@ function KpiBarChartWidgetInner({
     const groupBy = widget.group_by_sub_field_key || "";
     const agg = (widget.agg || "count_rows") as "count_rows" | "sum" | "avg";
     const valueKey = widget.value_sub_field_key;
-    const filterKey = widget.filter_sub_field_key || "";
+    const primaryKey = widget.filter_sub_field_key || configuredFilterKeys[0] || "";
     if (!groupBy) {
       setGroups([]);
       return;
     }
     if (sqlAggBuckets != null) {
-      setGroups(rollupSqlBuckets(sqlAggBuckets, agg, filterKey, selectedFilterValues));
+      const primaryVals = primaryKey ? selectedWidgetFilters[primaryKey] || [] : [];
+      setGroups(rollupSqlBuckets(sqlAggBuckets, agg, primaryKey, primaryVals));
       return;
     }
-    const filtered =
-      filterKey && selectedFilterValues.length > 0
-        ? rawMultiLineItems.filter((r: any) => selectedFilterValues.includes(safeKey(r?.[filterKey])))
-        : rawMultiLineItems;
+    let filtered = rawMultiLineItems;
+    Object.entries(selectedWidgetFilters).forEach(([k, vals]) => {
+      if (vals && vals.length > 0) {
+        filtered = filtered.filter((r: any) => vals.includes(safeKey(r?.[k])));
+      }
+    });
     setGroups(aggregateMultiLine(filtered, { groupByKey: groupBy, agg, valueKey }));
   }, [
     sqlAggBuckets,
     rawMultiLineItems,
-    selectedFilterValues,
+    selectedWidgetFilters,
     widget.mode,
     widget.group_by_sub_field_key,
     widget.agg,
     widget.value_sub_field_key,
     widget.filter_sub_field_key,
+    configuredFilterKeys,
   ]);
 
   const mode = widget.mode || "fields";
@@ -2339,15 +2875,19 @@ function KpiBarChartWidgetInner({
     if (sortBy === "x") next.sort((a, b) => dirMul * a.label.localeCompare(b.label));
     else next.sort((a, b) => dirMul * (a.value - b.value));
     return next;
-  }, [groups, JSON.stringify(hiddenSeriesKeys), sortBy, sortDir]);
+  }, [groups, hiddenSeriesKeys, sortBy, dirMul]);
 
   const visibleNumeric = useMemo(() => {
-    const v = numeric.filter((b) => !hiddenSeriesKeys.includes(b.key));
+    const v = numeric.filter((b) => !hiddenSeriesKeys.includes(b.label));
     const next = [...v];
     if (sortBy === "x") next.sort((a, b) => dirMul * a.label.localeCompare(b.label));
     else next.sort((a, b) => dirMul * (a.value - b.value));
     return next;
-  }, [JSON.stringify(numeric), JSON.stringify(hiddenSeriesKeys), sortBy, sortDir]);
+  }, [numeric, hiddenSeriesKeys, sortBy, dirMul]);
+
+  const toggleSeries = (label: string) => {
+    setHiddenSeriesKeys((prev) => (prev.includes(label) ? prev.filter((k) => k !== label) : [...prev, label]));
+  };
 
   const barColorMode = widget.bar_color_mode || "solid";
   const barSolid = widget.bar_color || "var(--accent)";
@@ -2356,7 +2896,6 @@ function KpiBarChartWidgetInner({
       ? widget.bar_palette
       : paletteForScheme(widget.bar_palette_scheme, 8);
   const barGradFrom = widget.bar_gradient_from || "var(--accent)";
-  const barGradTo = widget.bar_gradient_to || "";
 
   const parseRgbColor = (raw: string) => {
     const s = raw.trim();
@@ -2405,25 +2944,9 @@ function KpiBarChartWidgetInner({
 
   const parseColor = (raw: string) => parseHexColor(raw) ?? parseRgbColor(raw) ?? parseHslColor(raw);
 
-  const derivedGradTo = useMemo(() => {
-    const raw = (barGradTo || "").trim();
-    if (raw) return raw;
-    const base = parseColor(String(barGradFrom || "").trim());
-    if (!base) return "rgb(165, 180, 252)";
-    // Create a real visible ramp by mixing towards white (or black if already very light).
-    const lum = 0.2126 * (base.r / 255) + 0.7152 * (base.g / 255) + 0.0722 * (base.b / 255);
-    const toward = lum > 0.72 ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 };
-    const t = lum > 0.72 ? 0.35 : 0.62;
-    const r = Math.round(base.r + (toward.r - base.r) * t);
-    const g = Math.round(base.g + (toward.g - base.g) * t);
-    const b = Math.round(base.b + (toward.b - base.b) * t);
-    return `rgb(${r}, ${g}, ${b})`;
-  }, [barGradFrom, barGradTo]);
-
   const colorForIndex = (idx: number, total: number) => {
     if (barColorMode === "palette") return barPalette[idx % barPalette.length];
     if (barColorMode === "solid") return barSolid;
-    // Gradient: create distinct shades by varying lightness in HSL.
     const base = parseColor(barGradFrom) ?? parseColor(barSolid);
     if (!base) return barGradFrom || barSolid;
     const rgbToHsl = ({ r, g, b }: { r: number; g: number; b: number }) => {
@@ -2447,52 +2970,23 @@ function KpiBarChartWidgetInner({
     };
     const { h, s, l } = rgbToHsl(base);
     const t = total <= 1 ? 0 : Math.min(1, Math.max(0, idx / (total - 1)));
-    // Make a +/- 26% lightness ramp around the base, clamped for readability.
     const lo = Math.max(15, Math.min(70, l - 20));
     const hi = Math.max(15, Math.min(70, l + 20));
     const ll = lo + (hi - lo) * t;
     return `hsl(${Math.round(h)}, ${Math.round(Math.max(18, Math.min(92, s)))}%, ${Math.round(ll)}%)`;
   };
 
-  const toggleFilterValue = (v: string) => {
-    setSelectedFilterValues((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
-  };
-
-  const shownFilterValues = useMemo(() => {
-    if (!filterEditing) return [];
-    const q = filterSearch.trim().toLowerCase();
-    return filterValues
-      .filter((v) => !selectedFilterValues.includes(v))
-      .filter((v) => (q ? v.toLowerCase().includes(q) : true))
-      .slice(0, 50);
-  }, [filterValues, selectedFilterValues, filterSearch, filterEditing]);
-
-  const addTypedFilterValue = () => {
-    const raw = filterSearch.trim();
-    if (!raw) return;
-    const match = filterValues.find((v) => v.toLowerCase() === raw.toLowerCase());
-    const toAdd = match ?? shownFilterValues[0];
-    if (!toAdd) return;
-    setSelectedFilterValues((prev) => (prev.includes(toAdd) ? prev : [...prev, toAdd]));
-    setFilterSearch("");
-  };
-
-  const toggleHiddenSeries = (k: string) => {
-    setHiddenSeriesKeys((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]));
-  };
-
-  const chipBtnStyle = (hidden: boolean) => ({
-    padding: "0.12rem 0.45rem",
+  const pillStyle = (selected: boolean): React.CSSProperties => ({
+    padding: "0.25rem 0.55rem",
     borderRadius: 999,
-    border: `1px solid ${hidden ? "var(--border)" : "var(--accent)"}`,
-    background: hidden ? "var(--surface)" : "rgba(79,70,229,0.10)",
-    color: hidden ? "var(--muted)" : "var(--accent)",
+    border: "1px solid var(--border)",
+    background: selected ? "var(--accent)" : "var(--surface)",
+    color: selected ? "#fff" : "var(--text)",
     fontSize: "0.78rem",
     cursor: "pointer",
     maxWidth: 220,
     overflow: "hidden",
     textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
   });
 
   useEffect(() => {
@@ -2503,16 +2997,13 @@ function KpiBarChartWidgetInner({
     }
 
     const modeNow = widget.mode || "fields";
-    const filterKey = widget.filter_sub_field_key || "";
     const yearSelect = (
       <select
         value={viewerYear}
         onChange={(e) => {
           const next = fetchDataWithDate ? e.target.value : Number(e.target.value);
           setViewerYear(next);
-          setSelectedFilterValues([]);
-          setFilterSearch("");
-          setFilterEditing(false);
+          setSelectedWidgetFilters({});
         }}
         style={{ height: 36, padding: "0.35rem 0.45rem", fontSize: "0.85rem" }}
         title={fetchDataWithDate ? "Period" : "Year"}
@@ -2533,157 +3024,27 @@ function KpiBarChartWidgetInner({
       </select>
     );
 
-    if (modeNow !== "multi_line_items" || !filterKey) {
+    if (modeNow !== "multi_line_items" || configuredFilterKeys.length === 0) {
       setHeaderAddon(
         fetchDataWithDate ? null : <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>{yearSelect}</div>
       );
       return;
     }
 
-    const filterLabel = (widget.filter_label || "").trim() || filterKey;
-    const pillLabel =
-      selectedFilterValues.length === 0 ? `All ${filterLabel}` : `${filterLabel}: ${selectedFilterValues.length} selected`;
-
     setHeaderAddon(
       <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
         {!fetchDataWithDate && yearSelect}
-        <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.35rem" }}>
-          {!filterEditing ? (
-            <button
-              type="button"
-              onClick={() => {
-                setFilterEditing(true);
-                window.setTimeout(() => filterInputRef.current?.focus(), 0);
-              }}
-              style={{
-                height: 36,
-                maxWidth: 260,
-                padding: "0 0.65rem",
-                borderRadius: 999,
-                border: "1px solid var(--border)",
-                background: "var(--surface)",
-                color: selectedFilterValues.length > 0 ? "var(--accent)" : "var(--muted)",
-                cursor: "pointer",
-                fontSize: "0.85rem",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.35rem",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-              title="Click to filter"
-            >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pillLabel}</span>
-            </button>
-          ) : (
-            <>
-              <div
-                style={{
-                  height: 36,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "0.35rem",
-                  padding: "0 0.45rem",
-                  borderRadius: 12,
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                }}
-              >
-                <span style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{filterLabel}:</span>
-                <input
-                  ref={filterInputRef}
-                  value={filterSearch}
-                  onChange={(e) => setFilterSearch(e.target.value)}
-                  placeholder={filterValues.length === 0 ? "No values" : "Type to search"}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      addTypedFilterValue();
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setFilterEditing(false);
-                      setFilterSearch("");
-                    }
-                  }}
-                  style={{
-                    width: 150,
-                    border: "none",
-                    outline: "none",
-                    background: "transparent",
-                    padding: 0,
-                    fontSize: "0.9rem",
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFilterEditing(false);
-                    setFilterSearch("");
-                  }}
-                  aria-label="Close filter"
-                  style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--muted)", fontSize: "1.1rem", lineHeight: 1, padding: 0 }}
-                  title="Close"
-                >
-                  ×
-                </button>
-              </div>
-
-              <div
-                style={{
-                  position: "absolute",
-                  right: 0,
-                  top: "calc(100% + 6px)",
-                  zIndex: 45,
-                  minWidth: 260,
-                  maxWidth: "min(90vw, 360px)",
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                  borderRadius: 12,
-                  boxShadow: "0 10px 24px rgba(0,0,0,0.14)",
-                  overflow: "hidden",
-                }}
-              >
-                <div style={{ maxHeight: 240, overflow: "auto" }}>
-                  {shownFilterValues.length === 0 ? (
-                    <div style={{ padding: "0.55rem 0.7rem", color: "var(--muted)", fontSize: "0.85rem" }}>
-                      {filterValues.length === 0 ? "No values." : "No matches."}
-                    </div>
-                  ) : (
-                    shownFilterValues.map((v) => (
-                      <button
-                        key={v}
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => {
-                          setSelectedFilterValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
-                          setFilterSearch("");
-                        }}
-                        style={{
-                          width: "100%",
-                          textAlign: "left",
-                          border: "none",
-                          background: "transparent",
-                          color: "inherit",
-                          padding: "0.45rem 0.7rem",
-                          cursor: "pointer",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.5rem",
-                          fontSize: "0.9rem",
-                        }}
-                        title={v}
-                      >
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-        </div>
+        <WidgetFilterControl
+          filterKeys={configuredFilterKeys}
+          filterLabels={filterLabelsMap}
+          availableValuesByKey={availableValuesByKey}
+          selectedValuesByKey={selectedWidgetFilters}
+          onFilterChange={(next) => setSelectedWidgetFilters(next)}
+          kpiId={widget.kpi_id}
+          sourceFieldKey={widget.source_field_key}
+          dashboardId={dashboardId}
+          widgetId={widget.id}
+        />
       </div>
     );
 
@@ -2694,14 +3055,14 @@ function KpiBarChartWidgetInner({
     error,
     widget.id,
     widget.mode,
-    widget.filter_sub_field_key,
-    widget.filter_label,
     viewerYear,
-    filterEditing,
-    filterSearch,
-    JSON.stringify(filterValues),
-    JSON.stringify(selectedFilterValues),
-    JSON.stringify(shownFilterValues),
+    fetchDataWithDate,
+    periodOptions,
+    yearOptions,
+    configuredFilterKeys,
+    filterLabelsMap,
+    availableValuesByKey,
+    selectedWidgetFilters,
   ]);
 
   useEffect(() => {
@@ -2745,90 +3106,9 @@ function KpiBarChartWidgetInner({
         </button>
       </div>
     );
-
-    if (mode === "multi_line_items") {
-      setViewerMenu(
-        <div style={{ display: "grid", gap: "0.65rem" }}>
-          <div>
-            <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 4 }}>Chart Type</div>
-            {chartToggle}
-          </div>
-          {hiddenSeriesKeys.length > 0 && (
-            <button type="button" className="btn" onClick={() => setHiddenSeriesKeys([])} style={{ fontSize: "0.85rem", width: "100%" }}>
-              Reset hidden series
-            </button>
-          )}
-          {groups.length > 0 && (
-            <div>
-              <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 6 }}>Visible groups</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                {groups.slice(0, 20).map((g) => {
-                  const hidden = hiddenSeriesKeys.includes(g.label);
-                  return (
-                    <button
-                      key={g.label}
-                      type="button"
-                      onClick={() => toggleHiddenSeries(g.label)}
-                      style={chipBtnStyle(hidden)}
-                      title={hidden ? "Hidden (click to show)" : "Visible (click to hide)"}
-                    >
-                      {g.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
-      );
-      return () => setViewerMenu(null);
-    }
-
-    setViewerMenu(
-      <div style={{ display: "grid", gap: "0.65rem" }}>
-        <div>
-          <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 4 }}>Chart Type</div>
-          {chartToggle}
-        </div>
-        {hiddenSeriesKeys.length > 0 && (
-          <button type="button" className="btn" onClick={() => setHiddenSeriesKeys([])} style={{ fontSize: "0.85rem", width: "100%" }}>
-            Reset hidden series
-          </button>
-        )}
-        {numeric.length > 0 && (
-          <div>
-            <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginBottom: 6 }}>Visible fields</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-              {numeric.slice(0, 20).map((b) => {
-                const hidden = hiddenSeriesKeys.includes(b.key);
-                return (
-                  <button
-                    key={b.key}
-                    type="button"
-                    onClick={() => toggleHiddenSeries(b.key)}
-                    style={chipBtnStyle(hidden)}
-                    title={hidden ? "Hidden (click to show)" : "Visible (click to hide)"}
-                  >
-                    {b.key}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-    );
+    setViewerMenu(chartToggle);
     return () => setViewerMenu(null);
-  }, [
-    setViewerMenu,
-    loading,
-    error,
-    mode,
-    viewerChartType,
-    JSON.stringify(hiddenSeriesKeys),
-    JSON.stringify(groups),
-    JSON.stringify(numeric.map((b) => b.key))
-  ]);
+  }, [setViewerMenu, loading, error, viewerChartType]);
 
   // Register labels for customization
   useEffect(() => {
@@ -2836,7 +3116,7 @@ function KpiBarChartWidgetInner({
       const labels = groups.map((g) => g.label);
       registerWidgetLabels(widget.id, labels);
     } else {
-      const labels = bars.map((b) => b.key);
+      const labels = bars.map((b) => b.label);
       registerWidgetLabels(widget.id, labels);
     }
   }, [mode, groups, bars, widget.id, registerWidgetLabels]);
@@ -2855,42 +3135,68 @@ function KpiBarChartWidgetInner({
         <p className="form-error">{error}</p>
       ) : mode === "multi_line_items" ? (
         <div style={{ display: "grid", gap: "0.75rem" }}>
-          {widget.filter_sub_field_key && selectedFilterValues.length > 0 && (
+          {configuredFilterKeys.length > 0 && Object.values(selectedWidgetFilters).some((arr) => arr.length > 0) && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
-              {selectedFilterValues.map((v) => (
-                <span
-                  key={v}
-                  style={{
-                    display: "inline-flex",
-                    gap: "0.25rem",
-                    alignItems: "center",
-                    padding: "0.1rem 0.4rem",
-                    borderRadius: 999,
-                    border: "1px solid var(--border)",
-                    background: "var(--bg)",
-                    color: "var(--text)",
-                    fontSize: "0.78rem",
-                    maxWidth: 220,
-                  }}
-                  title={v}
-                >
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
-                  <button
-                    type="button"
-                    onClick={() => toggleFilterValue(v)}
-                    style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", fontSize: "0.9rem", lineHeight: 1, padding: 0 }}
-                    aria-label={`Remove ${v}`}
-                    title="Remove"
+              {Object.entries(selectedWidgetFilters).map(([k, vals]) => {
+                const label = filterLabelsMap[k] || k;
+                return (vals || []).map((v) => (
+                  <span
+                    key={`${k}_${v}`}
+                    style={{
+                      display: "inline-flex",
+                      gap: "0.25rem",
+                      alignItems: "center",
+                      padding: "0.1rem 0.4rem",
+                      borderRadius: 999,
+                      border: "1px solid var(--border)",
+                      background: "var(--bg)",
+                      color: "var(--text)",
+                      fontSize: "0.78rem",
+                      maxWidth: 220,
+                    }}
+                    title={`${label}: ${v}`}
                   >
-                    ×
-                  </button>
-                </span>
-              ))}
+                    <strong>{label}:</strong>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = (selectedWidgetFilters[k] || []).filter((x) => x !== v);
+                        const next = { ...selectedWidgetFilters };
+                        if (updated.length > 0) {
+                          next[k] = updated;
+                        } else {
+                          delete next[k];
+                        }
+                        setSelectedWidgetFilters(next);
+                      }}
+                      style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", fontSize: "0.9rem", lineHeight: 1, padding: 0 }}
+                      aria-label={`Remove ${v}`}
+                      title="Remove"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ));
+              })}
             </div>
           )}
 
           {visibleGroups.length === 0 ? (
-            <p style={{ color: "var(--muted)", margin: 0 }}>No grouped data available for this multi-line field.</p>
+            <div
+              style={{
+                padding: "2rem 1rem",
+                textAlign: "center",
+                background: "var(--bg-subtle, #f8fafc)",
+                borderRadius: "8px",
+                border: "1px dashed var(--border)",
+                margin: "0.5rem 0",
+              }}
+            >
+              <div style={{ fontWeight: 700, color: "var(--text, #1e293b)", fontSize: "1.125rem" }}>
+                No data submitted against this period.
+              </div>
+            </div>
           ) : (
             <SmartChartViewer
               rawItems={visibleGroups.map((g) => ({ key: g.label, label: g.label, value: g.value }))}
@@ -2903,7 +3209,20 @@ function KpiBarChartWidgetInner({
           )}
         </div>
       ) : visibleNumeric.length === 0 ? (
-        <p style={{ color: "var(--muted)", margin: 0 }}>No numeric data for the selected fields.</p>
+        <div
+          style={{
+            padding: "2rem 1rem",
+            textAlign: "center",
+            background: "var(--bg-subtle, #f8fafc)",
+            borderRadius: "8px",
+            border: "1px dashed var(--border)",
+            margin: "0.5rem 0",
+          }}
+        >
+          <div style={{ fontWeight: 700, color: "var(--text, #1e293b)", fontSize: "1.125rem" }}>
+            No data submitted against this period.
+          </div>
+        </div>
       ) : (
         <SmartChartViewer
           rawItems={visibleNumeric.map((b) => ({ key: b.key, label: b.label, value: b.value }))}
@@ -2974,7 +3293,7 @@ function KpiTrendWidgetInner({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
-  const { getDisplayLabel, registerWidgetLabels, consistentColors, getColorForValue } = useDashboardCustomization();
+  const { getDisplayLabel, registerWidgetLabels, consistentColors, getColorForValue, selectedColumnValue, selectedDashboardFilterValues, requestGeneration } = useDashboardCustomization();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const mode = widget.mode || "multi_line_items";
@@ -2988,12 +3307,27 @@ function KpiTrendWidgetInner({
     return within.length ? within.sort((a, b) => b - a) : [y];
   });
   const [yearOptions, setYearOptions] = useState<number[]>([]);
-  const [filterValues, setFilterValues] = useState<string[]>([]);
-  const [selectedFilterValues, setSelectedFilterValues] = useState<string[]>([]);
-  const [filterSearch, setFilterSearch] = useState("");
-  const [filterEditing, setFilterEditing] = useState(false);
-  const filterInputRef = useRef<HTMLInputElement>(null);
 
+  const configuredFilterKeys = useMemo(() => {
+    if (Array.isArray((widget as any).filter_sub_field_keys) && (widget as any).filter_sub_field_keys.length > 0) {
+      return (widget as any).filter_sub_field_keys.filter(Boolean);
+    }
+    if (widget.filter_sub_field_key) {
+      return [widget.filter_sub_field_key];
+    }
+    return [];
+  }, [widget.filter_sub_field_key, (widget as any).filter_sub_field_keys]);
+
+  const filterLabelsMap = useMemo(() => {
+    const raw = (widget as any).filter_labels || {};
+    if (widget.filter_sub_field_key && widget.filter_label) {
+      return { [widget.filter_sub_field_key]: widget.filter_label, ...raw };
+    }
+    return raw;
+  }, [widget.filter_sub_field_key, widget.filter_label, (widget as any).filter_labels]);
+
+  const [selectedWidgetFilters, setSelectedWidgetFilters] = useState<Record<string, string[]>>({});
+  const [availableValuesByKey, setAvailableValuesByKey] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [seriesByYear, setSeriesByYear] = useState<Record<number, Array<{ label: string; value: number }>>>({});
@@ -3003,16 +3337,15 @@ function KpiTrendWidgetInner({
   const [bucketsByYear, setBucketsByYear] = useState<Record<number, Array<{ g: string; f: string | null; n: number; s: number }>>>({});
 
   useEffect(() => {
-    setViewerView(widget.view || "bar");
-    const y = Math.max(widget.start_year, widget.end_year);
-    const raw = Array.isArray(widget.default_years) ? widget.default_years : [];
-    const uniq = Array.from(new Set(raw.map((n) => Math.trunc(Number(n))).filter((n) => Number.isFinite(n))));
-    const within = uniq.filter((yy) => yy >= Math.min(widget.start_year, widget.end_year) && yy <= Math.max(widget.start_year, widget.end_year));
-    setSelectedYears(within.length ? within.sort((a, b) => b - a) : [y]);
-    setSelectedFilterValues([]);
-    setFilterSearch("");
-    setFilterEditing(false);
-  }, [widget.id, widget.view, widget.mode, widget.start_year, widget.end_year, JSON.stringify(widget.default_years ?? [])]);
+    setSelectedWidgetFilters({});
+    setSelectedYears(() => {
+      const y = Math.max(widget.start_year, widget.end_year);
+      const raw = Array.isArray(widget.default_years) ? widget.default_years : [];
+      const uniq = Array.from(new Set(raw.map((n) => Math.trunc(Number(n))).filter((n) => Number.isFinite(n))));
+      const within = uniq.filter((yy) => yy >= Math.min(widget.start_year, widget.end_year) && yy <= Math.max(widget.start_year, widget.end_year));
+      return within.length ? within.sort((a, b) => b - a) : [y];
+    });
+  }, [widget.start_year, widget.end_year, widget.id]);
 
   useEffect(() => {
     const opts = yearRange(widget.start_year, widget.end_year);
@@ -3034,7 +3367,11 @@ function KpiTrendWidgetInner({
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
       const widgetId = String((w as any)?.id ?? "");
-      const trendOverrides = { selected_years: selectedYears };
+      const trendOverrides = {
+        selected_years: selectedYears,
+        selected_column_value: selectedColumnValue || undefined,
+        normal_filters: Object.keys(selectedWidgetFilters).length ? selectedWidgetFilters : undefined,
+      };
       const bundleReq =
         dashboardId != null
           ? enqueueDashboardUniversalBatch({
@@ -3073,13 +3410,11 @@ function KpiTrendWidgetInner({
               setRawMultiLineByYear({});
               setBucketsByYear({});
               setSeriesByYear({});
-              setFilterValues([]);
-              setSelectedFilterValues([]);
+              setAvailableValuesByKey({});
               setFieldBarsByYear({});
               return;
             }
             const years = [...selectedYears].sort((a, b) => b - a);
-            const filterKey = widget.filter_sub_field_key || "";
             const bby = d.multi_line_agg_buckets_by_year as Record<string, any[]> | undefined;
             if (bby) {
               const next: Record<number, Array<{ g: string; f: string | null; n: number; s: number }>> = {};
@@ -3087,23 +3422,26 @@ function KpiTrendWidgetInner({
               years.forEach((y) => {
                 const buckets = (bby && bby[String(y)]) || [];
                 next[y] = buckets as any;
-                if (filterKey) {
-                  (buckets as any[]).forEach((b: any) => {
-                    const fv = safeKey(b?.f);
-                    if (fv && fv !== "(empty)") allF.push(fv);
-                  });
-                }
+                (buckets as any[]).forEach((b: any) => {
+                  const fv = safeKey(b?.f);
+                  if (fv && fv !== "(empty)") allF.push(fv);
+                });
               });
               setBucketsByYear(next);
               setRawMultiLineByYear({});
-              if (filterKey) {
-                const uniq = Array.from(new Set(allF)).sort((a, b) => a.localeCompare(b));
-                setFilterValues(uniq);
-                setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
-              } else {
-                setFilterValues([]);
-                setSelectedFilterValues([]);
+              const nextAvailable: Record<string, string[]> = {};
+              const primaryKey = widget.filter_sub_field_key || configuredFilterKeys[0] || "";
+              if (primaryKey) {
+                nextAvailable[primaryKey] = Array.from(new Set(allF)).sort((a, b) => a.localeCompare(b));
               }
+              setAvailableValuesByKey((prev) => {
+                const merged: Record<string, string[]> = { ...prev };
+                Object.keys(nextAvailable).forEach((k) => {
+                  const setCombined = new Set([...(prev[k] || []), ...(nextAvailable[k] || [])]);
+                  merged[k] = Array.from(setCombined).sort((a, b) => a.localeCompare(b));
+                });
+                return merged;
+              });
             } else {
               const rby = d.raw_rows_by_year as Record<string, unknown[]> | undefined;
               const raw: Record<number, any[]> = {};
@@ -3114,16 +3452,20 @@ function KpiTrendWidgetInner({
                 allItems.push(...items);
               });
               setBucketsByYear({});
-              if (filterKey) {
-                const uniq = Array.from(
-                  new Set(allItems.map((r: any) => safeKey(r?.[filterKey])).filter((v) => v && v !== "(empty)"))
+              const nextAvailable: Record<string, string[]> = {};
+              configuredFilterKeys.forEach((k: string) => {
+                nextAvailable[k] = Array.from(
+                  new Set(allItems.map((r: any) => safeKey(r?.[k])).filter((v) => v && v !== "(empty)"))
                 ).sort((a, b) => a.localeCompare(b));
-                setFilterValues(uniq);
-                setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
-              } else {
-                setFilterValues([]);
-                setSelectedFilterValues([]);
-              }
+              });
+              setAvailableValuesByKey((prev) => {
+                const merged: Record<string, string[]> = { ...prev };
+                Object.keys(nextAvailable).forEach((k) => {
+                  const setCombined = new Set([...(prev[k] || []), ...(nextAvailable[k] || [])]);
+                  merged[k] = Array.from(setCombined).sort((a, b) => a.localeCompare(b));
+                });
+                return merged;
+              });
               setRawMultiLineByYear(raw);
             }
             setFieldBarsByYear({});
@@ -3144,8 +3486,7 @@ function KpiTrendWidgetInner({
           }
           setFieldBarsByYear(outByYear);
           setSeriesByYear({});
-          setFilterValues([]);
-          setSelectedFilterValues([]);
+          setAvailableValuesByKey({});
         })
         .catch((e) => {
           if (isLikelyAbortError(e)) return;
@@ -3185,13 +3526,11 @@ function KpiTrendWidgetInner({
           const groupBy = widget.group_by_sub_field_key || "";
           const agg = widget.agg || "count_rows";
           const valueKey = widget.value_sub_field_key;
-          const filterKey = widget.filter_sub_field_key || "";
           const sourceId = sourceKey ? map.idByKey[sourceKey] : undefined;
           if (!sourceId || !groupBy) {
             setRawMultiLineByYear({});
             setSeriesByYear({});
-            setFilterValues([]);
-            setSelectedFilterValues([]);
+            setAvailableValuesByKey({});
             setFieldBarsByYear({});
             return;
           }
@@ -3205,14 +3544,13 @@ function KpiTrendWidgetInner({
             allItems.push(...items);
           });
 
-          if (filterKey) {
-            const uniq = Array.from(new Set(allItems.map((r: any) => safeKey(r?.[filterKey])).filter((v) => v && v !== "(empty)"))).sort((a, b) => a.localeCompare(b));
-            setFilterValues(uniq);
-            setSelectedFilterValues((prev) => prev.filter((v) => uniq.includes(v)));
-          } else {
-            setFilterValues([]);
-            setSelectedFilterValues([]);
-          }
+          const nextAvailable: Record<string, string[]> = {};
+          configuredFilterKeys.forEach((k: string) => {
+            nextAvailable[k] = Array.from(
+              new Set(allItems.map((r: any) => safeKey(r?.[k])).filter((v) => v && v !== "(empty)"))
+            ).sort((a, b) => a.localeCompare(b));
+          });
+          setAvailableValuesByKey(nextAvailable);
 
           const raw: Record<number, any[]> = {};
           years.forEach((y) => {
@@ -3235,8 +3573,7 @@ function KpiTrendWidgetInner({
         });
         setFieldBarsByYear(outByYear);
         setSeriesByYear({});
-        setFilterValues([]);
-        setSelectedFilterValues([]);
+        setAvailableValuesByKey({});
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load trend data"))
       .finally(() => setLoading(false));
@@ -3252,9 +3589,14 @@ function KpiTrendWidgetInner({
     widget.agg,
     widget.value_sub_field_key,
     widget.filter_sub_field_key,
+    JSON.stringify((widget as any).filter_sub_field_keys || []),
     JSON.stringify(widget.filters ?? null),
     JSON.stringify(widget.field_keys || []),
     JSON.stringify(selectedYears),
+    JSON.stringify(selectedWidgetFilters),
+    selectedColumnValue,
+    dashboardId,
+    requestGeneration,
   ]);
 
   useEffect(() => {
@@ -3262,7 +3604,7 @@ function KpiTrendWidgetInner({
     const groupBy = widget.group_by_sub_field_key || "";
     const agg = widget.agg || "count_rows";
     const valueKey = widget.value_sub_field_key;
-    const filterKey = widget.filter_sub_field_key || "";
+    const primaryKey = widget.filter_sub_field_key || configuredFilterKeys[0] || "";
     if (!groupBy || selectedYears.length === 0) {
       setSeriesByYear({});
       return;
@@ -3272,13 +3614,16 @@ function KpiTrendWidgetInner({
     years.forEach((y) => {
       const buckets = bucketsByYear[y];
       if (Array.isArray(buckets) && buckets.length > 0) {
-        byYear[y] = rollupSqlBuckets(buckets as any, agg as any, filterKey, selectedFilterValues);
+        const primaryVals = primaryKey ? selectedWidgetFilters[primaryKey] || [] : [];
+        byYear[y] = rollupSqlBuckets(buckets as any, agg as any, primaryKey, primaryVals);
       } else {
         const items = rawMultiLineByYear[y] ?? [];
-        const filtered =
-          filterKey && selectedFilterValues.length > 0
-            ? items.filter((r: any) => selectedFilterValues.includes(safeKey(r?.[filterKey])))
-            : items;
+        let filtered = items;
+        Object.entries(selectedWidgetFilters).forEach(([k, vals]) => {
+          if (vals && vals.length > 0) {
+            filtered = filtered.filter((r: any) => vals.includes(safeKey(r?.[k])));
+          }
+        });
         byYear[y] = aggregateMultiLine(filtered, { groupByKey: groupBy, agg, valueKey });
       }
     });
@@ -3287,12 +3632,13 @@ function KpiTrendWidgetInner({
     mode,
     rawMultiLineByYear,
     bucketsByYear,
-    selectedFilterValues,
+    selectedWidgetFilters,
     JSON.stringify(selectedYears),
     widget.group_by_sub_field_key,
     widget.agg,
     widget.value_sub_field_key,
     widget.filter_sub_field_key,
+    configuredFilterKeys,
   ]);
 
   const toggleYear = (y: number) => {
@@ -3301,25 +3647,6 @@ function KpiTrendWidgetInner({
       const uniq = Array.from(new Set(next)).filter((x) => yearOptions.includes(x));
       return uniq.sort((a, b) => b - a);
     });
-  };
-
-  const shownFilterValues = useMemo(() => {
-    if (!filterEditing) return [];
-    const q = filterSearch.trim().toLowerCase();
-    return filterValues
-      .filter((v) => !selectedFilterValues.includes(v))
-      .filter((v) => (q ? v.toLowerCase().includes(q) : true))
-      .slice(0, 50);
-  }, [filterValues, selectedFilterValues, filterSearch, filterEditing]);
-
-  const addTypedFilterValue = () => {
-    const raw = filterSearch.trim();
-    if (!raw) return;
-    const match = filterValues.find((v) => v.toLowerCase() === raw.toLowerCase());
-    const toAdd = match ?? shownFilterValues[0];
-    if (!toAdd) return;
-    setSelectedFilterValues((prev) => (prev.includes(toAdd) ? prev : [...prev, toAdd]));
-    setFilterSearch("");
   };
 
   useEffect(() => {
@@ -3350,180 +3677,40 @@ function KpiTrendWidgetInner({
       </div>
     );
 
-    if (mode !== "multi_line_items" || !widget.filter_sub_field_key) {
+    if (mode !== "multi_line_items" || configuredFilterKeys.length === 0) {
       setHeaderAddon(<div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>{pill}</div>);
       return;
     }
 
-    const filterKey = widget.filter_sub_field_key || "";
-    const filterLabel = (widget.filter_label || "").trim() || filterKey;
-    const filterPillLabel =
-      selectedFilterValues.length === 0 ? `All ${filterLabel}` : `${filterLabel}: ${selectedFilterValues.length} selected`;
-
     setHeaderAddon(
       <div style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
         {pill}
-        <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.35rem" }}>
-          {!filterEditing ? (
-            <button
-              type="button"
-              onClick={() => {
-                setFilterEditing(true);
-                window.setTimeout(() => filterInputRef.current?.focus(), 0);
-              }}
-              style={{
-                height: 36,
-                maxWidth: 260,
-                padding: "0 0.65rem",
-                borderRadius: 999,
-                border: "1px solid var(--border)",
-                background: "var(--surface)",
-                color: selectedFilterValues.length > 0 ? "var(--accent)" : "var(--muted)",
-                cursor: "pointer",
-                fontSize: "0.85rem",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.35rem",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-              title="Click to filter"
-            >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{filterPillLabel}</span>
-            </button>
-          ) : (
-            <>
-              <div
-                style={{
-                  height: 36,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "0.35rem",
-                  padding: "0 0.45rem",
-                  borderRadius: 12,
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                }}
-              >
-                <span style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{filterLabel}:</span>
-                <input
-                  ref={filterInputRef}
-                  value={filterSearch}
-                  onChange={(e) => setFilterSearch(e.target.value)}
-                  placeholder={filterValues.length === 0 ? "No values" : "Type to search"}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      addTypedFilterValue();
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setFilterEditing(false);
-                      setFilterSearch("");
-                    }
-                  }}
-                  style={{
-                    width: 150,
-                    border: "none",
-                    outline: "none",
-                    background: "transparent",
-                    padding: 0,
-                    fontSize: "0.9rem",
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFilterEditing(false);
-                    setFilterSearch("");
-                  }}
-                  aria-label="Close filter"
-                  style={{
-                    border: "none",
-                    background: "transparent",
-                    cursor: "pointer",
-                    color: "var(--muted)",
-                    fontSize: "1.1rem",
-                    lineHeight: 1,
-                    padding: 0,
-                  }}
-                  title="Close"
-                >
-                  ×
-                </button>
-              </div>
-
-              <div
-                style={{
-                  position: "absolute",
-                  right: 0,
-                  top: "calc(100% + 6px)",
-                  zIndex: 45,
-                  minWidth: 260,
-                  maxWidth: "min(90vw, 360px)",
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                  borderRadius: 12,
-                  boxShadow: "0 10px 24px rgba(0,0,0,0.14)",
-                  overflow: "hidden",
-                }}
-              >
-                <div style={{ maxHeight: 240, overflow: "auto" }}>
-                  {shownFilterValues.length === 0 ? (
-                    <div style={{ padding: "0.55rem 0.7rem", color: "var(--muted)", fontSize: "0.85rem" }}>
-                      {filterValues.length === 0 ? "No values." : "No matches."}
-                    </div>
-                  ) : (
-                    shownFilterValues.map((v) => (
-                      <button
-                        key={v}
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => {
-                          setSelectedFilterValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
-                          setFilterSearch("");
-                        }}
-                        style={{
-                          width: "100%",
-                          textAlign: "left",
-                          border: "none",
-                          background: "transparent",
-                          color: "inherit",
-                          padding: "0.45rem 0.7rem",
-                          cursor: "pointer",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.5rem",
-                          fontSize: "0.9rem",
-                        }}
-                        title={v}
-                      >
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-        </div>
+        <WidgetFilterControl
+          filterKeys={configuredFilterKeys}
+          filterLabels={filterLabelsMap}
+          availableValuesByKey={availableValuesByKey}
+          selectedValuesByKey={selectedWidgetFilters}
+          onFilterChange={(next) => setSelectedWidgetFilters(next)}
+          kpiId={widget.kpi_id}
+          sourceFieldKey={widget.source_field_key}
+          dashboardId={dashboardId}
+          widgetId={widget.id}
+        />
       </div>
     );
+
+    return () => setHeaderAddon(null);
   }, [
     setHeaderAddon,
     loading,
     error,
     widget.id,
     mode,
-    widget.filter_sub_field_key,
-    widget.filter_label,
     JSON.stringify(selectedYears),
-    filterEditing,
-    filterSearch,
-    JSON.stringify(filterValues),
-    JSON.stringify(selectedFilterValues),
-    JSON.stringify(shownFilterValues),
+    configuredFilterKeys,
+    filterLabelsMap,
+    availableValuesByKey,
+    selectedWidgetFilters,
   ]);
 
   useEffect(() => {
@@ -3768,42 +3955,68 @@ function KpiTrendWidgetInner({
         <p style={{ color: "var(--muted)", margin: 0 }}>Select one or more years to view the trend.</p>
       ) : mode === "multi_line_items" ? (
         <div style={{ display: "grid", gap: "0.75rem" }}>
-          {widget.filter_sub_field_key && selectedFilterValues.length > 0 && (
+          {configuredFilterKeys.length > 0 && Object.values(selectedWidgetFilters).some((arr) => arr.length > 0) && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }}>
-              {selectedFilterValues.map((v) => (
-                <span
-                  key={v}
-                  style={{
-                    display: "inline-flex",
-                    gap: "0.25rem",
-                    alignItems: "center",
-                    padding: "0.1rem 0.4rem",
-                    borderRadius: 999,
-                    border: "1px solid var(--border)",
-                    background: "var(--bg)",
-                    color: "var(--text)",
-                    fontSize: "0.78rem",
-                    maxWidth: 220,
-                  }}
-                  title={v}
-                >
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedFilterValues((prev) => prev.filter((x) => x !== v))}
-                    style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", fontSize: "0.9rem", lineHeight: 1, padding: 0 }}
-                    aria-label={`Remove ${v}`}
-                    title="Remove"
+              {Object.entries(selectedWidgetFilters).map(([k, vals]) => {
+                const label = filterLabelsMap[k] || k;
+                return (vals || []).map((v) => (
+                  <span
+                    key={`${k}_${v}`}
+                    style={{
+                      display: "inline-flex",
+                      gap: "0.25rem",
+                      alignItems: "center",
+                      padding: "0.1rem 0.4rem",
+                      borderRadius: 999,
+                      border: "1px solid var(--border)",
+                      background: "var(--bg)",
+                      color: "var(--text)",
+                      fontSize: "0.78rem",
+                      maxWidth: 220,
+                    }}
+                    title={`${label}: ${v}`}
                   >
-                    ×
-                  </button>
-                </span>
-              ))}
+                    <strong>{label}:</strong>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = (selectedWidgetFilters[k] || []).filter((x) => x !== v);
+                        const next = { ...selectedWidgetFilters };
+                        if (updated.length > 0) {
+                          next[k] = updated;
+                        } else {
+                          delete next[k];
+                        }
+                        setSelectedWidgetFilters(next);
+                      }}
+                      style={{ border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", fontSize: "0.9rem", lineHeight: 1, padding: 0 }}
+                      aria-label={`Remove ${v}`}
+                      title="Remove"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ));
+              })}
             </div>
           )}
 
           {categories.length === 0 ? (
-            <p style={{ color: "var(--muted)", margin: 0 }}>No grouped data available.</p>
+            <div
+              style={{
+                padding: "2rem 1rem",
+                textAlign: "center",
+                background: "var(--bg-subtle, #f8fafc)",
+                borderRadius: "8px",
+                border: "1px dashed var(--border)",
+                margin: "0.5rem 0",
+              }}
+            >
+              <div style={{ fontWeight: 700, color: "var(--text, #1e293b)", fontSize: "1.125rem" }}>
+                No data submitted against this period.
+              </div>
+            </div>
           ) : viewerView === "bar" ? (
             <div style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 840 }}>
               <svg
@@ -4406,7 +4619,7 @@ function KpiMultiLineTableWidgetInner({
   dashboardId?: number;
 }) {
   const token = getAccessToken();
-  const { fetchDataWithDate, periodOptions, selectedPeriod } = useDashboardCustomization();
+  const { fetchDataWithDate, periodOptions, selectedPeriod, selectedPeriodType, selectedColumnValue, selectedDashboardFilterValues, requestGeneration } = useDashboardCustomization();
   const setViewerMenu = useWidgetViewerMenuSetter();
   const setHeaderAddon = useWidgetHeaderAddonSetter();
   const [viewerYear, setViewerYear] = useState<any>(() => {
@@ -4568,7 +4781,18 @@ function KpiMultiLineTableWidgetInner({
   useEffect(() => {
     if (!token) return;
     setLoading(true);
-    setError(null);
+    const isByDefault = selectedPeriodType === "by_default";
+    const effectiveTablePeriod = fetchDataWithDate && selectedPeriod ? selectedPeriod : viewerYear;
+    const sanitizedTableYear = isByDefault
+      ? (/^\d{4}$/.test(String(effectiveTablePeriod)) ? effectiveTablePeriod : undefined)
+      : effectiveTablePeriod;
+    const tableOverrides = {
+      year: sanitizedTableYear,
+      period_type: selectedPeriodType || undefined,
+      by_default: isByDefault,
+      selected_column_value: selectedColumnValue || undefined,
+      normal_filters: Object.keys(selectedDashboardFilterValues).length ? selectedDashboardFilterValues : undefined,
+    };
     if (isWidgetDataBundleEnabled()) {
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>), filters: viewerFilters };
@@ -4581,7 +4805,7 @@ function KpiMultiLineTableWidgetInner({
                 organization_id: organizationId,
                 dashboard_id: dashboardId,
                 widget: w,
-                overrides: { year: viewerYear },
+                overrides: tableOverrides,
                 page: page + 1,
                 page_size: Math.min(200, Math.max(1, pageSize)),
                 search: search || null,
@@ -4597,7 +4821,7 @@ function KpiMultiLineTableWidgetInner({
                 organization_id: organizationId,
                 ...(dashboardId != null ? { dashboard_id: dashboardId } : {}),
                 widget: w,
-                overrides: { year: viewerYear },
+                overrides: tableOverrides,
               },
               { signal: ac.signal }
             );
@@ -5024,7 +5248,20 @@ function KpiMultiLineTableWidgetInner({
             />
           </div>
           {total === 0 ? (
-            <p style={{ color: "var(--muted)", margin: 0 }}>No rows to show.</p>
+            <div
+              style={{
+                padding: "2rem 1rem",
+                textAlign: "center",
+                background: "var(--bg-subtle, #f8fafc)",
+                borderRadius: "8px",
+                border: "1px dashed var(--border)",
+                margin: "0.5rem 0",
+              }}
+            >
+              <div style={{ fontWeight: 700, color: "var(--text, #1e293b)", fontSize: "1.125rem" }}>
+                No data submitted against this period.
+              </div>
+            </div>
           ) : orderedKeys.length === 0 ? (
             <p style={{ color: "var(--muted)", margin: 0 }}>Select at least one column.</p>
           ) : (

@@ -132,6 +132,8 @@ def _compile_v2_one(
         return None
 
     op = normalize_filter_op(cond.get("op", "eq"))
+    if op == "in":
+        op = "eq"
     text_ops = {"eq", "neq", "contains", "not_contains", "starts_with", "ends_with"}
     cmp_ops = {"eq", "neq", "gt", "gte", "lt", "lte"}
     if op not in text_ops | cmp_ops:
@@ -161,6 +163,8 @@ def _compile_v2_one(
         return None
 
     vals_raw = cond.get("values")
+    if not vals_raw and isinstance(cond.get("value"), list):
+        vals_raw = cond.get("value")
     if isinstance(vals_raw, list) and len(vals_raw) > 1:
         if op not in ("eq", "neq"):
             return None
@@ -354,7 +358,7 @@ def compile_multiline_row_filters_sql(
 async def fetch_multiline_bar_agg_buckets(
     db: AsyncSession,
     *,
-    entry_id: int,
+    entry_id: int | list[int],
     multiline_field_id: int,
     group_sub_field_id: int,
     filter_sub_field_id: int | None,
@@ -363,6 +367,8 @@ async def fetch_multiline_bar_agg_buckets(
     filter_where_sql: str | None = None,
     filter_params: dict[str, Any] | None = None,
     filter_sid_params: list[str] | None = None,
+    date_sub_field_id: int | None = None,
+    date_range: tuple[date, date, str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     One SQL round-trip: GROUP BY group label [+ filter label], with counts and optional numeric sums.
@@ -395,6 +401,24 @@ async def fetch_multiline_bar_agg_buckets(
             alias = _wf_alias(p)
             extra_joins += f" LEFT JOIN kpi_multi_line_cells {alias} ON {alias}.row_id = r.id AND {alias}.sub_field_id = :{p}\n"
 
+    # Date range filtering join & where clause
+    date_join = ""
+    date_where = ""
+    if date_sub_field_id and date_range:
+        date_join = "LEFT JOIN kpi_multi_line_cells c_dt ON c_dt.row_id = r.id AND c_dt.sub_field_id = :dt_sid\n"
+        date_where = """AND (
+            (c_dt.value_date IS NOT NULL AND c_dt.value_date >= :dt_start AND c_dt.value_date < :dt_end)
+            OR
+            (c_dt.value_text IS NOT NULL AND TRIM(c_dt.value_text) <> '' AND TRIM(c_dt.value_text) >= :dt_start_str AND TRIM(c_dt.value_text) < :dt_end_str)
+        )\n"""
+
+    # Support single entry_id or list of entry_ids (spanning years)
+    is_multi_entry = isinstance(entry_id, (list, tuple, set))
+    if is_multi_entry:
+        entry_where = "r.entry_id = ANY(:eids)"
+    else:
+        entry_where = "r.entry_id = :eid"
+
     stmt = text(
         f"""
         SELECT
@@ -413,7 +437,9 @@ async def fetch_multiline_bar_agg_buckets(
           {join_cf}
           {join_cv}
           {extra_joins}
-          WHERE r.entry_id = :eid AND r.field_id = :mfid
+          {date_join}
+          WHERE {entry_where} AND r.field_id = :mfid
+            {date_where}
             {("AND (" + filter_where_sql + ")") if (filter_where_sql and str(filter_where_sql).strip()) else ""}
         ) x
         GROUP BY 1, 2
@@ -422,14 +448,24 @@ async def fetch_multiline_bar_agg_buckets(
     )
 
     params: dict[str, Any] = {
-        "eid": int(entry_id),
         "mfid": int(multiline_field_id),
         "gid": int(group_sub_field_id),
     }
+    if is_multi_entry:
+        params["eids"] = [int(x) for x in entry_id if x]
+    else:
+        params["eid"] = int(entry_id)
+
     if filter_sub_field_id:
         params["fid"] = int(filter_sub_field_id)
     if value_sub_field_id and agg in ("sum", "avg"):
         params["vid"] = int(value_sub_field_id)
+    if date_sub_field_id and date_range:
+        params["dt_sid"] = int(date_sub_field_id)
+        params["dt_start"] = date_range[0]
+        params["dt_end"] = date_range[1]
+        params["dt_start_str"] = date_range[0].isoformat()
+        params["dt_end_str"] = date_range[1].isoformat()
     if filter_params:
         params.update(filter_params)
 
@@ -445,3 +481,76 @@ async def fetch_multiline_bar_agg_buckets(
             }
         )
     return out
+
+
+async def fetch_multiline_single_value_agg(
+    db: AsyncSession,
+    *,
+    entry_id: int,
+    multiline_field_id: int,
+    value_sub_field_id: int | None = None,
+    agg: str = "count",
+    filter_where_sql: str | None = None,
+    filter_params: dict[str, Any] | None = None,
+    filter_sid_params: list[str] | None = None,
+) -> float | None:
+    """
+    Computes count, sum, or avg for a multi-line field in a single SQL query.
+    """
+    agg = (agg or "count").strip().lower()
+    if agg in ("count_rows", "count"):
+        agg = "count"
+    elif agg not in ("sum", "avg"):
+        agg = "count"
+
+    join_cv = ""
+    val_expr = "NULL::double precision"
+    if agg in ("sum", "avg") and value_sub_field_id:
+        join_cv = "LEFT JOIN kpi_multi_line_cells cv ON cv.row_id = r.id AND cv.sub_field_id = :vid"
+        val_expr = _numeric_sql("cv")
+
+    extra_joins = ""
+    if filter_sid_params:
+        for p in filter_sid_params:
+            alias = _wf_alias(p)
+            extra_joins += f" LEFT JOIN kpi_multi_line_cells {alias} ON {alias}.row_id = r.id AND {alias}.sub_field_id = :{p}\n"
+
+    if agg == "count":
+        agg_expr = "COUNT(*)::double precision"
+    elif agg == "sum":
+        agg_expr = "COALESCE(SUM(val_raw), 0)::double precision"
+    elif agg == "avg":
+        agg_expr = "AVG(val_raw)::double precision"
+    else:
+        agg_expr = "COUNT(*)::double precision"
+
+    stmt = text(
+        f"""
+        SELECT {agg_expr} AS val
+        FROM (
+          SELECT
+            r.id AS row_id,
+            {val_expr} AS val_raw
+          FROM kpi_multi_line_rows r
+          {join_cv}
+          {extra_joins}
+          WHERE r.entry_id = :eid AND r.field_id = :mfid
+            {("AND (" + filter_where_sql + ")") if (filter_where_sql and str(filter_where_sql).strip()) else ""}
+        ) x
+        """
+    )
+
+    params: dict[str, Any] = {
+        "eid": int(entry_id),
+        "mfid": int(multiline_field_id),
+    }
+    if value_sub_field_id and agg in ("sum", "avg"):
+        params["vid"] = int(value_sub_field_id)
+    if filter_params:
+        params.update(filter_params)
+
+    res = await db.execute(stmt, params)
+    row = res.mappings().first()
+    if not row or row["val"] is None:
+        return None
+    return float(row["val"])

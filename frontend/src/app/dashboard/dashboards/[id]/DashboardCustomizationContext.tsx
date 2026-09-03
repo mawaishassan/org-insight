@@ -44,11 +44,25 @@ interface DashboardCustomizationContextProps {
   periodOptions?: any[];
   selectedPeriod?: string;
   selectedPeriodType?: string;
-  /** Increments every time selectedPeriod or selectedPeriodType changes. Widgets use this
-   *  to associate requests with a configuration and discard stale responses. */
+  fetchDataWithColumn?: boolean;
+  columnFetchingConfig?: any;
+  selectedColumnValue: string;
+  setSelectedColumnValue: (val: string) => void;
+  selectedDashboardFilterValues: Record<string, string[]>;
+  setSelectedDashboardFilterValues: React.Dispatch<React.SetStateAction<Record<string, string[]>>>;
+  isFilterPanelOpen: boolean;
+  setIsFilterPanelOpen: (open: boolean) => void;
+  /** Increments every time selectedPeriod, selectedPeriodType, selectedColumnValue, or dashboard filters change. */
   requestGeneration: number;
   setWidgetLoading: (widgetId: string | number, isLoading: boolean) => void;
   isAnyWidgetLoading: boolean;
+  /** True until every registered widget has completed its very first data fetch.
+   *  Stays false on subsequent filter/period refreshes, allowing the UI to show
+   *  a slim progress bar instead of a full-page overlay on re-fetches. */
+  isInitialLoad: boolean;
+  /** True from mount until the very first cold load completes. Used to prevent
+   *  the empty-shell flash before any widget has registered and called setWidgetLoading. */
+  hasNeverLoaded: boolean;
 }
 
 const DashboardCustomizationContext = createContext<DashboardCustomizationContextProps | null>(null);
@@ -74,9 +88,19 @@ export function useDashboardCustomization() {
       fetchDataWithDate: false,
       periodOptions: [],
       selectedPeriod: "",
+      fetchDataWithColumn: false,
+      columnFetchingConfig: null,
+      selectedColumnValue: "",
+      setSelectedColumnValue: () => {},
+      selectedDashboardFilterValues: {},
+      setSelectedDashboardFilterValues: () => {},
+      isFilterPanelOpen: false,
+      setIsFilterPanelOpen: () => {},
       requestGeneration: 0,
       setWidgetLoading: () => {},
       isAnyWidgetLoading: false,
+      isInitialLoad: true,
+      hasNeverLoaded: true,
     };
   }
   return context;
@@ -92,6 +116,8 @@ export function DashboardCustomizationProvider({
   periodOptions = [],
   selectedPeriod = "",
   selectedPeriodType = "",
+  fetchDataWithColumn = false,
+  columnFetchingConfig = null,
 }: {
   children: React.ReactNode;
   dashboardId: number;
@@ -102,24 +128,32 @@ export function DashboardCustomizationProvider({
   periodOptions?: any[];
   selectedPeriod?: string;
   selectedPeriodType?: string;
+  fetchDataWithColumn?: boolean;
+  columnFetchingConfig?: any;
 }) {
   const token = getAccessToken();
   const [globalCustomizations, setGlobalCustomizations] = useState<Record<string, string>>({});
   const [widgetCustomizations, setWidgetCustomizations] = useState<Record<string, Record<string, string>>>({});
   const [isOrgAdmin, setIsOrgAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
-  // Monotonically increasing counter — increments on every period/type change so widgets
-  // can detect and discard stale in-flight responses.
+  
+  // Specific column filter & Dashboard normal filter states
+  const [selectedColumnValue, setSelectedColumnValue] = useState<string>("");
+  const [selectedDashboardFilterValues, setSelectedDashboardFilterValues] = useState<Record<string, string[]>>({});
+  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
+
+  // Monotonically increasing counter — increments on period, column, or filter changes
   const [requestGeneration, setRequestGeneration] = useState(0);
   const prevConfigRef = useRef("");
 
   useEffect(() => {
-    const key = `${selectedPeriodType}::${selectedPeriod}`;
+    const filterKey = JSON.stringify(selectedDashboardFilterValues);
+    const key = `${selectedPeriodType}::${selectedPeriod}::${selectedColumnValue}::${filterKey}`;
     if (prevConfigRef.current !== key) {
       prevConfigRef.current = key;
       setRequestGeneration((g) => g + 1);
     }
-  }, [selectedPeriodType, selectedPeriod]);
+  }, [selectedPeriodType, selectedPeriod, selectedColumnValue, selectedDashboardFilterValues]);
 
   const DEFAULT_COLORS = useMemo(() => [
     "#4E79A7", // Blue
@@ -335,6 +369,11 @@ export function DashboardCustomizationProvider({
   };
 
   const [loadingWidgets, setLoadingWidgets] = useState<Set<string | number>>(new Set());
+  // Track which widget IDs have completed their very first load
+  const everLoadedRef = useRef<Set<string | number>>(new Set());
+  // Starts true — flips to false once every registered widget has finished its first fetch.
+  // Used to gate the full-page initial-load spinner (prevents empty-shell flash).
+  const [hasNeverLoaded, setHasNeverLoaded] = useState(true);
 
   const setWidgetLoading = useCallback((widgetId: string | number, isLoading: boolean) => {
     setLoadingWidgets((prev) => {
@@ -342,6 +381,8 @@ export function DashboardCustomizationProvider({
       if (isLoading) {
         next.add(widgetId);
       } else {
+        // Mark this widget as having completed its first load
+        everLoadedRef.current.add(widgetId);
         next.delete(widgetId);
       }
       return next;
@@ -349,6 +390,20 @@ export function DashboardCustomizationProvider({
   }, []);
 
   const isAnyWidgetLoading = loadingWidgets.size > 0;
+
+  // isInitialLoad: true until every currently-loading widget has completed at least once.
+  // Once a widget transitions loading→done for the first time, it's in everLoadedRef.
+  // isInitialLoad flips to false as soon as all widgets that are currently loading
+  // have been seen before (i.e., this is a re-fetch, not a cold load).
+  const isInitialLoad = isAnyWidgetLoading &&
+    Array.from(loadingWidgets).some((id) => !everLoadedRef.current.has(id));
+
+  // Flip hasNeverLoaded → false once initial load is complete
+  useEffect(() => {
+    if (hasNeverLoaded && !isInitialLoad && !isAnyWidgetLoading) {
+      setHasNeverLoaded(false);
+    }
+  }, [hasNeverLoaded, isInitialLoad, isAnyWidgetLoading]);
 
   const openEditModal = (originalLabel: string, widgetId?: string) => {
     setActiveLabelToEdit({ originalLabel, widgetId });
@@ -379,9 +434,19 @@ export function DashboardCustomizationProvider({
         periodOptions,
         selectedPeriod,
         selectedPeriodType,
+        fetchDataWithColumn,
+        columnFetchingConfig,
+        selectedColumnValue,
+        setSelectedColumnValue,
+        selectedDashboardFilterValues,
+        setSelectedDashboardFilterValues,
+        isFilterPanelOpen,
+        setIsFilterPanelOpen,
         requestGeneration,
         setWidgetLoading,
         isAnyWidgetLoading,
+        isInitialLoad,
+        hasNeverLoaded,
       }}
     >
       {children}

@@ -889,6 +889,7 @@ class KpiMultiLineRow(Base):
             "row_index",
             name="uq_kpi_multi_line_rows_entry_field_row_index",
         ),
+        Index("ix_mli_rows_entry_field", "entry_id", "field_id"),
     )
 
     entry = relationship("KPIEntry", lazy="selectin")
@@ -926,6 +927,20 @@ class KpiMultiLineCell(Base):
             "row_id",
             "sub_field_id",
             name="uq_kpi_multi_line_cells_row_sub_field",
+        ),
+        Index("ix_mli_cells_sub_field_val_date", "sub_field_id", "value_date"),
+        Index(
+            "ix_mli_cells_sub_field_val_text_short",
+            "sub_field_id",
+            "value_text",
+            postgresql_where=Column("value_text").isnot(None),
+        ),
+        Index(
+            "ix_mli_cells_row_sub_field_val_text",
+            "row_id",
+            "sub_field_id",
+            "value_text",
+            postgresql_where=Column("value_text").isnot(None),
         ),
     )
 
@@ -1208,6 +1223,8 @@ class Dashboard(Base):
     layout = Column(JSON, nullable=True)  # list of widgets + layout metadata
     fetch_data_with_date = Column(Boolean, default=False, nullable=False, server_default="false")
     date_fetching_config = Column(JSON, nullable=True)
+    fetch_data_with_column = Column(Boolean, default=False, nullable=False, server_default="false")
+    column_fetching_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -1234,6 +1251,14 @@ class DashboardAccessPermission(Base):
     )
     can_view = Column(Boolean, default=True, nullable=False)
     can_edit = Column(Boolean, default=False, nullable=False)
+    can_load_lms = Column(Boolean, default=True, nullable=False, server_default="true")
+    can_change_period = Column(Boolean, default=True, nullable=False, server_default="true")
+    can_use_unique_value = Column(Boolean, default=False, nullable=False, server_default="false")
+    filter_kpi_id = Column(Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=True, index=True)
+    filter_mli_id = Column(Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=True, index=True)
+    filter_sub_field_key = Column(String(100), nullable=True)
+    filter_column_configs = Column(JSON, nullable=True)
+    filter_operator = Column(String(50), default="=", nullable=False, server_default="=")
     created_at = Column(DateTime, default=utc_now)
 
     __table_args__ = (UniqueConstraint("dashboard_id", "user_id", name="uq_dashboard_user"),)

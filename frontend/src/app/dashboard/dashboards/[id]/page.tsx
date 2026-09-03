@@ -20,6 +20,9 @@ interface DashboardDetail {
   description: string | null;
   layout: any;
   fetch_data_with_date?: boolean;
+  date_fetching_config?: any;
+  fetch_data_with_column?: boolean;
+  column_fetching_config?: any;
 }
 
 function asWidgets(layout: any): Widget[] {
@@ -81,13 +84,58 @@ export default function DashboardViewPage() {
   const [selectedPeriodType, setSelectedPeriodType] = useState<string>("");
   const [selectedPeriod, setSelectedPeriod] = useState<string>("");
 
+  const [userPermissions, setUserPermissions] = useState<{
+    can_view: boolean;
+    can_edit: boolean;
+    can_load_lms: boolean;
+    can_change_period: boolean;
+    can_use_unique_value: boolean;
+  }>({
+    can_view: true,
+    can_edit: true,
+    can_load_lms: true,
+    can_change_period: true,
+    can_use_unique_value: true,
+  });
+
+  useEffect(() => {
+    if (!id || !token) return;
+    const query = organizationId ? `?organization_id=${organizationId}` : "";
+    api<{
+      can_view: boolean;
+      can_edit: boolean;
+      can_load_lms: boolean;
+      can_change_period: boolean;
+      can_use_unique_value: boolean;
+    }>(`/dashboards/${id}/my-permissions${query}`, { token })
+      .then(setUserPermissions)
+      .catch(() => {});
+  }, [id, token, organizationId]);
+
   useEffect(() => {
     if (!id || !token) return;
     setLoading(true);
     setError(null);
     const query = organizationId ? `?organization_id=${organizationId}` : "";
     api<DashboardDetail>(`/dashboards/${id}${query}`, { token })
-      .then(setDashboard)
+      .then(async (d) => {
+        setDashboard(d);
+        const dConfig = d?.date_fetching_config || {};
+        if (dConfig.default_period_type) {
+          setSelectedPeriodType(dConfig.default_period_type);
+        }
+        if (dConfig.default_year) {
+          setSelectedPeriod(String(dConfig.default_year).trim());
+        }
+        if (d?.organization_id) {
+          try {
+            const orgData = await api<any>(`/organizations/${d.organization_id}`, { token });
+            setOrg(orgData);
+          } catch (e) {
+            console.error("Failed to load org details", e);
+          }
+        }
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load dashboard"))
       .finally(() => setLoading(false));
   }, [id, token, organizationId]);
@@ -100,14 +148,8 @@ export default function DashboardViewPage() {
       .catch(() => setSyncInfo(null));
   }, [id, token, organizationId]);
 
-  useEffect(() => {
-    if (!token || !dashboard?.organization_id) return;
-    api<any>(`/organizations/${dashboard.organization_id}`, { token })
-      .then((orgData) => {
-        setOrg(orgData);
-      })
-      .catch((e) => console.error("Failed to load org details", e));
-  }, [token, dashboard?.organization_id]);
+  // NOTE: org is already fetched inside the dashboard fetch callback above.
+  // A separate useEffect here was causing a duplicate /organizations call on every load.
 
   const customPeriods = useMemo(() => {
     if (!org) return [];
@@ -129,14 +171,27 @@ export default function DashboardViewPage() {
   }, [org]);
 
   useEffect(() => {
-    if (customPeriods.length > 0) {
-      if (!selectedPeriodType || (selectedPeriodType !== "by_default" && !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType))) {
+    if (!dashboard) return;
+    const dConfig = dashboard.date_fetching_config || {};
+    const defaultType = dConfig.default_period_type;
+
+    if (!selectedPeriodType) {
+      if (defaultType) {
+        setSelectedPeriodType(defaultType);
+      } else if (customPeriods.length > 0) {
         setSelectedPeriodType(customPeriods[0].custom_period_name);
+      } else {
+        setSelectedPeriodType("by_default");
       }
-    } else {
-      setSelectedPeriodType("by_default");
+    } else if (
+      selectedPeriodType !== "by_default" &&
+      customPeriods.length > 0 &&
+      !customPeriods.some((p: any) => p.custom_period_name === selectedPeriodType)
+    ) {
+      // If current type no longer exists in org periods, fall back
+      setSelectedPeriodType(defaultType || customPeriods[0].custom_period_name);
     }
-  }, [customPeriods, selectedPeriodType]);
+  }, [dashboard, customPeriods, selectedPeriodType]);
 
   const activePeriodConfig = useMemo(() => {
     return customPeriods.find((p: any) => p.custom_period_name === selectedPeriodType) || null;
@@ -157,6 +212,11 @@ export default function DashboardViewPage() {
 
   const findDefaultPeriod = (opts: any[]) => {
     if (!opts || opts.length === 0) return "";
+    const dConfig = dashboard?.date_fetching_config || {};
+    const configuredYear = dConfig.default_year ? String(dConfig.default_year).trim() : "";
+    if (configuredYear && opts.some((opt: any) => opt.value === configuredYear)) {
+      return configuredYear;
+    }
     const currentYear = new Date().getFullYear();
     const currentYearStr = String(currentYear);
     const prevYearStr = String(currentYear - 1);
@@ -183,13 +243,11 @@ export default function DashboardViewPage() {
 
   useEffect(() => {
     if (periodOptions.length > 0) {
-      if (!selectedPeriod || (selectedPeriodType !== "by_default" && selectedPeriod === "by_default") || !periodOptions.some(opt => opt.value === selectedPeriod)) {
+      if (!selectedPeriod || !periodOptions.some(opt => opt.value === selectedPeriod)) {
         setSelectedPeriod(findDefaultPeriod(periodOptions));
       }
-    } else {
-      setSelectedPeriod("");
     }
-  }, [periodOptions, selectedPeriod, selectedPeriodType]);
+  }, [periodOptions, selectedPeriod]);
 
   const handleSync = async () => {
     if (!id || !token || syncing) return;
@@ -302,47 +360,45 @@ export default function DashboardViewPage() {
 
   if (loading) {
     return (
-      <div style={{ minHeight: "400px", position: "relative" }}>
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 9999,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(248, 250, 252, 0.75)",
+          backdropFilter: "blur(12px)",
+          WebkitBackdropFilter: "blur(12px)",
+        }}
+      >
         <div
+          className="effective-spinner"
           style={{
-            position: "fixed",
-            top: "50%",
-            left: "50%",
-            transform: "translate(-50%, -50%)",
-            zIndex: 100,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            pointerEvents: "none",
+            width: 52,
+            height: 52,
+            borderWidth: 4,
+          }}
+        />
+        <span
+          className="effective-spinner-text"
+          style={{
+            marginTop: "1rem",
+            fontSize: "0.9rem",
+            fontWeight: 600,
+            color: "#1e293b",
+            background: "var(--surface, #ffffff)",
+            padding: "0.4rem 1rem",
+            borderRadius: 999,
+            boxShadow: "0 4px 14px rgba(0,0,0,0.08)",
+            border: "1px solid var(--border, #e2e8f0)",
+            whiteSpace: "nowrap",
           }}
         >
-          <div
-            className="effective-spinner"
-            style={{
-              width: 48,
-              height: 48,
-              borderWidth: 3.5,
-            }}
-          />
-          <span
-            className="effective-spinner-text"
-            style={{
-              marginTop: "0.85rem",
-              fontSize: "0.875rem",
-              fontWeight: 600,
-              color: "#1e293b",
-              background: "var(--surface)",
-              padding: "0.35rem 0.85rem",
-              borderRadius: 999,
-              boxShadow: "var(--shadow-md, 0 4px 12px rgba(0,0,0,0.05))",
-              border: "1px solid var(--border)",
-              whiteSpace: "nowrap",
-            }}
-          >
-            Loading dashboard data...
-          </span>
-        </div>
+          Loading dashboard data...
+        </span>
       </div>
     );
   }
@@ -359,10 +415,13 @@ export default function DashboardViewPage() {
       periodOptions={periodOptions}
       selectedPeriod={selectedPeriod}
       selectedPeriodType={selectedPeriodType}
+      fetchDataWithColumn={!!dashboard.fetch_data_with_column}
+      columnFetchingConfig={dashboard.column_fetching_config}
     >
       <WidgetFullScreenNavigationProvider widgets={widgets}>
         <DashboardViewContent
           dashboard={dashboard}
+          userPermissions={userPermissions}
           syncInfo={syncInfo}
           syncing={syncing}
           handleSync={handleSync}
@@ -383,6 +442,7 @@ export default function DashboardViewPage() {
 
 function DashboardViewContent({
   dashboard,
+  userPermissions,
   syncInfo,
   syncing,
   handleSync,
@@ -397,6 +457,13 @@ function DashboardViewContent({
   periodOptions,
 }: {
   dashboard: DashboardDetail;
+  userPermissions: {
+    can_view: boolean;
+    can_edit: boolean;
+    can_load_lms: boolean;
+    can_change_period: boolean;
+    can_use_unique_value: boolean;
+  };
   syncInfo: { has_odoo_graphs: boolean } | null;
   syncing: boolean;
   handleSync: () => void;
@@ -409,13 +476,49 @@ function DashboardViewContent({
   setSelectedPeriod: (s: string) => void;
   customPeriods: any[];
   periodOptions: any[];
-}) {  const { isOrgAdmin, openGlobalModal, isAnyWidgetLoading } = useDashboardCustomization();
+}) {
+  const {
+    isOrgAdmin,
+    openGlobalModal,
+    isAnyWidgetLoading,
+    isInitialLoad,
+    hasNeverLoaded,
+    selectedColumnValue,
+    setSelectedColumnValue,
+    selectedDashboardFilterValues,
+    setSelectedDashboardFilterValues,
+    isFilterPanelOpen,
+    setIsFilterPanelOpen,
+  } = useDashboardCustomization();
   const token = getAccessToken();
+
+  // Specific column data fetching state
+  const [columnValues, setColumnValues] = useState<string[]>([]);
+  const [columnLoading, setColumnLoading] = useState(false);
+  const columnConfig = dashboard.column_fetching_config || {};
+  const specificColumnName = columnConfig.column_name || columnConfig.column_key || "Department";
+
+  useEffect(() => {
+    if (!dashboard.fetch_data_with_column || !dashboard.id || !token) return;
+    setColumnLoading(true);
+    const q = dashboard.organization_id ? `?organization_id=${dashboard.organization_id}` : "";
+    api<{ ok: boolean; column_key: string; values: string[] }>(`/dashboards/${dashboard.id}/column-values${q}`, { token })
+      .then((res) => {
+        if (res?.values && Array.isArray(res.values)) {
+          setColumnValues(res.values);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to load column values", err);
+      })
+      .finally(() => setColumnLoading(false));
+  }, [dashboard.fetch_data_with_column, dashboard.id, dashboard.organization_id, token]);
+
 
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem", flexWrap: "wrap", gap: "0.75rem" }}>
         <div>
           <h2 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 600 }}>{dashboard.name}</h2>
           {dashboard.description && (
@@ -424,13 +527,47 @@ function DashboardViewContent({
             </p>
           )}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+          {/* Specific Column Data Fetching Filter */}
+          {dashboard.fetch_data_with_column && (
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>
+                {specificColumnName}:
+              </span>
+              <select
+                value={selectedColumnValue}
+                onChange={(e) => setSelectedColumnValue(e.target.value)}
+                disabled={columnLoading}
+                style={{
+                  padding: "0.4rem 0.75rem",
+                  borderRadius: "6px",
+                  border: selectedColumnValue ? "1.5px solid var(--accent, #3b82f6)" : "1px solid var(--border)",
+                  fontSize: "0.875rem",
+                  background: selectedColumnValue ? "rgba(59, 130, 246, 0.06)" : "var(--surface)",
+                  color: selectedColumnValue ? "var(--accent, #2563eb)" : "inherit",
+                  fontWeight: selectedColumnValue ? 600 : 400,
+                  outline: "none",
+                  cursor: "pointer",
+                }}
+              >
+                <option value="">All ({specificColumnName})</option>
+                {columnValues.map((val) => (
+                  <option key={val} value={val}>
+                    {val}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Date-based reporting period selectors */}
           {dashboard.fetch_data_with_date && (
-            <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>Period Type:</span>
                 <select
                   value={selectedPeriodType}
+                  disabled={!userPermissions.can_change_period}
                   onChange={(e) => setSelectedPeriodType(e.target.value)}
                   style={{
                     padding: "0.4rem 0.75rem",
@@ -438,21 +575,36 @@ function DashboardViewContent({
                     border: "1px solid var(--border)",
                     fontSize: "0.875rem",
                     background: "var(--surface)",
-                    outline: "none"
+                    outline: "none",
+                    opacity: !userPermissions.can_change_period ? 0.65 : 1,
+                    cursor: !userPermissions.can_change_period ? "not-allowed" : "pointer",
                   }}
                 >
-                  {customPeriods.map((cp: any) => (
-                    <option key={cp.custom_period_name} value={cp.custom_period_name}>
-                      {cp.custom_period_name}
-                    </option>
-                  ))}
-                  <option value="by_default">By Default</option>
+                  {(() => {
+                    const dbAllowed = dashboard.date_fetching_config?.allowed_period_types;
+                    const allowedTypes = userPermissions.can_change_period
+                      ? ["by_default", ...customPeriods.map((c: any) => c.custom_period_name)]
+                      : (dbAllowed ? (dbAllowed.includes("by_default") ? dbAllowed : ["by_default", ...dbAllowed]) : ["by_default", ...customPeriods.map((c: any) => c.custom_period_name)]);
+                    return (
+                      <>
+                        <option value="by_default">Data Entry</option>
+                        {customPeriods
+                          .filter((cp: any) => allowedTypes.includes(cp.custom_period_name))
+                          .map((cp: any) => (
+                            <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                              {cp.custom_period_name}
+                            </option>
+                          ))}
+                      </>
+                    );
+                  })()}
                 </select>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 <span style={{ fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>Reporting Period:</span>
                 <select
                   value={selectedPeriod}
+                  disabled={!userPermissions.can_change_period}
                   onChange={(e) => setSelectedPeriod(e.target.value)}
                   style={{
                     padding: "0.4rem 0.75rem",
@@ -460,7 +612,9 @@ function DashboardViewContent({
                     border: "1px solid var(--border)",
                     fontSize: "0.875rem",
                     background: "var(--surface)",
-                    outline: "none"
+                    outline: "none",
+                    opacity: !userPermissions.can_change_period ? 0.65 : 1,
+                    cursor: !userPermissions.can_change_period ? "not-allowed" : "pointer",
                   }}
                 >
                   <option value="">Select period...</option>
@@ -471,8 +625,14 @@ function DashboardViewContent({
                   ))}
                 </select>
               </div>
+              {!userPermissions.can_change_period && (
+                <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontStyle: "italic" }}>
+                  🔒 Period locked by admin configuration
+                </span>
+              )}
             </div>
           )}
+
           {isOrgAdmin && (
             <button
               type="button"
@@ -496,9 +656,152 @@ function DashboardViewContent({
         </div>
       </div>
 
-      {/* Main dashboard page section with relative positioning for local loading overlays */}
+      {/* Active Specific Column Filter Chip Bar */}
+      {selectedColumnValue && (
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap", padding: "0.5rem 0.75rem", background: "var(--surface)", borderRadius: "8px", border: "1px solid var(--border)" }}>
+          <span style={{ fontSize: "0.8rem", color: "var(--muted)", fontWeight: 600 }}>Active Filter:</span>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "0.35rem",
+              padding: "0.2rem 0.6rem",
+              background: "rgba(59, 130, 246, 0.1)",
+              border: "1px solid rgba(59, 130, 246, 0.3)",
+              color: "#2563eb",
+              borderRadius: 999,
+              fontSize: "0.8rem",
+              fontWeight: 500,
+            }}
+          >
+            <strong>{specificColumnName}:</strong> {selectedColumnValue}
+            <button
+              type="button"
+              onClick={() => setSelectedColumnValue("")}
+              style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", padding: 0, fontSize: "0.9rem", lineHeight: 1 }}
+              title="Remove filter"
+            >
+              ✕
+            </button>
+          </span>
+          <button
+            type="button"
+            onClick={() => setSelectedColumnValue("")}
+            style={{
+              marginLeft: "auto",
+              background: "none",
+              border: "none",
+              color: "#ef4444",
+              fontSize: "0.8rem",
+              fontWeight: 600,
+              cursor: "pointer",
+              textDecoration: "underline",
+            }}
+          >
+            Clear Filter
+          </button>
+        </div>
+      )}
+
+      {/* === FULL-PAGE SPINNER: shown during initial cold load to prevent empty-shell flash === */}
+      {(hasNeverLoaded || isInitialLoad) && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 9998,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(248, 250, 252, 0.75)",
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+          }}
+        >
+          <div
+            className="effective-spinner"
+            style={{ width: 52, height: 52, borderWidth: 4 }}
+          />
+          <span
+            className="effective-spinner-text"
+            style={{
+              marginTop: "1rem",
+              fontSize: "0.9rem",
+              fontWeight: 600,
+              color: "#1e293b",
+              background: "var(--surface, #ffffff)",
+              padding: "0.4rem 1rem",
+              borderRadius: 999,
+              boxShadow: "0 4px 14px rgba(0,0,0,0.08)",
+              border: "1px solid var(--border, #e2e8f0)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Loading dashboard data...
+          </span>
+        </div>
+      )}
+
+      {/* Main dashboard page section with relative positioning for local backdrop blur */}
       <div style={{ position: "relative", minHeight: "220px", width: "100%" }}>
-        {syncInfo?.has_odoo_graphs && (
+        {/* === REFRESH OVERLAY: shown during filter/period re-fetches over widgets only (header remains clear and sharp) === */}
+        {isAnyWidgetLoading && !isInitialLoad && !hasNeverLoaded && (
+          <>
+            {/* Backdrop blur covering widgets area */}
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                zIndex: 49,
+                background: "rgba(248, 250, 252, 0.65)",
+                backdropFilter: "blur(8px)",
+                WebkitBackdropFilter: "blur(8px)",
+                borderRadius: "var(--radius, 12px)",
+                pointerEvents: "auto",
+              }}
+            />
+            {/* Centered spinner badge pinned to the viewport center */}
+            <div
+              style={{
+                position: "fixed",
+                top: "50%",
+                left: "50%",
+                transform: "translate(-50%, -50%)",
+                zIndex: 100,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "var(--surface, #ffffff)",
+                padding: "1.25rem 2rem",
+                borderRadius: "1rem",
+                boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
+                border: "1px solid var(--border, #e2e8f0)",
+                pointerEvents: "none",
+              }}
+            >
+              <div
+                className="effective-spinner"
+                style={{ width: 50, height: 50, borderWidth: 4 }}
+              />
+              <span
+                className="effective-spinner-text"
+                style={{
+                  marginTop: "0.85rem",
+                  fontSize: "1.15rem",
+                  fontWeight: 700,
+                  color: "#0f172a",
+                  letterSpacing: "0.01em",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Applying filter...
+              </span>
+            </div>
+          </>
+        )}
+        {syncInfo?.has_odoo_graphs && userPermissions.can_load_lms && (
           <div
             style={{
               display: "flex",
@@ -562,64 +865,8 @@ function DashboardViewContent({
           </div>
         )}
 
-        {/* Local Loading Overlay */}
-        {isAnyWidgetLoading && (
-          <>
-            <div
-              style={{
-                position: "absolute",
-                inset: "-0.5rem",
-                zIndex: 99,
-                background: "rgba(255, 255, 255, 0.55)",
-                backdropFilter: "blur(4px)",
-                WebkitBackdropFilter: "blur(4px)",
-                pointerEvents: "auto",
-                transition: "all 0.25s ease",
-                borderRadius: "8px",
-              }}
-            />
-            <div
-              style={{
-                position: "fixed",
-                top: "50%",
-                left: "50%",
-                transform: "translate(-50%, -50%)",
-                zIndex: 100,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                pointerEvents: "none",
-              }}
-            >
-              <div
-                className="effective-spinner"
-                style={{
-                  width: 48,
-                  height: 48,
-                  borderWidth: 3.5,
-                }}
-              />
-              <span
-                className="effective-spinner-text"
-                style={{
-                  marginTop: "0.85rem",
-                  fontSize: "0.875rem",
-                  fontWeight: 600,
-                  color: "#1e293b",
-                  background: "var(--surface)",
-                  padding: "0.35rem 0.85rem",
-                  borderRadius: 999,
-                  boxShadow: "var(--shadow-md, 0 4px 12px rgba(0,0,0,0.05))",
-                  border: "1px solid var(--border)",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                Loading dashboard data...
-              </span>
-            </div>
-          </>
-        )}
+        {/* Backdrop blur removed — per-widget skeletons handle the initial load state;
+            the slim top-bar handles refresh state. Full-page blur was blocking interaction. */}
       </div>
     </div>
   );

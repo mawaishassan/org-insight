@@ -653,7 +653,7 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
         for fv in filter_candidates:
             c_low = cell_str.lower()
             f_low = fv.lower()
-            if op_norm == "eq" and (cell_str == fv or c_low == f_low):
+            if op_norm in ("eq", "in") and (cell_str == fv or c_low == f_low):
                 return True
             if op_norm == "contains" and f_low in c_low:
                 return True
@@ -667,7 +667,7 @@ def _row_matches(row: dict[str, Any], filter_sub_key: str, op: str, filter_value
             return all(fv not in cell_str for fv in filter_candidates)
         return False
 
-    if op_norm == "eq":
+    if op_norm in ("eq", "in"):
         return any(_match_text(c) for c in cell_candidates)
     if op_norm == "neq":
         return all(_match_text(c) for c in cell_candidates)
@@ -950,25 +950,34 @@ def _make_evaluator(
     def _eval_compare(node):
         if isinstance(node.left, ast.Name) and len(node.ops) == 1:
             left_name = node.left.id
-            op_node = node.ops[0]
-            right_val = s._eval(node.comparators[0])
-            op_map = {
-                ast.Eq: "op_eq",
-                ast.NotEq: "op_neq",
-                ast.Gt: "op_gt",
-                ast.GtE: "op_gte",
-                ast.Lt: "op_lt",
-                ast.LtE: "op_lte",
-            }
-            op_str = op_map.get(type(op_node))
-            if op_str:
-                return (left_name, op_str, right_val)
+            if left_name not in field_values and (current_row is None or left_name not in current_row):
+                op_node = node.ops[0]
+                right_val = s._eval(node.comparators[0])
+                op_map = {
+                    ast.Eq: "op_eq",
+                    ast.NotEq: "op_neq",
+                    ast.Gt: "op_gt",
+                    ast.GtE: "op_gte",
+                    ast.Lt: "op_lt",
+                    ast.LtE: "op_lte",
+                }
+                op_str = op_map.get(type(op_node))
+                if op_str:
+                    return (left_name, op_str, right_val)
         left = s._eval(node.left)
         for op, comp in zip(node.ops, node.comparators):
             right = s._eval(comp)
-            if isinstance(op, ast.Eq) and left != right:
+            if isinstance(op, ast.Eq) and not (left == right):
                 return False
-            elif isinstance(op, ast.NotEq) and left == right:
+            elif isinstance(op, ast.NotEq) and not (left != right):
+                return False
+            elif isinstance(op, ast.Lt) and not (left < right):
+                return False
+            elif isinstance(op, ast.LtE) and not (left <= right):
+                return False
+            elif isinstance(op, ast.Gt) and not (left > right):
+                return False
+            elif isinstance(op, ast.GtE) and not (left >= right):
                 return False
             left = right
         return True
@@ -1470,7 +1479,7 @@ def _make_evaluator(
         "UNIQUE_COUNT_KPI_ITEMS_WHERE": count_unique_kpi_items_where,
         "MIN_KPI_ITEMS_WHERE": min_KPI_items_where if "min_KPI_items_where" in locals() else min_kpi_items_where,
         "MAX_KPI_ITEMS_WHERE": max_kpi_items_where,
-        "KPI_FIELD": kpi_field,
+        "IF": lambda cond, t_val, f_val=None: t_val if (cond is not None and cond is not False and cond != 0 and str(cond).lower() != "false" and str(cond).strip() != "") else f_val,
         "FETCH_ITEMS_WHERE": fetch_items_where,
         "FETCH_KPI_ITEMS_WHERE": fetch_kpi_items_where,
     }

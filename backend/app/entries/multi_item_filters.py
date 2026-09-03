@@ -52,24 +52,30 @@ def eval_v2_condition_row(
         return cmp_vals(resolved)
 
     vals_raw = cond.get("values")
+    if not vals_raw and isinstance(cond.get("value"), list):
+        vals_raw = cond.get("value")
+    effective_op = "eq" if op == "in" else op
     if isinstance(vals_raw, list) and len(vals_raw) > 1:
-        if op == "eq":
+        if effective_op == "eq":
             return any(match_cell_value(cell, "eq", v) for v in vals_raw)
-        if op == "neq":
+        if effective_op == "neq":
             return all(match_cell_value(cell, "neq", v) for v in vals_raw)
-        return match_cell_value(cell, op, vals_raw[0])
-    return match_cell_value(cell, op, cond.get("value"))
+        return match_cell_value(cell, effective_op, vals_raw[0])
+    return match_cell_value(cell, effective_op, cond.get("value"))
 
 
 def _eval_compare_ops(resolved: Any, op: str, cond: dict[str, Any]) -> bool:
     vals_raw = cond.get("values")
+    if not vals_raw and isinstance(cond.get("value"), list):
+        vals_raw = cond.get("value")
+    effective_op = "eq" if op == "in" else op
     if isinstance(vals_raw, list) and len(vals_raw) > 1:
-        if op == "eq":
+        if effective_op == "eq":
             return any(match_cell_value(resolved, "eq", v) for v in vals_raw)
-        if op == "neq":
+        if effective_op == "neq":
             return all(match_cell_value(resolved, "neq", v) for v in vals_raw)
-        return match_cell_value(resolved, op, vals_raw[0])
-    return match_cell_value(resolved, op, cond.get("value"))
+        return match_cell_value(resolved, effective_op, vals_raw[0])
+    return match_cell_value(resolved, effective_op, cond.get("value"))
 
 
 def eval_v2_conditions(

@@ -151,6 +151,8 @@ type Widget =
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
       filter_label?: string;
+      filter_sub_field_keys?: string[];
+      filter_labels?: Record<string, string>;
       filters?: MultiItemsFilterPayloadV2 | null;
       full_width?: boolean;
       col_span?: number;
@@ -183,6 +185,8 @@ type Widget =
       value_sub_field_key?: string;
       filter_sub_field_key?: string;
       filter_label?: string;
+      filter_sub_field_keys?: string[];
+      filter_labels?: Record<string, string>;
       filters?: MultiItemsFilterPayloadV2 | null;
       full_width?: boolean;
       col_span?: number;
@@ -215,6 +219,10 @@ type Widget =
       allow_custom_colors?: boolean;
       bg_color?: string;
       fg_color?: string;
+      filter_sub_field_key?: string;
+      filter_label?: string;
+      filter_sub_field_keys?: string[];
+      filter_labels?: Record<string, string>;
       filters?: MultiItemsFilterPayloadV2 | null;
       full_width?: boolean;
       col_span?: number;
@@ -228,6 +236,10 @@ type Widget =
       period_key?: string | null;
       source_field_key: string;
       sub_field_keys: string[];
+      filter_sub_field_key?: string;
+      filter_label?: string;
+      filter_sub_field_keys?: string[];
+      filter_labels?: Record<string, string>;
       /** Viewer row limit for the embedded widget (design-time setting). */
       rows_limit?: number;
       /** Display order for combined columns (primary + join:...). */
@@ -443,6 +455,8 @@ function DashboardDesignContent({
   const [colorMappings, setColorMappings] = useState<Record<string, string>>(() => dashboard.layout?.color_mappings ?? {});
   const [fetchDataWithDate, setFetchDataWithDate] = useState<boolean>(() => dashboard.fetch_data_with_date ?? false);
   const [dateFetchingConfig, setDateFetchingConfig] = useState<any>(() => dashboard.date_fetching_config ?? {});
+  const [fetchDataWithColumn, setFetchDataWithColumn] = useState<boolean>(() => (dashboard as any).fetch_data_with_column ?? false);
+  const [columnFetchingConfig, setColumnFetchingConfig] = useState<any>(() => (dashboard as any).column_fetching_config ?? null);
   const [allDashboards, setAllDashboards] = useState<any[]>([]);
   const [importSourceDashboardId, setImportSourceDashboardId] = useState<number | null>(null);
 
@@ -452,6 +466,8 @@ function DashboardDesignContent({
     setColorMappings(dashboard.layout?.color_mappings ?? {});
     setFetchDataWithDate(dashboard.fetch_data_with_date ?? false);
     setDateFetchingConfig(dashboard.date_fetching_config ?? {});
+    setFetchDataWithColumn((dashboard as any).fetch_data_with_column ?? false);
+    setColumnFetchingConfig((dashboard as any).column_fetching_config ?? null);
   }, [dashboard]);
 
   const referencedKpiIds = useMemo(() => {
@@ -499,6 +515,12 @@ function DashboardDesignContent({
   const [localDateBasedFetching, setLocalDateBasedFetching] = useState<boolean>(false);
   const [localDateColumn, setLocalDateColumn] = useState<string>("");
   const [localMliDateCols, setLocalMliDateCols] = useState<Record<string, string>>({});
+  const [localAllowedPeriodTypes, setLocalAllowedPeriodTypes] = useState<string[]>(["by_default", "Customized Period"]);
+  const [localDefaultPeriodType, setLocalDefaultPeriodType] = useState<string>("by_default");
+  const [localDefaultYear, setLocalDefaultYear] = useState<string>("");
+  const [localColumnBasedFetching, setLocalColumnBasedFetching] = useState<boolean>(false);
+  const [localSelectedMliKey, setLocalSelectedMliKey] = useState<string>("");
+  const [localSelectedColumnKey, setLocalSelectedColumnKey] = useState<string>("");
 
   useEffect(() => {
     if (!token || !dashboard?.organization_id) return;
@@ -517,8 +539,18 @@ function DashboardDesignContent({
       setLocalDateBasedFetching(fetchDataWithDate);
       setLocalDateColumn(dateFetchingConfig?.date_column || "");
       setLocalMliDateCols(dateFetchingConfig?.mli_date_cols || {});
+      setLocalAllowedPeriodTypes(dateFetchingConfig?.allowed_period_types || ["by_default", "Customized Period"]);
+      setLocalDefaultPeriodType(dateFetchingConfig?.default_period_type || "by_default");
+      setLocalDefaultYear(dateFetchingConfig?.default_year || String(new Date().getFullYear()));
+      setLocalColumnBasedFetching(fetchDataWithColumn);
+      if (columnFetchingConfig?.kpi_id && columnFetchingConfig?.source_field_key) {
+        setLocalSelectedMliKey(`${columnFetchingConfig.kpi_id}_${columnFetchingConfig.source_field_key}`);
+      } else {
+        setLocalSelectedMliKey("");
+      }
+      setLocalSelectedColumnKey(columnFetchingConfig?.column_key || "");
     }
-  }, [dashboardSettingsOpen, fetchDataWithDate, dateFetchingConfig]);
+  }, [dashboardSettingsOpen, fetchDataWithDate, dateFetchingConfig, fetchDataWithColumn, columnFetchingConfig]);
 
   const customPeriods = useMemo(() => {
     if (!organization) return [];
@@ -565,6 +597,22 @@ function DashboardDesignContent({
     return generatePeriodOptions(widgetActivePeriodConfig);
   }, [widgetActivePeriodConfig]);
 
+  const designDefaultPeriodOptions = useMemo(() => {
+    if (!localDefaultPeriodType || localDefaultPeriodType === "by_default") {
+      const currentYear = new Date().getFullYear();
+      const years: any[] = [];
+      for (let y = currentYear + 1; y >= 2020; y--) {
+        years.push({ value: String(y), label: String(y) });
+      }
+      return years;
+    }
+    const cfg = customPeriods.find(
+      (p: any) => (p.custom_period_name || "").trim().toLowerCase() === (localDefaultPeriodType || "").trim().toLowerCase()
+    ) || customPeriods[0];
+    if (!cfg) return [];
+    return generatePeriodOptions(cfg);
+  }, [customPeriods, localDefaultPeriodType]);
+
   const [addType, setAddType] = useState<WidgetType>("text");
   const [addTitle, setAddTitle] = useState("");
   const [addText, setAddText] = useState("");
@@ -593,6 +641,8 @@ function DashboardDesignContent({
   const [addValueSubFieldKey, setAddValueSubFieldKey] = useState<string>("");
   const [addFilterSubFieldKey, setAddFilterSubFieldKey] = useState<string>("");
   const [addFilterLabel, setAddFilterLabel] = useState<string>("");
+  const [addFilterSubFieldKeys, setAddFilterSubFieldKeys] = useState<string[]>([]);
+  const [addFilterLabels, setAddFilterLabels] = useState<Record<string, string>>({});
   const [addAdvancedFilters, setAddAdvancedFilters] = useState<MultiItemsFilterPayloadV2 | null>(null);
   const [addCardSourceMode, setAddCardSourceMode] = useState<"field" | "multi_line_agg" | "static">("field");
   const [addCardAgg, setAddCardAgg] = useState<KpiCardAgg>("sum");
@@ -742,9 +792,11 @@ function DashboardDesignContent({
       setAddBarGradientFrom((w as any).bar_gradient_from || "#4f46e5");
       setAddBarGradientTo((w as any).bar_gradient_to || "#a5b4fc");
     }
-    setAddGroupBySubFieldKey((w as any).group_by_sub_field_key || "");
-    setAddValueSubFieldKey((w as any).value_sub_field_key || "");
-    setAddFilterSubFieldKey((w as any).filter_sub_field_key || "");
+    const rawFilterKeys = (w as any).filter_sub_field_keys || ((w as any).filter_sub_field_key ? [(w as any).filter_sub_field_key] : []);
+    setAddFilterSubFieldKeys(Array.isArray(rawFilterKeys) ? rawFilterKeys : []);
+    const rawFilterLabels = (w as any).filter_labels || ((w as any).filter_sub_field_key && (w as any).filter_label ? { [(w as any).filter_sub_field_key]: (w as any).filter_label } : {});
+    setAddFilterLabels(typeof rawFilterLabels === "object" && rawFilterLabels !== null ? rawFilterLabels : {});
+    setAddFilterSubFieldKey((w as any).filter_sub_field_key || (rawFilterKeys[0] || ""));
     setAddFilterLabel((w as any).filter_label || "");
     setAddAdvancedFilters(((w as any).filters as MultiItemsFilterPayloadV2 | null) ?? null);
     if (w.type === "kpi_card_single_value") {
@@ -1068,7 +1120,9 @@ function DashboardDesignContent({
     nextConsistentColors: boolean,
     nextColorMappings: Record<string, string>,
     nextFetchDataWithDate: boolean = fetchDataWithDate,
-    nextDateFetchingConfig: any = dateFetchingConfig
+    nextDateFetchingConfig: any = dateFetchingConfig,
+    nextFetchDataWithColumn: boolean = fetchDataWithColumn,
+    nextColumnFetchingConfig: any = columnFetchingConfig,
   ) => {
     if (!token || !dashboard) return;
     setSaving(true);
@@ -1086,14 +1140,20 @@ function DashboardDesignContent({
           layout: newLayout,
           fetch_data_with_date: nextFetchDataWithDate,
           date_fetching_config: nextDateFetchingConfig,
+          fetch_data_with_column: nextFetchDataWithColumn,
+          column_fetching_config: nextColumnFetchingConfig,
         }),
       });
       setDashboard((prev) => prev ? {
         ...prev,
         layout: newLayout,
         fetch_data_with_date: nextFetchDataWithDate,
-        date_fetching_config: nextDateFetchingConfig
+        date_fetching_config: nextDateFetchingConfig,
+        fetch_data_with_column: nextFetchDataWithColumn,
+        column_fetching_config: nextColumnFetchingConfig,
       } : null);
+      setFetchDataWithColumn(nextFetchDataWithColumn);
+      setColumnFetchingConfig(nextColumnFetchingConfig);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Save failed";
       setError(msg);
@@ -1227,8 +1287,10 @@ function DashboardDesignContent({
               agg: addAggFn,
               group_by_sub_field_key: addGroupBySubFieldKey.trim(),
               value_sub_field_key: addAggFn === "count_rows" ? undefined : addValueSubFieldKey.trim(),
-              filter_sub_field_key: addFilterSubFieldKey.trim() || undefined,
-              filter_label: addFilterLabel.trim() || undefined,
+              filter_sub_field_key: addFilterSubFieldKeys[0] || addFilterSubFieldKey.trim() || undefined,
+              filter_label: addFilterLabels[addFilterSubFieldKeys[0]] || addFilterLabel.trim() || undefined,
+              filter_sub_field_keys: addFilterSubFieldKeys.length > 0 ? addFilterSubFieldKeys : (addFilterSubFieldKey.trim() ? [addFilterSubFieldKey.trim()] : undefined),
+              filter_labels: Object.keys(addFilterLabels).length > 0 ? addFilterLabels : undefined,
               filters: addAdvancedFilters,
             }
           : {
@@ -1337,8 +1399,10 @@ function DashboardDesignContent({
         agg: addAggFn,
         group_by_sub_field_key: addGroupBySubFieldKey.trim(),
         value_sub_field_key: addAggFn === "count_rows" ? undefined : addValueSubFieldKey.trim(),
-        filter_sub_field_key: addFilterSubFieldKey.trim() || undefined,
-        filter_label: addFilterLabel.trim() || undefined,
+        filter_sub_field_key: addFilterSubFieldKeys[0] || addFilterSubFieldKey.trim() || undefined,
+        filter_label: addFilterLabels[addFilterSubFieldKeys[0]] || addFilterLabel.trim() || undefined,
+        filter_sub_field_keys: addFilterSubFieldKeys.length > 0 ? addFilterSubFieldKeys : (addFilterSubFieldKey.trim() ? [addFilterSubFieldKey.trim()] : undefined),
+        filter_labels: Object.keys(addFilterLabels).length > 0 ? addFilterLabels : undefined,
         filters: addAdvancedFilters,
       };
       applyWidgetUpsert(w);
@@ -1710,8 +1774,47 @@ function DashboardDesignContent({
             </div>
 
             {localDateBasedFetching && (
-              <div style={{ display: "grid", gap: "0.6rem", borderTop: "1px solid var(--border)", paddingTop: "0.6rem" }}>
-                <div style={{ display: "grid", gap: "0.5rem" }}>
+              <div style={{ display: "grid", gap: "0.8rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem", background: "var(--surface)", padding: "0.75rem", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+                  <div style={{ display: "grid", gap: "0.35rem" }}>
+                    <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Select Reporting Type:</label>
+                    <select
+                      value={localDefaultPeriodType || "by_default"}
+                      onChange={(e) => {
+                        const nextType = e.target.value;
+                        setLocalDefaultPeriodType(nextType);
+                        setLocalAllowedPeriodTypes(["by_default", ...customPeriods.map((c: any) => c.custom_period_name)]);
+                        setLocalDefaultYear("");
+                      }}
+                      style={{ padding: "0.4rem 0.6rem", fontSize: "0.85rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--bg)" }}
+                    >
+                      <option value="by_default">Data Entry Period (By Default)</option>
+                      {customPeriods.map((cp: any) => (
+                        <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                          {cp.custom_period_name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ display: "grid", gap: "0.35rem" }}>
+                    <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Default Reporting Year / Period:</label>
+                    <select
+                      value={localDefaultYear}
+                      onChange={(e) => setLocalDefaultYear(e.target.value)}
+                      style={{ padding: "0.4rem 0.6rem", fontSize: "0.85rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--bg)" }}
+                    >
+                      <option value="">Select default period...</option>
+                      {designDefaultPeriodOptions.map((opt: any) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gap: "0.5rem", borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
                   <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Configure Date Column per Multi-Line Field</label>
                   {dashboardMliFields.length === 0 ? (
                     <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
@@ -1774,20 +1877,129 @@ function DashboardDesignContent({
               </div>
             )}
 
+          <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+            <span style={{ fontWeight: 650, fontSize: "0.9rem" }}>Specific Column Data Fetching</span>
+            
+            <div style={{ display: "grid", gap: "0.3rem" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: 600, fontSize: "0.95rem", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={localColumnBasedFetching}
+                  onChange={(e) => setLocalColumnBasedFetching(e.target.checked)}
+                />
+                Enable Data Fetch with Specific Column
+              </label>
+              <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--muted)" }}>
+                Allow end users to filter dashboard data dynamically by a specific Multi-Line Item column (e.g., Department).
+              </p>
+            </div>
+
+            {localColumnBasedFetching && (
+              <div style={{ display: "grid", gap: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem", background: "var(--surface)", padding: "0.75rem", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                {/* Step 1 & 2: Select MLI */}
+                <div style={{ display: "grid", gap: "0.35rem" }}>
+                  <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Step 1 & 2: Select Target Multi-Line Item (MLI)</label>
+                  {dashboardMliFields.length === 0 ? (
+                    <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0, fontStyle: "italic" }}>
+                      No multi-line fields are used in this dashboard. Add widgets using multi-line fields to configure specific column fetching.
+                    </p>
+                  ) : (
+                    <select
+                      value={localSelectedMliKey}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setLocalSelectedMliKey(val);
+                        setLocalSelectedColumnKey("");
+                      }}
+                      style={{ padding: "0.45rem 0.6rem", fontSize: "0.85rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--bg)", width: "100%" }}
+                    >
+                      <option value="">-- Choose Multi-Line Item --</option>
+                      {dashboardMliFields.map((item) => (
+                        <option key={`${item.kpiId}_${item.field.key}`} value={`${item.kpiId}_${item.field.key}`}>
+                          {item.kpiName} → {item.field.name} ({item.field.key})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                {/* Step 3: Select Column */}
+                {localSelectedMliKey && (
+                  <div style={{ display: "grid", gap: "0.35rem" }}>
+                    <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>Step 3: Select Target Column to Filter By</label>
+                    {(() => {
+                      const selectedMli = dashboardMliFields.find(
+                        (item) => `${item.kpiId}_${item.field.key}` === localSelectedMliKey
+                      );
+                      const subFields = selectedMli?.field?.sub_fields || [];
+                      return (
+                        <select
+                          value={localSelectedColumnKey}
+                          onChange={(e) => setLocalSelectedColumnKey(e.target.value)}
+                          style={{ padding: "0.45rem 0.6rem", fontSize: "0.85rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--bg)", width: "100%" }}
+                        >
+                          <option value="">-- Choose Column (e.g. Department) --</option>
+                          {subFields.map((sf: any) => (
+                            <option key={sf.key} value={sf.key}>
+                              {sf.name || sf.key} ({sf.field_type})
+                            </option>
+                          ))}
+                        </select>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Preview summary */}
+                {localSelectedMliKey && localSelectedColumnKey && (
+                  <div style={{ padding: "0.5rem 0.75rem", background: "rgba(59, 130, 246, 0.08)", border: "1px solid rgba(59, 130, 246, 0.2)", borderRadius: "6px", fontSize: "0.82rem" }}>
+                    <span style={{ fontWeight: 600, color: "#2563eb" }}>Active Filter Configuration:</span> End users will see a global filter for <strong>{(() => {
+                      const selectedMli = dashboardMliFields.find(
+                        (item) => `${item.kpiId}_${item.field.key}` === localSelectedMliKey
+                      );
+                      const sf = selectedMli?.field?.sub_fields?.find((s: any) => s.key === localSelectedColumnKey);
+                      return sf?.name || localSelectedColumnKey;
+                    })()}</strong> populated with distinct values.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
             <button
               type="button"
               className="btn btn-primary"
               onClick={async () => {
-                const nextConfig = {
+                const nextDateConfig = {
                   ...dateFetchingConfig,
+                  allowed_period_types: localAllowedPeriodTypes,
+                  default_period_type: localDefaultPeriodType,
+                  default_year: localDefaultYear,
                   mli_date_cols: localMliDateCols,
                 };
+                let nextColConfig = null;
+                if (localColumnBasedFetching && localSelectedMliKey && localSelectedColumnKey) {
+                  const selectedMli = dashboardMliFields.find(
+                    (item) => `${item.kpiId}_${item.field.key}` === localSelectedMliKey
+                  );
+                  const sf = selectedMli?.field?.sub_fields?.find((s: any) => s.key === localSelectedColumnKey);
+                  nextColConfig = {
+                    enabled: true,
+                    kpi_id: selectedMli?.kpiId,
+                    kpi_name: selectedMli?.kpiName,
+                    source_field_key: selectedMli?.field?.key,
+                    column_key: localSelectedColumnKey,
+                    column_name: sf?.name || localSelectedColumnKey,
+                  };
+                }
                 await persistDashboardLayout(
                   widgets,
                   consistentColors,
                   colorMappings,
                   localDateBasedFetching,
-                  nextConfig
+                  nextDateConfig,
+                  localColumnBasedFetching,
+                  nextColConfig
                 );
                 toast.success("Configuration saved successfully.");
               }}
@@ -2973,36 +3185,103 @@ function DashboardDesignContent({
                             ))}
                           </select>
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
-                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Filter</label>
-                          <select
-                            value={addFilterSubFieldKey}
-                            onChange={(e) => {
-                              const next = e.target.value;
-                              setAddFilterSubFieldKey(next);
-                              if (!next) setAddFilterLabel("");
-                            }}
-                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                          >
-                            <option value="">None</option>
-                            {selectedMultiLineSubFields.map((sf) => (
-                              <option key={sf.key} value={sf.key}>
-                                {sf.name} ({sf.key})
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        {addFilterSubFieldKey.trim() && (
-                          <div style={{ display: "grid", gap: "0.35rem" }}>
-                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Filter button text</label>
-                            <input
-                              value={addFilterLabel}
-                              onChange={(e) => setAddFilterLabel(e.target.value)}
-                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                              placeholder={`Optional (defaults to ${addFilterSubFieldKey})`}
-                            />
+                        <div style={{ display: "grid", gap: "0.5rem", borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.88rem", fontWeight: 600 }}>Normal Dashboard Filters</label>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => {
+                                const available = selectedMultiLineSubFields.find(
+                                  (sf) => !addFilterSubFieldKeys.includes(sf.key) && sf.key !== addGroupBySubFieldKey
+                                );
+                                if (available) {
+                                  const nextKeys = [...addFilterSubFieldKeys, available.key];
+                                  setAddFilterSubFieldKeys(nextKeys);
+                                  setAddFilterSubFieldKey(nextKeys[0]);
+                                } else if (selectedMultiLineSubFields.length > 0) {
+                                  const nextKeys = [...addFilterSubFieldKeys, selectedMultiLineSubFields[0].key];
+                                  setAddFilterSubFieldKeys(nextKeys);
+                                  setAddFilterSubFieldKey(nextKeys[0]);
+                                }
+                              }}
+                              style={{ fontSize: "0.78rem", padding: "0.2rem 0.5rem" }}
+                            >
+                              + Add Filter Column
+                            </button>
                           </div>
-                        )}
+                          
+                          {addFilterSubFieldKeys.length === 0 ? (
+                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                              <label style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Filter Column</label>
+                              <select
+                                value={addFilterSubFieldKey}
+                                onChange={(e) => {
+                                  const next = e.target.value;
+                                  setAddFilterSubFieldKey(next);
+                                  if (next) {
+                                    setAddFilterSubFieldKeys([next]);
+                                  } else {
+                                    setAddFilterSubFieldKeys([]);
+                                    setAddFilterLabel("");
+                                  }
+                                }}
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              >
+                                <option value="">None (No normal filter)</option>
+                                {selectedMultiLineSubFields.map((sf) => (
+                                  <option key={sf.key} value={sf.key}>
+                                    {sf.name} ({sf.key})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ) : (
+                            <div style={{ display: "grid", gap: "0.5rem" }}>
+                              {addFilterSubFieldKeys.map((k, idx) => (
+                                <div key={`${k}_${idx}`} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "0.4rem", alignItems: "center", background: "var(--surface)", padding: "0.4rem", borderRadius: "6px", border: "1px solid var(--border)" }}>
+                                  <select
+                                    value={k}
+                                    onChange={(e) => {
+                                      const nextKeys = [...addFilterSubFieldKeys];
+                                      nextKeys[idx] = e.target.value;
+                                      setAddFilterSubFieldKeys(nextKeys);
+                                      setAddFilterSubFieldKey(nextKeys[0]);
+                                    }}
+                                    style={{ padding: "0.3rem 0.45rem", fontSize: "0.82rem", width: "100%" }}
+                                  >
+                                    {selectedMultiLineSubFields.map((sf) => (
+                                      <option key={sf.key} value={sf.key}>
+                                        {sf.name} ({sf.key})
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <input
+                                    placeholder="Button label override..."
+                                    value={addFilterLabels[k] || ""}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setAddFilterLabels(prev => ({ ...prev, [k]: val }));
+                                    }}
+                                    style={{ padding: "0.3rem 0.45rem", fontSize: "0.82rem", width: "100%" }}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const nextKeys = addFilterSubFieldKeys.filter((_, i) => i !== idx);
+                                      setAddFilterSubFieldKeys(nextKeys);
+                                      setAddFilterSubFieldKey(nextKeys[0] || "");
+                                    }}
+                                    style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: "1rem", padding: "0 0.3rem" }}
+                                    title="Remove filter"
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
 
                         {isSuperAdminRole(userRole) && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
                           <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>
@@ -3082,36 +3361,103 @@ function DashboardDesignContent({
                             ))}
                           </select>
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
-                          <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Filter</label>
-                          <select
-                            value={addFilterSubFieldKey}
-                            onChange={(e) => {
-                              const next = e.target.value;
-                              setAddFilterSubFieldKey(next);
-                              if (!next) setAddFilterLabel("");
-                            }}
-                            style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                          >
-                            <option value="">None</option>
-                            {selectedMultiLineSubFields.map((sf) => (
-                              <option key={sf.key} value={sf.key}>
-                                {sf.name} ({sf.key})
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        {addFilterSubFieldKey.trim() && (
-                          <div style={{ display: "grid", gap: "0.35rem" }}>
-                            <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Filter button text</label>
-                            <input
-                              value={addFilterLabel}
-                              onChange={(e) => setAddFilterLabel(e.target.value)}
-                              style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
-                              placeholder={`Optional (defaults to ${addFilterSubFieldKey})`}
-                            />
+                        <div style={{ display: "grid", gap: "0.5rem", borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.88rem", fontWeight: 600 }}>Normal Dashboard Filters</label>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => {
+                                const available = selectedMultiLineSubFields.find(
+                                  (sf) => !addFilterSubFieldKeys.includes(sf.key) && sf.key !== addGroupBySubFieldKey
+                                );
+                                if (available) {
+                                  const nextKeys = [...addFilterSubFieldKeys, available.key];
+                                  setAddFilterSubFieldKeys(nextKeys);
+                                  setAddFilterSubFieldKey(nextKeys[0]);
+                                } else if (selectedMultiLineSubFields.length > 0) {
+                                  const nextKeys = [...addFilterSubFieldKeys, selectedMultiLineSubFields[0].key];
+                                  setAddFilterSubFieldKeys(nextKeys);
+                                  setAddFilterSubFieldKey(nextKeys[0]);
+                                }
+                              }}
+                              style={{ fontSize: "0.78rem", padding: "0.2rem 0.5rem" }}
+                            >
+                              + Add Filter Column
+                            </button>
                           </div>
-                        )}
+                          
+                          {addFilterSubFieldKeys.length === 0 ? (
+                            <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+                              <label style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Filter Column</label>
+                              <select
+                                value={addFilterSubFieldKey}
+                                onChange={(e) => {
+                                  const next = e.target.value;
+                                  setAddFilterSubFieldKey(next);
+                                  if (next) {
+                                    setAddFilterSubFieldKeys([next]);
+                                  } else {
+                                    setAddFilterSubFieldKeys([]);
+                                    setAddFilterLabel("");
+                                  }
+                                }}
+                                style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
+                              >
+                                <option value="">None (No normal filter)</option>
+                                {selectedMultiLineSubFields.map((sf) => (
+                                  <option key={sf.key} value={sf.key}>
+                                    {sf.name} ({sf.key})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ) : (
+                            <div style={{ display: "grid", gap: "0.5rem" }}>
+                              {addFilterSubFieldKeys.map((k, idx) => (
+                                <div key={`${k}_${idx}`} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "0.4rem", alignItems: "center", background: "var(--surface)", padding: "0.4rem", borderRadius: "6px", border: "1px solid var(--border)" }}>
+                                  <select
+                                    value={k}
+                                    onChange={(e) => {
+                                      const nextKeys = [...addFilterSubFieldKeys];
+                                      nextKeys[idx] = e.target.value;
+                                      setAddFilterSubFieldKeys(nextKeys);
+                                      setAddFilterSubFieldKey(nextKeys[0]);
+                                    }}
+                                    style={{ padding: "0.3rem 0.45rem", fontSize: "0.82rem", width: "100%" }}
+                                  >
+                                    {selectedMultiLineSubFields.map((sf) => (
+                                      <option key={sf.key} value={sf.key}>
+                                        {sf.name} ({sf.key})
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <input
+                                    placeholder="Button label override..."
+                                    value={addFilterLabels[k] || ""}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setAddFilterLabels(prev => ({ ...prev, [k]: val }));
+                                    }}
+                                    style={{ padding: "0.3rem 0.45rem", fontSize: "0.82rem", width: "100%" }}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const nextKeys = addFilterSubFieldKeys.filter((_, i) => i !== idx);
+                                      setAddFilterSubFieldKeys(nextKeys);
+                                      setAddFilterSubFieldKey(nextKeys[0] || "");
+                                    }}
+                                    style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: "1rem", padding: "0 0.3rem" }}
+                                    title="Remove filter"
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
 
                         {isSuperAdminRole(userRole) && addMultiLineFieldKey.trim() && selectedMultiLineSubFields.length > 0 ? (
                           <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.25rem" }}>

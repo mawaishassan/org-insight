@@ -1347,15 +1347,17 @@ async def can_view_kpi_for_user(
     if not user or user.id is None:
         return False
     user_id = int(user.id)
-    if user.role.value == "SUPER_ADMIN":
+    role_str = str(getattr(user.role, "value", user.role) or "").upper()
+    if role_str == "SUPER_ADMIN":
         return True
-    if user.role.value == "ORG_ADMIN":
+    if role_str == "ORG_ADMIN":
         kpi_res = await db.execute(select(KPI.organization_id).where(KPI.id == kpi_id))
         kpi_org = kpi_res.scalar_one_or_none()
         if kpi_org is None:
             return False
         effective_org = org_id if org_id is not None else getattr(user, "organization_id", None)
         return effective_org is not None and kpi_org == effective_org
+
     # 1) Direct user KPI assignment?
     kpi_assign_res = await db.execute(
         select(KPIAssignment)
@@ -1381,6 +1383,20 @@ async def can_view_kpi_for_user(
     )
     if kpi_role_res.scalar_one_or_none() is not None:
         return True
+
+    # 3) Dashboard assignment access?
+    from app.core.models import DashboardAccessPermission
+    dash_perm_res = await db.execute(
+        select(DashboardAccessPermission.id)
+        .where(
+            DashboardAccessPermission.user_id == user_id,
+            DashboardAccessPermission.can_view == True,
+        )
+        .limit(1)
+    )
+    if dash_perm_res.scalar_one_or_none() is not None:
+        return True
+
     access_map = await get_user_field_access_for_kpi(db, user_id, kpi_id)
     if not access_map:
         return False
@@ -3548,6 +3564,21 @@ async def _load_other_kpi_multi_line_data(
         entry_res = await db.execute(q)
         entries = list(entry_res.scalars().all())
         
+        if not entries:
+            # Fallback: if the target KPI data was recorded in a different year (e.g. historical / survey data),
+            # load the latest non-draft entry across any year for this referenced KPI.
+            fallback_q = (
+                select(KPIEntry)
+                .where(
+                    KPIEntry.kpi_id == kpi_id,
+                    KPIEntry.organization_id == org_id,
+                    KPIEntry.is_draft == False,
+                )
+                .order_by(KPIEntry.year.desc())
+            )
+            fallback_res = await db.execute(fallback_q)
+            entries = list(fallback_res.scalars().all())
+
         if not entries:
             for fk in field_keys:
                 out[(kpi_id, fk)] = []
