@@ -10,7 +10,10 @@ from __future__ import annotations
 import json
 import math
 import asyncio
+import logging
 from typing import Any, Callable, Awaitable
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import and_, bindparam, cast, func, or_, select, text
 from sqlalchemy.sql import nulls_last
@@ -146,7 +149,7 @@ def get_widget_date_col_key(config: dict, kpi_id: int, source_key: str, field_de
         return specific_key
 
     # Check if field belongs to a Joined KPI and inherit date column from primary KPI
-    kpi_obj = getattr(field_def, "kpi", None)
+    kpi_obj = field_def.__dict__.get("kpi") if (field_def is not None and hasattr(field_def, "__dict__")) else None
     if kpi_obj and getattr(kpi_obj, "is_joined", False):
         jcfg = getattr(kpi_obj, "joined_config", None) or {}
         for m in jcfg.get("mappings", []):
@@ -159,12 +162,13 @@ def get_widget_date_col_key(config: dict, kpi_id: int, source_key: str, field_de
                         return pspecific
 
     # 2. Check if new dashboard-wide/report-wide date_column configuration is set
+    sub_fields = field_def.__dict__.get("sub_fields") if (field_def is not None and hasattr(field_def, "__dict__")) else None
     date_column = config.get("date_column")
     if date_column:
-        if field_def and hasattr(field_def, "sub_fields"):
+        if sub_fields:
             # Get date/datetime subfields
             date_subfields = []
-            for sf in field_def.sub_fields:
+            for sf in sub_fields:
                 sft = getattr(sf.field_type, "value", sf.field_type)
                 if sft in ("date", "datetime") or str(sft).lower() == "fieldtype.date" or str(sft).lower() == "fieldtype.datetime":
                     date_subfields.append(sf)
@@ -178,13 +182,13 @@ def get_widget_date_col_key(config: dict, kpi_id: int, source_key: str, field_de
         return None
 
     # 3. If mli_date_cols has configured date cols, check if any date subfield in this MLI matches one of them
-    if field_def and hasattr(field_def, "sub_fields"):
+    if sub_fields:
         known_date_keys = set(mli_date_cols.values())
-        for sf in (field_def.sub_fields or []):
+        for sf in sub_fields:
             if sf.key in known_date_keys:
                 return sf.key
         # Check for standard date names
-        for sf in (field_def.sub_fields or []):
+        for sf in sub_fields:
             sft = getattr(sf.field_type, "value", sf.field_type)
             if (sft in ("date", "datetime") or "date" in str(sft).lower()) and "date" in sf.key.lower():
                 return sf.key
@@ -432,12 +436,20 @@ async def resolve_dashboard_chart_widget_data_batch(
         if mod_overrides.get("by_default") is True:
             by_default_bypass = True
             mod_overrides.pop("by_default", None)
+        p_type_val = mod_overrides.get("period_type") or mod_overrides.get("__period_type") or (overrides or {}).get("period_type")
+        if p_type_val in ("by_default", "By Default", "Data Entry", "data_entry"):
+            by_default_bypass = True
         _clean_by_default_overrides(mod_overrides, by_default_bypass)
 
         if is_date_fetching and org and not by_default_bypass:
-            selected_period = (overrides or {}).get("year") or w.get("year")
-            period_type = (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
-            if selected_period and selected_period != "by_default" and selected_period != "By Default":
+            # Prefer __original_period (set by resolve_dashboard_universal_batch) over
+            # the already-resolved integer year, so Fiscal Year "2025/26" isn't
+            # misidentified as Calendrical Year 2026.
+            orig_period = mod_overrides.get("__original_period")
+            orig_period_type = mod_overrides.get("__period_type") or None
+            selected_period = orig_period or (overrides or {}).get("year") or w.get("year")
+            period_type = orig_period_type or (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
+            if selected_period and selected_period not in ("by_default", "By Default") and period_type not in ("by_default", "By Default", "Data Entry", "data_entry"):
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period), period_type=period_type)
                     mod_overrides["year"] = start_year
@@ -1339,18 +1351,31 @@ async def fetch_entry_revision_and_field_values(
         )
         entry = entry_res.scalar_one_or_none()
         if not entry:
-            entry = KPIEntry(
-                organization_id=org_id,
-                kpi_id=kpi_id,
-                year=int(year),
-                period_key=pk,
-                is_draft=False,
-            )
-            db.add(entry)
-            await db.flush()
+            try:
+                async with db.begin_nested():
+                    entry = KPIEntry(
+                        organization_id=org_id,
+                        kpi_id=kpi_id,
+                        year=int(year),
+                        period_key=pk,
+                        is_draft=False,
+                    )
+                    db.add(entry)
+                    await db.flush()
+            except Exception:
+                entry_res = await db.execute(
+                    select(KPIEntry).where(
+                        KPIEntry.organization_id == org_id,
+                        KPIEntry.kpi_id == kpi_id,
+                        KPIEntry.year == int(year),
+                        KPIEntry.period_key == pk,
+                        KPIEntry.is_draft == False,
+                    )
+                )
+                entry = entry_res.scalar_one_or_none()
         
-        eid = entry.id
-        e_ts = entry.updated_at
+        eid = entry.id if entry else None
+        e_ts = entry.updated_at if entry else None
         
         from app.entries.load_joined import load_joined_scalar_values
         mock_fvs = await load_joined_scalar_values(db, joined_kpi=kpi, entry_id=eid)
@@ -2508,6 +2533,17 @@ async def _resolve_kpi_card_single_value(
         eid, e_ts = await get_entry_id_updated(
             db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
         )
+        if not eid:
+            kpi_res = await db.execute(select(KPI).where(KPI.id == kpi_id))
+            kpi_obj = kpi_res.scalar_one_or_none()
+            if kpi_obj and getattr(kpi_obj, "is_joined", False):
+                try:
+                    from app.entries.joined_sync import sync_joined_kpi_physical_data
+                    await sync_joined_kpi_physical_data(db, kpi_obj, year=int(year), period_key=period_key, current_user_id=user.id if user else None)
+                    await db.commit()
+                    eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+                except Exception as ex:
+                    logger.error("Failed to sync joined KPI in _resolve_kpi_card_single_value: %s", ex)
         fid = fmap["id_by_key"].get(fk)
         f_obj = next((fld for fld in fields if fld.key == fk), None)
         c_flt = w.get("column_filter")
@@ -2789,6 +2825,7 @@ async def evaluate_kpi_scalar_formula_field(
     column_filter: dict[str, Any] | None = None,
     normal_filters: dict[str, Any] | None = None,
     user: User | None = None,
+    date_fetching_config: dict[str, Any] | None = None,
 ) -> Any:
     """
     Evaluates a KPI scalar formula field dynamically against runtime filtered multi-line data.
@@ -2868,6 +2905,80 @@ async def evaluate_kpi_scalar_formula_field(
     import re
     expr_tokens = set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', formula_expr))
 
+    # Fast-path for simple COUNT_ITEMS(table, ...) formulas via direct SQL aggregation:
+    count_match = re.fullmatch(r"COUNT_ITEMS\s*\(\s*([a-zA-Z0-9_]+)(?:\s*,\s*[^)]+)?\s*\)", (formula_expr or "").strip(), re.IGNORECASE)
+    if count_match and entry_ids:
+        mli_key = count_match.group(1)
+        mli_fld = next((x for x in all_fields if x.key == mli_key and x.field_type == FieldType.multi_line_items), None)
+        if mli_fld:
+            fld_date_col = None
+            if date_fetching_config:
+                mli_date_cols = date_fetching_config.get("mli_date_cols") or {}
+                fld_id = getattr(mli_fld, "id", None)
+                fld_date_col = (
+                    mli_date_cols.get(f"{kpi_id}_{mli_fld.key}")
+                    or (mli_date_cols.get(f"{kpi_id}_{fld_id}") if fld_id else None)
+                )
+            if not fld_date_col and date_range and date_range[2]:
+                fld_date_col = str(date_range[2]).strip() or getattr(mli_fld, "date_field_key", None)
+            
+            f_full = await get_field_with_subfields_only(db, int(mli_fld.id), org_id) or mli_fld
+            sub_fields = getattr(f_full, "sub_fields", None) or []
+            if not fld_date_col:
+                for sf in sub_fields:
+                    sft = getattr(sf.field_type, "value", sf.field_type)
+                    if sft in ("date", "datetime") or "date" in str(sft).lower():
+                        fld_date_col = sf.key
+                        break
+            
+            date_sid = None
+            if fld_date_col:
+                date_sf = next((sf for sf in sub_fields if sf.key == fld_date_col), None)
+                if date_sf:
+                    date_sid = int(date_sf.id)
+            
+            fld_date_range = (date_range[0], date_range[1], str(fld_date_col)) if (date_range and fld_date_col) else None
+            
+            can_sql = True
+            filter_where_sql, filter_params, filter_sid_params = None, None, None
+            if column_filter or normal_filters:
+                sub_id_by_key = {str(sf.key): int(sf.id) for sf in sub_fields if getattr(sf, "key", None)}
+                ref_types = {str(sf.key): str(getattr(getattr(sf, "field_type", None), "value", sf.field_type) or "") for sf in sub_fields if getattr(sf, "key", None)}
+                raw_flts = _combine_with_runtime_filters(
+                    None,
+                    column_filter=column_filter,
+                    normal_filters=normal_filters,
+                    kpi_id=kpi_id,
+                    source_field_key=mli_key,
+                    sub_id_by_key=sub_id_by_key,
+                )
+                compiled = compile_multiline_row_filters_sql(raw_flts, sub_id_by_key=sub_id_by_key, reference_field_types=ref_types)
+                if compiled is not None:
+                    filter_where_sql, filter_params, filter_sid_params = compiled
+                    if not (filter_where_sql or "").strip():
+                        filter_where_sql, filter_params = (None, None)
+                        filter_sid_params = []
+                else:
+                    can_sql = False
+            
+            if can_sql and (not date_range or date_sid is not None):
+                try:
+                    num_val = await fetch_multiline_single_value_agg(
+                        db,
+                        entry_id=entry_ids if len(entry_ids) > 1 else entry_ids[0],
+                        multiline_field_id=int(mli_fld.id),
+                        agg="count",
+                        filter_where_sql=filter_where_sql,
+                        filter_params=filter_params,
+                        filter_sid_params=filter_sid_params,
+                        date_sub_field_id=date_sid,
+                        date_range=fld_date_range,
+                    )
+                    if num_val is not None:
+                        return num_val
+                except Exception:
+                    pass
+
     multi_line_items_data = {}
     for fld in all_fields:
         if fld.field_type == FieldType.multi_line_items:
@@ -2883,10 +2994,23 @@ async def evaluate_kpi_scalar_formula_field(
             fld_date_range = None
             if date_range:
                 start_date, end_date, passed_col = date_range
-                fld_date_col = (str(passed_col).strip() if passed_col else None) or getattr(fld, "date_field_key", None)
+                # Resolve per-MLI date column: use mli_date_cols from config first,
+                # then passed_col (for non-formula cards), then field attr, then first date subfield.
+                fld_date_col = None
+                if date_fetching_config:
+                    mli_date_cols = date_fetching_config.get("mli_date_cols") or {}
+                    # Try KPI-specific MLI key first, then fallback to broader keys
+                    fld_id = getattr(fld, "id", None)
+                    fld_date_col = (
+                        mli_date_cols.get(f"{kpi_id}_{fld.key}")
+                        or (mli_date_cols.get(f"{kpi_id}_{fld_id}") if fld_id else None)
+                    )
+                if not fld_date_col:
+                    fld_date_col = (str(passed_col).strip() if passed_col else None) or getattr(fld, "date_field_key", None)
                 if not fld_date_col:
                     for sf in (getattr(fld, "sub_fields", None) or []):
-                        if getattr(sf, "field_type", None) == FieldType.date:
+                        sft = getattr(sf.field_type, "value", sf.field_type)
+                        if sft in ("date", "datetime") or "date" in str(sft).lower():
                             fld_date_col = sf.key
                             break
                 fld_date_range = (start_date, end_date, str(fld_date_col)) if fld_date_col else None
@@ -2896,7 +3020,23 @@ async def evaluate_kpi_scalar_formula_field(
                 )
                 rows = [d for _i, d in pairs if isinstance(d, dict)]
             else:
-                rows = []
+                kpi_for_fld = getattr(fld, "kpi", None)
+                if kpi_for_fld is None and getattr(fld, "kpi_id", None):
+                    kpi_res = await db.execute(select(KPI).where(KPI.id == fld.kpi_id))
+                    kpi_for_fld = kpi_res.scalar_one_or_none()
+                if kpi_for_fld and getattr(kpi_for_fld, "is_joined", False):
+                    from app.entries.load_joined import load_joined_multi_line_rows
+                    fld.kpi = kpi_for_fld
+                    rows = await load_joined_multi_line_rows(
+                        db,
+                        joined_field=fld,
+                        organization_id=org_id,
+                        year=year,
+                        period_key=period_key or "",
+                        current_user_id=user.id if user else None,
+                    )
+                else:
+                    rows = []
             if column_filter:
                 rows = [r for r in rows if _row_matches_specific_column_filter(r, column_filter)]
             if normal_filters:
@@ -2906,8 +3046,9 @@ async def evaluate_kpi_scalar_formula_field(
                         all_keys.add(sf.key)
                 rows = [r for r in rows if _row_matches_normal_filters(r, normal_filters, known_sub_field_keys=all_keys)]
 
+            # Only recalculate multi-line rows if the formula references subfields that have formula expressions:
             has_subfield_formula = any(
-                isinstance(sf.config, dict) and sf.config.get("formula_expression")
+                isinstance(sf.config, dict) and sf.config.get("formula_expression") and sf.key in expr_tokens
                 for sf in (getattr(fld, "sub_fields", None) or [])
             )
             if has_subfield_formula:
@@ -2931,15 +3072,23 @@ async def evaluate_kpi_scalar_formula_field(
         extract_cross_kpi_mli_references,
         _topological_sort_subfields,
     )
-    other_kpi_cache_key = f"_other_kpi_vals_{org_id}_{year}_{period_key}"
-    if hasattr(db, "info") and other_kpi_cache_key in db.info:
-        other_kpi_values = db.info[other_kpi_cache_key]
-    else:
-        other_kpi_values = await _load_other_kpi_values(
-            db, year, org_id, kpi_id, period_key=period_key, is_draft=False
-        )
-        if hasattr(db, "info"):
-            db.info[other_kpi_cache_key] = other_kpi_values
+    # Only load other KPI values if the formula or any referenced subfield formula actually needs other KPIs:
+    needs_other_kpis = (
+        "KPI_FIELD(" in (formula_expr or "").upper()
+        or "OTHER_KPI(" in (formula_expr or "").upper()
+        or bool(extract_cross_kpi_mli_references(formula_expr or ""))
+    )
+    other_kpi_values = {}
+    if needs_other_kpis:
+        other_kpi_cache_key = f"_other_kpi_vals_{org_id}_{year}_{period_key}"
+        if hasattr(db, "info") and other_kpi_cache_key in db.info:
+            other_kpi_values = db.info[other_kpi_cache_key]
+        else:
+            other_kpi_values = await _load_other_kpi_values(
+                db, year, org_id, kpi_id, period_key=period_key, is_draft=False
+            )
+            if hasattr(db, "info"):
+                db.info[other_kpi_cache_key] = other_kpi_values
 
     refs = set()
     if formula_expr:
@@ -3019,6 +3168,7 @@ async def _dashboard_card_payload(
             column_filter=col_filter,
             normal_filters=norm_filters,
             user=user,
+            date_fetching_config=merged.get("date_fetching_config"),
         )
         n = to_numeric(raw)
         return (
@@ -3095,10 +3245,11 @@ async def _dashboard_card_payload(
         has_runtime_filter = bool(col_filter or norm_filters)
         needs_dynamic_recalc = has_cross_kpi_formula_subfields and has_runtime_filter
 
+        date_sid = sub_id_by_key.get(str(date_range[2])) if (date_range and len(date_range) >= 3 and date_range[2]) else None
         use_sql = (
             not needs_dynamic_recalc
-            and isinstance(card_eid, int)
-            and not date_range
+            and (isinstance(card_eid, int) or isinstance(card_eid, (list, tuple, set)))
+            and (not date_range or date_sid is not None)
             and (agg in ("count", "count_rows") or (val_key and vid is not None))
         )
 
@@ -3116,13 +3267,15 @@ async def _dashboard_card_payload(
                 try:
                     num_val = await fetch_multiline_single_value_agg(
                         db,
-                        entry_id=int(card_eid),
+                        entry_id=card_eid,
                         multiline_field_id=int(f_obj.id),
                         value_sub_field_id=vid,
                         agg=agg,
                         filter_where_sql=filter_where_sql,
                         filter_params=filter_params,
                         filter_sid_params=filter_sid_params,
+                        date_sub_field_id=date_sid,
+                        date_range=date_range,
                     )
                     meta_eid = card_eid
                     return (
@@ -3324,12 +3477,20 @@ async def resolve_dashboard_card_widget_data_batch(
         if mod_overrides.get("by_default") is True:
             by_default_bypass = True
             mod_overrides.pop("by_default", None)
+        p_type_val = mod_overrides.get("period_type") or mod_overrides.get("__period_type") or (overrides or {}).get("period_type")
+        if p_type_val in ("by_default", "By Default", "Data Entry", "data_entry"):
+            by_default_bypass = True
         _clean_by_default_overrides(mod_overrides, by_default_bypass)
 
         if is_date_fetching and org and not by_default_bypass:
-            selected_period = (overrides or {}).get("year") or w.get("year")
-            period_type = (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
-            if selected_period and selected_period != "by_default" and selected_period != "By Default":
+            # Prefer __original_period (set by resolve_dashboard_universal_batch) over
+            # the already-resolved integer year, so Fiscal Year "2025/26" isn't
+            # misidentified as Calendrical Year 2026.
+            orig_period = mod_overrides.get("__original_period")
+            orig_period_type = mod_overrides.get("__period_type") or None
+            selected_period = orig_period or (overrides or {}).get("year") or w.get("year")
+            period_type = orig_period_type or (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
+            if selected_period and selected_period not in ("by_default", "By Default") and period_type not in ("by_default", "By Default", "Data Entry", "data_entry"):
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period), period_type=period_type)
                     mod_overrides["year"] = start_year
@@ -4999,15 +5160,24 @@ async def resolve_dashboard_universal_batch(
         if mod_overrides.get("by_default") is True:
             by_default_bypass = True
             mod_overrides.pop("by_default", None)
+        p_type_val = mod_overrides.get("period_type") or mod_overrides.get("__period_type") or (overrides or {}).get("period_type")
+        if p_type_val in ("by_default", "By Default", "Data Entry", "data_entry"):
+            by_default_bypass = True
         _clean_by_default_overrides(mod_overrides, by_default_bypass)
 
         if is_date_fetching and org and not by_default_bypass:
             selected_period = (overrides or {}).get("year") or w.get("year")
             period_type = (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
-            if selected_period and selected_period not in ("by_default", "By Default"):
+            if selected_period and selected_period not in ("by_default", "By Default") and period_type not in ("by_default", "By Default", "Data Entry", "data_entry"):
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period), period_type=period_type)
                     mod_overrides["year"] = start_year
+                    # Preserve the ORIGINAL period string (e.g. "2025/26") so that
+                    # sub-batch resolvers (chart, card) can re-resolve the date range
+                    # accurately. Without this, they re-resolve using the integer
+                    # year (2026) which may match a different period type.
+                    mod_overrides["__original_period"] = str(selected_period)
+                    mod_overrides["__period_type"] = period_type or ""
                     kpi_id_dr = int(w.get("kpi_id") or 0)
                     src_key_dr = (w.get("source_field_key") or w.get("field_key") or "").strip()
                     f_def_dr = None

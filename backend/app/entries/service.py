@@ -272,6 +272,25 @@ async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: 
     )
     total_count = count_res.scalar() or 0
 
+    if total_count == 0:
+        kpi = getattr(field, "kpi", None)
+        if kpi is None and getattr(field, "kpi_id", None):
+            kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
+            kpi = kpi_res.scalar_one_or_none()
+        if kpi and getattr(kpi, "is_joined", False):
+            entry_res = await db.execute(select(KPIEntry).where(KPIEntry.id == entry_id))
+            entry = entry_res.scalar_one_or_none()
+            if entry:
+                from app.entries.load_joined import load_joined_multi_line_rows
+                return await load_joined_multi_line_rows(
+                    db,
+                    joined_field=field,
+                    organization_id=entry.organization_id,
+                    year=entry.year,
+                    period_key=entry.period_key or "",
+                )
+
+
     if total_count > 500:
         q = (
             select(

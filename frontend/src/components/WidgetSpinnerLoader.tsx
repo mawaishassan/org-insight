@@ -19,8 +19,9 @@ export function WidgetSpinnerLoader({
   style = {},
   className = "",
 }: WidgetSpinnerLoaderProps) {
-  const spinnerSize = size === "small" ? 24 : size === "large" ? 44 : 32;
-  const borderWidth = size === "small" ? 2.5 : size === "large" ? 3.5 : 3;
+  const isSmall = size === "small";
+  const spinnerSize = isSmall ? 26 : size === "large" ? 50 : 42;
+  const borderWidth = isSmall ? 2.5 : 4;
 
   return (
     <div
@@ -30,32 +31,52 @@ export function WidgetSpinnerLoader({
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        padding: "1rem",
-        minHeight: minHeight ?? (size === "small" ? 90 : size === "large" ? 220 : 140),
+        padding: isSmall ? "0.5rem" : "1.5rem",
+        minHeight: minHeight ?? (isSmall ? 80 : size === "large" ? 220 : 140),
         width: "100%",
         borderRadius: 12,
         background: "transparent",
-        backdropFilter: "blur(8px)",
-        WebkitBackdropFilter: "blur(8px)",
         ...style,
       }}
     >
       <div
-        className="effective-spinner"
         style={{
-          width: spinnerSize,
-          height: spinnerSize,
-          borderWidth,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--surface, #ffffff)",
+          padding: isSmall ? "0.6rem 1rem" : "1.25rem 2rem",
+          borderRadius: isSmall ? "0.65rem" : "1rem",
+          boxShadow: isSmall ? "0 4px 12px rgba(0,0,0,0.08)" : "0 10px 30px rgba(0,0,0,0.18)",
+          border: "1px solid var(--border, #e2e8f0)",
+          pointerEvents: "none",
         }}
-      />
-      {text && (
-        <span
-          className="effective-spinner-text"
-          style={{ fontSize: size === "small" ? "0.78rem" : "0.85rem" }}
-        >
-          {text}
-        </span>
-      )}
+      >
+        <div
+          className="effective-spinner"
+          style={{
+            width: spinnerSize,
+            height: spinnerSize,
+            borderWidth,
+          }}
+        />
+        {text && (
+          <span
+            className="effective-spinner-text"
+            style={{
+              marginTop: isSmall ? "0.45rem" : "0.85rem",
+              fontSize: isSmall ? "0.82rem" : "1.15rem",
+              fontWeight: 700,
+              color: "#0f172a",
+              letterSpacing: "0.01em",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {text}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

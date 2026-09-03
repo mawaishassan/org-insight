@@ -103,15 +103,30 @@ async def sync_joined_kpi_physical_data(
         )
         entry = entry_res.scalar_one_or_none()
         if not entry:
-            entry = KPIEntry(
-                kpi_id=kpi_obj.id,
-                organization_id=kpi_obj.organization_id,
-                year=yr,
-                period_key=pk,
-                is_draft=False,
-            )
-            db.add(entry)
-            await db.flush()
+            try:
+                async with db.begin_nested():
+                    entry = KPIEntry(
+                        kpi_id=kpi_obj.id,
+                        organization_id=kpi_obj.organization_id,
+                        year=yr,
+                        period_key=pk,
+                        is_draft=False,
+                    )
+                    db.add(entry)
+                    await db.flush()
+            except Exception:
+                entry_res = await db.execute(
+                    select(KPIEntry).where(
+                        KPIEntry.kpi_id == kpi_obj.id,
+                        KPIEntry.organization_id == kpi_obj.organization_id,
+                        KPIEntry.year == yr,
+                        KPIEntry.period_key == pk,
+                    )
+                )
+                entry = entry_res.scalar_one_or_none()
+
+        if not entry:
+            continue
 
         # 1. Synchronize Multi-Line Fields
         for m in mappings:
