@@ -25,6 +25,7 @@ _BUILTIN_FUNCTIONS = frozenset({
     # Group-by and fetch helpers
     "GROUP_BY", "KPI_GROUP_BY", "GROUP_BY_KPI",
     "FETCH_ITEMS_WHERE", "FETCH_KPI_ITEMS_WHERE",
+    "WHERE",
     # Operators
     "op_eq", "op_neq", "op_gt", "op_gte", "op_lt", "op_lte",
     "op_contains", "op_not_contains", "op_starts_with", "op_ends_with",
@@ -58,19 +59,16 @@ def extract_formula_dependencies(expression: Optional[str]) -> set:
     Returns only true local references — bare Name nodes that are not
     built-in function names, operator tokens, or known formula keywords.
     `CurrentRow.attr` references are included (they refer to local MLI columns).
-
-    Names that appear exclusively as arguments inside cross-KPI function calls
-    are tracked separately via extract_formula_dependencies_split().
     """
     if not expression or not expression.strip():
         return set()
 
-    dependencies = set()
     try:
         tree = ast.parse(expression)
     except SyntaxError:
-        return dependencies
+        return set()
 
+    dependencies = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
             if node.id not in _BUILTIN_FUNCTIONS:
@@ -102,7 +100,7 @@ def extract_formula_dependencies_split(expression: Optional[str]) -> tuple[set, 
     except SyntaxError:
         return set(), set()
 
-    # Collect all Name node ids that appear as arguments to cross-KPI calls.
+    # Collect all Name node ids that appear as arguments (or within argument subtrees) to cross-KPI calls.
     # These are remote-KPI column names — never validate against local fields.
     cross_kpi_arg_ids: set = set()
     for node in ast.walk(tree):
@@ -115,10 +113,11 @@ def extract_formula_dependencies_split(expression: Optional[str]) -> tuple[set, 
         if func_name not in _CROSS_KPI_FUNCTIONS:
             continue
         # Skip argument 0 (kpi_id — always a number) and argument 1 (mli field key — string literal).
-        # From argument 2 onwards: bare Name nodes are remote column names.
+        # From argument 2 onwards: bare Name nodes in arguments or sub-calls are remote column names.
         for arg in node.args[2:]:
-            if isinstance(arg, ast.Name) and arg.id not in _BUILTIN_FUNCTIONS:
-                cross_kpi_arg_ids.add(arg.id)
+            for subnode in ast.walk(arg):
+                if isinstance(subnode, ast.Name) and subnode.id not in _BUILTIN_FUNCTIONS:
+                    cross_kpi_arg_ids.add(subnode.id)
 
     local_refs: set = set()
     cross_kpi_refs: set = set()

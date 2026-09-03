@@ -6,14 +6,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_org_admin, require_super_admin
-from app.core.models import User, Dashboard, DashboardLabelCustomization
+from app.core.models import User, Dashboard, DashboardAccessPermission, DashboardLabelCustomization
 from app.dashboards.schemas import (
     DashboardCreate,
     DashboardUpdate,
     DashboardResponse,
     DashboardDetailResponse,
     DashboardAccessAssign,
+    DashboardBulkAssignRequest,
     DashboardAssignmentResponse,
+    DashboardFilterColumnItem,
     DashboardLabelCustomizationResponse,
     DashboardLabelCustomizationUpsert,
 )
@@ -25,8 +27,10 @@ from app.dashboards.service import (
     update_dashboard,
     delete_dashboard,
     assign_dashboard_to_user,
+    bulk_assign_dashboards_to_users,
     unassign_dashboard_from_user,
     list_dashboard_assignments,
+    get_dashboard_filterable_columns,
     user_can_access_dashboard,
 )
 
@@ -86,7 +90,17 @@ async def create_org_dashboard(
     if current_user.role.value != "SUPER_ADMIN":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may create dashboards")
     org_id = _org_id(current_user, organization_id)
-    d = await create_dashboard(db, org_id, name=body.name, description=body.description, layout=body.layout)
+    d = await create_dashboard(
+        db,
+        org_id,
+        name=body.name,
+        description=body.description,
+        layout=body.layout,
+        fetch_data_with_date=body.fetch_data_with_date,
+        date_fetching_config=body.date_fetching_config,
+        fetch_data_with_column=body.fetch_data_with_column,
+        column_fetching_config=body.column_fetching_config,
+    )
     await db.commit()
     await db.refresh(d)
     return DashboardResponse.model_validate(d)
@@ -130,12 +144,125 @@ async def update_one_dashboard(
         layout=body.layout,
         fetch_data_with_date=body.fetch_data_with_date,
         date_fetching_config=body.date_fetching_config,
+        fetch_data_with_column=body.fetch_data_with_column,
+        column_fetching_config=body.column_fetching_config,
     )
     if not d:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
     await db.commit()
     await db.refresh(d)
     return DashboardResponse.model_validate(d)
+
+
+@router.get("/{dashboard_id}/column-values")
+async def get_dashboard_column_values(
+    dashboard_id: int,
+    kpi_id: int | None = Query(None),
+    source_field_key: str | None = Query(None),
+    column_key: str | None = Query(None),
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fetch distinct unique values for the configured column in a dashboard."""
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    can = await user_can_access_dashboard(db, current_user.id, dashboard_id, "view")
+    if not can:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+    
+    d = await get_dashboard(db, dashboard_id, org_id)
+    if not d:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
+
+    cfg = d.column_fetching_config or {}
+    effective_kpi_id = kpi_id or cfg.get("kpi_id")
+    effective_field_key = (source_field_key or cfg.get("source_field_key") or "").strip()
+    effective_column_key = (column_key or cfg.get("column_key") or "").strip()
+
+    if not effective_kpi_id or not effective_field_key or not effective_column_key:
+        return {"column_key": effective_column_key, "values": []}
+
+    from app.core.models import KPIField, KPIEntry, KPIFieldSubField, KpiMultiLineCell, KpiMultiLineRow
+    from app.entries.multi_line_load import load_multi_line_row_dicts
+
+    f_res = await db.execute(
+        select(KPIField).where(
+            KPIField.kpi_id == int(effective_kpi_id),
+            KPIField.key == effective_field_key,
+        )
+    )
+    field = f_res.scalar_one_or_none()
+    if not field:
+        return {"column_key": effective_column_key, "values": []}
+
+    entries_res = await db.execute(
+        select(KPIEntry.id).where(
+            KPIEntry.kpi_id == int(effective_kpi_id),
+            KPIEntry.organization_id == org_id,
+            KPIEntry.is_draft == False,
+        )
+    )
+    entry_ids = [r[0] for r in entries_res.all()]
+    if not entry_ids:
+        return {"column_key": effective_column_key, "values": []}
+
+    sf_res = await db.execute(
+        select(KPIFieldSubField.id).where(
+            KPIFieldSubField.field_id == field.id,
+            KPIFieldSubField.key == effective_column_key,
+        )
+    )
+    sub_field_id = sf_res.scalar_one_or_none()
+    if sub_field_id:
+        sql_stmt = (
+            select(KpiMultiLineCell.value_text)
+            .join(KpiMultiLineRow, KpiMultiLineRow.id == KpiMultiLineCell.row_id)
+            .where(
+                KpiMultiLineRow.entry_id.in_(entry_ids),
+                KpiMultiLineCell.sub_field_id == sub_field_id,
+                KpiMultiLineCell.value_text.isnot(None),
+                KpiMultiLineCell.value_text != "",
+            )
+            .distinct()
+        )
+        c_res = await db.execute(sql_stmt)
+        values = [r[0].strip() for r in c_res.all() if r[0] and r[0].strip() and r[0].strip() != "(empty)"]
+        values = sorted(list(dict.fromkeys(values)), key=lambda x: x.lower())
+        return {
+            "column_key": effective_column_key,
+            "column_name": cfg.get("column_name") or cfg.get("column_label") or effective_column_key,
+            "values": values,
+        }
+
+    pairs = await load_multi_line_row_dicts(
+        db,
+        entry_id=entry_ids,
+        field=field,
+        current_user_id=current_user.id if current_user else None,
+    )
+
+    seen = set()
+    values = []
+    for _idx, r in pairs:
+        if not isinstance(r, dict):
+            continue
+        v = r.get(effective_column_key)
+        if v is None:
+            continue
+        if isinstance(v, dict):
+            v_str = str(v.get("label") or v.get("name") or v.get("value") or "").strip()
+        else:
+            v_str = str(v).strip()
+        if v_str and v_str != "(empty)" and v_str not in seen:
+            seen.add(v_str)
+            values.append(v_str)
+
+    values.sort(key=lambda x: x.lower())
+    return {
+        "column_key": effective_column_key,
+        "column_name": cfg.get("column_name") or cfg.get("column_label") or effective_column_key,
+        "values": values,
+    }
 
 
 @router.delete("/{dashboard_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -712,6 +839,155 @@ async def delete_dashboard_label_customization(
     await db.delete(existing)
     await db.flush()
     await db.commit()
+
+
+@router.post("/bulk-assign", status_code=status.HTTP_200_OK)
+async def bulk_assign_dashboards_route(
+    body: DashboardBulkAssignRequest,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Bulk assign multiple dashboards to multiple users with permission & filter configuration (Org Admin / Super Admin)."""
+    org_id = _org_id(current_user, organization_id)
+    count = await bulk_assign_dashboards_to_users(
+        db,
+        org_id,
+        body.dashboard_ids,
+        body.user_ids,
+        can_view=body.can_view,
+        can_edit=body.can_edit,
+        can_load_lms=body.can_load_lms,
+        can_change_period=body.can_change_period,
+        can_use_unique_value=body.can_use_unique_value,
+        filter_kpi_id=body.filter_kpi_id,
+        filter_mli_id=body.filter_mli_id,
+        filter_sub_field_key=body.filter_sub_field_key,
+        filter_column_configs=body.filter_column_configs,
+        filter_operator=body.filter_operator,
+    )
+    await db.commit()
+    return {"message": f"Successfully created/updated {count} dashboard assignments", "assigned_count": count}
+
+
+@router.get("/{dashboard_id}/assignments", response_model=list[DashboardAssignmentResponse])
+async def list_dashboard_assignments_route(
+    dashboard_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """List all user assignments for a dashboard (Org Admin / Super Admin)."""
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    return await list_dashboard_assignments(db, dashboard_id, org_id)
+
+
+@router.post("/{dashboard_id}/assign", response_model=DashboardAssignmentResponse)
+async def assign_dashboard_route(
+    dashboard_id: int,
+    body: DashboardAccessAssign,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Assign or update dashboard permission for a single user (Org Admin / Super Admin)."""
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    perm = await assign_dashboard_to_user(
+        db,
+        dashboard_id,
+        org_id,
+        body.user_id,
+        can_view=body.can_view,
+        can_edit=body.can_edit,
+        can_load_lms=body.can_load_lms,
+        can_change_period=body.can_change_period,
+        can_use_unique_value=body.can_use_unique_value,
+        filter_kpi_id=body.filter_kpi_id,
+        filter_mli_id=body.filter_mli_id,
+        filter_sub_field_key=body.filter_sub_field_key,
+        filter_column_configs=body.filter_column_configs,
+        filter_operator=body.filter_operator,
+    )
+    if not perm:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Dashboard or user not found in organization")
+    await db.commit()
+
+    assignments = await list_dashboard_assignments(db, dashboard_id, org_id)
+    for a in assignments:
+        if a["user_id"] == body.user_id:
+            return a
+    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to fetch created assignment")
+
+
+@router.delete("/{dashboard_id}/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def unassign_dashboard_user_route(
+    dashboard_id: int,
+    user_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Remove user access assignment from a dashboard (Org Admin / Super Admin)."""
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    ok = await unassign_dashboard_from_user(db, dashboard_id, org_id, user_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
+    await db.commit()
+
+
+@router.get("/{dashboard_id}/filter-columns", response_model=list[DashboardFilterColumnItem])
+async def get_dashboard_filter_columns_route(
+    dashboard_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Retrieve available MLI columns across all KPIs in a dashboard for user key filtering."""
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    return await get_dashboard_filterable_columns(db, dashboard_id, org_id)
+
+
+@router.get("/{dashboard_id}/my-permissions")
+async def get_my_dashboard_permissions_route(
+    dashboard_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retrieve current user's effective permissions for a dashboard."""
+    role_str = str(getattr(current_user.role, "value", current_user.role) or "").upper()
+    if role_str in ("SUPER_ADMIN", "ORG_ADMIN"):
+        return {
+            "can_view": True,
+            "can_edit": True,
+            "can_load_lms": True,
+            "can_change_period": True,
+            "can_use_unique_value": True,
+        }
+
+    res = await db.execute(
+        select(DashboardAccessPermission).where(
+            DashboardAccessPermission.dashboard_id == dashboard_id,
+            DashboardAccessPermission.user_id == current_user.id,
+        )
+    )
+    perm = res.scalar_one_or_none()
+    if not perm:
+        return {
+            "can_view": False,
+            "can_edit": False,
+            "can_load_lms": True,
+            "can_change_period": True,
+            "can_use_unique_value": False,
+        }
+
+    return {
+        "can_view": perm.can_view,
+        "can_edit": perm.can_edit,
+        "can_load_lms": perm.can_load_lms,
+        "can_change_period": perm.can_change_period,
+        "can_use_unique_value": perm.can_use_unique_value,
+    }
 
 
 

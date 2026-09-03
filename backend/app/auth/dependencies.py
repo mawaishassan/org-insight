@@ -70,6 +70,7 @@ async def get_current_user(
                 User.role,
                 User.organization_id,
                 User.is_active,
+                User.unique_user_key,
             ),
         )
     )
@@ -107,6 +108,7 @@ async def get_current_user_optional(
                 User.role,
                 User.organization_id,
                 User.is_active,
+                User.unique_user_key,
             ),
         )
     )

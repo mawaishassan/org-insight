@@ -110,6 +110,8 @@ async def create_kpi(db: AsyncSession, org_id: int, data: KPICreate) -> KPI | No
         await _sync_kpi_organization_tags(db, kpi.id, org_id, data.organization_tag_ids)
     if kpi.is_joined:
         await sync_joined_kpi_fields(db, kpi)
+        from app.entries.joined_sync import sync_joined_kpi_physical_data
+        await sync_joined_kpi_physical_data(db, kpi)
     return kpi
 
 
@@ -354,6 +356,8 @@ async def update_kpi(
         await _sync_kpi_organization_tags(db, kpi_id, org_id, data.organization_tag_ids)
     if kpi.is_joined:
         await sync_joined_kpi_fields(db, kpi)
+        from app.entries.joined_sync import sync_joined_kpi_physical_data
+        await sync_joined_kpi_physical_data(db, kpi)
     return kpi
 
 

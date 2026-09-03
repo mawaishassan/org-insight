@@ -15,6 +15,7 @@ interface ConditionRow {
   colKey: string;
   operator: string;
   value: string;
+  thenResult?: string;
 }
 
 interface MliFormulaBuilderModalProps {
@@ -308,30 +309,31 @@ export function MliFormulaBuilderModal({
       return expression;
     }
 
-    const condStrs = conditions
-      .filter((c) => c.colKey && c.operator)
-      .map((c) => {
-        const colRef = c.colKey;
-        const valQuote = isNaN(Number(c.value)) ? `"${c.value}"` : c.value;
-        if (c.operator === "contains") {
-          return `contains(${colRef}, ${valQuote})`;
-        }
-        if (c.operator === "starts_with") {
-          return `starts_with(${colRef}, ${valQuote})`;
-        }
-        if (c.operator === "ends_with") {
-          return `ends_with(${colRef}, ${valQuote})`;
-        }
-        return `${colRef} ${c.operator} ${valQuote}`;
-      });
+    const validConds = conditions.filter((c) => c.colKey && c.operator);
+    if (validConds.length === 0) return "";
 
-    if (condStrs.length === 0) return "";
-
-    const combinedCond = condStrs.join(" AND ");
-    const trueVal = isNaN(Number(trueResult)) ? `"${trueResult}"` : trueResult || "1";
     const falseVal = isNaN(Number(falseResult)) ? `"${falseResult}"` : falseResult || "0";
 
-    return `IF(${combinedCond}, ${trueVal}, ${falseVal})`;
+    let expr = falseVal;
+    for (let i = validConds.length - 1; i >= 0; i--) {
+      const c = validConds[i];
+      const colRef = c.colKey;
+      const valQuote = isNaN(Number(c.value)) ? `"${c.value}"` : c.value;
+      let condClause = `${colRef} ${c.operator} ${valQuote}`;
+      if (c.operator === "contains") {
+        condClause = `contains(${colRef}, ${valQuote})`;
+      } else if (c.operator === "starts_with") {
+        condClause = `starts_with(${colRef}, ${valQuote})`;
+      } else if (c.operator === "ends_with") {
+        condClause = `ends_with(${colRef}, ${valQuote})`;
+      }
+
+      const resText = c.thenResult !== undefined && c.thenResult !== "" ? c.thenResult : (i === 0 ? trueResult : "1");
+      const thenVal = isNaN(Number(resText)) ? `"${resText}"` : resText || "1";
+
+      expr = `IF(${condClause}, ${thenVal}, ${expr})`;
+    }
+    return expr;
   };
 
   const activeExpression =
@@ -765,7 +767,7 @@ export function MliFormulaBuilderModal({
                 <div style={{ padding: "0.85rem", borderRadius: "8px", backgroundColor: "#f9fafb", border: "1px solid #e5e7eb", display: "flex", flexDirection: "column", gap: "0.65rem" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <label style={{ fontSize: "0.75rem", fontWeight: 600, color: "#4b5563", textTransform: "uppercase" }}>
-                      Conditions
+                      Conditional Rules (IF / ELSE IF / ELSE)
                     </label>
                     <button
                       type="button"
@@ -781,80 +783,91 @@ export function MliFormulaBuilderModal({
                         cursor: "pointer",
                       }}
                     >
-                      + Add Condition
+                      + Add Else If Condition
                     </button>
                   </div>
 
                   {conditions.map((cond, idx) => (
-                    <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: "0.4rem", alignItems: "center", backgroundColor: "#ffffff", padding: "0.5rem", borderRadius: "6px", border: "1px solid #d1d5db" }}>
-                      <select
-                        value={cond.colKey}
-                        onChange={(e) => handleConditionChange(idx, "colKey", e.target.value)}
-                        style={{ padding: "0.35rem 0.45rem", borderRadius: "4px", border: "1px solid #d1d5db", fontSize: "0.775rem" }}
-                      >
-                        <option value="">— Select Column —</option>
-                        {availableSourceColumns.map((sf) => (
-                          <option key={sf.key} value={sf.key}>
-                            {sf.name || sf.key} ({sf.key})
-                          </option>
-                        ))}
-                      </select>
-
-                      <select
-                        value={cond.operator}
-                        onChange={(e) => handleConditionChange(idx, "operator", e.target.value)}
-                        style={{ padding: "0.35rem 0.45rem", borderRadius: "4px", border: "1px solid #d1d5db", fontSize: "0.775rem", fontFamily: "monospace" }}
-                      >
-                        {COMPARISON_OPERATORS.map((op) => (
-                          <option key={op.value} value={op.value}>
-                            {op.label}
-                          </option>
-                        ))}
-                      </select>
-
-                      <input
-                        type="text"
-                        value={cond.value}
-                        onChange={(e) => handleConditionChange(idx, "value", e.target.value)}
-                        placeholder='Value'
-                        style={{ padding: "0.35rem 0.45rem", borderRadius: "4px", border: "1px solid #d1d5db", fontSize: "0.775rem", fontFamily: "monospace" }}
-                      />
-
-                      {conditions.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveCondition(idx)}
-                          style={{ background: "none", border: "none", color: "#dc2626", fontWeight: 700, fontSize: "0.9rem", cursor: "pointer", padding: "0 0.25rem" }}
+                    <div key={idx} style={{ backgroundColor: "#ffffff", padding: "0.6rem", borderRadius: "6px", border: "1px solid #d1d5db", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                        <span style={{ fontSize: "0.7rem", fontWeight: 700, padding: "0.15rem 0.4rem", borderRadius: "4px", background: idx === 0 ? "#e0f2fe" : "#f1f5f9", color: idx === 0 ? "#0369a1" : "#475569" }}>
+                          {idx === 0 ? "IF" : "ELSE IF"}
+                        </span>
+                        <select
+                          value={cond.colKey}
+                          onChange={(e) => handleConditionChange(idx, "colKey", e.target.value)}
+                          style={{ flex: 1, padding: "0.35rem 0.45rem", borderRadius: "4px", border: "1px solid #d1d5db", fontSize: "0.775rem" }}
                         >
-                          ×
-                        </button>
-                      )}
+                          <option value="">— Select Column —</option>
+                          {availableSourceColumns.map((sf) => (
+                            <option key={sf.key} value={sf.key}>
+                              {sf.name || sf.key} ({sf.key})
+                            </option>
+                          ))}
+                        </select>
+
+                        <select
+                          value={cond.operator}
+                          onChange={(e) => handleConditionChange(idx, "operator", e.target.value)}
+                          style={{ padding: "0.35rem 0.45rem", borderRadius: "4px", border: "1px solid #d1d5db", fontSize: "0.775rem", fontFamily: "monospace" }}
+                        >
+                          {COMPARISON_OPERATORS.map((op) => (
+                            <option key={op.value} value={op.value}>
+                              {op.label}
+                            </option>
+                          ))}
+                        </select>
+
+                        <input
+                          type="text"
+                          value={cond.value}
+                          onChange={(e) => handleConditionChange(idx, "value", e.target.value)}
+                          placeholder='Value'
+                          style={{ flex: 1, padding: "0.35rem 0.45rem", borderRadius: "4px", border: "1px solid #d1d5db", fontSize: "0.775rem", fontFamily: "monospace" }}
+                        />
+
+                        {conditions.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveCondition(idx)}
+                            style={{ background: "none", border: "none", color: "#dc2626", fontWeight: 700, fontSize: "1rem", cursor: "pointer", padding: "0 0.25rem" }}
+                            title="Remove condition"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", paddingLeft: "0.2rem" }}>
+                        <span style={{ fontSize: "0.7rem", fontWeight: 600, color: "#6b7280" }}>THEN Output:</span>
+                        <input
+                          type="text"
+                          value={cond.thenResult !== undefined ? cond.thenResult : (idx === 0 ? trueResult : "1")}
+                          onChange={(e) => {
+                            if (idx === 0) setTrueResult(e.target.value);
+                            handleConditionChange(idx, "thenResult", e.target.value);
+                          }}
+                          placeholder='e.g. "Below 60" or 1'
+                          style={{ flex: 1, padding: "0.3rem 0.45rem", borderRadius: "4px", border: "1px solid #d1d5db", fontSize: "0.775rem", fontFamily: "monospace" }}
+                        />
+                      </div>
                     </div>
                   ))}
 
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem", marginTop: "0.2rem" }}>
-                    <div>
-                      <label style={{ display: "block", fontSize: "0.725rem", fontWeight: 600, color: "#4b5563", marginBottom: "0.2rem" }}>
-                        Result if TRUE
-                      </label>
-                      <input
-                        type="text"
-                        value={trueResult}
-                        onChange={(e) => setTrueResult(e.target.value)}
-                        placeholder='e.g. 1'
-                        style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: "6px", border: "1px solid #d1d5db", fontSize: "0.775rem", fontFamily: "monospace" }}
-                      />
-                    </div>
-                    <div>
-                      <label style={{ display: "block", fontSize: "0.725rem", fontWeight: 600, color: "#4b5563", marginBottom: "0.2rem" }}>
-                        Result if FALSE
-                      </label>
+                  <div style={{ backgroundColor: "#ffffff", padding: "0.6rem", borderRadius: "6px", border: "1px solid #d1d5db", marginTop: "0.2rem" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                      <span style={{ fontSize: "0.7rem", fontWeight: 700, padding: "0.15rem 0.4rem", borderRadius: "4px", background: "#fef3c7", color: "#92400e" }}>
+                        ELSE
+                      </span>
+                      <span style={{ fontSize: "0.725rem", fontWeight: 600, color: "#4b5563" }}>
+                        Default Output (If No Conditions Match):
+                      </span>
                       <input
                         type="text"
                         value={falseResult}
                         onChange={(e) => setFalseResult(e.target.value)}
-                        placeholder='e.g. 0'
-                        style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: "6px", border: "1px solid #d1d5db", fontSize: "0.775rem", fontFamily: "monospace" }}
+                        placeholder='e.g. "Satisfactory" or 0'
+                        style={{ flex: 1, padding: "0.3rem 0.45rem", borderRadius: "4px", border: "1px solid #d1d5db", fontSize: "0.775rem", fontFamily: "monospace" }}
                       />
                     </div>
                   </div>

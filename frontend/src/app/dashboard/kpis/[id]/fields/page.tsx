@@ -6525,7 +6525,7 @@ interface ConditionalLogicEditorProps {
 function ConditionalLogicEditor({ config, onChangeConfig }: ConditionalLogicEditorProps) {
   const condLogic = config?.conditional_logic ?? { enabled: false, rules: [{ operator: "op_lt", value: "0", then: "" }], else_output: "" };
   const isEnabled = !!condLogic.enabled;
-  const rule = condLogic.rules?.[0] ?? { operator: "op_lt", value: "0", then: "" };
+  const rules = condLogic.rules && condLogic.rules.length > 0 ? condLogic.rules : [{ operator: "op_lt", value: "0", then: "" }];
   const elseOutput = condLogic.else_output ?? "";
 
   const updateCond = (patch: Partial<typeof condLogic>) => {
@@ -6538,8 +6538,19 @@ function ConditionalLogicEditor({ config, onChangeConfig }: ConditionalLogicEdit
     });
   };
 
-  const updateRule0 = (rulePatch: Partial<typeof rule>) => {
-    const updatedRules = [{ ...rule, ...rulePatch }];
+  const updateRuleAtIndex = (index: number, rulePatch: Partial<(typeof rules)[0]>) => {
+    const updatedRules = rules.map((r: any, i: number) => (i === index ? { ...r, ...rulePatch } : r));
+    updateCond({ rules: updatedRules });
+  };
+
+  const addRule = () => {
+    const updatedRules = [...rules, { operator: "op_gte", value: "0", then: "" }];
+    updateCond({ rules: updatedRules });
+  };
+
+  const removeRule = (index: number) => {
+    if (rules.length <= 1) return;
+    const updatedRules = rules.filter((_: any, i: number) => i !== index);
     updateCond({ rules: updatedRules });
   };
 
@@ -6558,67 +6569,107 @@ function ConditionalLogicEditor({ config, onChangeConfig }: ConditionalLogicEdit
             });
           }}
         />
-        Apply Conditional (IF / ELSE) Output Logic
+        Apply Conditional (IF / ELSE IF / ELSE) Output Logic
       </label>
 
       {isEnabled && (
-        <div style={{ marginTop: "0.75rem", padding: "0.75rem", borderRadius: "8px", border: "1px solid var(--border)", background: "var(--bg-subtle, #f8f9fa)" }}>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "0.75rem" }}>
-            <span style={{ fontSize: "0.8rem", fontWeight: 700, padding: "0.25rem 0.5rem", background: "var(--primary-light, #e0f2fe)", color: "var(--primary-dark, #0369a1)", borderRadius: 6 }}>
-              IF
-            </span>
-            <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)" }}>
-              Formula Result
-            </span>
+        <div style={{ marginTop: "0.75rem", padding: "0.75rem", borderRadius: "8px", border: "1px solid var(--border)", background: "var(--bg-subtle, #f8f9fa)", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          {rules.map((rule: any, idx: number) => (
+            <div key={idx} style={{ padding: "0.6rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface, #ffffff)" }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
+                <span style={{ fontSize: "0.8rem", fontWeight: 700, padding: "0.2rem 0.5rem", background: idx === 0 ? "var(--primary-light, #e0f2fe)" : "var(--bg-subtle, #f1f5f9)", color: idx === 0 ? "var(--primary-dark, #0369a1)" : "#475569", borderRadius: 6 }}>
+                  {idx === 0 ? "IF" : "ELSE IF"}
+                </span>
+                <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)" }}>
+                  Formula Result
+                </span>
 
-            <select
-              value={rule.operator || "op_lt"}
-              onChange={(e) => updateRule0({ operator: e.target.value })}
-              style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
-            >
-              <option value="op_lt">less than (&lt;)</option>
-              <option value="op_lte">less or equal (≤)</option>
-              <option value="op_eq">equals (=)</option>
-              <option value="op_neq">not equals (≠)</option>
-              <option value="op_gt">greater than (&gt;)</option>
-              <option value="op_gte">greater or equal (≥)</option>
-              <option value="is_empty">IS EMPTY</option>
-              <option value="is_not_empty">IS NOT EMPTY</option>
-            </select>
+                <select
+                  value={rule.operator || "op_lt"}
+                  onChange={(e) => updateRuleAtIndex(idx, { operator: e.target.value })}
+                  style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+                >
+                  <option value="op_lt">less than (&lt;)</option>
+                  <option value="op_lte">less or equal (≤)</option>
+                  <option value="op_eq">equals (=)</option>
+                  <option value="op_neq">not equals (≠)</option>
+                  <option value="op_gt">greater than (&gt;)</option>
+                  <option value="op_gte">greater or equal (≥)</option>
+                  <option value="is_empty">IS EMPTY</option>
+                  <option value="is_not_empty">IS NOT EMPTY</option>
+                </select>
 
-            {rule.operator !== "is_empty" && rule.operator !== "is_not_empty" && (
-              <input
-                type="text"
-                value={rule.value ?? ""}
-                onChange={(e) => updateRule0({ value: e.target.value })}
-                placeholder="Comparison Value (e.g. 0)"
-                style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", flex: "1 1 120px", fontSize: "0.85rem" }}
-              />
-            )}
-          </div>
+                {rule.operator !== "is_empty" && rule.operator !== "is_not_empty" && (
+                  <input
+                    type="text"
+                    value={rule.value ?? ""}
+                    onChange={(e) => updateRuleAtIndex(idx, { value: e.target.value })}
+                    placeholder="Comparison Value (e.g. 60)"
+                    style={{ padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", flex: "1 1 120px", fontSize: "0.85rem" }}
+                  />
+                )}
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
-            <div>
-              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>THEN Output (If True)</label>
-              <input
-                type="text"
-                value={rule.then ?? ""}
-                onChange={(e) => updateRule0({ then: e.target.value })}
-                placeholder='e.g. "Non Initialized"'
-                style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
-              />
+                {rules.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removeRule(idx)}
+                    style={{ marginLeft: "auto", border: "none", background: "none", color: "#ef4444", fontWeight: 700, fontSize: "1.1rem", cursor: "pointer", padding: "0 0.4rem" }}
+                    title="Remove rule"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+
+              <div>
+                <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.2rem" }}>
+                  THEN Output (If Condition Met)
+                </label>
+                <input
+                  type="text"
+                  value={rule.then ?? ""}
+                  onChange={(e) => updateRuleAtIndex(idx, { then: e.target.value })}
+                  placeholder='e.g. "Below 60"'
+                  style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+                />
+              </div>
             </div>
+          ))}
 
-            <div>
-              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.25rem" }}>ELSE Output (If False)</label>
-              <input
-                type="text"
-                value={elseOutput}
-                onChange={(e) => updateCond({ else_output: e.target.value })}
-                placeholder='e.g. "Initialized"'
-                style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
-              />
+          <button
+            type="button"
+            onClick={addRule}
+            style={{
+              alignSelf: "flex-start",
+              padding: "0.35rem 0.75rem",
+              borderRadius: "6px",
+              background: "#eff6ff",
+              color: "#2563eb",
+              border: "1px solid #bfdbfe",
+              fontSize: "0.8rem",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            + Add Else If Condition
+          </button>
+
+          <div style={{ padding: "0.6rem", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--surface, #ffffff)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.3rem" }}>
+              <span style={{ fontSize: "0.8rem", fontWeight: 700, padding: "0.2rem 0.5rem", background: "#fef3c7", color: "#92400e", borderRadius: 6 }}>
+                ELSE
+              </span>
+              <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--muted)" }}>
+                Default Output (If No Conditions Match)
+              </span>
             </div>
+            <input
+              type="text"
+              value={elseOutput}
+              onChange={(e) => updateCond({ else_output: e.target.value })}
+              placeholder='e.g. "Satisfactory"'
+              style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.85rem" }}
+            />
           </div>
         </div>
       )}

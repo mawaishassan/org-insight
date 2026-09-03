@@ -396,4 +396,10 @@ table.report-table th {
 @keyframes effective-pulse-text {
   0%, 100% { opacity: 0.65; }
   50% { opacity: 1; }
+}
+
+/* Slim top-bar progress indicator for dashboard widget refreshes */
+@keyframes dashboardProgressBar {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }

@@ -2783,3 +2783,23 @@ async def get_formula_progress(
         "total_rows": task.get("total_rows", 0),
         "message": task.get("message", "Processing..."),
     }
+
+
+@router.post("/{kpi_id}/sync-joined-data")
+async def sync_joined_kpi_data_route(
+    kpi_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Manually triggers physical materialization of joined KPI data into DB tables."""
+    kpi = (await db.execute(select(KPI).where(KPI.id == kpi_id))).scalar_one_or_none()
+    if not kpi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KPI not found")
+    if not kpi.is_joined:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="KPI is not a joined KPI")
+
+    from app.entries.joined_sync import sync_joined_kpi_physical_data
+    synced_rows = await sync_joined_kpi_physical_data(db, kpi, current_user_id=current_user.id)
+    await db.commit()
+    return {"status": "ok", "synced_rows": synced_rows}
+
