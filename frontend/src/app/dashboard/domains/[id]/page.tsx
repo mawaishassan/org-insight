@@ -82,8 +82,8 @@ function qs(params: Record<string, string | number | undefined>) {
 export default function DomainDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const domainId = Number(params.id);
-  const orgIdParam = searchParams.get("organization_id");
+  const domainId = Number(params?.id);
+  const orgIdParam = searchParams?.get("organization_id");
   const organizationId = orgIdParam ? Number(orgIdParam) : undefined;
 
   const token = getAccessToken();

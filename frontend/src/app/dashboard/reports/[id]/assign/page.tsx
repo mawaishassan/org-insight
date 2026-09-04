@@ -42,7 +42,7 @@ type Rights = { can_view: boolean; can_print: boolean; can_export: boolean; can_
 
 export default function ReportAssignPage() {
   const params = useParams();
-  const id = Number(params.id);
+  const id = Number(params?.id);
   const token = getAccessToken();
 
   const [template, setTemplate] = useState<TemplateRow | null>(null);

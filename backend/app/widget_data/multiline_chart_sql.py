@@ -409,7 +409,14 @@ async def fetch_multiline_bar_agg_buckets(
         date_where = """AND (
             (c_dt.value_date IS NOT NULL AND c_dt.value_date >= :dt_start AND c_dt.value_date < :dt_end)
             OR
-            (c_dt.value_text IS NOT NULL AND TRIM(c_dt.value_text) <> '' AND TRIM(c_dt.value_text) >= :dt_start_str AND TRIM(c_dt.value_text) < :dt_end_str)
+            (
+                c_dt.value_text IS NOT NULL 
+                AND TRIM(c_dt.value_text) <> '' 
+                AND LOWER(TRIM(c_dt.value_text)) NOT IN ('false', 'none', 'null', '0')
+                AND c_dt.value_text ~ '^\\d{4}'
+                AND TRIM(c_dt.value_text) >= :dt_start_str 
+                AND TRIM(c_dt.value_text) < :dt_end_str
+            )
         )\n"""
 
     # Support single entry_id or list of entry_ids (spanning years)

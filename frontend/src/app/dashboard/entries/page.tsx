@@ -38,13 +38,13 @@ interface OrgTagRow {
 export default function EntriesPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const yearParam = searchParams.get("year");
+  const yearParam = searchParams?.get("year");
   const year = yearParam ? Number(yearParam) : currentYear;
-  const q = searchParams.get("q") ?? "";
-  const domainIdParam = searchParams.get("domain_id");
-  const categoryIdParam = searchParams.get("category_id");
-  const tagIdParam = searchParams.get("tag_id");
-  const status = (searchParams.get("status") as "all" | "submitted" | "draft" | "not_entered" | "no_user_assigned") ?? "all";
+  const q = searchParams?.get("q") ?? "";
+  const domainIdParam = searchParams?.get("domain_id");
+  const categoryIdParam = searchParams?.get("category_id");
+  const tagIdParam = searchParams?.get("tag_id");
+  const status = (searchParams?.get("status") as "all" | "submitted" | "draft" | "not_entered" | "no_user_assigned") ?? "all";
 
   const [organizationId, setOrganizationId] = useState<number | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);

@@ -8,8 +8,8 @@ import { getApiUrl } from "@/lib/api";
 export default function AttachmentDownloadPage() {
   const params = useParams();
   const router = useRouter();
-  const kpiId = params.kpiId as string;
-  const fileId = params.fileId as string;
+  const kpiId = (params?.kpiId ?? "") as string;
+  const fileId = (params?.fileId ?? "") as string;
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

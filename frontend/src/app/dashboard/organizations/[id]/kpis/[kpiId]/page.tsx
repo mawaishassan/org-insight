@@ -11,8 +11,8 @@ import { useEffect } from "react";
 export default function OrganizationKpiEditPage() {
   const params = useParams();
   const router = useRouter();
-  const orgId = params.id;
-  const kpiId = params.kpiId;
+  const orgId = params?.id;
+  const kpiId = params?.kpiId;
 
   useEffect(() => {
     if (orgId && kpiId) {

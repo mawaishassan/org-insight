@@ -88,12 +88,12 @@ const EMPTY_FIELD_ACCESS: FieldAccessItem[] = [];
 export default function AccessControlPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const orgId = Number(params.id);
+  const orgId = Number(params?.id);
   const token = getAccessToken();
   const [org, setOrg] = useState<OrgInfo | null>(null);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
   const [users, setUsers] = useState<UserRef[]>([]);
-  const kpiIdFromUrl = searchParams.get("kpi_id");
+  const kpiIdFromUrl = searchParams?.get("kpi_id");
   const [selectedKpiId, setSelectedKpiId] = useState<number | null>(null);
   const [assignments, setAssignments] = useState<{ id: number; username: string; full_name: string | null; permission: string }[]>([]);
   const [fields, setFields] = useState<FieldDef[]>([]);

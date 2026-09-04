@@ -133,32 +133,9 @@ export function WidgetFilterControl({
     };
   }, [isOpen]);
 
-  // Auto-fetch full column values for active tab when popover opens
-  useEffect(() => {
-    const keyToFetch = filterKeys.length === 1 ? filterKeys[0] : activeKey;
-    if (!isOpen || !keyToFetch || !dashboardId || !kpiId || !sourceFieldKey) return;
-    if (!fetchedOptionsByKey[keyToFetch] && fetchingKey !== keyToFetch) {
-      setFetchingKey(keyToFetch);
-      const token = getAccessToken();
-      const q = `?kpi_id=${kpiId}&source_field_key=${encodeURIComponent(sourceFieldKey)}&column_key=${encodeURIComponent(keyToFetch)}`;
-      api<{ ok: boolean; column_key: string; values: string[] }>(`/dashboards/${dashboardId}/column-values${q}`, { token })
-        .then((res) => {
-          if (res?.values && Array.isArray(res.values)) {
-            setFetchedOptionsByKey((prev) => ({ ...prev, [keyToFetch]: res.values }));
-          }
-        })
-        .catch(() => {})
-        .finally(() => setFetchingKey(null));
-    }
-  }, [isOpen, activeKey, filterKeys, dashboardId, kpiId, sourceFieldKey, fetchedOptionsByKey, fetchingKey]);
-
   const effectiveAvailableValuesByKey: Record<string, string[]> = {};
   filterKeys.forEach((k) => {
-    const combinedSet = new Set([
-      ...(availableValuesByKey[k] || []),
-      ...(fetchedOptionsByKey[k] || []),
-    ]);
-    effectiveAvailableValuesByKey[k] = Array.from(combinedSet).sort((a, b) => a.localeCompare(b));
+    effectiveAvailableValuesByKey[k] = Array.from(new Set(availableValuesByKey[k] || [])).sort((a, b) => a.localeCompare(b));
   });
 
   if (!filterKeys || filterKeys.length === 0) return null;
@@ -683,14 +660,37 @@ const pendingUniversalBatches = new Map<
 const CLIENT_WIDGET_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const clientWidgetMemoryCache = new Map<string, { data: any; ts: number }>();
 
-export function clearClientWidgetCache(): void {
-  clientWidgetMemoryCache.clear();
+export function clearClientWidgetCache(dashboardId?: number): void {
+  if (dashboardId != null) {
+    const prefix = `${dashboardId}::`;
+    for (const k of Array.from(clientWidgetMemoryCache.keys())) {
+      if (k.startsWith(prefix)) {
+        clientWidgetMemoryCache.delete(k);
+      }
+    }
+  } else {
+    clientWidgetMemoryCache.clear();
+  }
+}
+
+function computeWidgetCacheSignature(w: any): string {
+  if (!w || typeof w !== "object") return "";
+  const kpiId = w.kpi_id ?? "";
+  const type = w.type ?? "";
+  const srcKey = w.source_field_key ?? w.field_key ?? "";
+  const groupBy = w.group_by_sub_field_key ?? "";
+  const valKey = w.value_sub_field_key ?? "";
+  const agg = w.agg ?? "";
+  const fkeys = Array.isArray(w.field_keys) ? w.field_keys.join(",") : "";
+  const joins = Array.isArray(w.joins) ? JSON.stringify(w.joins) : "";
+  return `${kpiId}:${type}:${srcKey}:${groupBy}:${valKey}:${agg}:${fkeys}:${joins}`;
 }
 
 export function enqueueDashboardUniversalBatch(
   req: Omit<PendingUniversal, "resolve" | "reject">
 ): Promise<any> {
-  const cacheKey = `${req.dashboardId}::${req.widgetId}::${JSON.stringify(req.overrides ?? {})}`;
+  const widgetSig = computeWidgetCacheSignature(req.widget);
+  const cacheKey = `${req.dashboardId}::${req.widgetId}::${widgetSig}::${JSON.stringify(req.overrides ?? {})}`;
   const cached = clientWidgetMemoryCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CLIENT_WIDGET_CACHE_TTL_MS) {
     return Promise.resolve(cached.data);
@@ -722,7 +722,8 @@ export function enqueueDashboardUniversalBatch(
             const k = x.widgetId || `idx:${idx}`;
             const r = res?.results?.[k] ?? res?.results?.[`idx:${idx}`];
             if (r && r.ok) {
-              const itemCacheKey = `${x.dashboardId}::${x.widgetId}::${JSON.stringify(x.overrides ?? {})}`;
+              const itemSig = computeWidgetCacheSignature(x.widget);
+              const itemCacheKey = `${x.dashboardId}::${x.widgetId}::${itemSig}::${JSON.stringify(x.overrides ?? {})}`;
               clientWidgetMemoryCache.set(itemCacheKey, { data: r, ts: Date.now() });
               x.resolve(r);
             } else {
@@ -809,6 +810,8 @@ export type Widget =
       year: number;
       period_key?: string | null;
       field_key: string;
+      enable_linked_widgets?: boolean;
+      linked_widget_ids?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -941,6 +944,8 @@ export type Widget =
       fg_color?: string;
       /** Advanced multi-line row filters (SUPER_ADMIN) */
       filters?: MultiItemsFilterPayloadV2 | null;
+      enable_linked_widgets?: boolean;
+      linked_widget_ids?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -1113,7 +1118,6 @@ function WidgetSettingsShell({
   }, [isFullScreen, goToNext, goToPrev]);
 
   useEffect(() => {
-    setViewerMenu(null);
     setOpen(false);
     setLayoutOpen(false);
   }, [widgetKey]);
@@ -1134,7 +1138,7 @@ function WidgetSettingsShell({
   const hasDesign = !!designActions;
   const hasViewer = viewerMenu != null;
   const showSettingsButton = hasDesign || hasViewer;
-  const showHeader = !!title || headerAddon != null || hasDesign || hasViewer;
+  const showHeader = true;
 
   return (
     <WidgetViewerMenuSetterContext.Provider value={setViewerMenu}>
@@ -1478,6 +1482,11 @@ function WidgetSettingsShell({
                         )}
                         {hasDesign && hasViewer && <div style={{ borderTop: "1px solid var(--border)", margin: "0.25rem 0" }} />}
                         {hasViewer && <div style={{ padding: "0.45rem 0.65rem" }}>{viewerMenu}</div>}
+                        {!hasDesign && !hasViewer && (
+                          <div style={{ padding: "0.45rem 0.65rem", fontSize: "0.82rem", color: "var(--muted)" }}>
+                            No additional settings
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1525,6 +1534,7 @@ export function WidgetRenderer({
   onTableRowsPerPageChange,
   tableRowsPerPageOptions,
   periodOverride,
+  onSingleValueCardClick,
 }: {
   widget: Widget;
   organizationId: number;
@@ -1535,6 +1545,7 @@ export function WidgetRenderer({
   onTableRowsPerPageChange?: (n: number) => void;
   tableRowsPerPageOptions?: number[];
   periodOverride?: string;
+  onSingleValueCardClick?: (widget: Widget) => void;
 }) {
   const effectiveWidget = useMemo(() => {
     if (periodOverride) {
@@ -1560,6 +1571,7 @@ export function WidgetRenderer({
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
+        onSingleValueCardClick={onSingleValueCardClick}
       />
     );
   }
@@ -1610,6 +1622,7 @@ export function WidgetRenderer({
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
+        onSingleValueCardClick={onSingleValueCardClick}
       />
     );
   }
@@ -1729,11 +1742,13 @@ function KpiSingleValueWidget({
   organizationId,
   designActions,
   dashboardId,
+  onSingleValueCardClick,
 }: {
   widget: Extract<Widget, { type: "kpi_single_value" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
   dashboardId?: number;
+  onSingleValueCardClick?: (widget: Widget) => void;
 }) {
   const token = getAccessToken();
   const [value, setValue] = useState<string>("");
@@ -1806,6 +1821,13 @@ function KpiSingleValueWidget({
     return () => setWidgetLoading(widget.id, false);
   }, [widget.id, loading, setWidgetLoading]);
 
+  const isLinkedInteractive = Boolean(
+    widget.enable_linked_widgets &&
+    Array.isArray(widget.linked_widget_ids) &&
+    widget.linked_widget_ids.length > 0 &&
+    onSingleValueCardClick
+  );
+
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id} allowFullScreen={false}>
       {loading ? (
@@ -1813,7 +1835,30 @@ function KpiSingleValueWidget({
       ) : error ? (
         <p className="form-error">{error}</p>
       ) : (
-        <div style={{ fontSize: "1.6rem", fontWeight: 700 }}>{value || "—"}</div>
+        <div
+          onClick={isLinkedInteractive ? () => onSingleValueCardClick?.(widget) : undefined}
+          onKeyDown={
+            isLinkedInteractive
+              ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSingleValueCardClick?.(widget);
+                  }
+                }
+              : undefined
+          }
+          role={isLinkedInteractive ? "button" : undefined}
+          tabIndex={isLinkedInteractive ? 0 : undefined}
+          style={{
+            fontSize: "1.6rem",
+            fontWeight: 700,
+            cursor: isLinkedInteractive ? "pointer" : "default",
+            userSelect: "none",
+          }}
+          title={isLinkedInteractive ? "Click to view linked detailed widgets" : undefined}
+        >
+          <div>{value || "—"}</div>
+        </div>
       )}
     </WidgetSettingsShell>
   );
@@ -1824,11 +1869,13 @@ function KpiCardSingleValueWidget({
   organizationId,
   designActions,
   dashboardId,
+  onSingleValueCardClick,
 }: {
   widget: Extract<Widget, { type: "kpi_card_single_value" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
   dashboardId?: number;
+  onSingleValueCardClick?: (widget: Widget) => void;
 }) {
   const token = getAccessToken();
   const { selectedPeriod, selectedPeriodType, selectedColumnValue, selectedDashboardFilterValues, requestGeneration } = useDashboardCustomization();
@@ -2046,6 +2093,13 @@ function KpiCardSingleValueWidget({
     return () => setWidgetLoading(widget.id, false);
   }, [widget.id, loading, refreshing, setWidgetLoading]);
 
+  const isLinkedInteractive = Boolean(
+    widget.enable_linked_widgets &&
+    Array.isArray(widget.linked_widget_ids) &&
+    widget.linked_widget_ids.length > 0 &&
+    onSingleValueCardClick
+  );
+
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id} allowFullScreen={false}>
       {showSkeleton ? (
@@ -2054,6 +2108,20 @@ function KpiCardSingleValueWidget({
         <p className="form-error">{error}</p>
       ) : (
         <div
+          onClick={isLinkedInteractive ? () => onSingleValueCardClick?.(widget) : undefined}
+          onKeyDown={
+            isLinkedInteractive
+              ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSingleValueCardClick?.(widget);
+                  }
+                }
+              : undefined
+          }
+          role={isLinkedInteractive ? "button" : undefined}
+          tabIndex={isLinkedInteractive ? 0 : undefined}
+          title={isLinkedInteractive ? "Click to view linked detailed widgets" : undefined}
           style={{
             borderRadius: 14,
             padding: "1rem 1.1rem",
@@ -2065,9 +2133,19 @@ function KpiCardSingleValueWidget({
             textAlign: align as any,
             border: showRefreshing
               ? "1.5px solid rgba(99,102,241,0.4)"
-              : bg === "#ffffff" ? "1px solid var(--border)" : "1px solid rgba(0,0,0,0.04)",
+              : isLinkedInteractive
+              ? "1.5px solid rgba(59, 130, 246, 0.45)"
+              : bg === "#ffffff"
+              ? "1px solid var(--border)"
+              : "1px solid rgba(0,0,0,0.04)",
+            boxShadow: isLinkedInteractive
+              ? "0 4px 12px rgba(59, 130, 246, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)"
+              : undefined,
+            cursor: isLinkedInteractive ? "pointer" : "default",
             opacity: showRefreshing ? 0.75 : 1,
-            transition: "opacity 0.25s ease, border-color 0.25s ease",
+            transition: "all 0.25s ease",
+            userSelect: isLinkedInteractive ? "none" : "auto",
+            position: "relative",
             ...bgStyle,
           }}
         >
@@ -2704,14 +2782,7 @@ function KpiBarChartWidgetInner({
                 ).sort((a, b) => a.localeCompare(b));
                 nextAvailable[primaryKey] = uniq;
               }
-              setAvailableValuesByKey((prev) => {
-                const merged: Record<string, string[]> = { ...prev };
-                Object.keys(nextAvailable).forEach((k) => {
-                  const setCombined = new Set([...(prev[k] || []), ...(nextAvailable[k] || [])]);
-                  merged[k] = Array.from(setCombined).sort((a, b) => a.localeCompare(b));
-                });
-                return merged;
-              });
+              setAvailableValuesByKey(nextAvailable);
             } else {
               setSqlAggBuckets(null);
               const items = Array.isArray(d.raw_rows) ? d.raw_rows : [];
@@ -2726,14 +2797,7 @@ function KpiBarChartWidgetInner({
                   )
                 ).sort((a, b) => a.localeCompare(b));
               });
-              setAvailableValuesByKey((prev) => {
-                const merged: Record<string, string[]> = { ...prev };
-                Object.keys(nextAvailable).forEach((k) => {
-                  const setCombined = new Set([...(prev[k] || []), ...(nextAvailable[k] || [])]);
-                  merged[k] = Array.from(setCombined).sort((a, b) => a.localeCompare(b));
-                });
-                return merged;
-              });
+              setAvailableValuesByKey(nextAvailable);
             }
             setBars([]);
             return;
@@ -3025,8 +3089,14 @@ function KpiBarChartWidgetInner({
   });
 
   useEffect(() => {
+    return () => {
+      if (setHeaderAddon) setHeaderAddon(null);
+    };
+  }, [setHeaderAddon]);
+
+  useEffect(() => {
     if (!setHeaderAddon) return;
-    if (loading || error) {
+    if (error) {
       setHeaderAddon(null);
       return;
     }
@@ -3082,14 +3152,14 @@ function KpiBarChartWidgetInner({
         />
       </div>
     );
-
-    return () => setHeaderAddon(null);
   }, [
     setHeaderAddon,
-    loading,
     error,
     widget.id,
     widget.mode,
+    widget.kpi_id,
+    widget.source_field_key,
+    dashboardId,
     viewerYear,
     fetchDataWithDate,
     periodOptions,
@@ -3102,22 +3172,20 @@ function KpiBarChartWidgetInner({
 
   useEffect(() => {
     if (!setViewerMenu) return;
-    if (loading || error) {
-      setViewerMenu(null);
-      return;
-    }
     const chartToggle = (
       <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 999, overflow: "hidden" }}>
         <button
           type="button"
           onClick={() => setViewerChartType("bar")}
           style={{
-            padding: "0.25rem 0.55rem",
+            padding: "0.25rem 0.65rem",
             border: "none",
-            background: viewerChartType === "bar" ? "rgba(79,70,229,0.10)" : "transparent",
-            color: viewerChartType === "bar" ? "var(--accent)" : "var(--text)",
+            background: viewerChartType === "bar" ? "var(--accent, #2563eb)" : "transparent",
+            color: viewerChartType === "bar" ? "#ffffff" : "var(--text)",
             cursor: "pointer",
             fontSize: "0.85rem",
+            fontWeight: viewerChartType === "bar" ? 600 : 400,
+            transition: "all 0.15s ease",
           }}
           aria-pressed={viewerChartType === "bar"}
         >
@@ -3127,13 +3195,15 @@ function KpiBarChartWidgetInner({
           type="button"
           onClick={() => setViewerChartType("pie")}
           style={{
-            padding: "0.25rem 0.55rem",
+            padding: "0.25rem 0.65rem",
             border: "none",
             borderLeft: "1px solid var(--border)",
-            background: viewerChartType === "pie" ? "rgba(79,70,229,0.10)" : "transparent",
-            color: viewerChartType === "pie" ? "var(--accent)" : "var(--text)",
+            background: viewerChartType === "pie" ? "var(--accent, #2563eb)" : "transparent",
+            color: viewerChartType === "pie" ? "#ffffff" : "var(--text)",
             cursor: "pointer",
             fontSize: "0.85rem",
+            fontWeight: viewerChartType === "pie" ? 600 : 400,
+            transition: "all 0.15s ease",
           }}
           aria-pressed={viewerChartType === "pie"}
         >
@@ -3142,8 +3212,10 @@ function KpiBarChartWidgetInner({
       </div>
     );
     setViewerMenu(chartToggle);
-    return () => setViewerMenu(null);
-  }, [setViewerMenu, loading, error, viewerChartType]);
+    return () => {
+      setViewerMenu(null);
+    };
+  }, [setViewerMenu, viewerChartType]);
 
   // Register labels for customization
   useEffect(() => {
@@ -3473,14 +3545,7 @@ function KpiTrendWidgetInner({
               if (primaryKey) {
                 nextAvailable[primaryKey] = Array.from(new Set(allF)).sort((a, b) => a.localeCompare(b));
               }
-              setAvailableValuesByKey((prev) => {
-                const merged: Record<string, string[]> = { ...prev };
-                Object.keys(nextAvailable).forEach((k) => {
-                  const setCombined = new Set([...(prev[k] || []), ...(nextAvailable[k] || [])]);
-                  merged[k] = Array.from(setCombined).sort((a, b) => a.localeCompare(b));
-                });
-                return merged;
-              });
+              setAvailableValuesByKey(nextAvailable);
             } else {
               const rby = d.raw_rows_by_year as Record<string, unknown[]> | undefined;
               const raw: Record<number, any[]> = {};
@@ -3497,14 +3562,7 @@ function KpiTrendWidgetInner({
                   new Set(allItems.map((r: any) => safeKey(r?.[k])).filter((v) => v && v !== "(empty)"))
                 ).sort((a, b) => a.localeCompare(b));
               });
-              setAvailableValuesByKey((prev) => {
-                const merged: Record<string, string[]> = { ...prev };
-                Object.keys(nextAvailable).forEach((k) => {
-                  const setCombined = new Set([...(prev[k] || []), ...(nextAvailable[k] || [])]);
-                  merged[k] = Array.from(setCombined).sort((a, b) => a.localeCompare(b));
-                });
-                return merged;
-              });
+              setAvailableValuesByKey(nextAvailable);
               setRawMultiLineByYear(raw);
             }
             setFieldBarsByYear({});
@@ -3688,9 +3746,17 @@ function KpiTrendWidgetInner({
     });
   };
 
+
+
+  useEffect(() => {
+    return () => {
+      if (setHeaderAddon) setHeaderAddon(null);
+    };
+  }, [setHeaderAddon]);
+
   useEffect(() => {
     if (!setHeaderAddon) return;
-    if (loading || error) {
+    if (error) {
       setHeaderAddon(null);
       return;
     }
@@ -3737,13 +3803,13 @@ function KpiTrendWidgetInner({
         />
       </div>
     );
-
-    return () => setHeaderAddon(null);
   }, [
     setHeaderAddon,
-    loading,
     error,
     widget.id,
+    widget.kpi_id,
+    widget.source_field_key,
+    dashboardId,
     mode,
     JSON.stringify(selectedYears),
     configuredFilterKeys,
@@ -3754,7 +3820,7 @@ function KpiTrendWidgetInner({
 
   useEffect(() => {
     if (!setViewerMenu) return;
-    if (loading || error) {
+    if (error) {
       setViewerMenu(null);
       return;
     }
@@ -3831,8 +3897,7 @@ function KpiTrendWidgetInner({
         </div>
       </div>
     );
-    return () => setViewerMenu(null);
-  }, [setViewerMenu, loading, error, viewerView, JSON.stringify(yearOptions), JSON.stringify(selectedYears)]);
+  }, [setViewerMenu, error, viewerView, JSON.stringify(yearOptions), JSON.stringify(selectedYears)]);
 
   const years = useMemo(() => [...selectedYears].sort((a, b) => a - b), [JSON.stringify(selectedYears)]);
 

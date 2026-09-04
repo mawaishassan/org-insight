@@ -1502,6 +1502,14 @@ async def get_column_unique_values(
             ),
         ).where(KpiMultiLineRowAccess.user_id == current_user.id)
 
+    user_key = (getattr(current_user, "unique_user_key", None) or "").strip()
+    if not is_org_admin and user_key:
+        from sqlalchemy import func
+        scoped_rows = select(KpiMultiLineCell.row_id).where(
+            func.trim(func.lower(KpiMultiLineCell.value_text)) == user_key.lower()
+        )
+        q = q.where(KpiMultiLineRow.id.in_(scoped_rows))
+
     from app.entries.multi_line_load import _fetch_rules_for_field, load_multi_line_row_dicts
     rules = await _fetch_rules_for_field(db, field.id)
     if rules:
@@ -1514,6 +1522,14 @@ async def get_column_unique_values(
                     field=field,
                     current_user_id=current_user.id
                 )
+                if not is_org_admin and user_key:
+                    u_key_lower = user_key.lower()
+                    row_tuples = [
+                        (r_idx, rdict)
+                        for r_idx, rdict in row_tuples
+                        if any(str(v).strip().lower() == u_key_lower for v in rdict.values() if v is not None)
+                    ]
+
                 from collections import Counter
                 values_counter = Counter()
                 for _, rdict in row_tuples:

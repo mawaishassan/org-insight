@@ -124,16 +124,17 @@ async def upsert_external_auth_config(db: AsyncSession, login_url: str, db_name:
     return cfg
 
 
-def create_tokens_for_user(user: User) -> tuple[str, str, int]:
-    """Create access and refresh tokens; return (access, refresh, expires_in_seconds)."""
+def create_tokens_for_user(user: User) -> tuple[str, str, int, bool]:
+    """Create access and refresh tokens; return (access, refresh, expires_in_seconds, force_password_reset)."""
     extra = {
         "role": user.role.value,
         "organization_id": user.organization_id,
+        "force_password_reset": bool(user.force_password_reset),
     }
     access = create_access_token(user.id, extra=extra)
     refresh = create_refresh_token(user.id)
     expires_in = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-    return access, refresh, expires_in
+    return access, refresh, expires_in, bool(user.force_password_reset)
 
 
 async def get_user_by_id(db: AsyncSession, user_id: int) -> User | None:
@@ -142,8 +143,8 @@ async def get_user_by_id(db: AsyncSession, user_id: int) -> User | None:
     return result.scalar_one_or_none()
 
 
-async def refresh_tokens(db: AsyncSession, refresh_token: str) -> tuple[str, str, int] | None:
-    """Validate refresh token and return new access, refresh, expires_in or None."""
+async def refresh_tokens(db: AsyncSession, refresh_token: str) -> tuple[str, str, int, bool] | None:
+    """Validate refresh token and return new access, refresh, expires_in, force_password_reset or None."""
     payload = decode_token(refresh_token)
     if not payload or payload.get("type") != "refresh":
         return None

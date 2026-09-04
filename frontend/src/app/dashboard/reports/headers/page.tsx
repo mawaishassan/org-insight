@@ -38,7 +38,7 @@ interface OrganizationBranding {
 export default function CustomHeadersPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const selectedOrgId = searchParams.get("organization_id");
+  const selectedOrgId = searchParams?.get("organization_id");
 
   const [headers, setHeaders] = useState<CustomHeaderRow[]>([]);
   const [branding, setBranding] = useState<OrganizationBranding | null>(null);

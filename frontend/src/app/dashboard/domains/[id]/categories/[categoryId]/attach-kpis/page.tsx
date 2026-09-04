@@ -83,9 +83,9 @@ type AttachmentFilter = "all" | "attached" | "not_attached";
 export default function AttachKpisPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const domainId = Number(params.id);
-  const categoryId = Number(params.categoryId);
-  const orgIdParam = searchParams.get("organization_id");
+  const domainId = Number(params?.id);
+  const categoryId = Number(params?.categoryId);
+  const orgIdParam = searchParams?.get("organization_id");
   const organizationId = orgIdParam ? Number(orgIdParam) : undefined;
 
   const token = getAccessToken();

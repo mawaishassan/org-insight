@@ -338,6 +338,12 @@ class User(Base):
     role = Column(Enum(UserRole), nullable=False, default=UserRole.USER)
     is_active = Column(Boolean, default=True, nullable=False)
     unique_user_key = Column(String(100), nullable=True, index=True)
+    force_password_reset = Column(Boolean, default=False, nullable=False)
+    password_reset_requested_at = Column(DateTime, nullable=True)
+    password_reset_completed_at = Column(DateTime, nullable=True)
+    password_reset_requested_by_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -346,6 +352,9 @@ class User(Base):
     )
 
     organization = relationship("Organization", back_populates="users")
+    password_reset_audits = relationship(
+        "PasswordResetAudit", back_populates="user", lazy="selectin", cascade="all, delete-orphan", foreign_keys="[PasswordResetAudit.user_id]"
+    )
     kpi_assignments = relationship("KPIAssignment", back_populates="user", lazy="selectin", cascade="all, delete-orphan")
     kpi_field_access = relationship("KpiFieldAccess", back_populates="user", lazy="selectin", cascade="all, delete-orphan")
     user_organization_roles = relationship(
@@ -366,6 +375,31 @@ class User(Base):
 
     # Optional external identity (password verification happens through an external XML-RPC service).
     external_account = relationship("ExternalUser", back_populates="user", uselist=False, lazy="selectin")
+
+
+class PasswordResetAudit(Base):
+    """Audit log tracking forced password reset requests and completions."""
+
+    __tablename__ = "password_reset_audits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    admin_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status = Column(String(50), nullable=False, default="PENDING", index=True)  # PENDING, COMPLETED, CANCELLED
+    requested_at = Column(DateTime, default=utc_now, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", foreign_keys=[user_id], lazy="selectin")
+    admin = relationship("User", foreign_keys=[admin_id], lazy="selectin")
+    organization = relationship("Organization", lazy="selectin")
 
 
 class ExternalAuthConfig(Base):
@@ -550,8 +584,8 @@ class KPI(Base):
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
-    organization = relationship("Organization", back_populates="kpis", lazy="joined")
-    domain = relationship("Domain", back_populates="kpis", lazy="joined")
+    organization = relationship("Organization", back_populates="kpis", lazy="select")
+    domain = relationship("Domain", back_populates="kpis", lazy="select")
     domain_tags = relationship("KPIDomain", back_populates="kpi", lazy="selectin")
     category_tags = relationship("KPICategory", back_populates="kpi", lazy="selectin")
     organization_tags = relationship("KPIOrganizationTag", back_populates="kpi", lazy="selectin")

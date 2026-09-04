@@ -33,6 +33,7 @@ const updateSchema = z.object({
   role: z.enum(["USER", "REPORT_VIEWER"]),
   is_active: z.boolean(),
   unique_user_key: z.string().optional().or(z.literal("")),
+  force_password_reset: z.boolean().optional(),
 });
 
 type UpdateFormData = z.infer<typeof updateSchema>;
@@ -40,7 +41,7 @@ type UpdateFormData = z.infer<typeof updateSchema>;
 export default function UserDetailPage() {
   const params = useParams();
   const router = useRouter();
-  const userId = params.id ? Number(params.id) : NaN;
+  const userId = params?.id ? Number(params.id) : NaN;
   const token = getAccessToken();
 
   const [user, setUser] = useState<UserRow | null>(null);
@@ -58,6 +59,7 @@ export default function UserDetailPage() {
       role: "USER",
       is_active: true,
       unique_user_key: "",
+      force_password_reset: false,
     },
   });
 
@@ -86,6 +88,7 @@ export default function UserDetailPage() {
           role: (u.role === "USER" || u.role === "REPORT_VIEWER" ? u.role : "USER") as "USER" | "REPORT_VIEWER",
           is_active: u.is_active,
           unique_user_key: u.unique_user_key ?? "",
+          force_password_reset: !!u.force_password_reset,
         });
       })
       .catch((e) => {
@@ -108,6 +111,7 @@ export default function UserDetailPage() {
         role: data.role,
         is_active: data.is_active,
         unique_user_key: data.unique_user_key || null,
+        force_password_reset: data.force_password_reset ?? false,
       };
       if (data.password && data.password.length >= 8) body.password = data.password;
       const updated = await api<UserRow>(`/users/${user.id}`, {
@@ -215,7 +219,97 @@ export default function UserDetailPage() {
               </button>
               <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>{form.watch("is_active") ? "On" : "Off"}</span>
             </div>
+
+            {/* Force Password Reset Field */}
+            <div className="form-group" style={{ marginBottom: 0, display: "flex", alignItems: "flex-end", gap: "0.5rem" }}>
+              <label style={{ fontSize: "0.85rem", flex: "0 0 auto" }}>Force Password Reset</label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={form.watch("force_password_reset")}
+                onClick={() => form.setValue("force_password_reset", !form.getValues("force_password_reset"))}
+                style={{
+                  width: 40,
+                  height: 22,
+                  borderRadius: 11,
+                  border: "1px solid var(--border)",
+                  background: form.watch("force_password_reset") ? "#f59e0b" : "var(--border)",
+                  cursor: "pointer",
+                  position: "relative",
+                  flexShrink: 0,
+                }}
+              >
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 2,
+                    left: form.watch("force_password_reset") ? 20 : 2,
+                    width: 16,
+                    height: 16,
+                    borderRadius: "50%",
+                    background: "white",
+                    boxShadow: "var(--shadow-sm)",
+                    transition: "left 0.15s ease",
+                  }}
+                />
+              </button>
+              <span style={{ fontSize: "0.85rem", fontWeight: 600, color: form.watch("force_password_reset") ? "#f59e0b" : "var(--muted)" }}>
+                {form.watch("force_password_reset") ? "Yes (Required)" : "No"}
+              </span>
+            </div>
           </div>
+
+          {/* Reset Status Tracker Banner */}
+          {user && (
+            <div
+              style={{
+                marginTop: "0.75rem",
+                padding: "0.6rem 0.85rem",
+                borderRadius: "8px",
+                background: "var(--bg-subtle, rgba(255, 255, 255, 0.03))",
+                border: "1px solid var(--border)",
+                fontSize: "0.82rem",
+                display: "flex",
+                alignItems: "center",
+                gap: "0.75rem",
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ color: "var(--muted)" }}>Current Reset Status:</span>
+              <span
+                style={{
+                  padding: "0.15rem 0.5rem",
+                  borderRadius: "999px",
+                  fontSize: "0.75rem",
+                  fontWeight: 600,
+                  background:
+                    user.reset_status === "Pending"
+                      ? "rgba(245, 158, 11, 0.15)"
+                      : user.reset_status === "Completed"
+                      ? "rgba(16, 185, 129, 0.15)"
+                      : "var(--border)",
+                  color:
+                    user.reset_status === "Pending"
+                      ? "#f59e0b"
+                      : user.reset_status === "Completed"
+                      ? "#10b981"
+                      : "var(--muted)",
+                }}
+              >
+                {user.reset_status || "Not Required"}
+              </span>
+              {user.password_reset_requested_at && (
+                <span style={{ color: "var(--muted)", fontSize: "0.78rem" }}>
+                  Requested: {new Date(user.password_reset_requested_at).toLocaleDateString()}
+                </span>
+              )}
+              {user.password_reset_completed_at && (
+                <span style={{ color: "var(--muted)", fontSize: "0.78rem" }}>
+                  Completed: {new Date(user.password_reset_completed_at).toLocaleDateString()}
+                </span>
+              )}
+            </div>
+          )}
           <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
             <button type="submit" className="btn btn-primary" disabled={form.formState.isSubmitting} style={{ fontSize: "0.9rem", padding: "0.4rem 0.75rem" }}>
               {form.formState.isSubmitting ? "Saving..." : "Save"}

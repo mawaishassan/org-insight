@@ -146,15 +146,15 @@ export default function FullPageMultiItems() {
   const searchParams = useSearchParams();
   const router = useRouter();
 
-  const kpiId = Number(params.kpiId);
-  const year = Number(params.year);
-  const fieldId = Number(params.fieldId);
-  const organizationIdFromUrl = searchParams.get("organization_id");
-  const periodKey = searchParams.get("period_key") || "";
-  const dashboardIdFromUrl = searchParams.get("dashboard_id");
-  const widgetIdFromUrl = searchParams.get("widget_id");
-  const colsFromUrl = searchParams.get("cols");
-  const filtersFromUrl = searchParams.get("filters");
+  const kpiId = Number(params?.kpiId);
+  const year = Number(params?.year);
+  const fieldId = Number(params?.fieldId);
+  const organizationIdFromUrl = searchParams?.get("organization_id");
+  const periodKey = searchParams?.get("period_key") || "";
+  const dashboardIdFromUrl = searchParams?.get("dashboard_id");
+  const widgetIdFromUrl = searchParams?.get("widget_id");
+  const colsFromUrl = searchParams?.get("cols");
+  const filtersFromUrl = searchParams?.get("filters");
 
   const token = getAccessToken();
 

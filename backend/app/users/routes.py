@@ -50,6 +50,12 @@ async def list_org_users(
     out: list[UserResponse] = []
     for u in users:
         eu = ext_map.get(u.id)
+        if u.force_password_reset:
+            status_str = "Pending"
+        elif u.password_reset_completed_at:
+            status_str = "Completed"
+        else:
+            status_str = "Not Required"
         out.append(
             UserResponse(
                 id=u.id,
@@ -62,6 +68,10 @@ async def list_org_users(
                 unique_user_key=u.unique_user_key,
                 description=eu.description if eu else None,
                 is_external=eu is not None,
+                force_password_reset=bool(u.force_password_reset),
+                password_reset_requested_at=u.password_reset_requested_at,
+                password_reset_completed_at=u.password_reset_completed_at,
+                reset_status=status_str,
             )
         )
     return out
@@ -478,6 +488,12 @@ async def get_org_user(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     ext_res = await db.execute(select(ExternalUser).where(ExternalUser.user_id == user.id))
     eu = ext_res.scalar_one_or_none()
+    if user.force_password_reset:
+        status_str = "Pending"
+    elif user.password_reset_completed_at:
+        status_str = "Completed"
+    else:
+        status_str = "Not Required"
     return UserResponse(
         id=user.id,
         username=user.username,
@@ -489,6 +505,10 @@ async def get_org_user(
         unique_user_key=user.unique_user_key,
         description=eu.description if eu else None,
         is_external=eu is not None,
+        force_password_reset=bool(user.force_password_reset),
+        password_reset_requested_at=user.password_reset_requested_at,
+        password_reset_completed_at=user.password_reset_completed_at,
+        reset_status=status_str,
     )
 
 

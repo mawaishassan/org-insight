@@ -65,8 +65,11 @@ class DashboardWidgetMemoryCache:
     Guarantees < 10ms response times for repeat views and period shifts while
     strictly isolating user scope, period type, reporting time, and revision.
     """
-    def __init__(self, max_size: int = 5000, default_ttl: int = 180):
-        self._cache: dict[str, tuple[float, Any]] = {}
+    def __init__(self, max_size: int = 5000, default_ttl: int = 600):
+        # TTL raised to 600s (10 min) — cache is invalidated on data upload already.
+        # Using OrderedDict so eviction is true LRU (most-recently-used survives).
+        from collections import OrderedDict
+        self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         self._max_size = max_size
         self._default_ttl = default_ttl
 
@@ -94,13 +97,16 @@ class DashboardWidgetMemoryCache:
         if time.time() > expire_at:
             self._cache.pop(key, None)
             return None
+        # Move to end = mark as most recently used (LRU)
+        self._cache.move_to_end(key)
         return val
 
     def set(self, key: str, val: Any, ttl: int | None = None) -> None:
-        if len(self._cache) >= self._max_size:
-            keys_to_remove = list(self._cache.keys())[: max(1, self._max_size // 5)]
-            for k in keys_to_remove:
-                self._cache.pop(k, None)
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        elif len(self._cache) >= self._max_size:
+            # Evict LRU (oldest) entry instead of arbitrary FIFO slice
+            self._cache.popitem(last=False)
         expire_at = time.time() + (ttl or self._default_ttl)
         self._cache[key] = (expire_at, val)
 
@@ -118,6 +124,47 @@ class DashboardWidgetMemoryCache:
 
 
 _widget_cache = DashboardWidgetMemoryCache()
+
+
+class _AppLRUCache:
+    """
+    Process-level LRU cache shared across ALL requests and users.
+    Safe for auth results (read-only, non-PII, short TTL).
+    NOT safe for user-specific data.
+    """
+    def __init__(self, maxsize: int = 2000, ttl: int = 30):
+        from collections import OrderedDict
+        self._cache: OrderedDict = OrderedDict()
+        self._maxsize = maxsize
+        self._ttl = ttl
+
+    def get(self, key: Any) -> Any:
+        """Return cached value or _MISS sentinel."""
+        item = self._cache.get(key)
+        if item is None:
+            return _MISS
+        exp, val = item
+        if time.time() > exp:
+            self._cache.pop(key, None)
+            return _MISS
+        self._cache.move_to_end(key)
+        return val
+
+    def set(self, key: Any, val: Any) -> None:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        elif len(self._cache) >= self._maxsize:
+            self._cache.popitem(last=False)
+        self._cache[key] = (time.time() + self._ttl, val)
+
+    def invalidate_for_dashboard(self, dashboard_id: int) -> None:
+        keys = [k for k in self._cache if isinstance(k, tuple) and len(k) > 1 and k[1] == dashboard_id]
+        for k in keys:
+            self._cache.pop(k, None)
+
+
+_MISS = object()  # sentinel for cache miss
+_auth_cache = _AppLRUCache(maxsize=2000, ttl=30)  # 30-second TTL for auth results
 
 
 def invalidate_dashboard_cache(dashboard_id: int) -> int:
@@ -520,10 +567,16 @@ async def resolve_dashboard_chart_widget_data_batch(
         k = (int(kpi_id), int(year), pk)
         if k not in entry_cache:
             eid_res = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
-            if not eid_res[0]:
-                kpi_check = await db.execute(select(KPI).where(KPI.id == int(kpi_id)))
-                kpi_o = kpi_check.scalar_one_or_none()
-                if kpi_o and getattr(kpi_o, "is_joined", False):
+            kpi_check = await db.execute(select(KPI).where(KPI.id == int(kpi_id)))
+            kpi_o = kpi_check.scalar_one_or_none()
+            if kpi_o and getattr(kpi_o, "is_joined", False):
+                need_sync = not eid_res[0]
+                if not need_sync and eid_res[0]:
+                    from app.core.models import KpiMultiLineRow
+                    r_cnt = (await db.execute(select(func.count(KpiMultiLineRow.id)).where(KpiMultiLineRow.entry_id == eid_res[0]))).scalar() or 0
+                    if r_cnt == 0:
+                        need_sync = True
+                if need_sync:
                     try:
                         from app.entries.joined_sync import sync_joined_kpi_physical_data
                         await sync_joined_kpi_physical_data(db, kpi_o, year=int(year), period_key=period_key, current_user_id=user.id if user else None)
@@ -602,6 +655,19 @@ async def resolve_dashboard_chart_widget_data_batch(
             eid = [r[0] for r in entries_data]
             e_rev = revision_for_parts(eid[0] if eid else 0, entries_data[0][1] if entries_data else None)
             if not eid:
+                fallback_res = await db.execute(
+                    select(KPIEntry.id, KPIEntry.updated_at)
+                    .where(
+                        KPIEntry.kpi_id == kpi_id,
+                        KPIEntry.organization_id == org_id,
+                        KPIEntry.is_draft == False,
+                    )
+                    .order_by(KPIEntry.year.desc())
+                )
+                entries_data = fallback_res.all()
+                eid = [r[0] for r in entries_data]
+                e_rev = revision_for_parts(eid[0] if eid else 0, entries_data[0][1] if entries_data else None)
+            if not eid:
                 results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": {"kpi_id": kpi_id, "year": year, "entry_id": None, "row_count": 0, "source_field_id": int(f_full.id)}, "data": {"mode": "multi_line_items", "multi_line_agg_buckets": [], "raw_rows": []}, "entry_revision": None}
                 continue
             date_col_key = get_widget_date_col_key(dash_date_config, kpi_id, source_key, f_full)
@@ -612,6 +678,21 @@ async def resolve_dashboard_chart_widget_data_batch(
         else:
             eid, e_ts = await _entry_for(kpi_id, year, period_key)
             e_rev = revision_for_parts(eid, e_ts)
+            if not eid:
+                fallback_res = await db.execute(
+                    select(KPIEntry.id, KPIEntry.updated_at)
+                    .where(
+                        KPIEntry.kpi_id == kpi_id,
+                        KPIEntry.organization_id == org_id,
+                        KPIEntry.is_draft == False,
+                    )
+                    .order_by(KPIEntry.year.desc())
+                    .limit(1)
+                )
+                fb_row = fallback_res.first()
+                if fb_row:
+                    eid, e_ts = fb_row[0], fb_row[1]
+                    e_rev = revision_for_parts(eid, e_ts)
             if not eid:
                 results[key] = {"ok": True, "widget_type": "kpi_bar_chart", "meta": {"kpi_id": kpi_id, "year": year, "entry_id": None, "row_count": 0, "source_field_id": int(f_full.id)}, "data": {"mode": "multi_line_items", "multi_line_agg_buckets": [], "raw_rows": []}, "entry_revision": None}
                 continue
@@ -655,11 +736,14 @@ async def resolve_dashboard_chart_widget_data_batch(
                     sid = sub_id_by_key.get(str(fk))
                     if sid is None:
                         continue
+                    is_admin_user = user and user.role.value in ("ORG_ADMIN", "SUPER_ADMIN") if user and getattr(user, "role", None) else False
+                    u_key_user = (getattr(user, "unique_user_key", None) or "").strip() if not is_admin_user and user else None
                     labs = await _distinct_multiline_subfield_labels(
                         db,
                         entry_id=int(eid[0] if isinstance(eid, list) else eid),
                         multiline_field_id=int(f_full.id),
                         sub_field_id=int(sid),
+                        user_unique_key=u_key_user,
                     )
                     row_dicts = [{str(fk): lab} for lab in labs]
                     res_map = await build_reference_resolution_map(db, org_id, int(year), f_full, conds, row_dicts)
@@ -689,13 +773,21 @@ async def resolve_dashboard_chart_widget_data_batch(
             resolved_label_sets=resolved_label_sets,
         )
         from app.entries.service import extract_cross_kpi_mli_references
-        cross_kpi_refs = set()
+        # Collect which sub-field keys have cross-KPI formula expressions
+        formula_sub_keys: set[str] = set()
         for sf in (getattr(f_full, "sub_fields", None) or []):
             if isinstance(sf.config, dict) and sf.config.get("formula_expression"):
-                cross_kpi_refs.update(extract_cross_kpi_mli_references(sf.config.get("formula_expression")))
-        has_cross_kpi_formula_subfields = bool(cross_kpi_refs)
+                refs = extract_cross_kpi_mli_references(sf.config.get("formula_expression"))
+                if refs:
+                    sk = getattr(sf, "key", None)
+                    if sk:
+                        formula_sub_keys.add(str(sk))
         has_runtime_filter = bool(col_filter or norm_filters)
-        needs_dynamic_recalc = has_cross_kpi_formula_subfields and has_runtime_filter
+        # Only fall back to Python when the formula field IS the aggregation/grouping target.
+        # KPIs that have formula subfields but aren't grouping on them can use SQL path safely.
+        needs_dynamic_recalc = has_runtime_filter and bool(formula_sub_keys) and (
+            group_key in formula_sub_keys or val_key in formula_sub_keys
+        )
 
         if needs_dynamic_recalc or compiled is None:
             # Fallback: do not aggregate in SQL for this widget (dynamically evaluate formula subfields in memory).
@@ -843,14 +935,24 @@ async def _distinct_multiline_subfield_labels(
     entry_id: int,
     multiline_field_id: int,
     sub_field_id: int,
+    user_unique_key: str | None = None,
 ) -> list[str]:
     """
     Get distinct display labels for one multi-line subfield in an entry.
     Used to pre-resolve reference_resolution filters without loading all rows.
     """
-    # Keep it simple: prefer value_text, else stringify other typed columns.
-    stmt = text(
+    params: dict[str, Any] = {"eid": int(entry_id), "fid": int(multiline_field_id), "sid": int(sub_field_id)}
+    scoped_clause = ""
+    if user_unique_key and str(user_unique_key).strip():
+        scoped_clause = """
+        AND r.id IN (
+            SELECT row_id FROM kpi_multi_line_cells WHERE TRIM(LOWER(value_text)) = :ukey
+        )
         """
+        params["ukey"] = str(user_unique_key).strip().lower()
+
+    stmt = text(
+        f"""
         SELECT DISTINCT
           COALESCE(
             NULLIF(TRIM(BOTH FROM c.value_text), ''),
@@ -861,10 +963,10 @@ async def _distinct_multiline_subfield_labels(
           ) AS lab
         FROM kpi_multi_line_rows r
         JOIN kpi_multi_line_cells c ON c.row_id = r.id AND c.sub_field_id = :sid
-        WHERE r.entry_id = :eid AND r.field_id = :fid
+        WHERE r.entry_id = :eid AND r.field_id = :fid {scoped_clause}
         """
     )
-    res = await db.execute(stmt, {"eid": int(entry_id), "fid": int(multiline_field_id), "sid": int(sub_field_id)})
+    res = await db.execute(stmt, params)
     out: list[str] = []
     for row in res.all():
         v = row[0]
@@ -1117,7 +1219,9 @@ def _get_spanned_years(org: Organization | None, start_date: datetime.date, end_
     y_start = _entry_year(start_date)
     y_end = _entry_year(last_date)
     
-    return list(range(min(y_start, y_end), max(y_start, y_end) + 1))
+    fiscal_years = list(range(min(y_start, y_end), max(y_start, y_end) + 1))
+    cal_years = list(range(start_date.year, (last_date.year if last_date else end_date.year) + 1))
+    return sorted(set(fiscal_years + cal_years))
 
 
 async def preprocess_dashboard_date_fetching(
@@ -1698,6 +1802,11 @@ async def recalculate_multi_line_rows_formulas(
     if not refs:
         return rows
 
+    # Cross-KPI formula recalculation only applies when global filter (fetch data with Column / normal filters) is active.
+    # When filtering at the widget level alone, do not recalculate cross-KPI data; directly use stored DB row values.
+    if not column_filter and not normal_filters:
+        return rows
+
     other_kpi_mli_data = {}
     if refs:
         raw_other_kpi_mli = await _load_other_kpi_multi_line_data(
@@ -1895,7 +2004,7 @@ async def _kpi_bar_chart_payload(
             )
             eid = [r[0] for r in entries_res.all()]
             if not eid:
-                latest_res = await db.execute(
+                fallback_res = await db.execute(
                     select(KPIEntry.id)
                     .where(
                         KPIEntry.kpi_id == kpi_id,
@@ -1903,27 +2012,48 @@ async def _kpi_bar_chart_payload(
                         KPIEntry.is_draft == False
                     )
                     .order_by(KPIEntry.year.desc())
-                    .limit(1)
                 )
-                latest_eid = latest_res.scalar_one_or_none()
-                if latest_eid:
-                    eid = [latest_eid]
+                eid = [r[0] for r in fallback_res.all()]
             e_rev = None
         else:
             eid, e_ts = await get_entry_id_updated(
                 db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
             )
-            if not eid and kpi.is_joined:
-                try:
-                    from app.entries.joined_sync import sync_joined_kpi_physical_data
-                    await sync_joined_kpi_physical_data(db, kpi, year=year, period_key=period_key, current_user_id=user.id if user else None)
-                    await db.commit()
-                    eid, e_ts = await get_entry_id_updated(
-                        db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+            if not eid:
+                fallback_res = await db.execute(
+                    select(KPIEntry.id, KPIEntry.updated_at)
+                    .where(
+                        KPIEntry.kpi_id == kpi_id,
+                        KPIEntry.organization_id == org_id,
+                        KPIEntry.is_draft == False,
                     )
-                except Exception as ex:
-                    logger.error("Failed to sync joined KPI in _kpi_bar_chart_payload: %s", ex)
+                    .order_by(KPIEntry.year.desc())
+                    .limit(1)
+                )
+                fb_row = fallback_res.first()
+                if fb_row:
+                    eid, e_ts = fb_row[0], fb_row[1]
+            if kpi.is_joined:
+                need_sync = not eid
+                if not need_sync and eid:
+                    from app.core.models import KpiMultiLineRow
+                    target_eid = eid[0] if isinstance(eid, list) else eid
+                    r_cnt = (await db.execute(select(func.count(KpiMultiLineRow.id)).where(KpiMultiLineRow.entry_id == int(target_eid)))).scalar() or 0
+                    if r_cnt == 0:
+                        need_sync = True
+                if need_sync:
+                    try:
+                        from app.entries.joined_sync import sync_joined_kpi_physical_data
+                        await sync_joined_kpi_physical_data(db, kpi, year=year, period_key=period_key, current_user_id=user.id if user else None)
+                        await db.commit()
+                        eid, e_ts = await get_entry_id_updated(
+                            db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key
+                        )
+                    except Exception as ex:
+                        logger.error("Failed to sync joined KPI in _kpi_bar_chart_payload: %s", ex)
             e_rev = revision_for_parts(eid, e_ts)
+        is_admin_user = user and user.role.value in ("ORG_ADMIN", "SUPER_ADMIN") if user and getattr(user, "role", None) else False
+        u_key = (getattr(user, "unique_user_key", None) or "").strip() if not is_admin_user and user else None
         source_key = (w.get("source_field_key") or "").strip()
         f_obj = next((f for f in fields if f.key == source_key and f.field_type == FieldType.multi_line_items), None)
         if not f_obj or not eid:
@@ -1964,13 +2094,24 @@ async def _kpi_bar_chart_payload(
         if use_sql_agg:
             f_full = await get_field_with_subfields_only(db, int(f_obj.id), org_id) or f_obj
             from app.entries.service import extract_cross_kpi_mli_references
-            has_cross_kpi_formula_subfields = any(
-                isinstance(sf.config, dict) and sf.config.get("formula_expression") and
-                bool(extract_cross_kpi_mli_references(sf.config.get("formula_expression")))
-                for sf in (getattr(f_full, "sub_fields", None) or [])
-            )
+            # Identify which sub_field keys have cross-KPI formula expressions
+            formula_sub_keys: set[str] = set()
+            for sf in (getattr(f_full, "sub_fields", None) or []):
+                if (
+                    isinstance(sf.config, dict)
+                    and sf.config.get("formula_expression")
+                    and bool(extract_cross_kpi_mli_references(sf.config.get("formula_expression")))
+                ):
+                    sk = getattr(sf, "key", None)
+                    if sk:
+                        formula_sub_keys.add(str(sk))
             has_runtime_filter = bool(col_filter or norm_filters)
-            needs_dynamic_recalc = has_cross_kpi_formula_subfields and has_runtime_filter
+            # Only fall back to Python when the formula field IS the aggregation target.
+            # If formula subfields exist but are not being grouped/valued on,
+            # SQL aggregation works fine on the stored (already-computed) values.
+            needs_dynamic_recalc = has_runtime_filter and bool(formula_sub_keys) and (
+                group_key in formula_sub_keys or val_key in formula_sub_keys
+            )
             if needs_dynamic_recalc:
                 use_sql_agg = False
             else:
@@ -2013,9 +2154,10 @@ async def _kpi_bar_chart_payload(
                                 continue
                             labs = await _distinct_multiline_subfield_labels(
                                 db,
-                                  entry_id=int(eid),
-                                  multiline_field_id=int(f_obj.id),
-                                  sub_field_id=int(sid),
+                                entry_id=int(eid),
+                                multiline_field_id=int(f_obj.id),
+                                sub_field_id=int(sid),
+                                user_unique_key=u_key,
                             )
                             # Build a minimal row_dict list so reference_filter_resolve can discover labels.
                             row_dicts = [{fk_s: lab} for lab in labs]
@@ -2081,7 +2223,11 @@ async def _kpi_bar_chart_payload(
                         sid_item = sub_id_by_key.get(str(fk_item))
                         if sid_item and eid and not isinstance(eid, list):
                             labs = await _distinct_multiline_subfield_labels(
-                                db, entry_id=int(eid), multiline_field_id=int(f_obj.id), sub_field_id=int(sid_item)
+                                db,
+                                entry_id=int(eid),
+                                multiline_field_id=int(f_obj.id),
+                                sub_field_id=int(sid_item),
+                                user_unique_key=u_key,
                             )
                             if labs:
                                 filter_col_opts[str(fk_item)] = labs
@@ -3150,6 +3296,20 @@ async def _dashboard_card_payload(
         )
 
     eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+    if not eid:
+        latest_res = await db.execute(
+            select(KPIEntry.id, KPIEntry.updated_at)
+            .where(
+                KPIEntry.kpi_id == kpi_id,
+                KPIEntry.organization_id == org_id,
+                KPIEntry.is_draft == False,
+            )
+            .order_by(KPIEntry.year.desc())
+            .limit(1)
+        )
+        fb_row = latest_res.first()
+        if fb_row:
+            eid, e_ts = fb_row[0], fb_row[1]
     e_rev = revision_for_parts(eid, e_ts)
     col_filter = merged.get("column_filter")
     norm_filters = merged.get("normal_filters")
@@ -3605,6 +3765,20 @@ async def resolve_dashboard_card_widget_data_batch(
 
     for (kpi_id, year, pk), items2 in groups.items():
         eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=pk)
+        if not eid:
+            latest_res = await db.execute(
+                select(KPIEntry.id, KPIEntry.updated_at)
+                .where(
+                    KPIEntry.kpi_id == kpi_id,
+                    KPIEntry.organization_id == org_id,
+                    KPIEntry.is_draft == False,
+                )
+                .order_by(KPIEntry.year.desc())
+                .limit(1)
+            )
+            latest_row = latest_res.first()
+            if latest_row:
+                eid, e_ts = latest_row[0], latest_row[1]
         e_rev = revision_for_parts(eid, e_ts)
         fields = await list_kpi_field_definitions(db, kpi_id, org_id)
         field_by_key = {fld.key: fld for fld in fields}
@@ -4845,6 +5019,14 @@ async def resolve_dashboard_trend_widget_data(
         revisions: list[str] = []
         for yy in years:
             eid_y, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=int(yy), period_key=period_key)
+            if not eid_y and kpi and getattr(kpi, "is_joined", False):
+                try:
+                    from app.entries.joined_sync import sync_joined_kpi_physical_data
+                    await sync_joined_kpi_physical_data(db, kpi, year=int(yy), period_key=period_key, current_user_id=user.id if user else None)
+                    await db.commit()
+                    eid_y, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=int(yy), period_key=period_key)
+                except Exception as ex:
+                    logger.error("Failed to sync joined KPI in trend resolver: %s", ex)
             r = revision_for_parts(eid_y, e_ts)
             if r:
                 revisions.append(r)
@@ -5115,6 +5297,8 @@ async def resolve_dashboard_universal_batch(
         norm_flt = ov.get("normal_filters")
         col_flt = ov.get("column_filter") or ov.get("selected_column_value")
         extra_parts = []
+        w_sig = f"k:{w.get('kpi_id')};t:{w.get('type')};s:{w.get('source_field_key') or w.get('field_key')};g:{w.get('group_by_sub_field_key')};v:{w.get('value_sub_field_key')};a:{w.get('agg')};fk:{repr(sorted(w.get('field_keys') or []))}"
+        extra_parts.append(w_sig)
         if norm_flt and isinstance(norm_flt, dict):
             extra_parts.append(f"nf:{repr(sorted(norm_flt.items()))}")
         if col_flt:
@@ -5302,43 +5486,61 @@ async def resolve_dashboard_universal_batch(
 
     # ------------------------------------------------------------------
     # 6. Resolve "other" light widget types (line, trend, single_value,
-    #    kv_table, text) concurrently instead of sequentially.
-    #    Each widget gets its own DB session to avoid shared-state issues.
+    #    kv_table, text) in shared sessions grouped by type.
+    #    Widgets of the same type share one read-only session to avoid
+    #    opening N connections for N widgets (saves 50-150ms overhead).
     # ------------------------------------------------------------------
-    async def _resolve_other_item(key: str, wtype: str, merged: dict[str, Any], date_range: tuple | None) -> tuple[str, dict[str, Any]]:
+    async def _resolve_other_batch(items_batch: list[tuple[str, str, dict[str, Any], tuple | None]]) -> list[tuple[str, dict[str, Any]]]:
+        """Resolve a group of same-type 'other' widgets in a single shared session."""
+        results_batch: list[tuple[str, dict[str, Any]]] = []
         try:
             async with AsyncSessionLocal() as session:
-                if wtype == "kpi_line_chart":
-                    meta, data, e_rev, _ = await resolve_dashboard_line_widget_data(
-                        session, user, org_id, dashboard_id, merged, None
-                    )
-                elif wtype == "kpi_trend":
-                    meta, data, e_rev, _ = await resolve_dashboard_trend_widget_data(
-                        session, user, org_id, dashboard_id, merged, None
-                    )
-                elif wtype == "kpi_single_value":
-                    meta, data, e_rev, _ = await resolve_dashboard_single_value_widget_data(
-                        session, user, org_id, dashboard_id, merged, None
-                    )
-                elif wtype == "kpi_table":
-                    meta, data, e_rev, _ = await resolve_dashboard_kpi_table_widget_data(
-                        session, user, org_id, dashboard_id, merged, None
-                    )
-                elif wtype == "text":
-                    meta, data, e_rev = await _resolve_text(session, user, org_id, merged)
-                    return key, {"ok": True, "widget_type": wtype, "meta": meta, "data": data, "entry_revision": e_rev}
-                else:
-                    return key, {"ok": False, "error": f"unsupported_widget_type:{wtype}"}
-            err = data.get("error") or meta.get("error")
-            if err == "forbidden":
-                return key, {"ok": False, "error": "forbidden"}
-            elif err:
-                return key, {"ok": False, "error": str(err)}
-            else:
-                return key, {"ok": True, "widget_type": wtype, "meta": meta, "data": data, "entry_revision": e_rev}
+                for key, wtype, merged, date_range in items_batch:
+                    try:
+                        if wtype == "kpi_line_chart":
+                            meta, data, e_rev, _ = await resolve_dashboard_line_widget_data(
+                                session, user, org_id, dashboard_id, merged, None
+                            )
+                        elif wtype == "kpi_trend":
+                            meta, data, e_rev, _ = await resolve_dashboard_trend_widget_data(
+                                session, user, org_id, dashboard_id, merged, None
+                            )
+                        elif wtype == "kpi_single_value":
+                            meta, data, e_rev, _ = await resolve_dashboard_single_value_widget_data(
+                                session, user, org_id, dashboard_id, merged, None
+                            )
+                        elif wtype == "kpi_table":
+                            meta, data, e_rev, _ = await resolve_dashboard_kpi_table_widget_data(
+                                session, user, org_id, dashboard_id, merged, None
+                            )
+                        elif wtype == "text":
+                            meta, data, e_rev = await _resolve_text(session, user, org_id, merged)
+                            results_batch.append((key, {"ok": True, "widget_type": wtype, "meta": meta, "data": data, "entry_revision": e_rev}))
+                            continue
+                        else:
+                            results_batch.append((key, {"ok": False, "error": f"unsupported_widget_type:{wtype}"}))
+                            continue
+                        err = data.get("error") or meta.get("error")
+                        if err == "forbidden":
+                            results_batch.append((key, {"ok": False, "error": "forbidden"}))
+                        elif err:
+                            results_batch.append((key, {"ok": False, "error": str(err)}))
+                        else:
+                            results_batch.append((key, {"ok": True, "widget_type": wtype, "meta": meta, "data": data, "entry_revision": e_rev}))
+                    except Exception as exc:
+                        _log.exception("universal_batch: error resolving key=%s type=%s", key, wtype)
+                        results_batch.append((key, {"ok": False, "error": str(exc)}))
         except Exception as exc:
-            _log.exception("universal_batch: error resolving key=%s type=%s", key, wtype)
-            return key, {"ok": False, "error": str(exc)}
+            for key, wtype, _merged, _dr in items_batch:
+                results_batch.append((key, {"ok": False, "error": str(exc)}))
+        return results_batch
+
+    # Group other_items by widget type to share sessions within each type group
+    from collections import defaultdict as _defaultdict
+    _other_by_type: dict[str, list[tuple[str, str, dict[str, Any], tuple | None]]] = _defaultdict(list)
+    for _item in other_items:
+        _other_by_type[_item[1]].append(_item)
+    other_batch_tasks = [_resolve_other_batch(batch) for batch in _other_by_type.values()]
 
     # ------------------------------------------------------------------
     # 7. Resolve "heavy" (MLI table) items concurrently using separate sessions.
@@ -5364,14 +5566,13 @@ async def resolve_dashboard_universal_batch(
             return key, {"ok": False, "error": str(exc)}
 
     # Run all resolution tasks concurrently
-    other_tasks = [_resolve_other_item(key, wtype, merged, dr) for key, wtype, merged, dr in other_items]
     heavy_tasks = [_resolve_heavy_item(key, wtype, merged, dr) for key, wtype, merged, dr in heavy_items]
 
     gathered = await asyncio.gather(
         _resolve_chart_batch(),
         _resolve_card_batch(),
-        *other_tasks,
-        *heavy_tasks,
+        *other_batch_tasks,    # each returns list[tuple[str, dict]]
+        *heavy_tasks,          # each returns tuple[str, dict]
     )
 
     # Unpack chart + card results (first two items from gather)
@@ -5380,8 +5581,14 @@ async def resolve_dashboard_universal_batch(
     results.update(chart_results)
     results.update(card_results)
 
-    # Unpack other + heavy results (remaining items are (key, result) tuples)
-    for item_result in gathered[2:]:
+    # Unpack other_batch results (list of lists) and heavy results (tuples)
+    n_other_batches = len(other_batch_tasks)
+    for batch_result in gathered[2: 2 + n_other_batches]:
+        # Each batch_result is a list[tuple[str, dict]]
+        for k, v in batch_result:
+            results[k] = v
+    for item_result in gathered[2 + n_other_batches:]:
+        # Each heavy result is a tuple[str, dict]
         k, v = item_result
         results[k] = v
 

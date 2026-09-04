@@ -159,6 +159,31 @@ async def update_user(
     if data.unique_user_key is not None:
         val = data.unique_user_key.strip()
         user.unique_user_key = val if val else None
+    if data.force_password_reset is not None:
+        user.force_password_reset = data.force_password_reset
+        now = datetime.utcnow()
+        if data.force_password_reset:
+            user.password_reset_requested_at = now
+            from app.core.models import PasswordResetAudit
+            db.add(
+                PasswordResetAudit(
+                    organization_id=org_id,
+                    user_id=user.id,
+                    status="PENDING",
+                    requested_at=now,
+                )
+            )
+        else:
+            from app.core.models import PasswordResetAudit
+            audit_res = await db.execute(
+                select(PasswordResetAudit).where(
+                    PasswordResetAudit.user_id == user.id,
+                    PasswordResetAudit.status == "PENDING",
+                )
+            )
+            for pa in audit_res.scalars().all():
+                pa.status = "CANCELLED"
+                pa.cancelled_at = now
     if data.kpi_assignments is not None:
         await db.execute(delete(KPIAssignment).where(KPIAssignment.user_id == user_id))
         for a in data.kpi_assignments:

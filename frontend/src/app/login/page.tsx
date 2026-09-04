@@ -52,7 +52,7 @@ export default function LoginPage() {
   async function onSubmit(data: FormData) {
     setError(null);
     try {
-      const res = await api<{ access_token: string; refresh_token: string }>(
+      const res = await api<{ access_token: string; refresh_token: string; force_password_reset?: boolean }>(
         "/auth/login",
         {
           method: "POST",
@@ -60,11 +60,22 @@ export default function LoginPage() {
         }
       );
       setTokens(res.access_token, res.refresh_token);
-      const me = await api<{ role: string; organization_id: number | null }>("/auth/me", { token: res.access_token });
+      const me = await api<{ role: string; organization_id: number | null; force_password_reset?: boolean }>(
+        "/auth/me",
+        { token: res.access_token }
+      );
+
+      if (res.force_password_reset || me.force_password_reset) {
+        toast("Password reset required before continuing.", { icon: "🔒" });
+        router.push("/reset-password");
+        router.refresh();
+        return;
+      }
+
       toast.success("Logged in successfully");
 
       const searchParams = new URLSearchParams(window.location.search);
-      const redirectTo = searchParams.get("redirect");
+      const redirectTo = searchParams?.get("redirect");
       if (redirectTo) {
         router.push(redirectTo);
         router.refresh();

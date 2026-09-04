@@ -830,7 +830,7 @@ function blocksToJinja(blocks: ReportBlock[]): string {
 export default function ReportDesignPage() {
   const params = useParams();
   const router = useRouter();
-  const id = Number(params.id);
+  const id = Number(params?.id);
   const token = getAccessToken();
   const [designAllowed, setDesignAllowed] = useState<boolean | null>(null);
   const [detail, setDetail] = useState<TemplateDetail | null>(null);

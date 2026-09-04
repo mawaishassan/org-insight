@@ -40,9 +40,9 @@ type Rights = { can_view: boolean; can_edit: boolean };
 export default function DashboardAssignPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const id = Number(params.id);
+  const id = Number(params?.id);
   const token = getAccessToken();
-  const orgIdFromQuery = searchParams.get("organization_id");
+  const orgIdFromQuery = searchParams?.get("organization_id");
 
   const [dashboard, setDashboard] = useState<DashboardRow | null>(null);
   const [meRole, setMeRole] = useState<string | null>(null);

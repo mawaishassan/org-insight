@@ -174,7 +174,7 @@ function ApiContractBlock({ contract }: { contract: ApiContract }) {
 
 export default function KPIsPage() {
   const searchParams = useSearchParams();
-  const organizationId = searchParams.get("organization_id") ? Number(searchParams.get("organization_id")) : undefined;
+  const organizationId = searchParams?.get("organization_id") ? Number(searchParams?.get("organization_id")) : undefined;
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
   const [list, setList] = useState<KpiRow[]>([]);

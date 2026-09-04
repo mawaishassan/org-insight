@@ -26,6 +26,7 @@ from app.chat.routes import router as chat_router
 from app.dashboards.routes import router as dashboards_router
 from app.widget_data.routes import router as widget_data_router
 from app.entries.mli_extraction_routes import router as mli_extraction_router
+from app.users.password_reset_routes import router as password_reset_router
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ app.add_middleware(
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(org_router, prefix="/api")
+app.include_router(password_reset_router, prefix="/api")
 app.include_router(users_router, prefix="/api")
 app.include_router(domains_router, prefix="/api")
 app.include_router(categories_router, prefix="/api")

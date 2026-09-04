@@ -83,6 +83,11 @@ async def update_dashboard(
     if column_fetching_config is not None:
         d.column_fetching_config = column_fetching_config
     await db.flush()
+    try:
+        from app.widget_data.service import invalidate_dashboard_cache
+        invalidate_dashboard_cache(dashboard_id)
+    except Exception:
+        pass
     return d
 
 
@@ -92,6 +97,11 @@ async def delete_dashboard(db: AsyncSession, dashboard_id: int, org_id: int) -> 
         return False
     await db.delete(d)
     await db.flush()
+    try:
+        from app.widget_data.service import invalidate_dashboard_cache
+        invalidate_dashboard_cache(dashboard_id)
+    except Exception:
+        pass
     return True
 
 
@@ -447,13 +457,30 @@ async def can_view_dashboard_for_kpi_chart(
     """
     One indexed round-trip: dashboard in org + KPI in same org (tenant-safe).
     Then role/assignment checks (same rules as can_view_dashboard_for_user).
+
+    Uses two-tier cache:
+      1. Process-level _auth_cache (30s TTL) — shared across all requests/users.
+         Safe because auth membership is read-only org-level data.
+      2. db.info — per-request fallback within the same session.
     """
     if not user or user.id is None or kpi_id <= 0:
         return False
     uid = int(user.id)
     cache_key = ("allowed_kpi", int(dashboard_id), int(org_id), int(kpi_id), uid)
+
+    # 1. Check db.info (within this request's session — zero cost)
     if cache_key in db.info:
         return db.info[cache_key]
+
+    # 2. Check process-level auth cache (shared across requests — avoids repeat DB hits)
+    try:
+        from app.widget_data.service import _auth_cache, _MISS
+        cached = _auth_cache.get(cache_key)
+        if cached is not _MISS:
+            db.info[cache_key] = cached
+            return cached
+    except ImportError:
+        pass
 
     ok = (
         await db.execute(
@@ -470,14 +497,26 @@ async def can_view_dashboard_for_kpi_chart(
     ).scalar_one_or_none()
     if ok is None:
         db.info[cache_key] = False
+        try:
+            _auth_cache.set(cache_key, False)
+        except Exception:
+            pass
         return False
     role_str = str(getattr(user.role, "value", user.role) or "").upper()
     if role_str == "SUPER_ADMIN":
         db.info[cache_key] = True
+        try:
+            _auth_cache.set(cache_key, True)
+        except Exception:
+            pass
         return True
     if role_str == "ORG_ADMIN":
         allowed = user.organization_id == org_id
         db.info[cache_key] = allowed
+        try:
+            _auth_cache.set(cache_key, allowed)
+        except Exception:
+            pass
         return allowed
     perm = (
         await db.execute(
@@ -489,7 +528,12 @@ async def can_view_dashboard_for_kpi_chart(
     ).scalar_one_or_none()
     allowed = bool(perm)
     db.info[cache_key] = allowed
+    try:
+        _auth_cache.set(cache_key, allowed)
+    except Exception:
+        pass
     return allowed
+
 
 
 async def user_can_access_dashboard(

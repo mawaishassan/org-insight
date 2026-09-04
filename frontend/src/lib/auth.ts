@@ -31,6 +31,7 @@ export interface CurrentUser {
   role: UserRole;
   organization_id: number | null;
   is_active: boolean;
+  force_password_reset?: boolean;
 }
 
 export function canManageOrgs(role: UserRole): boolean {

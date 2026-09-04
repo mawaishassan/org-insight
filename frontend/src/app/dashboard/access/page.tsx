@@ -6,6 +6,7 @@ import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 import type { UserRow } from "../users/shared";
+import { PasswordResetManagementTab } from "./PasswordResetManagementTab";
 
 interface MeInfo {
   id: number;
@@ -58,7 +59,7 @@ export default function AccessDashboardPage() {
   const [newUserPassword, setNewUserPassword] = useState("");
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserFullName, setNewUserFullName] = useState("");
-  const [activeTab, setActiveTab] = useState<"roles" | "users">("roles");
+  const [activeTab, setActiveTab] = useState<"roles" | "users" | "password-resets">("roles");
   const [newUserType, setNewUserType] = useState<"internal" | "external">("internal");
   const [newExternalDescription, setNewExternalDescription] = useState("");
   const [newExternalIsActive, setNewExternalIsActive] = useState(true);
@@ -310,6 +311,18 @@ export default function AccessDashboardPage() {
           onClick={() => setActiveTab("users")}
         >
           Users
+        </button>
+        <button
+          type="button"
+          className="btn"
+          style={{
+            ...(activeTab === "password-resets"
+              ? { background: "var(--accent)", color: "var(--on-muted)" }
+              : {}),
+          }}
+          onClick={() => setActiveTab("password-resets")}
+        >
+          Password Reset Management
         </button>
       </div>
 
@@ -1046,22 +1059,49 @@ export default function AccessDashboardPage() {
                         </div>
                       </td>
                       <td style={{ padding: "0.5rem" }}>
-                        <span
-                          style={{
-                            fontSize: "0.8rem",
-                            padding: "0.15rem 0.45rem",
-                            borderRadius: 6,
-                            background: u.is_active ? "var(--success)" : "var(--border)",
-                            color: u.is_active ? "var(--on-muted)" : "var(--muted)",
-                          }}
-                        >
-                          {u.is_active ? "Active" : "Inactive"}
-                        </span>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", alignItems: "flex-start" }}>
+                          <span
+                            style={{
+                              fontSize: "0.8rem",
+                              padding: "0.15rem 0.45rem",
+                              borderRadius: 6,
+                              background: u.is_active ? "var(--success)" : "var(--border)",
+                              color: u.is_active ? "var(--on-muted)" : "var(--muted)",
+                            }}
+                          >
+                            {u.is_active ? "Active" : "Inactive"}
+                          </span>
+                          {u.force_password_reset && (
+                            <span
+                              style={{
+                                fontSize: "0.72rem",
+                                padding: "0.1rem 0.4rem",
+                                borderRadius: 4,
+                                background: "rgba(245, 158, 11, 0.15)",
+                                color: "#f59e0b",
+                                fontWeight: 600,
+                              }}
+                            >
+                              Reset Required
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td style={{ padding: "0.5rem" }}>
-                        <Link href={`/dashboard/users/${u.id}`} className="btn" style={{ fontSize: "0.85rem" }}>
-                          Open
-                        </Link>
+                        <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                          <Link href={`/dashboard/users/${u.id}`} className="btn" style={{ fontSize: "0.85rem" }}>
+                            Open
+                          </Link>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ fontSize: "0.78rem", padding: "0.25rem 0.5rem" }}
+                            onClick={() => setActiveTab("password-resets")}
+                            title="Manage password reset"
+                          >
+                            Reset
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -1070,6 +1110,11 @@ export default function AccessDashboardPage() {
             </div>
           )}
         </section>
+      )}
+
+      {/* Password Reset Management tab */}
+      {activeTab === "password-resets" && (
+        <PasswordResetManagementTab token={token || ""} orgId={orgId} />
       )}
 
       {/* Create role modal */}

@@ -2730,6 +2730,16 @@ async def get_subfield_unique_values(
         current_user_id=current_user.id
     )
 
+    is_org_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN") if current_user and getattr(current_user, "role", None) else False
+    user_key = (getattr(current_user, "unique_user_key", None) or "").strip() if current_user else ""
+    if not is_org_admin and user_key:
+        u_key_lower = user_key.lower()
+        rows_with_indices = [
+            (r_idx, rdict)
+            for r_idx, rdict in rows_with_indices
+            if isinstance(rdict, dict) and any(str(v).strip().lower() == u_key_lower for v in rdict.values() if v is not None)
+        ]
+
     seen = set()
     unique_vals: list[str] = []
 

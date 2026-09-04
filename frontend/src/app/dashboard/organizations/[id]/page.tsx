@@ -381,10 +381,10 @@ export default function OrganizationDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
   const router = useRouter();
-  const orgId = Number(params.id);
+  const orgId = Number(params?.id);
   const token = getAccessToken();
-  const tabFromUrl = searchParams.get("tab") as TabId | null;
-  const settingsSubFromUrl = searchParams.get("sub") as SettingsSubId | null;
+  const tabFromUrl = searchParams?.get("tab") as TabId | null;
+  const settingsSubFromUrl = searchParams?.get("sub") as SettingsSubId | null;
   const initialTab: TabId =
     tabFromUrl && TAB_IDS.includes(tabFromUrl)
       ? tabFromUrl
@@ -588,7 +588,7 @@ export default function OrganizationDetailPage() {
   }
 
   const updateUrl = (newTab: TabId, newSub?: SettingsSubId) => {
-    const p = new URLSearchParams(searchParams.toString());
+    const p = new URLSearchParams(searchParams?.toString() ?? "");
     p.set("tab", newTab);
     if (newTab === "settings" && newSub) p.set("sub", newSub);
     else p.delete("sub");

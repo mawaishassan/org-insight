@@ -1213,8 +1213,8 @@ export default function CustomReportDesignPage() {
   const params = useParams();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const id = Number(params.id);
-  const orgId = Number(searchParams.get("organization_id"));
+  const id = Number(params?.id);
+  const orgId = Number(searchParams?.get("organization_id"));
 
   const [report, setReport] = useState<CustomReportDetail | null>(null);
   const [sections, setSections] = useState<CustomReportSection[]>([]);
