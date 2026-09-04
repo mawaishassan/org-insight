@@ -12,10 +12,10 @@ export default function EntriesKpiRedirectPage() {
   const params = useParams();
   const searchParams = useSearchParams();
   const router = useRouter();
-  const kpiId = params.kpiId as string;
-  const year = searchParams.get("year") || String(new Date().getFullYear());
-  const organizationId = searchParams.get("organization_id");
-  const periodKey = searchParams.get("period_key");
+  const kpiId = params?.kpiId as string;
+  const year = searchParams?.get("year") || String(new Date().getFullYear());
+  const organizationId = searchParams?.get("organization_id");
+  const periodKey = searchParams?.get("period_key");
 
   useEffect(() => {
     if (!kpiId) return;

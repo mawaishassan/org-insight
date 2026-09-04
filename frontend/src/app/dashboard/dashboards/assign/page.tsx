@@ -44,8 +44,8 @@ function qs(params: Record<string, string | number | undefined>) {
 export default function BulkDashboardAssignPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const preSelectedDashboardId = searchParams.get("dashboard_id")
-    ? Number(searchParams.get("dashboard_id"))
+  const preSelectedDashboardId = searchParams?.get("dashboard_id")
+    ? Number(searchParams?.get("dashboard_id"))
     : null;
   const token = getAccessToken();
 

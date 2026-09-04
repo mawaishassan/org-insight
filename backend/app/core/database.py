@@ -12,8 +12,10 @@ engine = create_async_engine(
     future=True,
     pool_pre_ping=True,
     pool_recycle=1800,
-    pool_size=20,
-    max_overflow=10,
+    pool_size=30,        # was 20 — supports more concurrent widget sessions
+    max_overflow=20,     # was 10 — burst capacity for peak multi-user load
+    pool_timeout=10,     # fail fast instead of hanging 30s when pool exhausted
+    pool_use_lifo=True,  # reuse recently-used (warm) connections for lower latency
 )
 
 AsyncSessionLocal = async_sessionmaker(

@@ -288,14 +288,14 @@ export default function DomainKpiDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
   const router = useRouter();
-  const domainId = params.id != null ? Number(params.id) : undefined;
+  const domainId = params?.id != null ? Number(params?.id) : undefined;
   const isEntriesRoute = domainId === undefined;
-  const kpiId = Number(params.kpiId);
-  const yearParam = isEntriesRoute ? (params.year as string) : searchParams.get("year");
+  const kpiId = Number(params?.kpiId);
+  const yearParam = isEntriesRoute ? (params?.year as string) : searchParams?.get("year");
   const year = yearParam ? Number(yearParam) : new Date().getFullYear();
-  const orgIdParam = searchParams.get("organization_id");
+  const orgIdParam = searchParams?.get("organization_id");
   const organizationIdFromUrl = orgIdParam ? Number(orgIdParam) : undefined;
-  const periodKeyFromUrl = searchParams.get("period_key") ?? "";
+  const periodKeyFromUrl = searchParams?.get("period_key") ?? "";
 
   const [meOrgId, setMeOrgId] = useState<number | null>(null);
   const [meRole, setMeRole] = useState<string | null>(null);
@@ -915,8 +915,8 @@ export default function DomainKpiDetailPage() {
     ]);
     if (loadId !== entryDetailLoadGenRef.current) return;
 
-    if (params.id === "undefined" && kpiResp?.domain_id != null) {
-      router.replace(`/dashboard/domains/${kpiResp.domain_id}/kpis/${kpiId}?${searchParams.toString()}`);
+    if (params?.id === "undefined" && kpiResp?.domain_id != null) {
+      router.replace(`/dashboard/domains/${kpiResp.domain_id}/kpis/${kpiId}?${searchParams?.toString() ?? ""}`);
       return;
     }
 
@@ -2087,7 +2087,7 @@ export default function DomainKpiDetailPage() {
                       if (year) backParams.set("year", String(year));
                       if (periodKeyFromUrl) backParams.set("period_key", periodKeyFromUrl);
                       if (isEntriesRoute) backParams.set("from_entries", "true");
-                      router.push(`/dashboard/domains/${params.id || "org"}/kpis/${kpiId}/report-builder?${backParams.toString()}`);
+                      router.push(`/dashboard/domains/${params?.id || "org"}/kpis/${kpiId}/report-builder?${backParams.toString()}`);
                     }}
                   >
                     <svg 

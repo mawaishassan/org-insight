@@ -103,6 +103,9 @@ function polarToCartesian(centerX: number, centerY: number, radius: number, angl
 }
 
 function pieArcPath(cx: number, cy: number, r: number, startAngle: number, endAngle: number) {
+  if (endAngle - startAngle >= 2 * Math.PI - 0.001) {
+    return `M ${cx - r} ${cy} A ${r} ${r} 0 1 0 ${cx + r} ${cy} A ${r} ${r} 0 1 0 ${cx - r} ${cy} Z`;
+  }
   const start = polarToCartesian(cx, cy, r, startAngle);
   const end = polarToCartesian(cx, cy, r, endAngle);
   const largeArcFlag = endAngle - startAngle <= Math.PI ? "0" : "1";
@@ -644,6 +647,7 @@ export function SmartChartViewer({
           }}
         >
           <rect x="0" y="0" width={cardW} height={H} fill="var(--bg)" rx="6" />
+
 
           {data.map((b, i) => {
             const x = startX + i * (barW + gap);

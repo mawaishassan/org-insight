@@ -50,11 +50,12 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
-    access, refresh, expires_in = create_tokens_for_user(user)
+    access, refresh, expires_in, force_reset = create_tokens_for_user(user)
     return TokenResponse(
         access_token=access,
         refresh_token=refresh,
         expires_in=expires_in,
+        force_password_reset=force_reset,
     )
 
 
@@ -71,11 +72,12 @@ async def refresh(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token",
         )
-    access, refresh, expires_in = result
+    access, refresh, expires_in, force_reset = result
     return TokenResponse(
         access_token=access,
         refresh_token=refresh,
         expires_in=expires_in,
+        force_password_reset=force_reset,
     )
 
 
@@ -90,6 +92,7 @@ async def me(current_user: User = Depends(get_current_user)):
         role=current_user.role,
         organization_id=current_user.organization_id,
         is_active=current_user.is_active,
+        force_password_reset=bool(current_user.force_password_reset),
     )
 
 

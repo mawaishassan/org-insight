@@ -13,6 +13,10 @@ export interface UserRow {
   description?: string | null;
   is_external?: boolean;
   unique_user_key?: string | null;
+  force_password_reset?: boolean;
+  password_reset_requested_at?: string | null;
+  password_reset_completed_at?: string | null;
+  reset_status?: string | null;
 }
 
 export interface KpiOption {

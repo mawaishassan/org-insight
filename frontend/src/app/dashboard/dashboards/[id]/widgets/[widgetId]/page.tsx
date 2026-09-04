@@ -24,9 +24,9 @@ function asWidgets(layout: any): Widget[] {
 export default function DashboardWidgetFullPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const dashboardId = Number(params.id);
-  const widgetId = String((params as any).widgetId || "");
-  const orgIdFromQuery = searchParams.get("organization_id");
+  const dashboardId = Number(params?.id);
+  const widgetId = String((params as any)?.widgetId || "");
+  const orgIdFromQuery = searchParams?.get("organization_id");
   const organizationIdFromQuery = orgIdFromQuery ? Number(orgIdFromQuery) : undefined;
 
   const token = getAccessToken();

@@ -22,6 +22,7 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # seconds
+    force_password_reset: bool = False
 
 
 class RefreshRequest(BaseModel):
@@ -40,9 +41,18 @@ class UserInResponse(BaseModel):
     role: UserRole
     organization_id: int | None
     is_active: bool
+    force_password_reset: bool = False
 
     class Config:
         from_attributes = True
+
+
+class ResetForcedPasswordRequest(BaseModel):
+    """Payload to reset password when forced by admin."""
+
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8)
+    confirm_password: str = Field(..., min_length=8)
 
 
 class ExternalAuthConfigUpdate(BaseModel):

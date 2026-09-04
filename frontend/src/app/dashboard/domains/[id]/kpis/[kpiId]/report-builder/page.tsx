@@ -101,13 +101,13 @@ export default function KpiReportBuilder() {
   const searchParams = useSearchParams();
   const router = useRouter();
 
-  const domainId = params.id;
-  const kpiId = Number(params.kpiId);
-  const organizationIdFromUrl = searchParams.get("organization_id");
-  const yearParam = searchParams.get("year");
+  const domainId = params?.id;
+  const kpiId = Number(params?.kpiId);
+  const organizationIdFromUrl = searchParams?.get("organization_id");
+  const yearParam = searchParams?.get("year");
   const year = yearParam ? Number(yearParam) : new Date().getFullYear();
-  const periodKeyFromUrl = searchParams.get("period_key") ?? "";
-  const fromEntries = searchParams.get("from_entries") === "true";
+  const periodKeyFromUrl = searchParams?.get("period_key") ?? "";
+  const fromEntries = searchParams?.get("from_entries") === "true";
 
   const backUrl = (() => {
     const backParams = new URLSearchParams();

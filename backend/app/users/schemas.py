@@ -1,8 +1,9 @@
 """Pydantic schemas for users."""
 
+from datetime import datetime
 from pydantic import BaseModel, Field
 
-from app.core.models import UserRole
+from app.core.models import UserRole, KPIAssignmentType
 
 
 class UserKpiAssignment(BaseModel):
@@ -18,6 +19,9 @@ class UserKpiAssignmentResponse(BaseModel):
     kpi_id: int
     permission: str  # "data_entry" | "view"
 
+    class Config:
+        from_attributes = True
+
 
 class UserCreate(BaseModel):
     """Create user (Org Admin)."""
@@ -28,10 +32,10 @@ class UserCreate(BaseModel):
     full_name: str | None = None
     role: UserRole = UserRole.USER
     unique_user_key: str | None = None
-    kpi_ids: list[int] = Field(default_factory=list, description="Legacy: assign as data_entry")
-    kpi_assignments: list[UserKpiAssignment] | None = Field(
-        default=None,
-        description="KPI assignments with permission (overrides kpi_ids if provided)",
+    kpi_ids: list[int] = Field(default_factory=list, description="Legacy: data_entry only")
+    kpi_assignments: list[UserKpiAssignment] = Field(
+        default_factory=list,
+        description="KPIs with permission (DATA_ENTRY or VIEW_ONLY)",
     )
     report_template_ids: list[int] = Field(default_factory=list)
 
@@ -55,6 +59,7 @@ class UserUpdate(BaseModel):
     role: UserRole | None = None
     is_active: bool | None = None
     unique_user_key: str | None = None
+    force_password_reset: bool | None = None
     kpi_ids: list[int] | None = Field(None, description="Legacy: replace with data_entry")
     kpi_assignments: list[UserKpiAssignment] | None = Field(
         None,
@@ -76,6 +81,10 @@ class UserResponse(BaseModel):
     unique_user_key: str | None = None
     description: str | None = None
     is_external: bool = False
+    force_password_reset: bool = False
+    password_reset_requested_at: datetime | None = None
+    password_reset_completed_at: datetime | None = None
+    reset_status: str | None = None
 
     class Config:
         from_attributes = True

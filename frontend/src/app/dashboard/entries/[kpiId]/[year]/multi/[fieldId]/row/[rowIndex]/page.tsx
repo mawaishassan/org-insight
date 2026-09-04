@@ -490,17 +490,17 @@ export default function MultiItemRowDetail() {
   const searchParams = useSearchParams();
   const router = useRouter();
 
-  const kpiId = Number(params.kpiId);
-  const year = Number(params.year);
-  const fieldId = Number(params.fieldId);
-  const rowIndexParam = params.rowIndex as string;
+  const kpiId = Number(params?.kpiId);
+  const year = Number(params?.year);
+  const fieldId = Number(params?.fieldId);
+  const rowIndexParam = params?.rowIndex as string;
   const isNew = rowIndexParam === "new";
   const rowIndex = isNew ? null : Number(rowIndexParam);
-  const isEditMode = isNew || searchParams.get("mode") === "edit";
-  const organizationIdFromUrl = searchParams.get("organization_id");
-  const periodKey = searchParams.get("period_key") || "";
-  const dashboardIdFromUrl = searchParams.get("dashboard_id");
-  const widgetIdFromUrl = searchParams.get("widget_id");
+  const isEditMode = isNew || searchParams?.get("mode") === "edit";
+  const organizationIdFromUrl = searchParams?.get("organization_id");
+  const periodKey = searchParams?.get("period_key") || "";
+  const dashboardIdFromUrl = searchParams?.get("dashboard_id");
+  const widgetIdFromUrl = searchParams?.get("widget_id");
 
   const token = getAccessToken();
 
@@ -1074,7 +1074,7 @@ export default function MultiItemRowDetail() {
       } else {
         await persistExistingRow(editData);
         toast.success("Row updated successfully");
-        const next = new URLSearchParams(searchParams.toString());
+        const next = new URLSearchParams(searchParams?.toString() ?? "");
         next.delete("mode");
         next.set("row_updated", "1");
         router.replace(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${next.toString()}`);
@@ -1155,7 +1155,7 @@ export default function MultiItemRowDetail() {
                       type="button"
                       className="btn btn-primary"
                       onClick={() => {
-                        const next = new URLSearchParams(searchParams.toString());
+                        const next = new URLSearchParams(searchParams?.toString() ?? "");
                         next.set("mode", "edit");
                         router.push(`/dashboard/entries/${kpiId}/${year}/multi/${fieldId}/row/${rowIndexParam}?${next.toString()}`);
                       }}

@@ -284,9 +284,9 @@ type KpiUpdateFormData = z.infer<typeof kpiUpdateSchema>;
 export default function KpiFieldsPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const organizationIdFromUrl = searchParams.get("organization_id");
+  const organizationIdFromUrl = searchParams?.get("organization_id");
   const orgIdFromUrl = organizationIdFromUrl ? Number(organizationIdFromUrl) : null;
-  const kpiId = Number(params.id);
+  const kpiId = Number(params?.id);
   const [kpi, setKpi] = useState<KpiInfo | null>(null);
   const [orgTags, setOrgTags] = useState<OrgTagRef[]>([]);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
@@ -421,7 +421,7 @@ export default function KpiFieldsPage() {
   const [addModalSelectedIds, setAddModalSelectedIds] = useState<number[]>([]);
   const [addModalSelectedDomainIds, setAddModalSelectedDomainIds] = useState<number[]>([]);
   type EditTabId = "details" | "fields" | "settings" | "odoo";
-  const tabFromUrl = searchParams.get("tab") as EditTabId | null;
+  const tabFromUrl = searchParams?.get("tab") as EditTabId | null;
   const [activeEditTab, setActiveEditTab] = useState<EditTabId>(
     tabFromUrl === "details" || tabFromUrl === "fields" || tabFromUrl === "settings" || tabFromUrl === "odoo"
       ? tabFromUrl
@@ -518,7 +518,7 @@ export default function KpiFieldsPage() {
     setActiveEditTab(tab);
     const oid = orgIdFromUrl ?? kpi?.organization_id ?? kpiOrgId;
     if (oid != null) {
-      const params = new URLSearchParams(searchParams.toString());
+      const params = new URLSearchParams(searchParams?.toString() ?? "");
       params.set("organization_id", String(oid));
       params.set("tab", tab);
       router.replace(`/dashboard/kpis/${kpiId}/fields?${params.toString()}`, { scroll: false });

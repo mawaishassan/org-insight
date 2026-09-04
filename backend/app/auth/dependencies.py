@@ -4,7 +4,7 @@ import hashlib
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -29,6 +29,7 @@ class DataExportAuth:
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request = None,
     token: str | None = None,
 ) -> User:
     """Resolve current user from JWT. Raises 401 if invalid or missing."""
@@ -71,6 +72,7 @@ async def get_current_user(
                 User.organization_id,
                 User.is_active,
                 User.unique_user_key,
+                User.force_password_reset,
             ),
         )
     )
@@ -79,6 +81,14 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User inactive")
+    if user.force_password_reset:
+        path = str(request.url.path) if request and hasattr(request, "url") else ""
+        allowed_paths = ("/auth/me", "/auth/reset-forced-password", "/auth/refresh")
+        if not any(path.endswith(p) for p in allowed_paths):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Password reset required. You must reset your password before accessing the system.",
+            )
     return user
 
 

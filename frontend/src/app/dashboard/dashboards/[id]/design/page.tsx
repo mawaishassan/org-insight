@@ -7,7 +7,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { WidgetRenderer } from "../widgets";
+import { WidgetRenderer, clearClientWidgetCache } from "../widgets";
 import { DashboardCustomizationProvider, useDashboardCustomization } from "../DashboardCustomizationContext";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
@@ -37,6 +37,29 @@ function isSuperAdminRole(role: string | null | undefined) {
     .toUpperCase()
     .replace(/\s+/g, "_");
   return norm === "SUPER_ADMIN" || norm === "SUPERADMIN";
+}
+
+function getWidgetTypeLabel(type: string): string {
+  switch (type) {
+    case "kpi_card_single_value":
+      return "Single Value Card";
+    case "kpi_single_value":
+      return "Single Value";
+    case "kpi_bar_chart":
+      return "Bar/Pie Chart";
+    case "kpi_line_chart":
+      return "Line Chart";
+    case "kpi_trend":
+      return "Trend";
+    case "kpi_table":
+      return "KPI Table";
+    case "kpi_multi_line_table":
+      return "Multi-Line Table";
+    case "text":
+      return "Text";
+    default:
+      return type;
+  }
 }
 
 const PALETTE_SCHEMES = [
@@ -99,6 +122,8 @@ type Widget =
       year: number;
       period_key?: string | null;
       field_key: string;
+      enable_linked_widgets?: boolean;
+      linked_widget_ids?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -224,6 +249,8 @@ type Widget =
       filter_sub_field_keys?: string[];
       filter_labels?: Record<string, string>;
       filters?: MultiItemsFilterPayloadV2 | null;
+      enable_linked_widgets?: boolean;
+      linked_widget_ids?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -378,8 +405,8 @@ function DesignMoveArrow({
 export default function DashboardDesignPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const id = Number(params.id);
-  const orgIdFromQuery = searchParams.get("organization_id");
+  const id = Number(params?.id);
+  const orgIdFromQuery = searchParams?.get("organization_id") ?? null;
   const token = getAccessToken();
 
   const [dashboard, setDashboard] = useState<DashboardDetail | null>(null);
@@ -407,6 +434,9 @@ export default function DashboardDesignPage() {
       organizationId={dashboard.organization_id}
       consistentColors={dashboard.layout?.consistent_colors}
       colorMappings={dashboard.layout?.color_mappings}
+      fetchDataWithDate={dashboard.fetch_data_with_date}
+      fetchDataWithColumn={(dashboard as any).fetch_data_with_column}
+      columnFetchingConfig={(dashboard as any).column_fetching_config}
     >
       <DashboardDesignContent
         dashboard={dashboard}
@@ -657,6 +687,8 @@ function DashboardDesignContent({
   const [addCardAllowCustomColors, setAddCardAllowCustomColors] = useState(false);
   const [addCardBgColor, setAddCardBgColor] = useState<string>("");
   const [addCardFgColor, setAddCardFgColor] = useState<string>("");
+  const [addEnableLinkedWidgets, setAddEnableLinkedWidgets] = useState<boolean>(false);
+  const [addLinkedWidgetIds, setAddLinkedWidgetIds] = useState<string[]>([]);
   const [addMultiLineTableFieldKey, setAddMultiLineTableFieldKey] = useState<string>("");
   const [addMultiLineTableSubKeys, setAddMultiLineTableSubKeys] = useState<string[]>([]);
   const [addMultiLineTableTopRows, setAddMultiLineTableTopRows] = useState<number>(5);
@@ -684,6 +716,22 @@ function DashboardDesignContent({
   const [mlPrimaryCollapsed, setMlPrimaryCollapsed] = useState(false);
   const [mlJoinCollapsed, setMlJoinCollapsed] = useState(false);
   const [editTab, setEditTab] = useState<EditTab>("basics");
+
+  useEffect(() => {
+    if (!token || !dashboard?.organization_id) return;
+    if (addKpiId && !fieldsByKpiId[addKpiId]) {
+      api<KpiFieldRow[]>(`/fields?kpi_id=${addKpiId}&organization_id=${dashboard.organization_id}`, { token })
+        .then((fields) => setFieldsByKpiId((prev) => ({ ...prev, [addKpiId]: fields })))
+        .catch(() => {});
+    }
+    mlJoins.forEach((j) => {
+      if (j.kpi_id && !fieldsByKpiId[j.kpi_id]) {
+        api<KpiFieldRow[]>(`/fields?kpi_id=${j.kpi_id}&organization_id=${dashboard.organization_id}`, { token })
+          .then((fields) => setFieldsByKpiId((prev) => ({ ...prev, [j.kpi_id!]: fields })))
+          .catch(() => {});
+      }
+    });
+  }, [token, dashboard?.organization_id, addKpiId, mlJoins, fieldsByKpiId]);
 
   const isEditing = editingWidgetId != null;
 
@@ -732,6 +780,8 @@ function DashboardDesignContent({
     setAddCardAllowCustomColors(false);
     setAddCardBgColor("");
     setAddCardFgColor("");
+    setAddEnableLinkedWidgets(false);
+    setAddLinkedWidgetIds([]);
     setAddMultiLineTableFieldKey("");
     setAddMultiLineTableSubKeys([]);
     setAddMultiLineTableTopRows(5);
@@ -772,6 +822,8 @@ function DashboardDesignContent({
     setAddTrendMode((((w as any).mode as any) || "multi_line_items") as any);
     setAddTrendDefaultYears(Array.isArray((w as any).default_years) ? (w as any).default_years.map((n: any) => Number(n)).filter((n: any) => Number.isFinite(n)) : []);
     setAddMultiLineFieldKey((w as any).source_field_key || "");
+    setAddGroupBySubFieldKey((w as any).group_by_sub_field_key || "");
+    setAddValueSubFieldKey((w as any).value_sub_field_key || "");
     if (w.type === "kpi_bar_chart") {
       setAddAggFn((((w as any).agg as any) || "count_rows") as any);
       setAddBarSortBy((((w as any).sort_by as any) || "value") as any);
@@ -816,6 +868,12 @@ function DashboardDesignContent({
       setAddMultiLineFieldKey((w as any).source_field_key || "");
       setAddCardAgg(normalizeKpiCardAgg((w as any).agg));
       setAddValueSubFieldKey((w as any).value_sub_field_key || "");
+      setAddEnableLinkedWidgets(Boolean((w as any).enable_linked_widgets));
+      setAddLinkedWidgetIds(Array.isArray((w as any).linked_widget_ids) ? (w as any).linked_widget_ids : []);
+    }
+    if (w.type === "kpi_single_value") {
+      setAddEnableLinkedWidgets(Boolean((w as any).enable_linked_widgets));
+      setAddLinkedWidgetIds(Array.isArray((w as any).linked_widget_ids) ? (w as any).linked_widget_ids : []);
     }
     if (w.type === "kpi_multi_line_table") {
       setAddMultiLineTableFieldKey(w.source_field_key || "");
@@ -1125,6 +1183,7 @@ function DashboardDesignContent({
     nextColumnFetchingConfig: any = columnFetchingConfig,
   ) => {
     if (!token || !dashboard) return;
+    clearClientWidgetCache(dashboard.id);
     setSaving(true);
     setError(null);
     try {
@@ -1170,6 +1229,7 @@ function DashboardDesignContent({
     setWidgets(nextWidgets);
     toast.success(editingWidgetId ? "Widget updated" : "Widget added");
     setWidgetModalOpen(false);
+    clearClientWidgetCache(dashboard?.id);
     // Auto-persist so refresh doesn't lose title/filter label/etc.
     persistDashboardLayout(nextWidgets, consistentColors, colorMappings);
   };
@@ -1193,6 +1253,8 @@ function DashboardDesignContent({
         year: addYear,
         period_key,
         field_key: addFieldKey.trim(),
+        enable_linked_widgets: addEnableLinkedWidgets,
+        linked_widget_ids: addEnableLinkedWidgets ? addLinkedWidgetIds : [],
       };
       applyWidgetUpsert(w);
       return;
@@ -1446,6 +1508,8 @@ function DashboardDesignContent({
         bg_color: addCardAllowCustomColors ? addCardBgColor.trim() || undefined : undefined,
         fg_color: addCardAllowCustomColors ? addCardFgColor.trim() || undefined : undefined,
         filters: addCardSourceMode === "multi_line_agg" ? addAdvancedFilters : null,
+        enable_linked_widgets: addEnableLinkedWidgets,
+        linked_widget_ids: addEnableLinkedWidgets ? addLinkedWidgetIds : [],
       } as any;
       applyWidgetUpsert(w);
       return;
@@ -1503,13 +1567,13 @@ function DashboardDesignContent({
 
   // Open the add-widget modal when navigated with ?add_widget=1 (used by top bar button).
   useEffect(() => {
-    if (!token) return;
+    if (!token || !searchParams) return;
     if (widgetModalOpen) return;
-    const q = searchParams.get("add_widget");
+    const q = searchParams?.get("add_widget");
     if (q !== "1") return;
     openAddWidget();
     // Remove param so refresh doesn't keep opening.
-    const next = new URLSearchParams(searchParams.toString());
+    const next = new URLSearchParams(searchParams?.toString() ?? "");
     next.delete("add_widget");
     const qs = next.toString();
     router.replace(qs ? `?${qs}` : "?", { scroll: false });
@@ -2258,7 +2322,23 @@ function DashboardDesignContent({
                           <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>KPI</label>
                           <select
                             value={addKpiId ?? ""}
-                            onChange={(e) => setAddKpiId(Number(e.target.value))}
+                            onChange={(e) => {
+                              const nextKpi = Number(e.target.value);
+                              setAddKpiId(nextKpi);
+                              if (nextKpi !== addKpiId) {
+                                setAddFieldKey("");
+                                setAddFieldKeys("");
+                                setAddMultiLineFieldKey("");
+                                setAddGroupBySubFieldKey("");
+                                setAddValueSubFieldKey("");
+                                setAddFilterSubFieldKeys([]);
+                                setAddFilterSubFieldKey("");
+                                setAddFilterLabel("");
+                                setAddMultiLineTableFieldKey("");
+                                setAddMultiLineTableSubKeys([]);
+                                setAddMultiLineTableColumnOrder([]);
+                              }
+                            }}
                             style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
                           >
                             {kpis.map((k) => (
@@ -3129,7 +3209,17 @@ function DashboardDesignContent({
                           <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Source</label>
                           <select
                             value={addMultiLineFieldKey}
-                            onChange={(e) => setAddMultiLineFieldKey(e.target.value)}
+                            onChange={(e) => {
+                              const nextVal = e.target.value;
+                              setAddMultiLineFieldKey(nextVal);
+                              if (nextVal !== addMultiLineFieldKey) {
+                                setAddGroupBySubFieldKey("");
+                                setAddValueSubFieldKey("");
+                                setAddFilterSubFieldKeys([]);
+                                setAddFilterSubFieldKey("");
+                                setAddFilterLabel("");
+                              }
+                            }}
                             style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
                           >
                             <option value="">Select…</option>
@@ -3305,7 +3395,17 @@ function DashboardDesignContent({
                           <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Source</label>
                           <select
                             value={addMultiLineFieldKey}
-                            onChange={(e) => setAddMultiLineFieldKey(e.target.value)}
+                            onChange={(e) => {
+                              const nextVal = e.target.value;
+                              setAddMultiLineFieldKey(nextVal);
+                              if (nextVal !== addMultiLineFieldKey) {
+                                setAddGroupBySubFieldKey("");
+                                setAddValueSubFieldKey("");
+                                setAddFilterSubFieldKeys([]);
+                                setAddFilterSubFieldKey("");
+                                setAddFilterLabel("");
+                              }
+                            }}
                             style={{ padding: "0.35rem 0.45rem", fontSize: "0.9rem", width: "100%", minWidth: 0, boxSizing: "border-box" }}
                           >
                             <option value="">Select…</option>
@@ -3480,6 +3580,7 @@ function DashboardDesignContent({
                       addType !== "kpi_trend" &&
                       addType !== "kpi_multi_line_table" &&
                       addType !== "kpi_card_single_value" &&
+                      addType !== "kpi_single_value" &&
                       addType !== "text" && (
                       <div className="card" style={{ padding: "0.9rem" }}>
                         <div style={{ fontWeight: 700, marginBottom: "0.25rem" }}>No extra options</div>
@@ -3655,6 +3756,293 @@ function DashboardDesignContent({
                               <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Text color</label>
                               <input value={addCardFgColor} onChange={(e) => setAddCardFgColor(e.target.value)} style={{ padding: "0.35rem 0.45rem" }} placeholder="#ffffff" />
                             </div>
+                          </div>
+                        )}
+
+                        {/* Linked Widgets Navigation Section (Strictly from the same dashboard) */}
+                        <div style={{ height: 1, background: "var(--border)", margin: "0.4rem 0" }} />
+                        <div style={{ display: "grid", gap: "0.6rem" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <label style={{ fontSize: "0.9rem", fontWeight: 650, color: "var(--text)" }}>
+                              Enable Linked Widgets Navigation
+                            </label>
+                            <div style={{ display: "inline-flex", borderRadius: "6px", border: "1px solid var(--border)", overflow: "hidden" }}>
+                              <button
+                                type="button"
+                                onClick={() => setAddEnableLinkedWidgets(false)}
+                                style={{
+                                  padding: "0.25rem 0.75rem",
+                                  fontSize: "0.82rem",
+                                  fontWeight: !addEnableLinkedWidgets ? 700 : 500,
+                                  background: !addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
+                                  color: !addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
+                                  border: "none",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                No
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setAddEnableLinkedWidgets(true)}
+                                style={{
+                                  padding: "0.25rem 0.75rem",
+                                  fontSize: "0.82rem",
+                                  fontWeight: addEnableLinkedWidgets ? 700 : 500,
+                                  background: addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
+                                  color: addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
+                                  border: "none",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Yes
+                              </button>
+                            </div>
+                          </div>
+                          <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
+                            When enabled, clicking this Single Value Card navigates viewers to all linked widgets on this dashboard.
+                          </p>
+
+                          {addEnableLinkedWidgets && (
+                            <div style={{ marginTop: "0.25rem", padding: "0.75rem", background: "rgba(59, 130, 246, 0.03)", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                              {(() => {
+                                const eligibleWidgets = widgets.filter((w) => w.id !== editingWidgetId);
+                                return (
+                                  <>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                                      <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+                                        Linked Widgets (Same Dashboard)
+                                        {addLinkedWidgetIds.length > 0 && (
+                                          <span style={{ marginLeft: "0.4rem", color: "var(--accent, #3b82f6)", fontWeight: 700 }}>
+                                            ({addLinkedWidgetIds.length} selected)
+                                          </span>
+                                        )}
+                                      </span>
+                                      {eligibleWidgets.length > 0 && (
+                                        <div style={{ display: "flex", gap: "0.4rem" }}>
+                                          <button
+                                            type="button"
+                                            onClick={() => setAddLinkedWidgetIds(eligibleWidgets.map((w) => w.id))}
+                                            style={{ background: "none", border: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 600, padding: 0 }}
+                                          >
+                                            Select All
+                                          </button>
+                                          <span style={{ color: "var(--border)" }}>|</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => setAddLinkedWidgetIds([])}
+                                            style={{ background: "none", border: "none", color: "var(--muted)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500, padding: 0 }}
+                                          >
+                                            Clear
+                                          </button>
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {eligibleWidgets.length === 0 ? (
+                                      <div style={{ padding: "0.6rem", fontSize: "0.82rem", color: "var(--muted)", background: "var(--surface)", borderRadius: "6px", textAlign: "center" }}>
+                                        No other widgets available on this dashboard yet. Add widgets to this dashboard first to link them to this card.
+                                      </div>
+                                    ) : (
+                                      <div style={{ maxHeight: "200px", overflowY: "auto", display: "grid", gap: "0.35rem", paddingRight: "0.25rem" }}>
+                                        {eligibleWidgets.map((ew) => {
+                                          const isChecked = addLinkedWidgetIds.includes(ew.id);
+                                          const title = ew.title || `Untitled (${getWidgetTypeLabel(ew.type)})`;
+                                          return (
+                                            <label
+                                              key={ew.id}
+                                              style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: "0.5rem",
+                                                padding: "0.4rem 0.6rem",
+                                                borderRadius: "6px",
+                                                background: isChecked ? "rgba(59, 130, 246, 0.08)" : "var(--surface)",
+                                                border: isChecked ? "1px solid rgba(59, 130, 246, 0.3)" : "1px solid var(--border)",
+                                                cursor: "pointer",
+                                                fontSize: "0.85rem",
+                                                transition: "background 0.15s ease",
+                                              }}
+                                            >
+                                              <input
+                                                type="checkbox"
+                                                checked={isChecked}
+                                                onChange={(e) => {
+                                                  if (e.target.checked) {
+                                                    setAddLinkedWidgetIds((prev) => [...prev, ew.id]);
+                                                  } else {
+                                                    setAddLinkedWidgetIds((prev) => prev.filter((id) => id !== ew.id));
+                                                  }
+                                                }}
+                                              />
+                                              <span style={{ flex: 1, fontWeight: isChecked ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                {title}
+                                              </span>
+                                              <span
+                                                style={{
+                                                  fontSize: "0.72rem",
+                                                  padding: "0.15rem 0.45rem",
+                                                  borderRadius: "4px",
+                                                  background: "rgba(0,0,0,0.06)",
+                                                  color: "var(--muted)",
+                                                  fontWeight: 500,
+                                                }}
+                                              >
+                                                {getWidgetTypeLabel(ew.type)}
+                                              </span>
+                                            </label>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                  </>
+                                );
+                              })()}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {addType === "kpi_single_value" && (
+                      <div style={{ display: "grid", gap: "0.75rem" }}>
+                        {/* Linked Widgets Navigation Section for basic single value */}
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <label style={{ fontSize: "0.9rem", fontWeight: 650, color: "var(--text)" }}>
+                            Enable Linked Widgets Navigation
+                          </label>
+                          <div style={{ display: "inline-flex", borderRadius: "6px", border: "1px solid var(--border)", overflow: "hidden" }}>
+                            <button
+                              type="button"
+                              onClick={() => setAddEnableLinkedWidgets(false)}
+                              style={{
+                                padding: "0.25rem 0.75rem",
+                                fontSize: "0.82rem",
+                                fontWeight: !addEnableLinkedWidgets ? 700 : 500,
+                                background: !addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
+                                color: !addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
+                                border: "none",
+                                cursor: "pointer",
+                              }}
+                            >
+                              No
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setAddEnableLinkedWidgets(true)}
+                              style={{
+                                padding: "0.25rem 0.75rem",
+                                fontSize: "0.82rem",
+                                fontWeight: addEnableLinkedWidgets ? 700 : 500,
+                                background: addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
+                                color: addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
+                                border: "none",
+                                cursor: "pointer",
+                              }}
+                            >
+                              Yes
+                            </button>
+                          </div>
+                        </div>
+                        <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
+                          When enabled, clicking this Single Value Card navigates viewers to all linked widgets on this dashboard.
+                        </p>
+
+                        {addEnableLinkedWidgets && (
+                          <div style={{ marginTop: "0.25rem", padding: "0.75rem", background: "rgba(59, 130, 246, 0.03)", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                            {(() => {
+                              const eligibleWidgets = widgets.filter((w) => w.id !== editingWidgetId);
+                              return (
+                                <>
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                                    <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+                                      Linked Widgets (Same Dashboard)
+                                      {addLinkedWidgetIds.length > 0 && (
+                                        <span style={{ marginLeft: "0.4rem", color: "var(--accent, #3b82f6)", fontWeight: 700 }}>
+                                          ({addLinkedWidgetIds.length} selected)
+                                        </span>
+                                      )}
+                                    </span>
+                                    {eligibleWidgets.length > 0 && (
+                                      <div style={{ display: "flex", gap: "0.4rem" }}>
+                                        <button
+                                          type="button"
+                                          onClick={() => setAddLinkedWidgetIds(eligibleWidgets.map((w) => w.id))}
+                                          style={{ background: "none", border: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 600, padding: 0 }}
+                                        >
+                                          Select All
+                                        </button>
+                                        <span style={{ color: "var(--border)" }}>|</span>
+                                        <button
+                                          type="button"
+                                          onClick={() => setAddLinkedWidgetIds([])}
+                                          style={{ background: "none", border: "none", color: "var(--muted)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500, padding: 0 }}
+                                        >
+                                          Clear
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {eligibleWidgets.length === 0 ? (
+                                    <div style={{ padding: "0.6rem", fontSize: "0.82rem", color: "var(--muted)", background: "var(--surface)", borderRadius: "6px", textAlign: "center" }}>
+                                      No other widgets available on this dashboard yet. Add widgets to this dashboard first to link them to this card.
+                                    </div>
+                                  ) : (
+                                    <div style={{ maxHeight: "200px", overflowY: "auto", display: "grid", gap: "0.35rem", paddingRight: "0.25rem" }}>
+                                      {eligibleWidgets.map((ew) => {
+                                        const isChecked = addLinkedWidgetIds.includes(ew.id);
+                                        const title = ew.title || `Untitled (${getWidgetTypeLabel(ew.type)})`;
+                                        return (
+                                          <label
+                                            key={ew.id}
+                                            style={{
+                                              display: "flex",
+                                              alignItems: "center",
+                                              gap: "0.5rem",
+                                              padding: "0.4rem 0.6rem",
+                                              borderRadius: "6px",
+                                              background: isChecked ? "rgba(59, 130, 246, 0.08)" : "var(--surface)",
+                                              border: isChecked ? "1px solid rgba(59, 130, 246, 0.3)" : "1px solid var(--border)",
+                                              cursor: "pointer",
+                                              fontSize: "0.85rem",
+                                              transition: "background 0.15s ease",
+                                            }}
+                                          >
+                                            <input
+                                              type="checkbox"
+                                              checked={isChecked}
+                                              onChange={(e) => {
+                                                if (e.target.checked) {
+                                                  setAddLinkedWidgetIds((prev) => [...prev, ew.id]);
+                                                } else {
+                                                  setAddLinkedWidgetIds((prev) => prev.filter((id) => id !== ew.id));
+                                                }
+                                              }}
+                                            />
+                                            <span style={{ flex: 1, fontWeight: isChecked ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                              {title}
+                                            </span>
+                                            <span
+                                              style={{
+                                                fontSize: "0.72rem",
+                                                padding: "0.15rem 0.45rem",
+                                                borderRadius: "4px",
+                                                background: "rgba(0,0,0,0.06)",
+                                                color: "var(--muted)",
+                                                fontWeight: 500,
+                                              }}
+                                            >
+                                              {getWidgetTypeLabel(ew.type)}
+                                            </span>
+                                          </label>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </>
+                              );
+                            })()}
                           </div>
                         )}
                       </div>

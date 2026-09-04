@@ -44,9 +44,11 @@ interface OrgTagRow {
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
+  const rawPathname = usePathname();
+  const pathname = rawPathname || "";
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const rawSearchParams = useSearchParams();
+  const searchParams = rawSearchParams ?? new URLSearchParams();
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -62,38 +64,39 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   /** Ignore stale breadcrumb API responses when pathname/query changes quickly (avoids clearing tail or showing wrong year). */
   const breadcrumbFetchGenRef = useRef(0);
 
-  const onEntries = pathname === "/dashboard/entries";
-  const yearParam = onEntries ? searchParams.get("year") : null;
+  const currentPath = pathname || "";
+  const onEntries = currentPath === "/dashboard/entries";
+  const yearParam = onEntries ? searchParams?.get("year") : null;
   const year = yearParam ? Number(yearParam) : currentYear;
   const orgId = user?.organization_id ?? null;
   const canEnter = user && canEnterData(user.role as UserRole);
   const canShowFilters = onEntries && canEnter && orgId != null;
 
   /** When super admin is in any organization context: org detail path, or organization_id in URL, or breadcrumb (e.g. report page loads org from API). */
-  const orgDetailMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)(?:\/|$)/);
+  const orgDetailMatch = currentPath.match(/^\/dashboard\/organizations\/(\d+)(?:\/|$)/);
   const orgIdFromPath = orgDetailMatch ? Number(orgDetailMatch[1]) : null;
-  const orgIdFromQuery = searchParams.get("organization_id");
+  const orgIdFromQuery = searchParams?.get("organization_id");
   const orgIdFromBreadcrumb = breadcrumbTail?.orgId && breadcrumbTail.orgId > 0 ? breadcrumbTail.orgId : null;
   const selectedOrgId = orgIdFromPath ?? (orgIdFromQuery ? Number(orgIdFromQuery) : null) ?? orgIdFromBreadcrumb;
 
-  const kpiFieldsMatch = pathname.match(/^\/dashboard\/kpis\/(\d+)\/fields\/?$/);
-  const reportBuilderMatch = pathname.match(/^\/dashboard\/domains\/([^/]+)\/kpis\/(\d+)\/report-builder\/?$/);
-  const domainDetailMatch = pathname.match(/^\/dashboard\/domains\/(\d+)\/?$/);
-  const reportDetailMatch = pathname.match(/^\/dashboard\/reports\/(\d+)(?:\/|$)/);
-  const dashboardDetailMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)(?:\/|$)/);
-  const dataExportMatch = pathname.match(/^\/dashboard\/organizations\/(\d+)\/data-export\/?$/);
-  const usersDetailMatch = pathname.match(/^\/dashboard\/users\/(\d+)\/?$/);
-  const entryDetailMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/?$/);
-  const entryMultiMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/?$/);
-  const entryMultiRowMatch = pathname.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/row\/([^/]+)\/?$/);
+  const kpiFieldsMatch = currentPath.match(/^\/dashboard\/kpis\/(\d+)\/fields\/?$/);
+  const reportBuilderMatch = currentPath.match(/^\/dashboard\/domains\/([^/]+)\/kpis\/(\d+)\/report-builder\/?$/);
+  const domainDetailMatch = currentPath.match(/^\/dashboard\/domains\/(\d+)\/?$/);
+  const reportDetailMatch = currentPath.match(/^\/dashboard\/reports\/(\d+)(?:\/|$)/);
+  const dashboardDetailMatch = currentPath.match(/^\/dashboard\/dashboards\/(\d+)(?:\/|$)/);
+  const dataExportMatch = currentPath.match(/^\/dashboard\/organizations\/(\d+)\/data-export\/?$/);
+  const usersDetailMatch = currentPath.match(/^\/dashboard\/users\/(\d+)\/?$/);
+  const entryDetailMatch = currentPath.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/?$/);
+  const entryMultiMatch = currentPath.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/?$/);
+  const entryMultiRowMatch = currentPath.match(/^\/dashboard\/entries\/(\d+)\/(\d+)\/multi\/(\d+)\/row\/([^/]+)\/?$/);
 
-  const dashboardDesignMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/design\/?$/);
+  const dashboardDesignMatch = currentPath.match(/^\/dashboard\/dashboards\/(\d+)\/design\/?$/);
   const isDashboardDesign = !!dashboardDesignMatch;
   const dashboardDesignId = dashboardDesignMatch ? Number(dashboardDesignMatch[1]) : null;
-  const dashboardViewMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/?$/);
+  const dashboardViewMatch = currentPath.match(/^\/dashboard\/dashboards\/(\d+)\/?$/);
   const isDashboardView = !!dashboardViewMatch;
   const dashboardViewId = dashboardViewMatch ? Number(dashboardViewMatch[1]) : null;
-  const dashboardWidgetFullMatch = pathname.match(/^\/dashboard\/dashboards\/(\d+)\/widgets\/([^/]+)\/?$/);
+  const dashboardWidgetFullMatch = currentPath.match(/^\/dashboard\/dashboards\/(\d+)\/widgets\/([^/]+)\/?$/);
   const isDashboardWidgetFull = !!dashboardWidgetFullMatch;
   const dashboardWidgetFullDashboardId = dashboardWidgetFullMatch ? Number(dashboardWidgetFullMatch[1]) : null;
 
@@ -106,7 +109,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
     if (selectedOrgId == null) return;
 
-    const next = new URLSearchParams(searchParams.toString());
+    const next = new URLSearchParams(searchParams?.toString() ?? "");
     const hasAnyFilterInUrl = ["q", "domain_id", "category_id", "status", "tag_id"].some((key) => next.has(key));
 
     if (!restoredRef.current[selectedOrgId]) {
@@ -151,7 +154,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       return;
     }
     api<CurrentUser>("/auth/me", { token })
-      .then(setUser)
+      .then((u) => {
+        if (u.force_password_reset) {
+          router.replace("/reset-password");
+          return;
+        }
+        setUser(u);
+      })
       .catch(() => {
         clearTokens();
         const currentPath = pathname + (searchParams.toString() ? `?${searchParams.toString()}` : "");

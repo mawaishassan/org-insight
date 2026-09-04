@@ -151,6 +151,8 @@ async def update_one_dashboard(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
     await db.commit()
     await db.refresh(d)
+    from app.widget_data.service import invalidate_dashboard_cache
+    invalidate_dashboard_cache(dashboard_id)
     return DashboardResponse.model_validate(d)
 
 
@@ -206,6 +208,50 @@ async def get_dashboard_column_values(
     if not entry_ids:
         return {"column_key": effective_column_key, "values": []}
 
+    is_org_admin = current_user.role.value in ("ORG_ADMIN", "SUPER_ADMIN") if current_user and getattr(current_user, "role", None) else False
+    user_key = (getattr(current_user, "unique_user_key", None) or "").strip() if current_user else ""
+
+    from app.entries.multi_line_load import _fetch_rules_for_field, load_multi_line_row_dicts
+    rules = await _fetch_rules_for_field(db, field.id)
+    if rules:
+        try:
+            row_tuples = await load_multi_line_row_dicts(
+                db,
+                entry_id=entry_ids,
+                field=field,
+                current_user_id=current_user.id if current_user else None
+            )
+            if not is_org_admin and user_key:
+                u_key_lower = user_key.lower()
+                row_tuples = [
+                    (r_idx, rdict)
+                    for r_idx, rdict in row_tuples
+                    if isinstance(rdict, dict) and any(str(v).strip().lower() == u_key_lower for v in rdict.values() if v is not None)
+                ]
+            seen = set()
+            values = []
+            for _, rdict in row_tuples:
+                if not isinstance(rdict, dict):
+                    continue
+                v = rdict.get(effective_column_key)
+                if v is None:
+                    continue
+                if isinstance(v, dict):
+                    v_str = str(v.get("label") or v.get("name") or v.get("value") or "").strip()
+                else:
+                    v_str = str(v).strip()
+                if v_str and v_str != "(empty)" and v_str.lower() not in ("none", "null", "false", "undefined", "—") and v_str not in seen:
+                    seen.add(v_str)
+                    values.append(v_str)
+            values.sort(key=lambda x: x.lower())
+            return {
+                "column_key": effective_column_key,
+                "column_name": cfg.get("column_name") or cfg.get("column_label") or effective_column_key,
+                "values": values,
+            }
+        except Exception:
+            pass
+
     sf_res = await db.execute(
         select(KPIFieldSubField.id).where(
             KPIFieldSubField.field_id == field.id,
@@ -223,8 +269,15 @@ async def get_dashboard_column_values(
                 KpiMultiLineCell.value_text.isnot(None),
                 KpiMultiLineCell.value_text != "",
             )
-            .distinct()
         )
+        if not is_org_admin and user_key:
+            from sqlalchemy import func
+            scoped_rows = select(KpiMultiLineCell.row_id).where(
+                func.trim(func.lower(KpiMultiLineCell.value_text)) == user_key.lower()
+            )
+            sql_stmt = sql_stmt.where(KpiMultiLineRow.id.in_(scoped_rows))
+
+        sql_stmt = sql_stmt.distinct()
         c_res = await db.execute(sql_stmt)
         values = [r[0].strip() for r in c_res.all() if r[0] and r[0].strip() and r[0].strip() != "(empty)"]
         values = sorted(list(dict.fromkeys(values)), key=lambda x: x.lower())
@@ -240,6 +293,13 @@ async def get_dashboard_column_values(
         field=field,
         current_user_id=current_user.id if current_user else None,
     )
+    if not is_org_admin and user_key:
+        u_key_lower = user_key.lower()
+        pairs = [
+            (r_idx, rdict)
+            for r_idx, rdict in pairs
+            if isinstance(rdict, dict) and any(str(v).strip().lower() == u_key_lower for v in rdict.values() if v is not None)
+        ]
 
     seen = set()
     values = []

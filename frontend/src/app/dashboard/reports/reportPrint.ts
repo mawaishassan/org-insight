@@ -84,39 +84,26 @@ export function buildReportPrintDocument(data: ReportData): string {
   return parts.join("");
 }
 
-/**
- * Opens the report in a new tab for print/PDF. Returns true if the window opened, false if blocked (e.g. pop-up blocker).
- * Callers should show an inline message if false instead of using alert().
- */
 export function openReportPrintWindow(doc: string, autoPrint = true): boolean {
-  const blob = new Blob([doc], { type: "text/html;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const win = window.open(url, "_blank", "noopener,noreferrer");
-  if (!win) {
-    URL.revokeObjectURL(url);
-    return false;
-  }
-  const doPrint = () => {
-    URL.revokeObjectURL(url);
+  try {
+    const win = window.open("", "_blank");
+    if (!win) return false;
+    win.document.open();
+    win.document.write(doc);
+    win.document.close();
     if (autoPrint) {
       setTimeout(() => {
-        win.print();
-        if (typeof (win as Window & { onafterprint?: () => void }).onafterprint !== "undefined") {
-          (win as Window & { onafterprint?: () => void }).onafterprint = () => win.close();
-        } else {
-          setTimeout(() => win.close(), 1000);
+        try {
+          win.focus();
+          win.print();
+        } catch (e) {
+          console.error("Print error", e);
         }
-      }, 150);
+      }, 250);
     }
-  };
-  try {
-    if (win.document.readyState === "complete") {
-      doPrint();
-    } else {
-      win.addEventListener("load", doPrint);
-    }
-  } catch {
-    win.addEventListener("load", doPrint);
+    return true;
+  } catch (e) {
+    console.error("Failed to open report print window", e);
+    return false;
   }
-  return true;
 }

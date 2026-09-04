@@ -36,18 +36,35 @@ function WidgetWithPeriodSelector({
   widget,
   organizationId,
   dashboardId,
+  onCardClick,
+  isActiveCard,
 }: {
   widget: Widget;
   organizationId: number;
   dashboardId: number;
+  onCardClick?: (widget: Widget) => void;
+  isActiveCard?: boolean;
 }) {
   return (
-    <div className="card" style={{ display: "flex", flexDirection: "column", height: "100%", padding: "0.5rem" }}>
+    <div
+      id={`widget-${widget.id}`}
+      className="card"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        padding: "0.5rem",
+        border: isActiveCard ? "2px solid var(--accent, #3b82f6)" : undefined,
+        boxShadow: isActiveCard ? "0 0 0 3px rgba(59, 130, 246, 0.25)" : undefined,
+        transition: "border 0.25s ease, box-shadow 0.25s ease",
+      }}
+    >
       <div style={{ flex: 1 }}>
         <WidgetRenderer
           widget={widget}
           organizationId={organizationId}
           dashboardId={dashboardId}
+          onSingleValueCardClick={onCardClick}
         />
       </div>
     </div>
@@ -66,8 +83,8 @@ function Card({ title, children }: { title?: string; children: React.ReactNode }
 export default function DashboardViewPage() {
   const params = useParams();
   const searchParams = useSearchParams();
-  const id = Number(params.id);
-  const orgIdFromQuery = searchParams.get("organization_id");
+  const id = Number(params?.id);
+  const orgIdFromQuery = searchParams?.get("organization_id");
   const organizationId = orgIdFromQuery ? Number(orgIdFromQuery) : undefined;
 
   const token = getAccessToken();
@@ -98,35 +115,40 @@ export default function DashboardViewPage() {
     can_use_unique_value: true,
   });
 
+  // Fetch all page-load data in parallel: permissions + dashboard + odoo-sync start at the same time.
+  // Org is fetched immediately after dashboard responds (needs organization_id from it).
   useEffect(() => {
     if (!id || !token) return;
     const query = organizationId ? `?organization_id=${organizationId}` : "";
-    api<{
-      can_view: boolean;
-      can_edit: boolean;
-      can_load_lms: boolean;
-      can_change_period: boolean;
-      can_use_unique_value: boolean;
-    }>(`/dashboards/${id}/my-permissions${query}`, { token })
-      .then(setUserPermissions)
-      .catch(() => {});
-  }, [id, token, organizationId]);
-
-  useEffect(() => {
-    if (!id || !token) return;
     setLoading(true);
     setError(null);
-    const query = organizationId ? `?organization_id=${organizationId}` : "";
-    api<DashboardDetail>(`/dashboards/${id}${query}`, { token })
-      .then(async (d) => {
+
+    Promise.all([
+      // 1. Dashboard permissions
+      api<{
+        can_view: boolean;
+        can_edit: boolean;
+        can_load_lms: boolean;
+        can_change_period: boolean;
+        can_use_unique_value: boolean;
+      }>(`/dashboards/${id}/my-permissions${query}`, { token }).catch(() => null),
+
+      // 2. Dashboard detail
+      api<DashboardDetail>(`/dashboards/${id}${query}`, { token }),
+
+      // 3. Odoo sync info
+      api<{ has_odoo_graphs: boolean }>(`/dashboards/${id}/odoo-sync-info${query}`, { token }).catch(() => null),
+    ])
+      .then(async ([perms, d, syncInfoData]) => {
+        if (perms) setUserPermissions(perms);
         setDashboard(d);
+        if (syncInfoData !== null) setSyncInfo(syncInfoData);
+
         const dConfig = d?.date_fetching_config || {};
-        if (dConfig.default_period_type) {
-          setSelectedPeriodType(dConfig.default_period_type);
-        }
-        if (dConfig.default_year) {
-          setSelectedPeriod(String(dConfig.default_year).trim());
-        }
+        if (dConfig.default_period_type) setSelectedPeriodType(dConfig.default_period_type);
+        if (dConfig.default_year) setSelectedPeriod(String(dConfig.default_year).trim());
+
+        // Org fetch — depends on dashboard response for organization_id
         if (d?.organization_id) {
           try {
             const orgData = await api<any>(`/organizations/${d.organization_id}`, { token });
@@ -140,16 +162,8 @@ export default function DashboardViewPage() {
       .finally(() => setLoading(false));
   }, [id, token, organizationId]);
 
-  useEffect(() => {
-    if (!id || !token) return;
-    const query = organizationId ? `?organization_id=${organizationId}` : "";
-    api<{ has_odoo_graphs: boolean }>(`/dashboards/${id}/odoo-sync-info${query}`, { token })
-      .then(setSyncInfo)
-      .catch(() => setSyncInfo(null));
-  }, [id, token, organizationId]);
+  // NOTE: permissions, dashboard, odoo-sync and org are all fetched in the combined useEffect above.
 
-  // NOTE: org is already fetched inside the dashboard fetch callback above.
-  // A separate useEffect here was causing a duplicate /organizations call on every load.
 
   const customPeriods = useMemo(() => {
     if (!org) return [];
@@ -523,6 +537,54 @@ function DashboardViewContent({
       .finally(() => setColumnLoading(false));
   }, [dashboard.fetch_data_with_column, dashboard.id, dashboard.organization_id, token]);
 
+  // Linked widgets navigation state
+  const [activeLinkedCardId, setActiveLinkedCardId] = useState<string | null>(null);
+
+  const activeLinkedCard = useMemo(() => {
+    if (!activeLinkedCardId) return null;
+    return widgets.find((w) => w.id === activeLinkedCardId) || null;
+  }, [activeLinkedCardId, widgets]);
+
+  const linkedWidgets = useMemo<Widget[]>(() => {
+    if (!activeLinkedCard) return [];
+    const card = activeLinkedCard as any;
+    if (!card.enable_linked_widgets) return [];
+    const ids: string[] = Array.isArray(card.linked_widget_ids) ? card.linked_widget_ids : [];
+    return ids
+      .map((id: string) => widgets.find((w: Widget) => w.id === id))
+      .filter((w: Widget | undefined): w is Widget => Boolean(w));
+  }, [activeLinkedCard, widgets]);
+
+  const singleValueCards = useMemo(() => {
+    return widgets.filter((w: Widget) => w.type === "kpi_card_single_value" || w.type === "kpi_single_value");
+  }, [widgets]);
+
+  // Smooth scroll to the dedicated linked widgets section when a card is clicked
+  useEffect(() => {
+    if (activeLinkedCardId) {
+      const timer = setTimeout(() => {
+        const el = document.getElementById("linked-widgets-section");
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [activeLinkedCardId]);
+
+  const handleBackToDashboard = () => {
+    const prevId = activeLinkedCardId;
+    setActiveLinkedCardId(null);
+    setTimeout(() => {
+      if (prevId) {
+        const cardEl = document.getElementById(`widget-${prevId}`);
+        if (cardEl) {
+          cardEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
+    }, 50);
+  };
+
 
 
   return (
@@ -644,11 +706,6 @@ function DashboardViewContent({
                   ))}
                 </select>
               </div>
-              {!userPermissions.can_change_period && (
-                <span style={{ fontSize: "0.75rem", color: "var(--muted)", fontStyle: "italic" }}>
-                  🔒 Period locked by admin configuration
-                </span>
-              )}
             </div>
           )}
 
@@ -877,7 +934,137 @@ function DashboardViewContent({
           <Card title="No widgets">
             <p style={{ color: "var(--muted)", margin: 0 }}>This dashboard has no widgets yet.</p>
           </Card>
+        ) : activeLinkedCardId && activeLinkedCard ? (
+          /* Focused Linked Widgets View Mode */
+          <div style={{ display: "grid", gap: "1.25rem" }}>
+            {/* Single Value Cards row at top to show context and allow switching */}
+            {singleValueCards.length > 0 && (
+              <div
+                style={{
+                  display: "grid",
+                  gap: "1rem",
+                  gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+                }}
+              >
+                {singleValueCards.map((w) => (
+                  <div key={`${w.id}-${refreshCount}`} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
+                    <WidgetWithPeriodSelector
+                      widget={w}
+                      organizationId={dashboard.organization_id}
+                      dashboardId={dashboard.id}
+                      onCardClick={(card) => setActiveLinkedCardId(card.id)}
+                      isActiveCard={w.id === activeLinkedCardId}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Dedicated Linked Widgets Section Container */}
+            <div
+              id="linked-widgets-section"
+              style={{
+                marginTop: "0.25rem",
+                padding: "1.25rem",
+                background: "var(--surface)",
+                borderRadius: "14px",
+                border: "1.5px solid var(--accent, #3b82f6)",
+                boxShadow: "0 10px 25px -5px rgba(59, 130, 246, 0.08), 0 8px 10px -6px rgba(59, 130, 246, 0.04)",
+                display: "grid",
+                gap: "1.25rem",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: "0.75rem",
+                  borderBottom: "1px solid var(--border)",
+                  paddingBottom: "0.9rem",
+                }}
+              >
+                <div>
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", fontSize: "0.78rem", fontWeight: 700, color: "var(--accent, #3b82f6)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" }}>
+                    <span>●</span>
+                    <span>Linked Widgets View</span>
+                  </div>
+                  <h3 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 700, color: "var(--text)" }}>
+                    {(activeLinkedCard.title || "Single Value Card")} – Detailed Analysis
+                  </h3>
+                  <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                    Showing {linkedWidgets.length} linked widget{linkedWidgets.length === 1 ? "" : "s"} from this dashboard
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleBackToDashboard}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    padding: "0.5rem 1rem",
+                    fontSize: "0.875rem",
+                    fontWeight: 600,
+                    borderRadius: "8px",
+                    boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+                  }}
+                >
+                  ← Back to Dashboard
+                </button>
+              </div>
+
+              {linkedWidgets.length === 0 ? (
+                <div
+                  style={{
+                    padding: "3rem 1.5rem",
+                    textAlign: "center",
+                    background: "rgba(0,0,0,0.02)",
+                    borderRadius: "10px",
+                    border: "1.5px dashed var(--border)",
+                  }}
+                >
+                  <div style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>🔍</div>
+                  <p style={{ margin: 0, fontSize: "1rem", color: "var(--text)", fontWeight: 600 }}>
+                    No detailed widgets are available for this dashboard card.
+                  </p>
+                  <p style={{ margin: "0.35rem 0 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                    None of the linked widgets are accessible under your current permissions or no widgets were linked.
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={handleBackToDashboard}
+                    style={{ marginTop: "1.25rem", padding: "0.4rem 0.9rem", fontSize: "0.85rem" }}
+                  >
+                    Return to Dashboard
+                  </button>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: "grid",
+                    gap: "1rem",
+                    gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+                  }}
+                >
+                  {linkedWidgets.map((w: Widget) => (
+                    <div key={`linked-${w.id}-${refreshCount}`} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
+                      <WidgetWithPeriodSelector
+                        widget={w}
+                        organizationId={dashboard.organization_id}
+                        dashboardId={dashboard.id}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         ) : (
+          /* Normal Dashboard View with all widgets */
           <div
             style={{
               display: "grid",
@@ -891,6 +1078,7 @@ function DashboardViewContent({
                   widget={w}
                   organizationId={dashboard.organization_id}
                   dashboardId={dashboard.id}
+                  onCardClick={(card) => setActiveLinkedCardId(card.id)}
                 />
               </div>
             ))}

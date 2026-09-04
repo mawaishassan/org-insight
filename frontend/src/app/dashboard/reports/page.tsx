@@ -6,6 +6,7 @@ import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 import toast from "react-hot-toast";
 import { generatePeriodOptions } from "@/lib/periodHelpers";
+import { downloadBlob } from "@/lib/download";
 import {
   buildReportPrintDocument,
   openReportPrintWindow,
@@ -64,10 +65,11 @@ export default function ReportsPage() {
   const [organizations, setOrganizations] = useState<{ id: number; name: string }[]>([]);
   const [addOrgId, setAddOrgId] = useState<number | null>(null);
 
-  // End-user Generate Report Modal State
+  // End-user Generate / Download Report Modal State
   const [genModalOpen, setGenModalOpen] = useState(false);
   const [activeReport, setActiveReport] = useState<TemplateRow | null>(null);
   const [activeReportType, setActiveReportType] = useState<"standard" | "custom">("standard");
+  const [selectedFormat, setSelectedFormat] = useState<"pdf" | "docx" | "xlsx">("pdf");
   const [org, setOrg] = useState<any | null>(null);
   const [selectedPeriodType, setSelectedPeriodType] = useState<string>("by_default");
   const [selectedPeriod, setSelectedPeriod] = useState<string>("by_default");
@@ -280,32 +282,71 @@ export default function ReportsPage() {
   const handleGenerateReport = async (reportOverride?: TemplateRow, periodTypeOverride?: string, periodOverride?: string) => {
     const token = getAccessToken();
     const active = reportOverride || activeReport;
-    if (!token || !active) return;
+    if (!token || !active) {
+      toast.error("Unable to generate report: Missing session or active report configuration");
+      return;
+    }
+
+    // Pre-open pop-up window synchronously to bypass browser pop-up blocker
+    const printWin = typeof window !== "undefined" ? window.open("", "_blank") : null;
+    if (printWin) {
+      printWin.document.write(`
+        <!DOCTYPE html>
+        <html>
+          <head><title>Generating Report...</title></head>
+          <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f8fafc; color: #475569;">
+            <div style="text-align: center;">
+              <h3 style="font-size: 1.25rem; margin-bottom: 0.5rem; color: #1e293b;">Generating PDF Report...</h3>
+              <p style="font-size: 0.9rem; margin: 0; color: #64748b;">Please wait while the report data is fetched and formatted.</p>
+            </div>
+          </body>
+        </html>
+      `);
+    }
+
     setGenerateLoading(true);
     setGenerateStep("Accessing report database...");
     
-    const pType = periodTypeOverride || selectedPeriodType;
-    const yr = periodOverride || selectedPeriod;
+    const pType = periodTypeOverride || selectedPeriodType || "by_default";
+    const yr = periodOverride || selectedPeriod || String(new Date().getFullYear());
     const isByDefault = pType === "by_default";
-    let url = `/reports/templates/${active.id}/generate?format=json&year=${yr}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(pType)}`}&_t=${Date.now()}`;
+    let url = `/reports/templates/${active.id}/generate?format=json&year=${encodeURIComponent(yr)}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(pType)}`}&_t=${Date.now()}`;
     if (active.organization_id) {
       url += `&organization_id=${active.organization_id}`;
     }
 
     try {
-      await new Promise(r => setTimeout(r, 400));
       setGenerateStep("Compiling formulas...");
       const res = await api<ReportData>(url, { token, cache: "no-store" });
       setGenerateStep("Finalizing print layout...");
       const doc = buildReportPrintDocument(res);
-      const opened = openReportPrintWindow(doc, true);
-      if (!opened) {
-        toast.error("Pop-up was blocked. Allow pop-ups for this site to view the PDF/Print layout.");
-      } else {
+
+      if (printWin && !printWin.closed) {
+        printWin.document.open();
+        printWin.document.write(doc);
+        printWin.document.close();
+        setTimeout(() => {
+          try {
+            printWin.focus();
+            printWin.print();
+          } catch (err) {
+            console.error("Print error", err);
+          }
+        }, 250);
         toast.success("PDF/Print layout generated successfully");
+      } else {
+        const opened = openReportPrintWindow(doc, true);
+        if (!opened) {
+          toast.error("Pop-up was blocked. Allow pop-ups for this site to view the PDF/Print layout.");
+        } else {
+          toast.success("PDF/Print layout generated successfully");
+        }
       }
       setGenModalOpen(false);
     } catch (e) {
+      if (printWin && !printWin.closed) {
+        printWin.close();
+      }
       toast.error(e instanceof Error ? e.message : "Failed to generate report");
       setGenModalOpen(false);
     } finally {
@@ -313,17 +354,33 @@ export default function ReportsPage() {
     }
   };
 
-  const handleGenerateCustomReport = async (reportOverride?: TemplateRow, periodTypeOverride?: string, periodOverride?: string) => {
+  const handleDownloadCustomReport = async (
+    reportOverride?: TemplateRow,
+    formatOverride?: "pdf" | "docx" | "xlsx",
+    periodTypeOverride?: string,
+    periodOverride?: string
+  ) => {
     const token = getAccessToken();
     const active = reportOverride || activeReport;
-    if (!token || !active) return;
+    if (!token || !active) {
+      toast.error("Unable to download report: Missing session or active report configuration");
+      return;
+    }
+    const format = formatOverride || selectedFormat || "pdf";
     setGenerateLoading(true);
-    setGenerateStep("Accessing custom report database...");
+    setGenerateStep(`Preparing ${format.toUpperCase()} report...`);
 
-    const pType = periodTypeOverride || selectedPeriodType;
-    const yr = periodOverride || selectedPeriod;
-    const isByDefault = pType === "by_default";
-    let url = getApiUrl(`/custom-reports/${active.id}/export?year=${yr}&format=pdf&organization_id=${active.organization_id || organizationId}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(pType)}`}`);
+    const pType = periodTypeOverride || selectedPeriodType || "by_default";
+    const isByDefault = pType === "by_default" || !active.fetch_data_with_date;
+    const yr = isByDefault
+      ? (periodOverride || (selectedPeriod && selectedPeriod !== "by_default" ? selectedPeriod : String(new Date().getFullYear())))
+      : (periodOverride || selectedPeriod || String(new Date().getFullYear()));
+    const targetOrgId = active.organization_id || organizationId;
+    let url = getApiUrl(
+      `/custom-reports/${active.id}/export?year=${encodeURIComponent(yr)}&format=${format}&organization_id=${targetOrgId}${
+        isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(pType)}`
+      }`
+    );
 
     try {
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -331,16 +388,18 @@ export default function ReportsPage() {
         const errJson = await res.json().catch(() => ({}));
         throw new Error(errJson.detail || "Export failed");
       }
-      setGenerateStep("Downloading PDF report file...");
+      setGenerateStep(`Downloading ${format.toUpperCase()} report file...`);
       const blob = await res.blob();
-      const link = document.createElement("a");
-      link.href = window.URL.createObjectURL(blob);
-      link.download = `${active.name}_${yr}.pdf`;
-      link.click();
-      toast.success("PDF report generated successfully!");
+      const cleanName = (active.name || "custom_report")
+        .replace(/[^\w\s-]/g, "")
+        .trim()
+        .replace(/\s+/g, "_");
+      const downloadName = `${cleanName}_${yr}.${format}`;
+      downloadBlob(blob, downloadName);
+      toast.success(`${format.toUpperCase()} report downloaded successfully!`);
       setGenModalOpen(false);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to generate custom report");
+      toast.error(e instanceof Error ? e.message : `Failed to download custom report (${format.toUpperCase()})`);
       setGenModalOpen(false);
     } finally {
       setGenerateLoading(false);
@@ -349,40 +408,78 @@ export default function ReportsPage() {
 
   const handleGenerateClick = () => {
     if (activeReportType === "custom") {
-      handleGenerateCustomReport();
+      void handleDownloadCustomReport();
     } else {
-      handleGenerateReport();
+      void handleGenerateReport();
     }
   };
 
-  const openGenModal = (t: TemplateRow, type: "standard" | "custom") => {
+  const openCustomReportDownload = (t: TemplateRow) => {
     setActiveReport(t);
-    setActiveReportType(type);
-    
+    setActiveReportType("custom");
+    setSelectedFormat("pdf");
+
+    const targetOrgId = t.organization_id || organizationId;
+    const token = getAccessToken();
+    if (token && targetOrgId && (!org || org.id !== targetOrgId)) {
+      api<any>(`/organizations/${targetOrgId}`, { token })
+        .then(setOrg)
+        .catch((e) => console.error("Failed to load organization details", e));
+    }
+
     const config = t.date_fetching_config;
     const adminPeriodType = config?.default_period_type || config?.period_type;
     const adminPeriod = config?.default_period || config?.period;
-    
+
     let resolvedPeriodType = "by_default";
     if (t.fetch_data_with_date && adminPeriodType) {
       resolvedPeriodType = adminPeriodType;
     }
-    
+
     let resolvedPeriod = adminPeriod || String(new Date().getFullYear());
-    
+
     setSelectedPeriodType(resolvedPeriodType);
     setSelectedPeriod(resolvedPeriod);
     setGenerateLoading(false);
     setGenerateStep("");
-    
+
+    // For end-users, if the report does not require selecting a date period, immediately start downloading PDF
+    if (!canManageAssignments && (!t.fetch_data_with_date || t.can_change_period === false)) {
+      setGenModalOpen(true);
+      void handleDownloadCustomReport(t, "pdf", resolvedPeriodType, resolvedPeriod);
+    } else {
+      setGenModalOpen(true);
+    }
+  };
+
+  const openGenModal = (t: TemplateRow, type: "standard" | "custom") => {
+    if (type === "custom") {
+      openCustomReportDownload(t);
+      return;
+    }
+
+    setActiveReport(t);
+    setActiveReportType(type);
+
+    const config = t.date_fetching_config;
+    const adminPeriodType = config?.default_period_type || config?.period_type;
+    const adminPeriod = config?.default_period || config?.period;
+
+    let resolvedPeriodType = "by_default";
+    if (t.fetch_data_with_date && adminPeriodType) {
+      resolvedPeriodType = adminPeriodType;
+    }
+
+    let resolvedPeriod = adminPeriod || String(new Date().getFullYear());
+
+    setSelectedPeriodType(resolvedPeriodType);
+    setSelectedPeriod(resolvedPeriod);
+    setGenerateLoading(false);
+    setGenerateStep("");
+
     if (t.can_change_period === false) {
-      // Directly generate the report and bypass the modal config
-      setGenModalOpen(true); // Open the loading overlay
-      if (type === "custom") {
-        void handleGenerateCustomReport(t, resolvedPeriodType, resolvedPeriod);
-      } else {
-        void handleGenerateReport(t, resolvedPeriodType, resolvedPeriod);
-      }
+      setGenModalOpen(true);
+      void handleGenerateReport(t, resolvedPeriodType, resolvedPeriod);
     } else {
       setGenModalOpen(true);
     }
@@ -404,6 +501,242 @@ export default function ReportsPage() {
     });
     return map;
   }, [groups, customList]);
+
+  const renderDownloadModal = () => {
+    if (!genModalOpen || !activeReport) return null;
+
+    const isCustom = activeReportType === "custom";
+    const dateFetchingEnabled = isCustom && !!activeReport.fetch_data_with_date;
+
+    return (
+      <div
+        role="dialog"
+        aria-modal="true"
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 9999,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(15, 23, 42, 0.45)",
+          backdropFilter: "blur(6px)",
+          padding: "1.5rem",
+        }}
+        onClick={(e) => {
+          if (e.target === e.currentTarget && !generateLoading) {
+            setGenModalOpen(false);
+            setGenerateLoading(false);
+          }
+        }}
+      >
+        <div
+          className="card"
+          style={{
+            maxWidth: 480,
+            width: "100%",
+            padding: "1.75rem",
+            borderRadius: "16px",
+            boxShadow: "0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)",
+            position: "relative",
+            background: "#ffffff",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {generateLoading ? (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "2.5rem 0", textAlign: "center" }}>
+              <div style={{ position: "relative", width: "64px", height: "64px", marginBottom: "1.25rem" }}>
+                <div style={{ position: "absolute", width: "100%", height: "100%", border: "4px solid var(--border)", borderRadius: "50%" }}></div>
+                <div style={{ position: "absolute", width: "100%", height: "100%", border: "4px solid transparent", borderTopColor: "var(--primary)", borderRadius: "50%", animation: "spin 1s linear infinite" }}></div>
+              </div>
+              <h4 style={{ margin: 0, fontSize: "1.3rem", fontWeight: 700, color: "#0f172a" }}>
+                {isCustom ? `Downloading ${selectedFormat.toUpperCase()} Report` : "Generating Report"}
+              </h4>
+              <style>{`
+                @keyframes spin {
+                  0% { transform: rotate(0deg); }
+                  100% { transform: rotate(360deg); }
+                }
+              `}</style>
+            </div>
+          ) : (
+            <>
+              <div>
+                <h3 style={{ margin: "0 0 0.4rem 0", fontSize: "1.35rem", fontWeight: 700, color: "#0f172a" }}>
+                  Generate PDF Report
+                </h3>
+                <p style={{ color: "#475569", fontSize: "0.95rem", margin: "0 0 1.5rem 0", lineHeight: "1.5" }}>
+                  Select reporting period parameters for{" "}
+                  <strong style={{ color: "#1e3a8a", fontWeight: 700 }}>{activeReport.name}</strong>.
+                </p>
+              </div>
+
+              {/* Reporting Period */}
+              <div style={{ marginBottom: "1.25rem" }}>
+                <label style={{ display: "block", marginBottom: "0.45rem", fontWeight: 600, fontSize: "0.95rem", color: "#0f172a" }}>
+                  Reporting Period *
+                </label>
+                <select
+                  value={selectedPeriodType}
+                  onChange={(e) => setSelectedPeriodType(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "0.65rem 0.85rem",
+                    background: "#ffffff",
+                    border: "1.5px solid #cbd5e1",
+                    borderRadius: "8px",
+                    fontSize: "0.95rem",
+                    color: "#0f172a",
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                >
+                  <option value="by_default">Fiscal Year</option>
+                  {customPeriods.map((cp: any) => (
+                    <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                      {cp.custom_period_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Reporting Time */}
+              <div style={{ marginBottom: "1.5rem" }}>
+                <label style={{ display: "block", marginBottom: "0.45rem", fontWeight: 600, fontSize: "0.95rem", color: "#0f172a" }}>
+                  Reporting Time *
+                </label>
+                <select
+                  value={selectedPeriod}
+                  onChange={(e) => setSelectedPeriod(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "0.65rem 0.85rem",
+                    background: "#ffffff",
+                    border: "1.5px solid #cbd5e1",
+                    borderRadius: "8px",
+                    fontSize: "0.95rem",
+                    color: "#0f172a",
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                >
+                  {activePeriodOptions.length > 0 ? (
+                    activePeriodOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value={String(new Date().getFullYear())}>
+                      {new Date().getFullYear()}/{String(new Date().getFullYear() + 1).slice(-2)}
+                    </option>
+                  )}
+                </select>
+              </div>
+
+              {/* Format Selection for Custom Reports: PDF, Excel, Word - Org Admin and Super Admin ONLY */}
+              {isCustom && canManageAssignments && (
+                <div style={{ marginBottom: "1.5rem" }}>
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, fontSize: "0.9rem", color: "#1e293b" }}>
+                    Choose Format (PDF, Excel, Word) *
+                  </label>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0.65rem" }}>
+                    {/* PDF Card */}
+                    <div
+                      onClick={() => setSelectedFormat("pdf")}
+                      style={{
+                        padding: "0.85rem 0.5rem",
+                        borderRadius: "10px",
+                        border: selectedFormat === "pdf" ? "2px solid #ef4444" : "1px solid #e2e8f0",
+                        background: selectedFormat === "pdf" ? "rgba(239, 68, 68, 0.05)" : "#ffffff",
+                        cursor: "pointer",
+                        textAlign: "center",
+                        transition: "all 0.15s ease",
+                        boxShadow: selectedFormat === "pdf" ? "0 2px 8px rgba(239, 68, 68, 0.15)" : "none",
+                      }}
+                    >
+                      <div style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>📄</div>
+                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "pdf" ? "#b91c1c" : "#1e293b" }}>PDF</div>
+                      <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Document</div>
+                    </div>
+
+                    {/* Excel Card */}
+                    <div
+                      onClick={() => setSelectedFormat("xlsx")}
+                      style={{
+                        padding: "0.85rem 0.5rem",
+                        borderRadius: "10px",
+                        border: selectedFormat === "xlsx" ? "2px solid #10b981" : "1px solid #e2e8f0",
+                        background: selectedFormat === "xlsx" ? "rgba(16, 185, 129, 0.05)" : "#ffffff",
+                        cursor: "pointer",
+                        textAlign: "center",
+                        transition: "all 0.15s ease",
+                        boxShadow: selectedFormat === "xlsx" ? "0 2px 8px rgba(16, 185, 129, 0.15)" : "none",
+                      }}
+                    >
+                      <div style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>📊</div>
+                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "xlsx" ? "#047857" : "#1e293b" }}>Excel</div>
+                      <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Spreadsheet</div>
+                    </div>
+
+                    {/* Word Card */}
+                    <div
+                      onClick={() => setSelectedFormat("docx")}
+                      style={{
+                        padding: "0.85rem 0.5rem",
+                        borderRadius: "10px",
+                        border: selectedFormat === "docx" ? "2px solid #2563eb" : "1px solid #e2e8f0",
+                        background: selectedFormat === "docx" ? "rgba(37, 99, 235, 0.05)" : "#ffffff",
+                        cursor: "pointer",
+                        textAlign: "center",
+                        transition: "all 0.15s ease",
+                        boxShadow: selectedFormat === "docx" ? "0 2px 8px rgba(37, 99, 235, 0.15)" : "none",
+                      }}
+                    >
+                      <div style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>📝</div>
+                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "docx" ? "#1d4ed8" : "#1e293b" }}>Word</div>
+                      <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Document</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div style={{ display: "flex", gap: "0.75rem", justifyContent: "flex-end", marginTop: "1.75rem" }}>
+                <button
+                  type="button"
+                  className="modal-btn-cancel"
+                  onClick={() => {
+                    setGenModalOpen(false);
+                    setGenerateLoading(false);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="modal-btn-confirm"
+                  disabled={
+                    isCustom &&
+                    dateFetchingEnabled &&
+                    selectedPeriodType !== "by_default" &&
+                    !selectedPeriod
+                  }
+                  onClick={handleGenerateClick}
+                >
+                  {isCustom
+                    ? canManageAssignments
+                      ? `Download ${selectedFormat === "xlsx" ? "Excel" : selectedFormat === "docx" ? "Word" : "PDF"}`
+                      : "Generate PDF"
+                    : "Generate PDF"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   if (loading) return null;
   if (error) return <p className="form-error">{error}</p>;
@@ -473,10 +806,15 @@ export default function ReportsPage() {
                       <button
                         type="button"
                         className="btn btn-primary"
-                        onClick={() => openGenModal(t, "custom")}
-                        style={{ width: "100%", padding: "0.5rem", fontSize: "0.9rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.35rem" }}
+                        onClick={() => openCustomReportDownload(t)}
+                        style={{ width: "100%", padding: "0.5rem", fontSize: "0.9rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
                       >
-                        Generate Report
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="7 10 12 15 17 10" />
+                          <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                        Download Report
                       </button>
                     </div>
                   </div>
@@ -503,10 +841,15 @@ export default function ReportsPage() {
                     <button
                       type="button"
                       className="btn btn-primary"
-                      onClick={() => openGenModal(t, "custom")}
-                      style={{ width: "100%", padding: "0.5rem", fontSize: "0.9rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.35rem" }}
+                      onClick={() => openCustomReportDownload(t)}
+                      style={{ width: "100%", padding: "0.5rem", fontSize: "0.9rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
                     >
-                      Generate Report
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      Download Report
                     </button>
                   </div>
                 </div>
@@ -515,105 +858,8 @@ export default function ReportsPage() {
           </div>
         )}
 
-        {/* Dynamic PDF Report Parameter Selection Dialog Modal */}
-        {genModalOpen && activeReport && (
-          <div
-            role="dialog"
-            aria-modal="true"
-            style={{
-              position: "fixed",
-              inset: 0,
-              zIndex: 1000,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "rgba(15, 23, 42, 0.45)",
-              backdropFilter: "blur(6px)",
-              padding: "1.5rem",
-            }}
-            onClick={(e) => e.target === e.currentTarget && !generateLoading && setGenModalOpen(false)}
-          >
-            <div
-              className="card"
-              style={{ maxWidth: 440, width: "100%", padding: "1.75rem", borderRadius: "16px", boxShadow: "0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)", position: "relative" }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              {generateLoading ? (
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "2rem 0", textAlign: "center" }}>
-                  {/* Modern circular pulsing loading spinner */}
-                  <div style={{ position: "relative", width: "64px", height: "64px", marginBottom: "1.5rem" }}>
-                    <div style={{ position: "absolute", width: "100%", height: "100%", border: "4px solid var(--border)", borderRadius: "50%" }}></div>
-                    <div style={{ position: "absolute", width: "100%", height: "100%", border: "4px solid transparent", borderTopColor: "var(--primary)", borderRadius: "50%", animation: "spin 1s linear infinite" }}></div>
-                  </div>
-                  <h4 style={{ margin: "0", fontSize: "1.5rem", fontWeight: 600 }}>Generating PDF Report</h4>
-                  <style>{`
-                    @keyframes spin {
-                      0% { transform: rotate(0deg); }
-                      100% { transform: rotate(360deg); }
-                    }
-                  `}</style>
-                </div>
-              ) : (
-                <>
-                  <h3 style={{ margin: "0 0 0.25rem 0", fontSize: "1.35rem", fontWeight: 700, color: "#0f172a" }}>
-                    Generate PDF Report
-                  </h3>
-                  <p style={{ color: "#334155", fontSize: "1.05rem", margin: "0 0 1.5rem 0", lineHeight: "1.5" }}>
-                    Select reporting period parameters for <strong style={{ color: "#1e3a8a" }}>{activeReport.name}</strong>.
-                  </p>
-
-                  <div className="form-group" style={{ marginBottom: "1.25rem" }}>
-                    <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, fontSize: "1.05rem", color: "#1e293b" }}>Reporting Period *</label>
-                    <select
-                      value={selectedPeriodType}
-                      onChange={(e) => setSelectedPeriodType(e.target.value)}
-                      style={{ width: "100%", padding: "0.6rem 0.75rem", background: "var(--surface)", border: "1px solid #94a3b8", borderRadius: "8px", fontSize: "1rem", color: "#0f172a" }}
-                    >
-                      <option value="by_default">Data Entry</option>
-                      {activeReport.fetch_data_with_date && customPeriods.map((cp: any) => (
-                        <option key={cp.custom_period_name} value={cp.custom_period_name}>
-                          {cp.custom_period_name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {activePeriodOptions.length > 0 && (
-                    <div className="form-group" style={{ marginBottom: "1.5rem" }}>
-                      <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, fontSize: "1.05rem", color: "#1e293b" }}>Reporting Time *</label>
-                      <select
-                        value={selectedPeriod}
-                        onChange={(e) => setSelectedPeriod(e.target.value)}
-                        style={{ width: "100%", padding: "0.6rem 0.75rem", background: "var(--surface)", border: "1px solid #94a3b8", borderRadius: "8px", fontSize: "1rem", color: "#0f172a" }}
-                      >
-                        {activePeriodOptions.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-
-                  <div style={{ display: "flex", gap: "0.75rem", justifyContent: "flex-end", marginTop: "1.75rem" }}>
-                    <button type="button" className="btn" onClick={() => setGenModalOpen(false)} style={{ padding: "0.5rem 1.25rem", fontSize: "1rem" }}>
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={selectedPeriodType !== "by_default" && !selectedPeriod}
-                      onClick={handleGenerateClick}
-                      style={{ padding: "0.5rem 1.25rem", fontSize: "1rem" }}
-                    >
-                      Generate PDF
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        )}
+        {/* Render Download / Generate Modal */}
+        {renderDownloadModal()}
       </div>
     );
   }
@@ -712,21 +958,36 @@ export default function ReportsPage() {
                   </h3>
                   <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                     {groupReports.map((t) => (
-                      <li key={t.id} style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                        <div style={{ flex: "1 1 auto" }}>
-                          <Link href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontWeight: 500 }}>
+                      <li key={t.id} style={{ padding: "0.6rem 0", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                        <div style={{ flex: "1 1 auto", display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+                          <Link href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontWeight: 600, fontSize: "0.95rem", color: "var(--text)", textDecoration: "none" }} title="Open report viewer">
                             {t.name}
                           </Link>
-                          {t.description && <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.1rem 0 0 0" }}>{t.description}</p>}
-                        </div>
-                        <Link className="btn btn-primary" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                          View print report
-                        </Link>
-                        {canManageAssignments && userRole !== "SUPER_ADMIN" && (
-                          <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                            Assign users
+                        {t.description && <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.1rem 0 0 0", width: "100%" }}>{t.description}</p>}
+                      </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => openCustomReportDownload(t)}
+                            style={{ fontSize: "0.85rem", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                              <polyline points="7 10 12 15 17 10" />
+                              <line x1="12" y1="15" x2="12" y2="3" />
+                            </svg>
+                            Download
+                          </button>
+                          <Link className="btn" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                            View print report
                           </Link>
-                        )}
+                          {canManageAssignments && userRole !== "SUPER_ADMIN" && (
+                            <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                              Assign users
+                            </Link>
+                          )}
+                        </div>
                       </li>
                     ))}
                   </ul>
@@ -742,21 +1003,36 @@ export default function ReportsPage() {
                 </h3>
                 <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                   {groupedCustomReports.uncategorized.map((t) => (
-                    <li key={t.id} style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                      <div style={{ flex: "1 1 auto" }}>
-                        <Link href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontWeight: 500 }}>
+                    <li key={t.id} style={{ padding: "0.6rem 0", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                      <div style={{ flex: "1 1 auto", display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+                        <Link href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontWeight: 600, fontSize: "0.95rem", color: "var(--text)", textDecoration: "none" }} title="Open report viewer">
                           {t.name}
                         </Link>
-                        {t.description && <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.1rem 0 0 0" }}>{t.description}</p>}
+                        {t.description && <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "0.1rem 0 0 0", width: "100%" }}>{t.description}</p>}
                       </div>
-                      <Link className="btn btn-primary" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                        View print report
-                      </Link>
-                      {canManageAssignments && userRole !== "SUPER_ADMIN" && (
-                        <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                          Assign users
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={() => openCustomReportDownload(t)}
+                          style={{ fontSize: "0.85rem", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="7 10 12 15 17 10" />
+                            <line x1="12" y1="15" x2="12" y2="3" />
+                          </svg>
+                          Download
+                        </button>
+                        <Link className="btn" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                          View print report
                         </Link>
-                      )}
+                        {canManageAssignments && userRole !== "SUPER_ADMIN" && (
+                          <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                            Assign users
+                          </Link>
+                        )}
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -910,6 +1186,9 @@ export default function ReportsPage() {
           </div>
         </div>
       )}
+
+      {/* Render Download / Generate Modal in Admin View */}
+      {renderDownloadModal()}
     </div>
   );
 }

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo, useRef } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { generatePeriodOptions } from "@/lib/periodHelpers";
@@ -13,9 +13,10 @@ import {
 } from "@/app/dashboard/reports/reportPrint";
 import { ReportLoadProgress } from "@/app/dashboard/reports/ReportLoadProgress";
 
-export default function ReportViewPage() {
+export default function ReportPage() {
   const params = useParams();
-  const id = Number(params.id);
+  const router = useRouter();
+  const id = Number(params?.id);
   const token = getAccessToken();
 
   const [userRole, setUserRole] = useState<string | null>(null);

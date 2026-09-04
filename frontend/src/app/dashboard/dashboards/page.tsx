@@ -27,7 +27,7 @@ let cachedDashboards: Record<string, DashboardRow[]> = {};
 export default function DashboardsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const orgIdParam = searchParams.get("organization_id");
+  const orgIdParam = searchParams?.get("organization_id");
   const queryOrgId = orgIdParam ? Number(orgIdParam) : null;
   const orgKey = queryOrgId ? String(queryOrgId) : "all";
 
