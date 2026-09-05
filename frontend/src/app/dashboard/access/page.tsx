@@ -59,6 +59,7 @@ export default function AccessDashboardPage() {
   const [newUserPassword, setNewUserPassword] = useState("");
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserFullName, setNewUserFullName] = useState("");
+  const [newUserUniqueKey, setNewUserUniqueKey] = useState("");
   const [activeTab, setActiveTab] = useState<"roles" | "users" | "password-resets">("roles");
   const [newUserType, setNewUserType] = useState<"internal" | "external">("internal");
   const [newExternalDescription, setNewExternalDescription] = useState("");
@@ -572,6 +573,18 @@ export default function AccessDashboardPage() {
                   />
                 </div>
 
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
+                    Unique user key (optional, e.g. CS-001)
+                  </label>
+                  <input
+                    value={newUserUniqueKey}
+                    onChange={(e) => setNewUserUniqueKey(e.target.value)}
+                    placeholder="e.g. CS-001"
+                    style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                  />
+                </div>
+
                 {newUserType === "external" && (
                   <div style={{ gridColumn: "span 1" }}>
                     <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
@@ -631,6 +644,7 @@ export default function AccessDashboardPage() {
                           password: newUserPassword,
                           email: newUserEmail.trim() || null,
                           full_name: newUserFullName.trim() || null,
+                          unique_user_key: newUserUniqueKey.trim() || null,
                           role: "USER",
                           organization_id: orgId,
                         }),
@@ -642,6 +656,7 @@ export default function AccessDashboardPage() {
                         body: JSON.stringify({
                           username: newUserUsername.trim(),
                           full_name: newUserFullName.trim() || null,
+                          unique_user_key: newUserUniqueKey.trim() || null,
                           description: newExternalDescription.trim() || null,
                           is_active: newExternalIsActive,
                         }),
@@ -659,6 +674,7 @@ export default function AccessDashboardPage() {
                     setNewUserPassword("");
                     setNewUserEmail("");
                     setNewUserFullName("");
+                    setNewUserUniqueKey("");
                     setNewExternalDescription("");
                     setNewExternalIsActive(true);
                     setNewUserType("internal");
@@ -706,35 +722,89 @@ export default function AccessDashboardPage() {
 
             {bulkOpen && (
               <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={async () => {
-                    if (!token || orgId == null) return;
-                    try {
-                      const url = getApiUrl(
-                        `/users/bulk-template?${new URLSearchParams({
-                          organization_id: String(orgId),
-                        }).toString()}`
-                      );
-                      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-                      if (!res.ok) {
+                <div style={{ fontSize: "0.85rem", color: "var(--muted)", lineHeight: "1.4" }}>
+                  Download an Excel template, fill in your users, and upload the file below:
+                </div>
+
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ fontSize: "0.85rem" }}
+                    onClick={async () => {
+                      if (!token || orgId == null) return;
+                      try {
+                        const url = getApiUrl(
+                          `/users/bulk-template?${new URLSearchParams({
+                            organization_id: String(orgId),
+                          }).toString()}`
+                        );
+                        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                        if (!res.ok) {
+                          toast.error("Template download failed");
+                          return;
+                        }
+                        const blob = await res.blob();
+                        const a = document.createElement("a");
+                        a.href = URL.createObjectURL(blob);
+                        a.download = `users_import_template_${orgId}.xlsx`;
+                        a.click();
+                        URL.revokeObjectURL(a.href);
+                      } catch {
                         toast.error("Template download failed");
-                        return;
                       }
-                      const blob = await res.blob();
-                      const a = document.createElement("a");
-                      a.href = URL.createObjectURL(blob);
-                      a.download = `users_import_template_${orgId}.xlsx`;
-                      a.click();
-                      URL.revokeObjectURL(a.href);
-                    } catch {
-                      toast.error("Template download failed");
-                    }
+                    }}
+                  >
+                    📥 Download Standard Template (Excel)
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ fontSize: "0.85rem" }}
+                    onClick={async () => {
+                      if (!token || orgId == null) return;
+                      try {
+                        const url = getApiUrl(
+                          `/users/external/template?${new URLSearchParams({
+                            organization_id: String(orgId),
+                          }).toString()}`
+                        );
+                        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                        if (!res.ok) {
+                          toast.error("External template download failed");
+                          return;
+                        }
+                        const blob = await res.blob();
+                        const a = document.createElement("a");
+                        a.href = URL.createObjectURL(blob);
+                        a.download = `external_users_template_${orgId}.xlsx`;
+                        a.click();
+                        URL.revokeObjectURL(a.href);
+                      } catch {
+                        toast.error("External template download failed");
+                      }
+                    }}
+                  >
+                    📥 Download External (Odoo / LMS) Template
+                  </button>
+                </div>
+
+                <div
+                  style={{
+                    fontSize: "0.8rem",
+                    color: "var(--muted)",
+                    backgroundColor: "rgba(59, 130, 246, 0.05)",
+                    border: "1px solid rgba(59, 130, 246, 0.2)",
+                    padding: "0.6rem 0.8rem",
+                    borderRadius: "6px",
+                    lineHeight: "1.4",
                   }}
                 >
-                  Download template (Excel)
-                </button>
+                  💡 <strong>External (Odoo / LMS) Users Info:</strong><br />
+                  • <strong>Option A (External Template):</strong> Columns: <code>username</code>, <code>full_name</code>, <code>description</code>, <code>is_active</code>. No password needed.<br />
+                  • <strong>Option B (Standard Template):</strong> Set the <code>is_external</code> column to <code>TRUE</code> (password can be left empty).
+                </div>
 
                 <label
                   className="btn btn-primary"

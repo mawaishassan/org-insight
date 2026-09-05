@@ -1,5 +1,6 @@
 """User CRUD with tenant isolation and KPI/report assignments."""
 
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
@@ -73,11 +74,13 @@ async def create_external_user(
     because the column is non-nullable. We use a random dummy hash.
     """
     dummy_password = f"external:{uuid4().hex}"
+    val_key = data.unique_user_key.strip() if data.unique_user_key and data.unique_user_key.strip() else None
     user = User(
         organization_id=org_id,
         username=data.username,
         email=None,
         full_name=data.full_name,
+        unique_user_key=val_key,
         hashed_password=get_password_hash(dummy_password),
         role=UserRole.USER,
         is_active=data.is_active,

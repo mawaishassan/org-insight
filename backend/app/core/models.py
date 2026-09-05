@@ -374,7 +374,9 @@ class User(Base):
     export_api_tokens = relationship("ExportAPIToken", back_populates="created_by", lazy="selectin")
 
     # Optional external identity (password verification happens through an external XML-RPC service).
-    external_account = relationship("ExternalUser", back_populates="user", uselist=False, lazy="selectin")
+    external_account = relationship(
+        "ExternalUser", back_populates="user", uselist=False, lazy="selectin", cascade="all, delete-orphan"
+    )
 
 
 class PasswordResetAudit(Base):
