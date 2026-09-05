@@ -37,7 +37,7 @@ async def _verify_external_credentials(login_url: str, db_name: str, username: s
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=False, follow_redirects=True) as client:
             resp = await client.post(login_url, json=payload)
         if resp.status_code < 200 or resp.status_code >= 300:
             return False
@@ -51,7 +51,7 @@ async def _verify_external_credentials(login_url: str, db_name: str, username: s
     user_context = result.get("user_context") or {}
     uid = user_context.get("uid") or result.get("uid")
     try:
-        return uid is not None and int(uid) > 0
+        return uid is not None and uid is not False and int(uid) > 0
     except Exception:
         return bool(uid)
 
@@ -61,7 +61,7 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> U
     Authenticate by username and password.
     Super admin is looked up with organization_id IS NULL; org users by username + org.
     """
-    from app.core.models import ExternalAuthConfig, ExternalUser
+    from app.core.models import ExternalAuthConfig, ExternalUser, OrganizationOdooConfig
 
     result = await db.execute(
         select(User).where(User.username == username).order_by(User.organization_id.desc().nulls_last())
@@ -70,7 +70,7 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> U
     if not users:
         return None
 
-    # Load external auth config (single-row expectation, but we use "first" if multiple exist).
+    # Load external auth config (global fallback).
     ext_cfg_res = await db.execute(select(ExternalAuthConfig).order_by(ExternalAuthConfig.id).limit(1))
     ext_cfg = ext_cfg_res.scalar_one_or_none()
 
@@ -79,16 +79,41 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> U
     ext_users = ext_users_res.scalars().all()
     ext_user_by_id = {eu.user_id: eu for eu in ext_users}
 
+    org_ids = list({u.organization_id for u in users if u.organization_id is not None})
+    org_odoo_map: dict[int, OrganizationOdooConfig] = {}
+    if org_ids:
+        org_odoo_res = await db.execute(
+            select(OrganizationOdooConfig).where(OrganizationOdooConfig.organization_id.in_(org_ids))
+        )
+        for o_cfg in org_odoo_res.scalars().all():
+            org_odoo_map[o_cfg.organization_id] = o_cfg
+
     for user in users:
         if not user.is_active:
             continue
 
         if user.id in ext_user_by_id:
-            if not ext_cfg or not ext_cfg.login_url:
+            login_url = None
+            db_name = "OBE"
+
+            # 1. Primary: Check organization-specific Odoo config
+            if user.organization_id and user.organization_id in org_odoo_map:
+                o_cfg = org_odoo_map[user.organization_id]
+                if o_cfg.login_url:
+                    login_url = o_cfg.login_url
+                    db_name = o_cfg.odoo_db or "OBE"
+
+            # 2. Fallback to global external auth config
+            if not login_url and ext_cfg and ext_cfg.login_url:
+                login_url = ext_cfg.login_url
+                db_name = ext_cfg.db_name or "OBE"
+
+            if not login_url:
                 continue
+
             ok = await _verify_external_credentials(
-                ext_cfg.login_url,
-                ext_cfg.db_name or "OBE",
+                login_url,
+                db_name,
                 username,
                 password,
             )

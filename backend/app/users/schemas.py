@@ -45,6 +45,7 @@ class ExternalUserCreate(BaseModel):
 
     username: str = Field(..., min_length=1, max_length=100)
     full_name: str | None = None
+    unique_user_key: str | None = None
     description: str | None = None
     is_active: bool = True
 

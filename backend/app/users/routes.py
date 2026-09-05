@@ -123,9 +123,9 @@ async def download_external_users_template(
     wb = Workbook()
     ws = wb.active
     ws.title = "External users"
-    ws.append(["username", "full_name", "description", "is_active"])
+    ws.append(["username", "full_name", "unique_user_key", "description", "is_active"])
     # Example row (keeps template user-friendly)
-    ws.append(["ext_user_1", "External User 1", "Department / notes", True])
+    ws.append(["ext_user_1", "External User 1", "CS-001", "Department / notes", True])
 
     import uuid
 
@@ -171,8 +171,9 @@ async def upload_external_users_excel(
                 return header_index[n]
         return None
 
-    idx_username = _idx("username")
+    idx_username = _idx("username", "user_name")
     idx_full_name = _idx("full_name", "full name", "fullname", "name")
+    idx_unique_key = _idx("unique_user_key", "unique_key", "user_key", "key")
     idx_description = _idx("description", "desc", "notes")
     idx_is_active = _idx("is_active", "active", "isactive")
 
@@ -203,11 +204,13 @@ async def upload_external_users_excel(
             return s if s else None
 
         full_name = _norm_str(r[idx_full_name]) if idx_full_name is not None else None
+        unique_key = _norm_str(r[idx_unique_key]) if idx_unique_key is not None and idx_unique_key < len(r) else None
         description = _norm_str(r[idx_description]) if idx_description is not None else None
         is_active = parse_bool(r[idx_is_active] if idx_is_active is not None else None, default=True)
         parsed.append({
             "username": username,
             "full_name": full_name,
+            "unique_user_key": unique_key,
             "description": description,
             "is_active": is_active,
         })
@@ -249,6 +252,7 @@ async def upload_external_users_excel(
                 continue
             user = existing_by_username[username]
             user.full_name = p["full_name"]
+            user.unique_user_key = p["unique_user_key"]
             user.is_active = bool(p["is_active"])
             # Ensure external row exists and set description
             eu = ext_by_user_id.get(user.id)
@@ -265,6 +269,7 @@ async def upload_external_users_excel(
                 username=username,
                 email=None,
                 full_name=p["full_name"],
+                unique_user_key=p["unique_user_key"],
                 hashed_password=get_password_hash(dummy_password),
                 role=UserRole.USER,
                 is_active=bool(p["is_active"]),
@@ -284,7 +289,7 @@ async def download_standard_users_template(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Download an Excel template for bulk importing standard database users."""
+    """Download an Excel template for bulk importing standard database users or external Odoo users."""
     from openpyxl import Workbook
     from io import BytesIO
 
@@ -292,10 +297,10 @@ async def download_standard_users_template(
     wb = Workbook()
     ws = wb.active
     ws.title = "Users Import"
-    ws.append(["user_name", "password", "unique_user_key", "full_name", "email", "role"])
+    ws.append(["user_name", "password", "unique_user_key", "full_name", "email", "role", "is_external"])
     # Example rows
-    ws.append(["user1", "Password123", "CS-001", "John Doe", "john@example.com", "USER"])
-    ws.append(["user2", "Password123", "CS-002", "Jane Smith", "jane@example.com", "REPORT_VIEWER"])
+    ws.append(["user1", "Password123", "CS-001", "John Doe", "john@example.com", "USER", False])
+    ws.append(["user2", "", "CS-002", "External User", "user2@example.com", "USER", True])
 
     import uuid
     buf = BytesIO()
@@ -316,9 +321,10 @@ async def upload_standard_users_excel(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Bulk import standard users from Excel (.xlsx) with strict validation and bulk database insertion."""
+    """Bulk import standard users or external Odoo users from Excel (.xlsx) with strict validation and bulk insertion."""
     from openpyxl import load_workbook
     from io import BytesIO
+    from uuid import uuid4
     from app.core.security import get_password_hash
     from sqlalchemy import select
 
@@ -351,29 +357,44 @@ async def upload_standard_users_excel(
     idx_full_name = _idx("full_name", "full name", "fullname", "name")
     idx_email = _idx("email", "mail")
     idx_role = _idx("role", "user_role")
+    idx_is_external = _idx("is_external", "external", "is_external_user", "isexternal")
+    idx_desc = _idx("description", "desc", "notes")
 
     if idx_username is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required column: user_name")
-    if idx_password is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required column: password")
-    if idx_unique_key is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required column: unique_user_key")
+
+    # If the file has no password column (e.g. external users sheet), treat it as external users
+    is_dedicated_external_file = (idx_password is None)
 
     errors = []
     parsed_users = []
     seen_usernames = set()
     seen_keys = set()
 
+    def parse_bool(v: object, default: bool = False) -> bool:
+        if v is None or v == "":
+            return default
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(int(v))
+        s = str(v).strip().lower()
+        return s in ("1", "true", "yes", "y", "active", "external")
+
     for row_idx, r in enumerate(rows[1:], start=2):
         if all(c is None or str(c).strip() == "" for c in r):
             continue
 
         username = str(r[idx_username] if idx_username < len(r) and r[idx_username] is not None else "").strip()
-        password = str(r[idx_password] if idx_password < len(r) and r[idx_password] is not None else "").strip()
-        unique_key = str(r[idx_unique_key] if idx_unique_key < len(r) and r[idx_unique_key] is not None else "").strip()
+        raw_password = str(r[idx_password] if idx_password is not None and idx_password < len(r) and r[idx_password] is not None else "").strip()
+        unique_key = str(r[idx_unique_key] if idx_unique_key is not None and idx_unique_key < len(r) and r[idx_unique_key] is not None else "").strip()
         full_name = str(r[idx_full_name] if idx_full_name is not None and idx_full_name < len(r) and r[idx_full_name] is not None else "").strip() or None
         email = str(r[idx_email] if idx_email is not None and idx_email < len(r) and r[idx_email] is not None else "").strip() or None
         role_str = str(r[idx_role] if idx_role is not None and idx_role < len(r) and r[idx_role] is not None else "").strip().upper()
+        description = str(r[idx_desc] if idx_desc is not None and idx_desc < len(r) and r[idx_desc] is not None else "").strip() or "Imported via Excel"
+
+        raw_is_external = r[idx_is_external] if idx_is_external is not None and idx_is_external < len(r) else None
+        is_external = is_dedicated_external_file or parse_bool(raw_is_external, default=False)
 
         if role_str:
             if role_str not in ("ORG_ADMIN", "USER", "REPORT_VIEWER"):
@@ -384,10 +405,17 @@ async def upload_standard_users_excel(
         # Validation: Required fields
         if not username:
             errors.append(f"Row {row_idx}: user_name is required")
-        if not password:
-            errors.append(f"Row {row_idx}: password is required")
-        elif len(password) < 8:
-            errors.append(f"Row {row_idx}: password must be at least 8 characters long")
+
+        if not is_external:
+            if not raw_password:
+                errors.append(f"Row {row_idx}: password is required for internal users")
+            elif len(raw_password) < 8:
+                errors.append(f"Row {row_idx}: password must be at least 8 characters long")
+            if idx_unique_key is not None and not unique_key:
+                errors.append(f"Row {row_idx}: unique_user_key is required for internal users")
+        else:
+            if not raw_password:
+                raw_password = f"external:{uuid4().hex}"
 
         # Validation: Duplicates in upload sheet
         if username:
@@ -403,11 +431,13 @@ async def upload_standard_users_excel(
         parsed_users.append({
             "row_idx": row_idx,
             "username": username,
-            "password": password,
+            "password": raw_password,
             "unique_user_key": unique_key or None,
             "full_name": full_name,
             "email": email,
-            "role": role_str
+            "role": role_str,
+            "is_external": is_external,
+            "description": description,
         })
 
     if not parsed_users and not errors:
@@ -466,9 +496,13 @@ async def upload_standard_users_excel(
             role=UserRole(p["role"]),
             is_active=True,
             unique_user_key=p["unique_user_key"],
-            full_name=p["full_name"]
+            full_name=p["full_name"],
         )
         db.add(u)
+        await db.flush()
+
+        if p["is_external"]:
+            db.add(ExternalUser(user_id=u.id, description=p["description"]))
 
     await db.commit()
     return {"ok": True, "rows_added": len(parsed_users)}
