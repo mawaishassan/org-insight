@@ -129,55 +129,75 @@ def _kpi_to_response(k):
     domain_tags = []
     seen_domain_ids = set()
     for kc in getattr(k, "category_tags", []) or []:
-        if kc.category:
-            cat = kc.category
-            domain_id = getattr(cat, "domain_id", None) or (cat.domain.id if getattr(cat, "domain", None) else None)
-            domain_name = (cat.domain.name if getattr(cat, "domain", None) else None)
-            category_tags.append(
-                CategoryTagRef(id=cat.id, name=cat.name, domain_id=domain_id, domain_name=domain_name)
-            )
-            if domain_id is not None and domain_id not in seen_domain_ids:
-                seen_domain_ids.add(domain_id)
-                domain_tags.append(DomainTagRef(id=domain_id, name=domain_name or f"Domain {domain_id}"))
+        try:
+            cat = getattr(kc, "category", None)
+            if cat:
+                domain_rel = getattr(cat, "domain", None)
+                domain_id = getattr(cat, "domain_id", None) or (domain_rel.id if domain_rel else None)
+                domain_name = domain_rel.name if domain_rel else None
+                category_tags.append(
+                    CategoryTagRef(id=cat.id, name=cat.name, domain_id=domain_id, domain_name=domain_name)
+                )
+                if domain_id is not None and domain_id not in seen_domain_ids:
+                    seen_domain_ids.add(domain_id)
+                    domain_tags.append(DomainTagRef(id=domain_id, name=domain_name or f"Domain {domain_id}"))
+        except Exception:
+            pass
     organization_tags = []
     for kot in getattr(k, "organization_tags", []) or []:
-        if getattr(kot, "tag", None):
-            organization_tags.append(OrganizationTagRef(id=kot.tag.id, name=kot.tag.name))
+        try:
+            tag = getattr(kot, "tag", None)
+            if tag:
+                organization_tags.append(OrganizationTagRef(id=tag.id, name=tag.name))
+        except Exception:
+            pass
     assigned_users = []
     for ka in getattr(k, "assignments", []) or []:
-        if getattr(ka, "user", None):
-            u = ka.user
-            perm = getattr(ka, "assignment_type", None) or "data_entry"
-            perm = perm.value if hasattr(perm, "value") else str(perm)
-            if perm not in ("data_entry", "view"):
-                perm = "data_entry"
-            assigned_users.append(
-                AssignedUserRef(id=u.id, username=u.username, full_name=u.full_name, permission=perm)
-            )
+        try:
+            u = getattr(ka, "user", None)
+            if u:
+                perm = getattr(ka, "assignment_type", None) or "data_entry"
+                perm = perm.value if hasattr(perm, "value") else str(perm)
+                if perm not in ("data_entry", "view"):
+                    perm = "data_entry"
+                assigned_users.append(
+                    AssignedUserRef(id=u.id, username=u.username, full_name=u.full_name, permission=perm)
+                )
+        except Exception:
+            pass
     assigned_roles = []
     for kra in getattr(k, "role_assignments", []) or []:
-        role = getattr(kra, "organization_role", None)
-        if role is not None:
-            perm = getattr(kra, "assignment_type", None) or "data_entry"
-            perm = perm.value if hasattr(perm, "value") else str(perm)
-            if perm not in ("data_entry", "view"):
-                perm = "data_entry"
-            assigned_roles.append(
-                AssignedRoleRef(id=role.id, name=role.name, permission=perm)
-            )
+        try:
+            role = getattr(kra, "organization_role", None)
+            if role is not None:
+                perm = getattr(kra, "assignment_type", None) or "data_entry"
+                perm = perm.value if hasattr(perm, "value") else str(perm)
+                if perm not in ("data_entry", "view"):
+                    perm = "data_entry"
+                assigned_roles.append(
+                    AssignedRoleRef(id=role.id, name=role.name, permission=perm)
+                )
+        except Exception:
+            pass
     fields_count = len(getattr(k, "fields", []) or [])
     used_in_reports = []
     for rtk in getattr(k, "report_template_kpis", []) or []:
-        rt = getattr(rtk, "report_template", None)
-        if rt is not None:
-            used_in_reports.append(
-                UsedInReportRef(
-                    report_id=rt.id,
-                    report_name=rt.name,
-                    organization_id=rt.organization_id,
+        try:
+            rt = getattr(rtk, "report_template", None)
+            if rt is not None:
+                used_in_reports.append(
+                    UsedInReportRef(
+                        report_id=rt.id,
+                        report_name=rt.name,
+                        organization_id=rt.organization_id,
+                    )
                 )
-            )
-    rh = getattr(k, "report_header", None)
+        except Exception:
+            pass
+    try:
+        rh = getattr(k, "report_header", None)
+    except Exception:
+        rh = None
     report_header_ref = KPIReportHeaderRef(
         id=rh.id,
         name=rh.name,

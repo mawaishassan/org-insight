@@ -319,7 +319,7 @@ class KPIOrganizationTag(Base):
     __table_args__ = (UniqueConstraint("kpi_id", "organization_tag_id", name="uq_kpi_org_tag"),)
 
     kpi = relationship("KPI", back_populates="organization_tags")
-    tag = relationship("OrganizationTag", back_populates="kpi_tags")
+    tag = relationship("OrganizationTag", back_populates="kpi_tags", lazy="selectin")
 
 
 class User(Base):
@@ -347,9 +347,6 @@ class User(Base):
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
-    __table_args__ = (
-        UniqueConstraint("organization_id", "unique_user_key", name="uq_org_unique_user_key"),
-    )
 
     organization = relationship("Organization", back_populates="users")
     password_reset_audits = relationship(
@@ -485,7 +482,7 @@ class KPIDomain(Base):
     __table_args__ = (UniqueConstraint("kpi_id", "domain_id", name="uq_kpi_domain"),)
 
     kpi = relationship("KPI", back_populates="domain_tags")
-    domain = relationship("Domain", back_populates="kpi_domains")
+    domain = relationship("Domain", back_populates="kpi_domains", lazy="selectin")
 
 
 class KPICategory(Base):
@@ -505,7 +502,7 @@ class KPICategory(Base):
     __table_args__ = (UniqueConstraint("kpi_id", "category_id", name="uq_kpi_category"),)
 
     kpi = relationship("KPI", back_populates="category_tags")
-    category = relationship("Category", back_populates="kpi_categories")
+    category = relationship("Category", back_populates="kpi_categories", lazy="selectin")
 
 
 class CustomReportHeader(Base):
@@ -610,6 +607,10 @@ class KPI(Base):
         lazy="selectin",
     )
     report_header = relationship("CustomReportHeader", lazy="joined")
+
+    __table_args__ = (
+        Index("ix_kpi_org_id_id", "organization_id", "id"),
+    )
 
 
 class KpiOdooConfig(Base):
@@ -766,7 +767,7 @@ class KPIAssignment(Base):
 
     __table_args__ = (UniqueConstraint("user_id", "kpi_id", name="uq_user_kpi"),)
 
-    user = relationship("User", back_populates="kpi_assignments")
+    user = relationship("User", back_populates="kpi_assignments", lazy="selectin")
     kpi = relationship("KPI", back_populates="assignments")
 
 
@@ -792,7 +793,7 @@ class KpiRoleAssignment(Base):
     __table_args__ = (UniqueConstraint("kpi_id", "organization_role_id", name="uq_kpi_role"),)
 
     kpi = relationship("KPI", back_populates="role_assignments")
-    organization_role = relationship("OrganizationRole", back_populates="kpi_role_assignments")
+    organization_role = relationship("OrganizationRole", back_populates="kpi_role_assignments", lazy="selectin")
 
 
 class KpiFieldAccess(Base):
@@ -1035,6 +1036,13 @@ class KPIEntry(Base):
             unique=True,
             postgresql_where=(is_draft == True),
         ),
+        Index(
+            "ix_kpi_entry_kpi_year_period_draft",
+            "kpi_id",
+            "year",
+            "period_key",
+            postgresql_where=(is_draft == False),
+        ),
     )
 
     organization = relationship("Organization", back_populates="kpi_entries")
@@ -1187,7 +1195,7 @@ class ReportTemplateKPI(Base):
     include_all_fields = Column(Boolean, default=True, nullable=False)
     sort_order = Column(Integer, default=0)
 
-    report_template = relationship("ReportTemplate", back_populates="kpis")
+    report_template = relationship("ReportTemplate", back_populates="kpis", lazy="selectin")
     kpi = relationship("KPI", back_populates="report_template_kpis")
     fields = relationship(
         "ReportTemplateField",
@@ -1272,6 +1280,10 @@ class Dashboard(Base):
         cascade="all, delete-orphan",
     )
 
+    __table_args__ = (
+        Index("ix_dashboard_org_id", "organization_id", "id"),
+    )
+
 
 class DashboardAccessPermission(Base):
     """Permission for user to view/edit a dashboard."""
@@ -1297,7 +1309,10 @@ class DashboardAccessPermission(Base):
     filter_operator = Column(String(50), default="=", nullable=False, server_default="=")
     created_at = Column(DateTime, default=utc_now)
 
-    __table_args__ = (UniqueConstraint("dashboard_id", "user_id", name="uq_dashboard_user"),)
+    __table_args__ = (
+        UniqueConstraint("dashboard_id", "user_id", name="uq_dashboard_user"),
+        Index("ix_dashboard_access_perm_user_dashboard", "user_id", "dashboard_id"),
+    )
 
     dashboard = relationship("Dashboard", back_populates="access_permissions")
     user = relationship("User", back_populates="dashboard_access_permissions")

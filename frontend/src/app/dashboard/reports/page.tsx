@@ -76,8 +76,11 @@ export default function ReportsPage() {
   const [generateLoading, setGenerateLoading] = useState(false);
   const [generateStep, setGenerateStep] = useState<string>("");
 
-  const canManageAssignments = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
-  const canAddReport = userRole === "SUPER_ADMIN";
+  const isSuperAdmin = userRole === "SUPER_ADMIN";
+  const isOrgAdmin = userRole === "ORG_ADMIN";
+  const canManageAssignments = isOrgAdmin;
+  const isAdmin = isSuperAdmin || isOrgAdmin;
+  const canAddReport = isSuperAdmin;
 
   const openRenameModal = (t: TemplateRow) => {
     setRenameTemplate(t);
@@ -444,7 +447,7 @@ export default function ReportsPage() {
     setGenerateStep("");
 
     // For end-users, if the report does not require selecting a date period, immediately start downloading PDF
-    if (!canManageAssignments && (!t.fetch_data_with_date || t.can_change_period === false)) {
+    if (!isAdmin && (!t.fetch_data_with_date || t.can_change_period === false)) {
       setGenModalOpen(true);
       void handleDownloadCustomReport(t, "pdf", resolvedPeriodType, resolvedPeriod);
     } else {
@@ -725,7 +728,7 @@ export default function ReportsPage() {
                   onClick={handleGenerateClick}
                 >
                   {isCustom
-                    ? canManageAssignments
+                    ? isAdmin
                       ? `Download ${selectedFormat === "xlsx" ? "Excel" : selectedFormat === "docx" ? "Word" : "PDF"}`
                       : "Generate PDF"
                     : "Generate PDF"}
@@ -741,7 +744,7 @@ export default function ReportsPage() {
   if (loading) return null;
   if (error) return <p className="form-error">{error}</p>;
 
-  if (!canManageAssignments) {
+  if (!isAdmin) {
     if (list.length === 0 && customList.length === 0) {
       return (
         <div>
@@ -870,7 +873,11 @@ export default function ReportsPage() {
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem" }}>
           <p style={{ color: "var(--muted)", margin: 0, flex: "1 1 auto" }}>
-            View and print reports. Use “Assign users” to give others access with view/print/export rights.
+            {userRole === "SUPER_ADMIN"
+              ? "Create and design report templates for organizations."
+              : canManageAssignments
+              ? "View and print reports. Use “Assign users” to give others access with view/print/export rights."
+              : "View and print reports shared with you."}
           </p>
           {canAddReport && (
             <button
@@ -941,7 +948,9 @@ export default function ReportsPage() {
       <div className="card" style={{ marginTop: "1.5rem" }}>
         <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: "0.5rem" }}>Custom Reports</h2>
         <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
-          View and assign custom report templates built by Super Admins.
+          {userRole === "SUPER_ADMIN"
+            ? "Custom report templates available for organizations."
+            : "View and assign custom report templates built by Super Admins."}
         </p>
 
         {customList.length === 0 ? (
@@ -982,7 +991,7 @@ export default function ReportsPage() {
                           <Link className="btn" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
                             View print report
                           </Link>
-                          {canManageAssignments && userRole !== "SUPER_ADMIN" && (
+                          {canManageAssignments && (
                             <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
                               Assign users
                             </Link>
@@ -1027,7 +1036,7 @@ export default function ReportsPage() {
                         <Link className="btn" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
                           View print report
                         </Link>
-                        {canManageAssignments && userRole !== "SUPER_ADMIN" && (
+                        {canManageAssignments && (
                           <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
                             Assign users
                           </Link>
@@ -1070,7 +1079,7 @@ export default function ReportsPage() {
               Add report template
             </h3>
             <p id="add-report-modal-desc" style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 1.25rem 0" }}>
-              Create a new report template. You can assign it to users after saving.
+              Create a new report template. You can design the layout after saving.
             </p>
             {organizationId == null && (
               <div className="form-group" style={{ marginBottom: "1rem" }}>

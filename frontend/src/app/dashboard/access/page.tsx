@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
@@ -74,10 +74,71 @@ export default function AccessDashboardPage() {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkErrors, setBulkErrors] = useState<string[]>([]);
+  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
+  const [deletingUsers, setDeletingUsers] = useState(false);
+  const [userCategoryFilter, setUserCategoryFilter] = useState<"all" | "internal" | "external">("all");
+
+  const displayedUsers = useMemo(() => {
+    if (userCategoryFilter === "internal") return users.filter((u) => !u.is_external);
+    if (userCategoryFilter === "external") return users.filter((u) => Boolean(u.is_external));
+    return users;
+  }, [users, userCategoryFilter]);
+
+  const internalCount = useMemo(() => users.filter((u) => !u.is_external).length, [users]);
+  const externalCount = useMemo(() => users.filter((u) => Boolean(u.is_external)).length, [users]);
 
   const orgId = me?.organization_id ?? null;
   const isOrgAdmin = me?.role === "ORG_ADMIN";
   const isSuperAdmin = me?.role === "SUPER_ADMIN";
+
+  const refreshUsers = async () => {
+    if (!token || !orgId) return;
+    const usersRes = await api<UserRow[]>(`/users?organization_id=${orgId}`, { token }).catch(() => []);
+    setUsers(Array.isArray(usersRes) ? usersRes : []);
+    setSelectedUserIds([]);
+  };
+
+  const handleBulkDeleteUsers = async () => {
+    if (!token || !orgId || selectedUserIds.length === 0) return;
+    const count = selectedUserIds.length;
+    if (!window.confirm(`Are you sure you want to delete ${count} selected user(s)? This action cannot be undone.`)) {
+      return;
+    }
+    setDeletingUsers(true);
+    try {
+      const res = await api<{ deleted_count: number; message: string }>("/users/bulk-delete", {
+        method: "POST",
+        token,
+        body: JSON.stringify({
+          user_ids: selectedUserIds,
+          organization_id: orgId,
+        }),
+      });
+      toast.success(res.message || `Deleted ${res.deleted_count} user(s) successfully`);
+      await refreshUsers();
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to delete users");
+    } finally {
+      setDeletingUsers(false);
+    }
+  };
+
+  const handleSingleDeleteUser = async (userId: number, userName: string) => {
+    if (!token || !orgId) return;
+    if (!window.confirm(`Are you sure you want to delete user "${userName}"? This action cannot be undone.`)) {
+      return;
+    }
+    try {
+      await api(`/users/${userId}?organization_id=${orgId}`, {
+        method: "DELETE",
+        token,
+      });
+      toast.success(`User "${userName}" deleted successfully`);
+      await refreshUsers();
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to delete user");
+    }
+  };
 
   // Load current user and then org/users/roles
   useEffect(() => {
@@ -455,32 +516,74 @@ export default function AccessDashboardPage() {
               justifyContent: "space-between",
               gap: "0.5rem",
               marginBottom: "0.75rem",
+              flexWrap: "wrap",
             }}
           >
             <h2 style={{ fontSize: "1.1rem", margin: 0 }}>Users</h2>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => setShowCreateUser((v) => !v)}
-            >
-              {showCreateUser ? "Cancel" : "Add user"}
-            </button>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ fontSize: "0.85rem" }}
+                onClick={() => {
+                  if (showCreateUser && newUserType === "internal") {
+                    setShowCreateUser(false);
+                  } else {
+                    setNewUserType("internal");
+                    setShowCreateUser(true);
+                    setCreateUserError(null);
+                  }
+                }}
+              >
+                {showCreateUser && newUserType === "internal" ? "Cancel" : "+ System User"}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{
+                  fontSize: "0.85rem",
+                  borderColor: "var(--accent, #3b82f6)",
+                  color: "var(--accent, #3b82f6)",
+                  fontWeight: 500,
+                  backgroundColor: showCreateUser && newUserType === "external" ? "rgba(59, 130, 246, 0.08)" : undefined,
+                }}
+                onClick={() => {
+                  if (showCreateUser && newUserType === "external") {
+                    setShowCreateUser(false);
+                  } else {
+                    setNewUserType("external");
+                    setShowCreateUser(true);
+                    setCreateUserError(null);
+                  }
+                }}
+              >
+                {showCreateUser && newUserType === "external" ? "Cancel" : "+ External User (Odoo)"}
+              </button>
+            </div>
           </div>
           <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
-            View and manage all users in this organization. Use roles to control KPI and field access centrally.
+            View and manage all users in this organization. System users authenticate locally; external users authenticate via Odoo.
           </p>
           {showCreateUser && (
-            <div className="card" style={{ padding: "0.75rem 0.9rem", marginBottom: "0.9rem" }}>
-              <div style={{ marginBottom: "0.6rem" }}>
-                <h3 style={{ margin: "0 0 0.25rem", fontSize: "0.95rem" }}>
-                  {newUserType === "internal" ? "Create user" : "Add external user"}
-                </h3>
-                <div style={{ display: "flex", gap: "0.5rem" }}>
+            <div className="card" style={{ padding: "0.85rem 1rem", marginBottom: "0.9rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
+                <div>
+                  <h3 style={{ margin: "0 0 0.2rem", fontSize: "0.95rem" }}>
+                    {newUserType === "internal" ? "Add System User" : "Add External User (Odoo)"}
+                  </h3>
+                  <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
+                    {newUserType === "internal"
+                      ? "System users authenticate directly with their local password."
+                      : "External users authenticate using their Odoo passwords (no local password required)."}
+                  </p>
+                </div>
+                <div style={{ display: "flex", gap: "0.35rem" }}>
                   <button
                     type="button"
                     className="btn"
                     style={{
-                      fontSize: "0.85rem",
+                      fontSize: "0.8rem",
+                      padding: "0.2rem 0.6rem",
                       background: newUserType === "internal" ? "var(--accent)" : undefined,
                       color: newUserType === "internal" ? "var(--on-muted)" : undefined,
                     }}
@@ -489,13 +592,14 @@ export default function AccessDashboardPage() {
                       setCreateUserError(null);
                     }}
                   >
-                    Internal user
+                    System user
                   </button>
                   <button
                     type="button"
                     className="btn"
                     style={{
-                      fontSize: "0.85rem",
+                      fontSize: "0.8rem",
+                      padding: "0.2rem 0.6rem",
                       background: newUserType === "external" ? "var(--accent)" : undefined,
                       color: newUserType === "external" ? "var(--on-muted)" : undefined,
                     }}
@@ -504,7 +608,7 @@ export default function AccessDashboardPage() {
                       setCreateUserError(null);
                     }}
                   >
-                    External user
+                    External user (Odoo)
                   </button>
                 </div>
               </div>
@@ -690,12 +794,12 @@ export default function AccessDashboardPage() {
                   }
                 }}
               >
-                {createUserSaving ? "Saving…" : newUserType === "internal" ? "Create user" : "Add external user"}
+                {createUserSaving ? "Saving…" : newUserType === "internal" ? "Create system user" : "Add external user (Odoo)"}
               </button>
             </div>
           )}
 
-          {/* Unified Bulk Import Card */}
+          {/* Bulk Import Card */}
           <div className="card" style={{ padding: "0.75rem 0.9rem", marginBottom: "0.9rem" }}>
             <div
               style={{
@@ -722,11 +826,7 @@ export default function AccessDashboardPage() {
 
             {bulkOpen && (
               <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                <div style={{ fontSize: "0.85rem", color: "var(--muted)", lineHeight: "1.4" }}>
-                  Download an Excel template, fill in your users, and upload the file below:
-                </div>
-
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
                   <button
                     type="button"
                     className="btn"
@@ -747,7 +847,7 @@ export default function AccessDashboardPage() {
                         const blob = await res.blob();
                         const a = document.createElement("a");
                         a.href = URL.createObjectURL(blob);
-                        a.download = `users_import_template_${orgId}.xlsx`;
+                        a.download = `system_users_template_${orgId}.xlsx`;
                         a.click();
                         URL.revokeObjectURL(a.href);
                       } catch {
@@ -755,7 +855,7 @@ export default function AccessDashboardPage() {
                       }
                     }}
                   >
-                    📥 Download Standard Template (Excel)
+                    Download System Users Template
                   </button>
 
                   <button
@@ -786,87 +886,72 @@ export default function AccessDashboardPage() {
                       }
                     }}
                   >
-                    📥 Download External (Odoo / LMS) Template
+                    Download External Users Template (Odoo)
                   </button>
-                </div>
 
-                <div
-                  style={{
-                    fontSize: "0.8rem",
-                    color: "var(--muted)",
-                    backgroundColor: "rgba(59, 130, 246, 0.05)",
-                    border: "1px solid rgba(59, 130, 246, 0.2)",
-                    padding: "0.6rem 0.8rem",
-                    borderRadius: "6px",
-                    lineHeight: "1.4",
-                  }}
-                >
-                  💡 <strong>External (Odoo / LMS) Users Info:</strong><br />
-                  • <strong>Option A (External Template):</strong> Columns: <code>username</code>, <code>full_name</code>, <code>description</code>, <code>is_active</code>. No password needed.<br />
-                  • <strong>Option B (Standard Template):</strong> Set the <code>is_external</code> column to <code>TRUE</code> (password can be left empty).
-                </div>
-
-                <label
-                  className="btn btn-primary"
-                  style={{
-                    cursor: !bulkUploading ? "pointer" : "not-allowed",
-                    opacity: bulkUploading ? 0.7 : 1,
-                  }}
-                >
-                  {bulkUploading ? "Uploading…" : "Upload Excel"}
-                  <input
-                    type="file"
-                    accept=".xlsx"
-                    style={{ display: "none" }}
-                    disabled={bulkUploading || orgId == null}
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      e.target.value = "";
-                      if (!file || !token || orgId == null) return;
-
-                      setBulkUploading(true);
-                      setBulkErrors([]);
-                      try {
-                        const form = new FormData();
-                        form.append("file", file);
-                        const url = getApiUrl(
-                          `/users/bulk-upload?${new URLSearchParams({
-                            organization_id: String(orgId),
-                          }).toString()}`
-                        );
-                        const res = await fetch(url, {
-                          method: "POST",
-                          headers: { Authorization: `Bearer ${token}` },
-                          body: form,
-                        });
-
-                        if (res.ok) {
-                          const payload = await res.json().catch(() => ({} as any));
-                          const added = Number((payload as any)?.rows_added ?? 0);
-                          toast.success(`Success: ${added} users created`);
-                          
-                          const refreshed = await api<any[]>(`/users?organization_id=${orgId}`, { token }).catch(() => null);
-                          if (Array.isArray(refreshed)) setUsers(refreshed);
-                          
-                          setBulkOpen(false);
-                        } else {
-                          const err = await res.json().catch(() => ({} as any));
-                          const detail = err?.detail;
-                          if (detail && typeof detail === "object" && Array.isArray(detail.errors)) {
-                            setBulkErrors(detail.errors);
-                            toast.error(detail.message || "Bulk upload validation failed");
-                          } else {
-                            toast.error(typeof detail === "string" ? detail : "Bulk upload failed");
-                          }
-                        }
-                      } catch (ex) {
-                        toast.error(ex instanceof Error ? ex.message : "Bulk upload failed");
-                      } finally {
-                        setBulkUploading(false);
-                      }
+                  <label
+                    className="btn btn-primary"
+                    style={{
+                      cursor: !bulkUploading ? "pointer" : "not-allowed",
+                      opacity: bulkUploading ? 0.7 : 1,
+                      fontSize: "0.85rem",
                     }}
-                  />
-                </label>
+                  >
+                    {bulkUploading ? "Uploading…" : "Upload Excel"}
+                    <input
+                      type="file"
+                      accept=".xlsx"
+                      style={{ display: "none" }}
+                      disabled={bulkUploading || orgId == null}
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = "";
+                        if (!file || !token || orgId == null) return;
+
+                        setBulkUploading(true);
+                        setBulkErrors([]);
+                        try {
+                          const form = new FormData();
+                          form.append("file", file);
+                          const url = getApiUrl(
+                            `/users/bulk-upload?${new URLSearchParams({
+                              organization_id: String(orgId),
+                            }).toString()}`
+                          );
+                          const res = await fetch(url, {
+                            method: "POST",
+                            headers: { Authorization: `Bearer ${token}` },
+                            body: form,
+                          });
+
+                          if (res.ok) {
+                            const payload = await res.json().catch(() => ({} as any));
+                            const added = Number((payload as any)?.rows_added ?? 0);
+                            toast.success(`Success: ${added} users created`);
+
+                            const refreshed = await api<any[]>(`/users?organization_id=${orgId}`, { token }).catch(() => null);
+                            if (Array.isArray(refreshed)) setUsers(refreshed);
+
+                            setBulkOpen(false);
+                          } else {
+                            const err = await res.json().catch(() => ({} as any));
+                            const detail = err?.detail;
+                            if (detail && typeof detail === "object" && Array.isArray(detail.errors)) {
+                              setBulkErrors(detail.errors);
+                              toast.error(detail.message || "Bulk upload validation failed");
+                            } else {
+                              toast.error(typeof detail === "string" ? detail : "Bulk upload failed");
+                            }
+                          }
+                        } catch (ex) {
+                          toast.error(ex instanceof Error ? ex.message : "Bulk upload failed");
+                        } finally {
+                          setBulkUploading(false);
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
 
                 {bulkErrors.length > 0 && (
                   <div
@@ -892,10 +977,6 @@ export default function AccessDashboardPage() {
                     ))}
                   </div>
                 )}
-
-                <div style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
-                  Expected columns: `user_name`, `password`, `unique_user_key`, `full_name`, `email`, `role` (optional)
-                </div>
               </div>
             )}
           </div>
@@ -906,6 +987,87 @@ export default function AccessDashboardPage() {
             </p>
           ) : (
             <div style={{ maxHeight: 420, overflow: "auto" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
+                {/* Filter Tabs for Internal vs External Users */}
+                <div style={{ display: "inline-flex", background: "var(--bg-subtle, rgba(0,0,0,0.04))", padding: "2px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                  <button
+                    type="button"
+                    onClick={() => setUserCategoryFilter("all")}
+                    style={{
+                      padding: "0.25rem 0.65rem",
+                      fontSize: "0.82rem",
+                      borderRadius: "6px",
+                      border: "none",
+                      background: userCategoryFilter === "all" ? "var(--surface, #fff)" : "transparent",
+                      color: userCategoryFilter === "all" ? "var(--foreground)" : "var(--muted)",
+                      fontWeight: userCategoryFilter === "all" ? 600 : 400,
+                      cursor: "pointer",
+                      boxShadow: userCategoryFilter === "all" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
+                    }}
+                  >
+                    All Users ({users.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUserCategoryFilter("internal")}
+                    style={{
+                      padding: "0.25rem 0.65rem",
+                      fontSize: "0.82rem",
+                      borderRadius: "6px",
+                      border: "none",
+                      background: userCategoryFilter === "internal" ? "var(--surface, #fff)" : "transparent",
+                      color: userCategoryFilter === "internal" ? "var(--foreground)" : "var(--muted)",
+                      fontWeight: userCategoryFilter === "internal" ? 600 : 400,
+                      cursor: "pointer",
+                      boxShadow: userCategoryFilter === "internal" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
+                    }}
+                  >
+                    System Users ({internalCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUserCategoryFilter("external")}
+                    style={{
+                      padding: "0.25rem 0.65rem",
+                      fontSize: "0.82rem",
+                      borderRadius: "6px",
+                      border: "none",
+                      background: userCategoryFilter === "external" ? "var(--surface, #fff)" : "transparent",
+                      color: userCategoryFilter === "external" ? "var(--foreground)" : "var(--muted)",
+                      fontWeight: userCategoryFilter === "external" ? 600 : 400,
+                      cursor: "pointer",
+                      boxShadow: userCategoryFilter === "external" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
+                    }}
+                  >
+                    External Users (Odoo) ({externalCount})
+                  </button>
+                </div>
+
+                {selectedUserIds.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={handleBulkDeleteUsers}
+                    disabled={deletingUsers}
+                    style={{
+                      background: "#dc2626",
+                      color: "#ffffff",
+                      border: "none",
+                      fontSize: "0.82rem",
+                      padding: "0.3rem 0.75rem",
+                      borderRadius: 6,
+                      cursor: "pointer",
+                      fontWeight: 600,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "0.35rem",
+                    }}
+                  >
+                    {deletingUsers ? "Deleting..." : `Delete Selected Users (${selectedUserIds.length})`}
+                  </button>
+                )}
+              </div>
+
               <table
                 style={{
                   width: "100%",
@@ -915,7 +1077,27 @@ export default function AccessDashboardPage() {
               >
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                    <th style={{ width: 38, textAlign: "center", padding: "0.5rem" }}>
+                      <input
+                        type="checkbox"
+                        checked={
+                          displayedUsers.filter((u) => u.id !== me?.id).length > 0 &&
+                          displayedUsers.filter((u) => u.id !== me?.id).every((u) => selectedUserIds.includes(u.id))
+                        }
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            const selectable = displayedUsers.filter((u) => u.id !== me?.id).map((u) => u.id);
+                            setSelectedUserIds((prev) => Array.from(new Set([...prev, ...selectable])));
+                          } else {
+                            const displayedIds = new Set(displayedUsers.map((u) => u.id));
+                            setSelectedUserIds((prev) => prev.filter((id) => !displayedIds.has(id)));
+                          }
+                        }}
+                        title="Select all"
+                      />
+                    </th>
                     <th style={{ textAlign: "left", padding: "0.5rem" }}>User</th>
+                    <th style={{ textAlign: "left", padding: "0.5rem" }}>Type</th>
                     <th style={{ textAlign: "left", padding: "0.5rem" }}>Email / Description</th>
                     <th style={{ textAlign: "left", padding: "0.5rem" }}>Role</th>
                     <th style={{ textAlign: "left", padding: "0.5rem" }}>Status</th>
@@ -923,11 +1105,60 @@ export default function AccessDashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {users.map((u) => (
+                  {displayedUsers.map((u) => (
                     <tr key={u.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ width: 38, textAlign: "center", padding: "0.5rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={selectedUserIds.includes(u.id)}
+                          disabled={u.id === me?.id}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedUserIds((prev) => [...prev, u.id]);
+                            } else {
+                              setSelectedUserIds((prev) => prev.filter((id) => id !== u.id));
+                            }
+                          }}
+                        />
+                      </td>
                       <td style={{ padding: "0.5rem" }}>
                         <div style={{ fontWeight: 600 }}>{u.full_name || u.username}</div>
                         <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>{u.username}</div>
+                      </td>
+                      <td style={{ padding: "0.5rem" }}>
+                        {u.is_external ? (
+                          <span
+                            style={{
+                              fontSize: "0.72rem",
+                              padding: "0.15rem 0.45rem",
+                              borderRadius: 4,
+                              background: "rgba(139, 92, 246, 0.12)",
+                              color: "#7c3aed",
+                              fontWeight: 600,
+                              border: "1px solid rgba(139, 92, 246, 0.25)",
+                              display: "inline-block",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            External (Odoo)
+                          </span>
+                        ) : (
+                          <span
+                            style={{
+                              fontSize: "0.72rem",
+                              padding: "0.15rem 0.45rem",
+                              borderRadius: 4,
+                              background: "rgba(59, 130, 246, 0.1)",
+                              color: "#2563eb",
+                              fontWeight: 600,
+                              border: "1px solid rgba(59, 130, 246, 0.2)",
+                              display: "inline-block",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            System
+                          </span>
+                        )}
                       </td>
                       <td style={{ padding: "0.5rem", fontSize: "0.85rem", color: "var(--muted)" }}>
                         {u.email || u.description || "—"}
@@ -1162,15 +1393,39 @@ export default function AccessDashboardPage() {
                           <Link href={`/dashboard/users/${u.id}`} className="btn" style={{ fontSize: "0.85rem" }}>
                             Open
                           </Link>
-                          <button
-                            type="button"
-                            className="btn"
-                            style={{ fontSize: "0.78rem", padding: "0.25rem 0.5rem" }}
-                            onClick={() => setActiveTab("password-resets")}
-                            title="Manage password reset"
-                          >
-                            Reset
-                          </button>
+                          {!u.is_external ? (
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ fontSize: "0.78rem", padding: "0.25rem 0.5rem" }}
+                              onClick={() => setActiveTab("password-resets")}
+                              title="Manage password reset"
+                            >
+                              Reset
+                            </button>
+                          ) : (
+                            <span
+                              style={{
+                                fontSize: "0.75rem",
+                                color: "var(--muted)",
+                                padding: "0.2rem 0.3rem",
+                              }}
+                              title="Password authenticated via Odoo"
+                            >
+                              Odoo Auth
+                            </span>
+                          )}
+                          {u.id !== me?.id && (
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ fontSize: "0.78rem", padding: "0.25rem 0.5rem", color: "#dc2626", borderColor: "rgba(220, 38, 38, 0.3)" }}
+                              onClick={() => handleSingleDeleteUser(u.id, u.username)}
+                              title="Delete user"
+                            >
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

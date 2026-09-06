@@ -174,11 +174,11 @@ def _compile_v2_one(
             params[pkey] = str(v).strip() if v is not None else ""
             if op == "eq":
                 parts.append(
-                    f"({lbl} IS NOT NULL AND TRIM(BOTH FROM COALESCE({lbl}, '')) = TRIM(BOTH FROM CAST(:{pkey} AS text)))"
+                    f"({lbl} IS NOT NULL AND LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) = LOWER(TRIM(BOTH FROM CAST(:{pkey} AS text))))"
                 )
             else:
                 parts.append(
-                    f"({lbl} IS NULL OR TRIM(BOTH FROM COALESCE({lbl}, '')) IS DISTINCT FROM TRIM(BOTH FROM CAST(:{pkey} AS text)))"
+                    f"({lbl} IS NULL OR LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) IS DISTINCT FROM LOWER(TRIM(BOTH FROM CAST(:{pkey} AS text))))"
                 )
         joined = " OR " if op == "eq" else " AND "
         return "(" + joined.join(parts) + ")"
@@ -208,12 +208,12 @@ def _compile_v2_one(
             params[vkey] = str(raw_val).strip() if raw_val is not None else ""
             if op == "eq":
                 return (
-                    f"({lbl} IS NOT NULL AND TRIM(BOTH FROM COALESCE({lbl}, '')) = "
-                    f"TRIM(BOTH FROM CAST(:{vkey} AS text)))"
+                    f"({lbl} IS NOT NULL AND LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) = "
+                    f"LOWER(TRIM(BOTH FROM CAST(:{vkey} AS text))))"
                 )
             return (
-                f"({lbl} IS NULL OR TRIM(BOTH FROM COALESCE({lbl}, '')) IS DISTINCT FROM "
-                f"TRIM(BOTH FROM CAST(:{vkey} AS text)))"
+                f"({lbl} IS NULL OR LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) IS DISTINCT FROM "
+                f"LOWER(TRIM(BOTH FROM CAST(:{vkey} AS text))))"
             )
 
         if ft == "date" and op in ("gt", "gte", "lt", "lte", "eq", "neq"):
@@ -242,8 +242,8 @@ def _compile_v2_one(
                 return f"({num} IS NOT NULL AND {num} = CAST(:{vkey} AS double precision))"
             params[vkey] = str(raw_val).strip() if raw_val is not None else ""
             return (
-                f"({lbl} IS NOT NULL AND TRIM(BOTH FROM COALESCE({lbl}, '')) = "
-                f"TRIM(BOTH FROM CAST(:{vkey} AS text)))"
+                f"({lbl} IS NOT NULL AND LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) = "
+                f"LOWER(TRIM(BOTH FROM CAST(:{vkey} AS text))))"
             )
 
         if op == "neq":
@@ -252,8 +252,8 @@ def _compile_v2_one(
                 return f"({num} IS DISTINCT FROM CAST(:{vkey} AS double precision))"
             params[vkey] = str(raw_val).strip() if raw_val is not None else ""
             return (
-                f"({lbl} IS NULL OR TRIM(BOTH FROM COALESCE({lbl}, '')) IS DISTINCT FROM "
-                f"TRIM(BOTH FROM CAST(:{vkey} AS text)))"
+                f"({lbl} IS NULL OR LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) IS DISTINCT FROM "
+                f"LOWER(TRIM(BOTH FROM CAST(:{vkey} AS text))))"
             )
 
     return None

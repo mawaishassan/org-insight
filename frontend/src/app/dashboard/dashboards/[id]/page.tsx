@@ -5,7 +5,8 @@ import { useParams, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { WidgetRenderer, type Widget } from "./widgets";
+import { WidgetRenderer, type Widget, type DrillDownRequestPayload } from "./widgets";
+import { WidgetDrillDownModal } from "@/components/WidgetDrillDownModal";
 import { generatePeriodOptions } from "@/lib/periodHelpers";
 import { DASHBOARD_GRID_COLUMNS, widgetGridColumnStyle } from "./layoutGrid";
 import { DashboardCustomizationProvider, useDashboardCustomization } from "./DashboardCustomizationContext";
@@ -38,12 +39,14 @@ function WidgetWithPeriodSelector({
   dashboardId,
   onCardClick,
   isActiveCard,
+  onDrillDownRequest,
 }: {
   widget: Widget;
   organizationId: number;
   dashboardId: number;
   onCardClick?: (widget: Widget) => void;
   isActiveCard?: boolean;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
 }) {
   return (
     <div
@@ -65,6 +68,7 @@ function WidgetWithPeriodSelector({
           organizationId={organizationId}
           dashboardId={dashboardId}
           onSingleValueCardClick={onCardClick}
+          onDrillDownRequest={onDrillDownRequest}
         />
       </div>
     </div>
@@ -539,6 +543,7 @@ function DashboardViewContent({
 
   // Linked widgets navigation state
   const [activeLinkedCardId, setActiveLinkedCardId] = useState<string | null>(null);
+  const [activeDrillDown, setActiveDrillDown] = useState<DrillDownRequestPayload | null>(null);
 
   const activeLinkedCard = useMemo(() => {
     if (!activeLinkedCardId) return null;
@@ -954,6 +959,7 @@ function DashboardViewContent({
                       dashboardId={dashboard.id}
                       onCardClick={(card) => setActiveLinkedCardId(card.id)}
                       isActiveCard={w.id === activeLinkedCardId}
+                      onDrillDownRequest={setActiveDrillDown}
                     />
                   </div>
                 ))}
@@ -988,14 +994,11 @@ function DashboardViewContent({
                 <div>
                   <div style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", fontSize: "0.78rem", fontWeight: 700, color: "var(--accent, #3b82f6)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" }}>
                     <span>●</span>
-                    <span>Linked Widgets View</span>
+                    <span>Linked Graphs View</span>
                   </div>
                   <h3 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 700, color: "var(--text)" }}>
                     {(activeLinkedCard.title || "Single Value Card")} – Detailed Analysis
                   </h3>
-                  <p style={{ margin: "0.25rem 0 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
-                    Showing {linkedWidgets.length} linked widget{linkedWidgets.length === 1 ? "" : "s"} from this dashboard
-                  </p>
                 </div>
                 <button
                   type="button"
@@ -1056,6 +1059,7 @@ function DashboardViewContent({
                         widget={w}
                         organizationId={dashboard.organization_id}
                         dashboardId={dashboard.id}
+                        onDrillDownRequest={setActiveDrillDown}
                       />
                     </div>
                   ))}
@@ -1079,6 +1083,7 @@ function DashboardViewContent({
                   organizationId={dashboard.organization_id}
                   dashboardId={dashboard.id}
                   onCardClick={(card) => setActiveLinkedCardId(card.id)}
+                  onDrillDownRequest={setActiveDrillDown}
                 />
               </div>
             ))}
@@ -1088,6 +1093,22 @@ function DashboardViewContent({
         {/* Backdrop blur removed — per-widget skeletons handle the initial load state;
             the slim top-bar handles refresh state. Full-page blur was blocking interaction. */}
       </div>
+
+      {activeDrillDown && (
+        <WidgetDrillDownModal
+          isOpen={Boolean(activeDrillDown)}
+          onClose={() => setActiveDrillDown(null)}
+          widget={activeDrillDown.widget}
+          organizationId={dashboard.organization_id}
+          dashboardId={dashboard.id}
+          dimensionFilter={activeDrillDown.dimensionFilter}
+          label={activeDrillDown.label}
+          periodOverride={selectedPeriod}
+          periodType={selectedPeriodType}
+          normalFilters={selectedDashboardFilterValues}
+          selectedColumnValue={selectedColumnValue}
+        />
+      )}
     </div>
   );
 }

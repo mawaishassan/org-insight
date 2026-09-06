@@ -34,6 +34,8 @@ from app.core.models import (
     Dashboard,
     DashboardAccessPermission,
     Organization,
+    CustomReportHeader,
+    DashboardLabelCustomization,
 )
 from app.entries.multi_item_filters import row_passes_filters
 from app.entries.reference_filter_resolve import build_reference_resolution_map
@@ -266,8 +268,35 @@ def _find_sub_field_key_match(target_key: str, sub_id_by_key: dict[str, int] | N
             or k_norm == f"{target_norm}_id"
             or target_norm == f"{k_norm}_name"
             or target_norm == f"{k_norm}_id"
+            or (("dept" in target_norm or "department" in target_norm) and ("dept" in k_norm or "department" in k_norm))
         ):
             return k
+    return None
+
+
+def _find_dept_or_user_key_subfield(sub_fields: list[Any], target_key: str | None = None) -> Any | None:
+    if not sub_fields:
+        return None
+    if target_key:
+        tk_norm = str(target_key).strip().lower()
+        for sf in sub_fields:
+            if str(getattr(sf, "key", "")).strip().lower() == tk_norm:
+                return sf
+        for sf in sub_fields:
+            k = str(getattr(sf, "key", "")).strip().lower()
+            if k in (f"{tk_norm}_name", f"{tk_norm}_id") or tk_norm in (f"{k}_name", f"{k}_id"):
+                return sf
+        for sf in sub_fields:
+            n = str(getattr(sf, "name", "")).strip().lower()
+            if n == tk_norm or tk_norm in n:
+                return sf
+
+    dept_keywords = ("department", "dept", "unique_user_key", "unique_key", "user_key")
+    for sf in sub_fields:
+        k = str(getattr(sf, "key", "")).strip().lower()
+        n = str(getattr(sf, "name", "")).strip().lower()
+        if any(dk in k or dk in n for dk in dept_keywords):
+            return sf
     return None
 
 
@@ -304,6 +333,20 @@ def _combine_with_runtime_filters(
                         "logic": "and",
                     })
 
+    def _dept_variants_for(v_str: str, f_key: str) -> list[str]:
+        val = str(v_str).strip()
+        val_lower = val.lower()
+        variants = [val]
+        if any(dk in str(f_key).lower() for dk in ("dept", "department")):
+            if val_lower.startswith("department of "):
+                variants.append(val[len("department of "):].strip())
+            elif val_lower.endswith(" department"):
+                variants.append(val[:-len(" department")].strip())
+            else:
+                variants.append(f"Department of {val}")
+                variants.append(f"{val} Department")
+        return list(dict.fromkeys(variants))
+
     # Add column_filter condition if applicable
     if column_filter and isinstance(column_filter, dict):
         target_kpi = column_filter.get("kpi_id")
@@ -319,11 +362,18 @@ def _combine_with_runtime_filters(
         
         applies = (kpi_matches and source_matches)
         if sub_id_by_key is not None:
-            applies = bool(matched_col_key) and (kpi_matches or not target_kpi)
+            applies = bool(matched_col_key)
 
         if applies and matched_col_key and col_val not in (None, ""):
-            # Avoid duplicate condition if already present
-            if not any(c.get("field") == matched_col_key and c.get("value") == str(col_val) for c in conditions):
+            variants = _dept_variants_for(str(col_val), matched_col_key)
+            if len(variants) > 1:
+                conditions.append({
+                    "field": matched_col_key,
+                    "op": "eq",
+                    "values": variants,
+                    "logic": "and",
+                })
+            elif not any(c.get("field") == matched_col_key and c.get("value") == str(col_val) for c in conditions):
                 conditions.append({
                     "field": matched_col_key,
                     "op": "eq",
@@ -343,7 +393,15 @@ def _combine_with_runtime_filters(
             if isinstance(f_vals, list):
                 clean_vals = [str(v) for v in f_vals if v not in (None, "")]
                 if len(clean_vals) == 1:
-                    if not any(c.get("field") == actual_key and c.get("value") == clean_vals[0] for c in conditions):
+                    variants = _dept_variants_for(clean_vals[0], actual_key)
+                    if len(variants) > 1:
+                        conditions.append({
+                            "field": actual_key,
+                            "op": "eq",
+                            "values": variants,
+                            "logic": "and",
+                        })
+                    elif not any(c.get("field") == actual_key and c.get("value") == clean_vals[0] for c in conditions):
                         conditions.append({
                             "field": actual_key,
                             "op": "eq",
@@ -351,17 +409,29 @@ def _combine_with_runtime_filters(
                             "logic": "and",
                         })
                 elif len(clean_vals) > 1:
+                    all_variants: list[str] = []
+                    for cv in clean_vals:
+                        all_variants.extend(_dept_variants_for(cv, actual_key))
+                    all_variants = list(dict.fromkeys(all_variants))
                     if not any(c.get("field") == actual_key for c in conditions):
                         conditions.append({
                             "field": actual_key,
                             "op": "eq",
-                            "values": clean_vals,
-                            "value": clean_vals[0],
+                            "values": all_variants,
+                            "value": all_variants[0],
                             "logic": "and",
                         })
             else:
                 s_val = str(f_vals).strip()
-                if s_val and not any(c.get("field") == actual_key and c.get("value") == s_val for c in conditions):
+                variants = _dept_variants_for(s_val, actual_key)
+                if len(variants) > 1:
+                    conditions.append({
+                        "field": actual_key,
+                        "op": "eq",
+                        "values": variants,
+                        "logic": "and",
+                    })
+                elif not any(c.get("field") == actual_key and c.get("value") == s_val for c in conditions):
                     conditions.append({
                         "field": actual_key,
                         "op": "eq",
@@ -496,7 +566,7 @@ async def resolve_dashboard_chart_widget_data_batch(
             orig_period_type = mod_overrides.get("__period_type") or None
             selected_period = orig_period or (overrides or {}).get("year") or w.get("year")
             period_type = orig_period_type or (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
-            if selected_period and selected_period not in ("by_default", "By Default") and period_type not in ("by_default", "By Default", "Data Entry", "data_entry"):
+            if period_type and selected_period and selected_period not in ("by_default", "By Default") and str(period_type).strip().lower() not in ("by_default", "data entry", "data_entry"):
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period), period_type=period_type)
                     mod_overrides["year"] = start_year
@@ -1095,7 +1165,7 @@ def _get_config_val(config: Any, key: str, default: Any = None) -> Any:
 
 
 def resolve_date_range_for_period(config: Any, selected_period: str, period_type: str | None = None) -> tuple[datetime.date, datetime.date, int]:
-    if selected_period == "by_default" or selected_period == "By Default":
+    if str(selected_period).strip().lower() in ("by_default", "data entry", "data_entry") or (period_type and str(period_type).strip().lower() in ("by_default", "data entry", "data_entry")):
         raise ValueError("Cannot resolve date range for default period")
     import datetime as dt
     import calendar
@@ -1204,24 +1274,39 @@ def resolve_date_range_for_period(config: Any, selected_period: str, period_type
 
 
 def _get_spanned_years(org: Organization | None, start_date: datetime.date, end_date: datetime.date) -> list[int]:
+    """Return the KPI entry 'year' values that cover the given date range.
+
+    KPI entries are keyed by a fiscal-year label, not a calendar year:
+      - For a July-start org, entry.year=2026 covers Jul 2025 – Jun 2026.
+      - For a Jan-start org, entry.year=2026 covers Jan 2026 – Dec 2026.
+
+    We compute only the FISCAL years that fall inside [start_date, end_date).
+    Calendar years are intentionally excluded: adding them caused double-counting
+    whenever a non-Jan fiscal year spans two calendar years (e.g. fiscal 2025/26
+    Jul–Jun spans cal-years 2025 and 2026, but only ONE entry exists for that
+    fiscal year — mixing both would pull in the prior year's entry and duplicate rows).
+    """
     import datetime
     start_month = start_date.month
     start_day = start_date.day
-        
+
     def _entry_year(d: datetime.date) -> int:
+        """Map a date to the fiscal-year label stored in KPIEntry.year."""
         if start_month == 1:
+            # Calendrical year: label == calendar year of the date.
             return d.year
+        # Non-Jan fiscal year: the label is the ENDING calendar year.
+        # e.g. Jul-start: Jul 2025 → Jun 2026 is labelled 2026.
         if (d.month > start_month) or (d.month == start_month and d.day >= start_day):
             return d.year + 1
         return d.year
-        
+
     last_date = end_date - datetime.timedelta(days=1) if end_date > start_date else start_date
     y_start = _entry_year(start_date)
     y_end = _entry_year(last_date)
-    
-    fiscal_years = list(range(min(y_start, y_end), max(y_start, y_end) + 1))
-    cal_years = list(range(start_date.year, (last_date.year if last_date else end_date.year) + 1))
-    return sorted(set(fiscal_years + cal_years))
+
+    # Only fiscal years — no calendar-year supplement.
+    return sorted(set(range(min(y_start, y_end), max(y_start, y_end) + 1)))
 
 
 async def preprocess_dashboard_date_fetching(
@@ -1246,7 +1331,9 @@ async def preprocess_dashboard_date_fetching(
         
     selected_period = (overrides or {}).get("year") or w.get("year")
     period_type = (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
-    if not selected_period or selected_period == "by_default" or selected_period == "By Default":
+    if not selected_period or selected_period in ("by_default", "By Default"):
+        return merged, overrides, None
+    if not period_type or str(period_type).strip().lower() in ("by_default", "data entry", "data_entry"):
         return merged, overrides, None
         
     try:
@@ -1288,7 +1375,9 @@ async def resolve_date_context_for_dashboard(
 ) -> tuple[datetime.date, datetime.date, int, dict] | None:
     if dashboard_id is None or not selected_period:
         return None
-    if selected_period == "by_default" or selected_period == "By Default":
+    if str(selected_period).strip().lower() in ("by_default", "data entry", "data_entry"):
+        return None
+    if not period_type or str(period_type).strip().lower() in ("by_default", "data entry", "data_entry"):
         return None
     dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
     if not dashboard or not getattr(dashboard, "fetch_data_with_date", False):
@@ -2907,6 +2996,9 @@ async def resolve_dashboard_chart_widget_data(
     if mod_overrides.get("by_default") is True:
         by_default_bypass = True
         mod_overrides.pop("by_default", None)
+    p_type_val = str(mod_overrides.get("period_type") or mod_overrides.get("__period_type") or (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else "") or "").strip().lower()
+    if p_type_val in ("by_default", "data entry", "data_entry"):
+        by_default_bypass = True
     _clean_by_default_overrides(mod_overrides, by_default_bypass)
 
     if date_ctx and not by_default_bypass:
@@ -2926,7 +3018,7 @@ async def resolve_dashboard_chart_widget_data(
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
 
     date_range = None
-    if date_ctx:
+    if date_ctx and not by_default_bypass:
         start_date, end_date, start_year, config = date_ctx
         source_key = (merged.get("source_field_key") or "").strip()
         f_def = None
@@ -3502,6 +3594,9 @@ async def resolve_dashboard_card_widget_data(
     if mod_overrides.get("by_default") is True:
         by_default_bypass = True
         mod_overrides.pop("by_default", None)
+    p_type_val = str(mod_overrides.get("period_type") or mod_overrides.get("__period_type") or (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else "") or "").strip().lower()
+    if p_type_val in ("by_default", "data entry", "data_entry"):
+        by_default_bypass = True
     _clean_by_default_overrides(mod_overrides, by_default_bypass)
 
     date_ctx = None
@@ -3650,7 +3745,7 @@ async def resolve_dashboard_card_widget_data_batch(
             orig_period_type = mod_overrides.get("__period_type") or None
             selected_period = orig_period or (overrides or {}).get("year") or w.get("year")
             period_type = orig_period_type or (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
-            if selected_period and selected_period not in ("by_default", "By Default") and period_type not in ("by_default", "By Default", "Data Entry", "data_entry"):
+            if period_type and selected_period and selected_period not in ("by_default", "By Default") and str(period_type).strip().lower() not in ("by_default", "data entry", "data_entry"):
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period), period_type=period_type)
                     mod_overrides["year"] = start_year
@@ -3829,15 +3924,29 @@ async def resolve_dashboard_table_widget_data(
     widget: dict[str, Any],
     overrides: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str | None]:
-    date_ctx = await resolve_date_context_for_dashboard(
-        db,
-        org_id,
-        dashboard_id,
-        (overrides or {}).get("year") or widget.get("year"),
-        period_type=(overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None),
-    )
     mod_overrides = dict(overrides) if overrides else {}
-    if date_ctx:
+    by_default_bypass = False
+    if mod_overrides.get("year") in ("by_default", "By Default"):
+        by_default_bypass = True
+        mod_overrides.pop("year", None)
+    if mod_overrides.get("by_default") is True:
+        by_default_bypass = True
+        mod_overrides.pop("by_default", None)
+    p_type_val = str(mod_overrides.get("period_type") or mod_overrides.get("__period_type") or (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else "") or "").strip().lower()
+    if p_type_val in ("by_default", "data entry", "data_entry"):
+        by_default_bypass = True
+    _clean_by_default_overrides(mod_overrides, by_default_bypass)
+
+    date_ctx = None
+    if not by_default_bypass:
+        date_ctx = await resolve_date_context_for_dashboard(
+            db,
+            org_id,
+            dashboard_id,
+            (overrides or {}).get("year") or widget.get("year"),
+            period_type=(overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None),
+        )
+    if date_ctx and not by_default_bypass:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
 
@@ -3854,7 +3963,7 @@ async def resolve_dashboard_table_widget_data(
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
 
     date_range = None
-    if date_ctx:
+    if date_ctx and not by_default_bypass:
         start_date, end_date, start_year, config = date_ctx
         source_key = (merged.get("source_field_key") or "").strip()
         f_def = None
@@ -4113,15 +4222,29 @@ async def resolve_dashboard_table_rows_widget_data(
     Fast paged rows for dashboard `kpi_multi_line_table`.
     Uses SQL paging so 20k rows doesn't mean 20k JSON payload.
     """
-    date_ctx = await resolve_date_context_for_dashboard(
-        db,
-        org_id,
-        dashboard_id,
-        (overrides or {}).get("year") or widget.get("year"),
-        period_type=(overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None),
-    )
     mod_overrides = dict(overrides) if overrides else {}
-    if date_ctx:
+    by_default_bypass = False
+    if mod_overrides.get("year") in ("by_default", "By Default"):
+        by_default_bypass = True
+        mod_overrides.pop("year", None)
+    if mod_overrides.get("by_default") is True:
+        by_default_bypass = True
+        mod_overrides.pop("by_default", None)
+    p_type_val = str(mod_overrides.get("period_type") or mod_overrides.get("__period_type") or (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else "") or "").strip().lower()
+    if p_type_val in ("by_default", "data entry", "data_entry"):
+        by_default_bypass = True
+    _clean_by_default_overrides(mod_overrides, by_default_bypass)
+
+    date_ctx = None
+    if not by_default_bypass:
+        date_ctx = await resolve_date_context_for_dashboard(
+            db,
+            org_id,
+            dashboard_id,
+            (overrides or {}).get("year") or widget.get("year"),
+            period_type=(overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None),
+        )
+    if date_ctx and not by_default_bypass:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
 
@@ -4150,7 +4273,7 @@ async def resolve_dashboard_table_rows_widget_data(
     f_obj = await get_field_with_subfields_only(db, int(f_light.id), org_id) if f_light is not None else None
 
     date_range = None
-    if date_ctx:
+    if date_ctx and not by_default_bypass:
         start_date, end_date, start_year, config = date_ctx
         date_col_key = get_widget_date_col_key(config, kpi_id, mls, f_obj)
         if date_col_key:
@@ -4526,6 +4649,571 @@ async def resolve_dashboard_table_rows_widget_data(
     meta = {"kpi_id": kpi_id, "year": year, "period_key": _period_key_norm(period_key), "entry_id": eid, "row_count": len(rows_out), "total": total, "source_field_id": int(f_obj.id)}
     data = {"rows": rows_out, "total": total, "page": int(page), "page_size": int(page_size), "sub_field_labels": label_by_key, "joins": joins_pack, "source_field_id": int(f_obj.id)}
     return (meta, data, "kpi_multi_line_table", e_rev)
+
+
+async def resolve_dashboard_widget_drill_down(
+    db: AsyncSession,
+    user: User,
+    org_id: int,
+    dashboard_id: int,
+    widget: dict[str, Any],
+    overrides: dict[str, Any] | None,
+    *,
+    dimension_filter: dict[str, Any] | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    search: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str = "asc",
+) -> dict[str, Any]:
+    """
+    Resolve underlying Multi-Line Item rows for drilling down from a graph / KPI card widget.
+    Filters rows by exact clicked dimension, active dashboard period/fiscal year, and widget filters.
+    """
+    kpi_id = int(widget.get("kpi_id") or 0)
+    if not kpi_id:
+        return {"error": "missing_kpi_id", "message": "Widget does not have an associated KPI"}
+    if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
+        return {"error": "forbidden", "message": "Not allowed to view this dashboard widget"}
+
+    mod_overrides = dict(overrides) if overrides else {}
+    by_default_bypass = False
+    if mod_overrides.get("year") in ("by_default", "By Default"):
+        by_default_bypass = True
+        mod_overrides.pop("year", None)
+    if mod_overrides.get("by_default") is True:
+        by_default_bypass = True
+        mod_overrides.pop("by_default", None)
+    p_type_val = str(mod_overrides.get("period_type") or mod_overrides.get("__period_type") or (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else "") or "").strip().lower()
+    if p_type_val in ("by_default", "data entry", "data_entry"):
+        by_default_bypass = True
+    _clean_by_default_overrides(mod_overrides, by_default_bypass)
+
+    date_ctx = None
+    if not by_default_bypass:
+        date_ctx = await resolve_date_context_for_dashboard(
+            db,
+            org_id,
+            dashboard_id,
+            (overrides or {}).get("year") or widget.get("year"),
+            period_type=(overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None),
+        )
+    if date_ctx and not by_default_bypass:
+        _start_date, _end_date, start_year, _config = date_ctx
+        mod_overrides["year"] = start_year
+
+    merged = _merge_overrides(widget, mod_overrides)
+    year = int(merged.get("year") or 0)
+    period_key = merged.get("period_key")
+
+    mls = str(merged.get("linked_table_field_key") or merged.get("source_field_key") or "").strip()
+    f_light = None
+    if mls:
+        f_light = (
+            await db.execute(
+                select(KPIField).where(
+                    KPIField.kpi_id == int(kpi_id),
+                    KPIField.key == mls,
+                    KPIField.field_type == FieldType.multi_line_items,
+                )
+            )
+        ).scalars().first()
+    if not f_light:
+        f_light = (
+            await db.execute(
+                select(KPIField).where(
+                    KPIField.kpi_id == int(kpi_id),
+                    KPIField.field_type == FieldType.multi_line_items,
+                ).limit(1)
+            )
+        ).scalars().first()
+
+    if not f_light:
+        return {"error": "no_mla_field", "message": "No Multi-Line Item table found for this widget"}
+
+    f_obj = await get_field_with_subfields_only(db, int(f_light.id), org_id)
+    if not f_obj:
+        return {"error": "no_mla_field", "message": "Failed to load MLA table definition"}
+
+    kpi_res = await db.execute(select(KPI).where(KPI.id == kpi_id))
+    kpi_obj = kpi_res.scalar_one_or_none()
+    kpi_title = getattr(kpi_obj, "name", None) or f"KPI #{kpi_id}"
+    widget_title = merged.get("title") or getattr(kpi_obj, "name", "")
+
+    header_id = getattr(kpi_obj, "report_header_id", None)
+    header_obj = None
+    if header_id:
+        header_obj = (await db.execute(select(CustomReportHeader).where(CustomReportHeader.id == header_id))).scalar_one_or_none()
+    if not header_obj:
+        headers = (await db.execute(select(CustomReportHeader).where(CustomReportHeader.organization_id == org_id))).scalars().all()
+        if headers:
+            kpi_name_lower = (kpi_title or "").lower()
+            matched_h = next((h for h in headers if h.name and (h.name.lower() in kpi_name_lower or any(w in h.name.lower() for w in kpi_name_lower.split()))), headers[0])
+            header_id = matched_h.id
+            header_obj = matched_h
+
+    org_obj = await _get_org(db, org_id) if org_id else None
+    org_name = getattr(org_obj, "name", None)
+
+    main_heading = (getattr(header_obj, "main_heading", None) or org_name) if (header_obj or org_name) else None
+    sub_heading = getattr(header_obj, "sub_heading", None) if header_obj else None
+
+    from app.core.models import OrganizationBranding
+    org_branding = (await db.execute(
+        select(OrganizationBranding).where(OrganizationBranding.organization_id == org_id)
+    )).scalar_one_or_none() if org_id else None
+
+    footer_label = "Confidential Document"
+    if org_branding and org_branding.footer_label:
+        footer_label = org_branding.footer_label
+    elif org_name:
+        footer_label = f"Confidential Document | {org_name}"
+
+    raw_selected_period = (overrides or {}).get("year") or widget.get("year")
+    raw_period_type = (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None)
+    
+    resolved_period_type = "Data Entry"
+    if date_ctx and not by_default_bypass:
+        resolved_period_type = raw_period_type or "Fiscal Year"
+    elif raw_period_type and str(raw_period_type).strip().lower() not in ("by_default", "data_entry", "data entry"):
+        resolved_period_type = raw_period_type
+
+    if str(resolved_period_type).strip().lower() in ("by_default", "data_entry", "data entry"):
+        resolved_period_type = "Data Entry"
+    else:
+        resolved_period_type = " ".join(word.capitalize() for word in str(resolved_period_type).replace("_", " ").split())
+
+    reporting_period = ""
+    if date_ctx and raw_selected_period:
+        reporting_period = str(raw_selected_period)
+    elif raw_selected_period and str(raw_selected_period).strip().lower() not in ("by_default", "data_entry", "data entry"):
+        reporting_period = str(raw_selected_period)
+    elif year:
+        reporting_period = str(year)
+    elif period_key:
+        reporting_period = str(period_key)
+
+    period_info = f"{resolved_period_type} : {reporting_period}" if reporting_period else resolved_period_type
+
+    header_meta = {
+        "year": year if "year" in locals() else None,
+        "period_key": period_key if "period_key" in locals() else None,
+        "period_type": resolved_period_type,
+        "reporting_period": reporting_period,
+        "period_info": period_info,
+        "header_id": header_id,
+        "header_main_heading": main_heading,
+        "header_sub_heading": sub_heading,
+        "header_font_family": getattr(header_obj, "font_family", None) if header_obj else None,
+        "header_font_size": getattr(header_obj, "font_size", 18) if header_obj else 18,
+        "header_text_color": (getattr(header_obj, "text_color", None) or "#1e3a8a") if header_obj else "#1e3a8a",
+        "header_text_align": (getattr(header_obj, "text_align", None) or "center") if header_obj else "center",
+        "header_sub_font_size": getattr(header_obj, "sub_font_size", 11) if header_obj else 11,
+        "header_sub_text_color": (getattr(header_obj, "sub_text_color", None) or "#4b5563") if header_obj else "#4b5563",
+        "header_kpi_name_color": (getattr(header_obj, "kpi_name_color", None) or "#1e3a8a") if header_obj else "#1e3a8a",
+        "logo_url": f"/reports/headers/{header_id}/logo" if (header_obj and header_obj.logo_path) else None,
+        "logo2_url": f"/reports/headers/{header_id}/logo2" if (header_obj and getattr(header_obj, "logo_path_2", None)) else None,
+        "organization_name": org_name,
+        "footer_label": footer_label,
+    }
+
+    date_range = None
+    if date_ctx and not by_default_bypass:
+        start_date, end_date, start_year, config = date_ctx
+        date_col_key = get_widget_date_col_key(config, kpi_id, f_obj.key, f_obj)
+        if date_col_key:
+            date_range = (start_date, end_date, str(date_col_key))
+
+    entry_ids: list[int] = []
+    if date_range:
+        start_date, end_date, _col = date_range
+        org = await _get_org(db, org_id)
+        spanned_years = _get_spanned_years(org, start_date, end_date)
+        entries_res = await db.execute(
+            select(KPIEntry.id)
+            .where(
+                KPIEntry.kpi_id == kpi_id,
+                KPIEntry.organization_id == org_id,
+                KPIEntry.is_draft == False,
+                KPIEntry.year.in_(spanned_years),
+            )
+        )
+        entry_ids = [r[0] for r in entries_res.all()]
+    if not entry_ids:
+        eid, _ = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
+        if eid:
+            entry_ids = [eid]
+        else:
+            latest_res = await db.execute(
+                select(KPIEntry.id)
+                .where(
+                    KPIEntry.kpi_id == kpi_id,
+                    KPIEntry.organization_id == org_id,
+                    KPIEntry.is_draft == False,
+                )
+                .order_by(KPIEntry.year.desc())
+                .limit(1)
+            )
+            latest_eid = latest_res.scalar_one_or_none()
+            if latest_eid:
+                entry_ids = [latest_eid]
+
+    configured_cols = [str(x) for x in (merged.get("linked_table_columns") or []) if str(x).strip()]
+    sub_fields = f_obj.sub_fields or []
+    sf_by_key = {str(getattr(sf, "key", "")): sf for sf in sub_fields if getattr(sf, "key", None)}
+    if not configured_cols:
+        visible_keys = [str(sf.key) for sf in sub_fields]
+    else:
+        visible_keys = [k for k in configured_cols if k in sf_by_key]
+        if not visible_keys:
+            visible_keys = [str(sf.key) for sf in sub_fields]
+
+    columns = [
+        {
+            "key": k,
+            "name": sf_by_key[k].name or k,
+            "field_type": str(getattr(getattr(sf_by_key[k], "field_type", None), "value", getattr(sf_by_key[k], "field_type", "")) or "text"),
+        }
+        for k in visible_keys
+        if k in sf_by_key
+    ]
+    visible_sf_ids = [int(getattr(sf_by_key[k], "id")) for k in visible_keys if k in sf_by_key]
+
+    if not entry_ids:
+        return {
+            "version": 1,
+            "widget_id": merged.get("id"),
+            "widget_title": widget_title,
+            "kpi_id": kpi_id,
+            "kpi_title": kpi_title,
+            "source_field_key": f_obj.key,
+            "source_field_name": f_obj.name or f_obj.key,
+            "source_field_id": int(f_obj.id),
+            "columns": columns,
+            "rows": [],
+            "total": 0,
+            "page": int(page),
+            "page_size": int(page_size),
+            "dimension_filter": dimension_filter,
+            "entry_ids": [],
+            "meta": header_meta,
+        }
+
+    r = KpiMultiLineRow.__table__.alias("r")
+    stmt = select(r.c.id, r.c.row_index).where(r.c.entry_id.in_(entry_ids), r.c.field_id == int(f_obj.id))
+
+    if date_range:
+        start_date, end_date, date_col_key = date_range
+        date_sf = sf_by_key.get(date_col_key)
+        if date_sf:
+            date_sf_id = int(getattr(date_sf, "id"))
+            dc = KpiMultiLineCell.__table__.alias("dc")
+            stmt = stmt.join(dc, and_(dc.c.row_id == r.c.id, dc.c.sub_field_id == date_sf_id))
+            stmt = stmt.where(
+                or_(
+                    and_(
+                        dc.c.value_date.isnot(None),
+                        dc.c.value_date >= start_date,
+                        dc.c.value_date < end_date,
+                    ),
+                    and_(
+                        dc.c.value_text.isnot(None),
+                        dc.c.value_text != "",
+                        ~dc.c.value_text.in_(["false", "null", "none", "False", "Null", "None"]),
+                        dc.c.value_text >= start_date.isoformat(),
+                        dc.c.value_text < end_date.isoformat(),
+                    ),
+                )
+            )
+
+    sub_id_by_key = {str(getattr(sf, "key", "")): int(getattr(sf, "id")) for sf in sub_fields if getattr(sf, "key", None)}
+    reference_field_types = {str(getattr(sf, "key", "")): str(getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", "")) or "") for sf in sub_fields if getattr(sf, "key", None)}
+
+    # 1. Fetch user-scoped dashboard filters and permissions
+    user_filters: dict[str, list[str]] = {}
+    if dashboard_id and user:
+        try:
+            user_filters, _ = await _get_dashboard_user_filter_and_permissions(db, user, int(dashboard_id))
+        except Exception:
+            user_filters = {}
+
+    normal_filters = dict((overrides or {}).get("normal_filters") or (overrides or {}).get("dashboard_filters") or {})
+
+    # Check dashboard column fetching config & selected_column_value
+    dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == int(dashboard_id)))).scalar_one_or_none() if dashboard_id else None
+    is_column_fetching = bool(dashboard and getattr(dashboard, "fetch_data_with_column", False))
+    col_fetching_config = getattr(dashboard, "column_fetching_config", None) or {}
+
+    sel_col_val = (overrides or {}).get("selected_column_value") or merged.get("selected_column_value")
+    column_filter = (overrides or {}).get("column_filter") or merged.get("column_filter")
+    if not column_filter and sel_col_val and str(sel_col_val).strip() != "":
+        column_filter = {
+            "kpi_id": col_fetching_config.get("kpi_id") if is_column_fetching else None,
+            "source_field_key": col_fetching_config.get("source_field_key") if is_column_fetching else None,
+            "column_key": col_fetching_config.get("column_key") if is_column_fetching else None,
+            "value": str(sel_col_val).strip(),
+        }
+
+    # Map user_filters to matching subfields in this table
+    if user_filters:
+        for fk, fvals in user_filters.items():
+            matched_sf = _find_dept_or_user_key_subfield(sub_fields, fk)
+            target_k = matched_sf.key if matched_sf else fk
+            if target_k not in normal_filters:
+                normal_filters[target_k] = fvals
+
+    # Also check if user is not admin and has unique_user_key (e.g. department)
+    role_val = str(getattr(user.role, "value", user.role) or "").upper() if user and getattr(user, "role", None) else ""
+    is_admin = role_val in ("ORG_ADMIN", "SUPER_ADMIN")
+    u_key = (getattr(user, "unique_user_key", None) or "").strip() if not is_admin and user else None
+    if u_key:
+        dept_sf = _find_dept_or_user_key_subfield(sub_fields)
+        if dept_sf and dept_sf.key not in normal_filters:
+            normal_filters[dept_sf.key] = [u_key]
+
+    # If sel_col_val was provided (e.g. "Civil Engineering"), ensure it gets applied to the table's department / column_fetching column
+    if sel_col_val and str(sel_col_val).strip() != "":
+        val_str = str(sel_col_val).strip()
+        dept_sf = _find_dept_or_user_key_subfield(sub_fields, col_fetching_config.get("column_key"))
+        if dept_sf and dept_sf.key not in normal_filters:
+            normal_filters[dept_sf.key] = [val_str]
+
+    raw_filters = _combine_with_runtime_filters(
+        merged.get("filters") or (overrides or {}).get("filters"),
+        column_filter=column_filter,
+        normal_filters=normal_filters,
+        kpi_id=kpi_id,
+        source_field_key=f_obj.key,
+        sub_id_by_key=sub_id_by_key,
+    )
+    # 2. Fetch custom label mappings for this dashboard & widget
+    original_to_custom: dict[str, str] = {}
+    custom_to_original: dict[str, str] = {}
+    if dashboard_id:
+        try:
+            customizations_res = await db.execute(
+                select(DashboardLabelCustomization).where(
+                    DashboardLabelCustomization.dashboard_id == int(dashboard_id)
+                )
+            )
+            all_customs = customizations_res.scalars().all()
+            widget_id_str = str(merged.get("id") or "")
+            for c in all_customs:
+                if not c.widget_id:
+                    original_to_custom[c.original_label.strip()] = c.customized_label.strip()
+                    custom_to_original[c.customized_label.lower().strip()] = c.original_label.strip()
+            for c in all_customs:
+                if c.widget_id and c.widget_id == widget_id_str:
+                    original_to_custom[c.original_label.strip()] = c.customized_label.strip()
+                    custom_to_original[c.customized_label.lower().strip()] = c.original_label.strip()
+        except Exception:
+            pass
+
+    filter_params: dict[str, Any] = {}
+    resolved_dim_filter = dict(dimension_filter) if dimension_filter else None
+    if dimension_filter:
+        dim_sf_key = dimension_filter.get("sub_field_key") or dimension_filter.get("field") or dimension_filter.get("dimension")
+        dim_val = dimension_filter.get("value")
+        if dim_sf_key and str(dim_sf_key) in sf_by_key:
+            dim_sf = sf_by_key[str(dim_sf_key)]
+            dim_sf_id = int(getattr(dim_sf, "id"))
+            dim_col_name = str(getattr(dim_sf, "name", None) or dim_sf_key).strip()
+            if resolved_dim_filter:
+                resolved_dim_filter["column_name"] = dim_col_name
+                resolved_dim_filter["sub_field_name"] = dim_col_name
+            header_meta["dimension_column_name"] = dim_col_name
+            dim_cell = KpiMultiLineCell.__table__.alias("dim_cell")
+            stmt = stmt.outerjoin(dim_cell, and_(dim_cell.c.row_id == r.c.id, dim_cell.c.sub_field_id == dim_sf_id))
+            if dim_val is None or str(dim_val).strip() in ("", "(empty)", "null", "None"):
+                stmt = stmt.where(
+                    or_(
+                        dim_cell.c.id.is_(None),
+                        text("TRIM(BOTH FROM COALESCE(dim_cell.value_text, '')) = ''"),
+                    )
+                )
+            else:
+                dim_str = str(dim_val).strip()
+                # Resolve custom display label back to original raw backend value if applicable
+                raw_val = custom_to_original.get(dim_str.lower(), dim_str)
+                # If custom label exists for raw_val, ensure label is set in resolved_dim_filter and header_meta
+                custom_lbl = original_to_custom.get(raw_val) or original_to_custom.get(dim_str) or dimension_filter.get("label") or dim_str
+                if resolved_dim_filter:
+                    resolved_dim_filter["label"] = custom_lbl
+                header_meta["display_slice_label"] = custom_lbl
+
+                filter_params["drill_dim_val"] = dim_str
+                filter_params["drill_raw_val"] = raw_val
+                stmt = stmt.where(
+                    or_(
+                        text("TRIM(BOTH FROM COALESCE(dim_cell.value_text, CAST(dim_cell.value_number AS text), '')) = TRIM(BOTH FROM CAST(:drill_dim_val AS text))"),
+                        text("TRIM(BOTH FROM COALESCE(dim_cell.value_text, CAST(dim_cell.value_number AS text), '')) = TRIM(BOTH FROM CAST(:drill_raw_val AS text))"),
+                    )
+                )
+
+    compiled = compile_multiline_row_filters_sql(
+        raw_filters,
+        sub_id_by_key=sub_id_by_key,
+        reference_field_types=reference_field_types,
+        resolved_label_sets=None,
+    )
+    if compiled is not None:
+        where_sql, p, sid_params = compiled
+        for sp in sid_params or []:
+            spk = str(sp)
+            alias = KpiMultiLineCell.__table__.alias(_wf_alias(spk))
+            stmt = stmt.outerjoin(alias, and_(alias.c.row_id == r.c.id, alias.c.sub_field_id == bindparam(spk)))
+        if where_sql.strip():
+            stmt = stmt.where(text(where_sql))
+            filter_params.update(p)
+
+    if search and search.strip():
+        q = f"%{search.strip().lower()}%"
+        cs = KpiMultiLineCell.__table__.alias("cs")
+        val_expr = func.lower(
+            func.coalesce(
+                cast(cs.c.value_text, String()),
+                cast(cs.c.value_json, String()),
+                cast(cs.c.value_number, String()),
+                cast(cs.c.value_boolean, String()),
+                cast(cs.c.value_date, String()),
+            )
+        )
+        stmt = stmt.where(
+            select(func.count())
+            .select_from(cs)
+            .where(and_(cs.c.row_id == r.c.id, cs.c.sub_field_id.in_(visible_sf_ids), val_expr.like(q)))
+            .correlate(r)
+            .scalar_subquery()
+            > 0
+        )
+
+    total = int((await db.execute(select(func.count()).select_from(stmt.subquery()), filter_params)).scalar_one() or 0)
+
+    sort_key = (sort_by or "").strip()
+    sort_dir_s = "desc" if str(sort_dir).lower() == "desc" else "asc"
+    if sort_key and sort_key in sf_by_key:
+        sf = sf_by_key[sort_key]
+        sort_sf_id = int(getattr(sf, "id"))
+        sort_ft = str(getattr(getattr(sf, "field_type", None), "value", getattr(sf, "field_type", "")) or "")
+        sc = KpiMultiLineCell.__table__.alias("sc")
+        stmt = stmt.outerjoin(sc, and_(sc.c.row_id == r.c.id, sc.c.sub_field_id == sort_sf_id))
+        if sort_ft == "number":
+            expr = sc.c.value_number
+        elif sort_ft == "date":
+            expr = sc.c.value_date
+        elif sort_ft == "boolean":
+            expr = sc.c.value_boolean
+        else:
+            expr = func.lower(sc.c.value_text)
+        order_clause = expr.desc().nullslast() if sort_dir_s == "desc" else expr.asc().nullslast()
+        stmt = stmt.order_by(order_clause, r.c.row_index)
+    else:
+        first_col_key = columns[0]["key"] if columns else None
+        if first_col_key and first_col_key in sf_by_key:
+            fc_sf_id = int(getattr(sf_by_key[first_col_key], "id"))
+            fc = KpiMultiLineCell.__table__.alias("fc")
+            stmt = stmt.outerjoin(fc, and_(fc.c.row_id == r.c.id, fc.c.sub_field_id == fc_sf_id))
+            fc_val = func.coalesce(fc.c.value_text, cast(fc.c.value_number, String), "")
+            stmt = stmt.order_by(func.count().over(partition_by=fc_val).desc(), fc_val.asc(), r.c.row_index)
+        else:
+            stmt = stmt.order_by(r.c.row_index)
+
+    start = (int(page) - 1) * int(page_size)
+    page_rows = list((await db.execute(stmt.offset(start).limit(int(page_size)), filter_params)).all())
+    row_ids = [int(rr[0]) for rr in page_rows]
+    row_index_by_id = {int(rr[0]): int(rr[1]) for rr in page_rows}
+
+    if not row_ids:
+        return {
+            "version": 1,
+            "widget_id": merged.get("id"),
+            "widget_title": widget_title,
+            "kpi_id": kpi_id,
+            "kpi_title": kpi_title,
+            "source_field_key": f_obj.key,
+            "source_field_name": f_obj.name or f_obj.key,
+            "source_field_id": int(f_obj.id),
+            "columns": columns,
+            "rows": [],
+            "total": total,
+            "page": int(page),
+            "page_size": int(page_size),
+            "dimension_filter": dimension_filter,
+            "entry_ids": entry_ids,
+            "meta": header_meta,
+        }
+
+    ctab = KpiMultiLineCell.__table__
+    sftab = KPIFieldSubField.__table__
+    row_data_by_id: dict[int, dict[str, Any]] = {rid: {} for rid in row_ids}
+    chunk_size = 1000
+    for i in range(0, len(row_ids), chunk_size):
+        chunk = row_ids[i : i + chunk_size]
+        cell_res = await db.execute(
+            select(ctab.c.row_id, sftab.c.key, ctab.c.value_text, ctab.c.value_number, ctab.c.value_boolean, ctab.c.value_date, ctab.c.value_json)
+            .select_from(ctab)
+            .join(sftab, sftab.c.id == ctab.c.sub_field_id)
+            .where(ctab.c.row_id.in_(chunk), ctab.c.sub_field_id.in_(visible_sf_ids))
+        )
+        for row_id, key, vt, vn, vb, vd, vj in cell_res.all():
+            rid = int(row_id)
+            if rid not in row_data_by_id or not key:
+                continue
+            if vj is not None:
+                raw = vj
+            elif vt is not None:
+                raw = vt
+            elif vn is not None:
+                raw = vn
+            elif vb is not None:
+                raw = vb
+            elif vd is not None:
+                raw = vd.isoformat() if hasattr(vd, "isoformat") else str(vd)
+            else:
+                raw = None
+            row_data_by_id[rid][str(key)] = raw
+
+    # Map raw cell values to custom display labels so reports & modal show custom labels
+    if original_to_custom:
+        for rid in row_ids:
+            rdict = row_data_by_id.get(rid, {})
+            for ck, cval in list(rdict.items()):
+                if cval is not None:
+                    str_cval = str(cval).strip()
+                    if str_cval in original_to_custom:
+                        rdict[ck] = original_to_custom[str_cval]
+
+    rows_out = [{"__index": row_index_by_id.get(rid, 0), **row_data_by_id.get(rid, {})} for rid in row_ids]
+
+    footer_cfg = (f_obj.config or {}).get("footer_config") if (getattr(f_obj, "config", None) and isinstance(f_obj.config, dict)) else None
+    if footer_cfg and footer_cfg.get("enabled"):
+        try:
+            from app.reports.custom_service import evaluate_report_table_footer_rows
+            sub_fields_list = [{"key": sf.key, "name": sf.name} for sf in f_obj.sub_fields]
+            evaluated_footer = evaluate_report_table_footer_rows(footer_cfg, sub_fields_list, rows_out)
+            if evaluated_footer:
+                header_meta["evaluated_footer_rows"] = evaluated_footer
+        except Exception:
+            pass
+
+    return {
+        "version": 1,
+        "widget_id": merged.get("id"),
+        "widget_title": widget_title,
+        "kpi_id": kpi_id,
+        "kpi_title": kpi_title,
+        "source_field_key": f_obj.key,
+        "source_field_name": f_obj.name or f_obj.key,
+        "source_field_id": int(f_obj.id),
+        "columns": columns,
+        "rows": rows_out,
+        "total": total,
+        "page": int(page),
+        "page_size": int(page_size),
+        "dimension_filter": resolved_dim_filter,
+        "entry_ids": entry_ids,
+        "meta": header_meta,
+    }
 
 
 async def _fast_line_points(
@@ -5352,7 +6040,12 @@ async def resolve_dashboard_universal_batch(
         if is_date_fetching and org and not by_default_bypass:
             selected_period = (overrides or {}).get("year") or w.get("year")
             period_type = (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
-            if selected_period and selected_period not in ("by_default", "By Default") and period_type not in ("by_default", "By Default", "Data Entry", "data_entry"):
+            if (
+                period_type
+                and selected_period
+                and selected_period not in ("by_default", "By Default")
+                and str(period_type).strip().lower() not in ("by_default", "data entry", "data_entry")
+            ):
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period), period_type=period_type)
                     mod_overrides["year"] = start_year

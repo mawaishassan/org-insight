@@ -10,7 +10,15 @@ from sqlalchemy import select
 from app.core.database import get_db
 from app.auth.dependencies import get_current_user, require_org_admin, require_tenant
 from app.core.models import User, ExternalUser, UserRole
-from app.users.schemas import UserCreate, UserUpdate, UserResponse, UserKpiAssignmentResponse, ExternalUserCreate
+from app.users.schemas import (
+    UserCreate,
+    UserUpdate,
+    UserResponse,
+    UserKpiAssignmentResponse,
+    ExternalUserCreate,
+    BulkDeleteUsersRequest,
+    BulkDeleteUsersResponse,
+)
 from app.users.service import (
     create_user,
     create_external_user,
@@ -423,11 +431,6 @@ async def upload_standard_users_excel(
                 errors.append(f"Row {row_idx}: Duplicate user_name '{username}' in template")
             seen_usernames.add(username.lower())
 
-        if unique_key:
-            if unique_key.lower() in seen_keys:
-                errors.append(f"Row {row_idx}: Duplicate unique_user_key '{unique_key}' in template")
-            seen_keys.add(unique_key.lower())
-
         parsed_users.append({
             "row_idx": row_idx,
             "username": username,
@@ -452,7 +455,6 @@ async def upload_standard_users_excel(
 
     # Database validation against existing records
     usernames_list = [p["username"] for p in parsed_users if p["username"]]
-    unique_keys_list = [p["unique_user_key"] for p in parsed_users if p["unique_user_key"]]
 
     # Check existing usernames in org
     existing_username_res = await db.execute(
@@ -460,25 +462,12 @@ async def upload_standard_users_excel(
     )
     existing_usernames = {u.lower() for u in existing_username_res.scalars().all()}
 
-    # Check existing unique keys in org
-    existing_keys = set()
-    if unique_keys_list:
-        existing_keys_res = await db.execute(
-            select(User.unique_user_key).where(
-                User.organization_id == org_id, User.unique_user_key.in_(unique_keys_list)
-            )
-        )
-        existing_keys = {k.lower() for k in existing_keys_res.scalars().all()}
-
     for p in parsed_users:
         row_idx = p["row_idx"]
         username = p["username"]
-        key = p["unique_user_key"]
 
         if username and username.lower() in existing_usernames:
             errors.append(f"Row {row_idx}: Username '{username}' already exists in this organization")
-        if key and key.lower() in existing_keys:
-            errors.append(f"Row {row_idx}: unique_user_key '{key}' already exists in this organization")
 
     if errors:
         raise HTTPException(
@@ -595,3 +584,31 @@ async def delete_org_user(
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     await db.commit()
+
+
+@router.post("/bulk-delete", response_model=BulkDeleteUsersResponse)
+async def bulk_delete_org_users(
+    payload: BulkDeleteUsersRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Bulk delete users in organization, preventing self-deletion."""
+    from app.reports.custom_service import CUSTOM_REPORT_CACHE
+
+    org_id = _org_id(current_user, payload.organization_id)
+    target_ids = [uid for uid in payload.user_ids if uid != current_user.id]
+    if not target_ids:
+        return BulkDeleteUsersResponse(deleted_count=0, message="No eligible users to delete")
+
+    deleted_count = 0
+    for uid in target_ids:
+        ok = await delete_user(db, uid, org_id)
+        if ok:
+            CUSTOM_REPORT_CACHE.invalidate_user(uid)
+            deleted_count += 1
+
+    await db.commit()
+    return BulkDeleteUsersResponse(
+        deleted_count=deleted_count,
+        message=f"Successfully deleted {deleted_count} user(s)",
+    )

@@ -25,6 +25,8 @@ from app.widget_data.schemas import (
     DashboardWidgetDataRequestV1,
     WidgetDataRequestV1,
     WidgetDataResponseV1,
+    WidgetDrillDownRequestV1,
+    WidgetDrillDownResponseV1,
 )
 from app.widget_data.service import (
     resolve_dashboard_card_widget_data,
@@ -38,6 +40,7 @@ from app.widget_data.service import (
     resolve_dashboard_table_widget_data,
     resolve_dashboard_trend_widget_data,
     resolve_dashboard_universal_batch,
+    resolve_dashboard_widget_drill_down,
     resolve_widget_data,
     trace,
 )
@@ -378,6 +381,42 @@ async def post_dashboard_table_widget_rows(
     if resolved_type == "error":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(meta.get("error") or data.get("error") or "Invalid request"))
     return _chart_response(meta, data, resolved_type, entry_revision)
+
+
+@router.post("/drill-down", response_model=WidgetDrillDownResponseV1)
+async def post_widget_drill_down(
+    body: WidgetDrillDownRequestV1,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Drill-down API: return paged MLA records corresponding to clicked graph data element or KPI card.
+    Authorizes via dashboard view rights.
+    """
+    org_id = _org_id(current_user, body.organization_id)
+    if body.version != 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported request version")
+    if not body.widget or not isinstance(body.widget, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="widget is required")
+    res = await resolve_dashboard_widget_drill_down(
+        db,
+        current_user,
+        org_id,
+        body.dashboard_id,
+        body.widget,
+        body.overrides,
+        dimension_filter=body.dimension_filter,
+        page=body.page,
+        page_size=body.page_size,
+        search=body.search,
+        sort_by=body.sort_by,
+        sort_dir=body.sort_dir,
+    )
+    if res.get("error") == "forbidden":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to view this dashboard")
+    if res.get("error"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(res.get("message") or res.get("error")))
+    return res
 
 
 @router.post("/line", response_model=WidgetDataResponseV1)

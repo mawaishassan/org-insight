@@ -25,7 +25,10 @@ function getBaseUrl(): string {
 
 export function getApiUrl(path: string): string {
   const base = getBaseUrl();
-  const p = path.startsWith("/") ? path : `/${path}`;
+  let p = path.startsWith("/") ? path : `/${path}`;
+  if (p.startsWith("/api/")) {
+    p = p.substring(4);
+  }
   return base ? `${base}/api${p}` : `/api${p}`;
 }
 

@@ -112,6 +112,366 @@ function deriveGradientStopsFromBase(base: string) {
   return { from: `#${hex.toLowerCase()}`, to: `rgba(${r}, ${g}, ${b}, 0.35)` };
 }
 
+function WidgetLinkWithTableConfigUI({
+  addLinkWithTable,
+  setAddLinkWithTable,
+  addLinkedTableFieldKey,
+  setAddLinkedTableFieldKey,
+  addLinkedTableColumns,
+  setAddLinkedTableColumns,
+  addMultiLineFields,
+  defaultFieldKey,
+  defaultSubFields,
+}: {
+  addLinkWithTable: boolean;
+  setAddLinkWithTable: (val: boolean) => void;
+  addLinkedTableFieldKey: string;
+  setAddLinkedTableFieldKey: (val: string) => void;
+  addLinkedTableColumns: string[];
+  setAddLinkedTableColumns: React.Dispatch<React.SetStateAction<string[]>>;
+  addMultiLineFields: Array<{ id: number; key: string; name: string; sub_fields?: any[] }>;
+  defaultFieldKey?: string;
+  defaultSubFields?: Array<{ key: string; name: string }>;
+}) {
+  const effectiveKey = addLinkedTableFieldKey || defaultFieldKey || "";
+  const targetMla = addMultiLineFields.find((f) => f.key === effectiveKey);
+  const availSubFields: any[] = targetMla?.sub_fields || defaultSubFields || [];
+
+  return (
+    <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.85rem", marginTop: "0.5rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+        <div>
+          <label style={{ fontSize: "0.9rem", fontWeight: 650, color: "var(--text)", display: "block" }}>
+            Link with Table (Drill-Down)
+          </label>
+          <span style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
+            When enabled, clicking a chart element (bar, slice, data point) drills down to matching MLA records.
+          </span>
+        </div>
+        <div style={{ display: "inline-flex", borderRadius: "6px", border: "1px solid var(--border)", overflow: "hidden" }}>
+          <button
+            type="button"
+            onClick={() => setAddLinkWithTable(false)}
+            style={{
+              padding: "0.25rem 0.75rem",
+              fontSize: "0.82rem",
+              fontWeight: !addLinkWithTable ? 700 : 500,
+              background: !addLinkWithTable ? "var(--accent, #3b82f6)" : "var(--surface)",
+              color: !addLinkWithTable ? "#ffffff" : "var(--muted)",
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            No
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setAddLinkWithTable(true);
+              if (!addLinkedTableFieldKey && defaultFieldKey) {
+                setAddLinkedTableFieldKey(defaultFieldKey);
+              }
+              if (addLinkedTableColumns.length === 0 && availSubFields.length > 0) {
+                setAddLinkedTableColumns(availSubFields.slice(0, 6).map((s: any) => s.key));
+              }
+            }}
+            style={{
+              padding: "0.25rem 0.75rem",
+              fontSize: "0.82rem",
+              fontWeight: addLinkWithTable ? 700 : 500,
+              background: addLinkWithTable ? "var(--accent, #3b82f6)" : "var(--surface)",
+              color: addLinkWithTable ? "#ffffff" : "var(--muted)",
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            Yes
+          </button>
+        </div>
+      </div>
+
+      {addLinkWithTable && (
+        <div
+          style={{
+            marginTop: "0.5rem",
+            padding: "0.85rem",
+            background: "rgba(59, 130, 246, 0.03)",
+            borderRadius: "8px",
+            border: "1px solid var(--border)",
+            display: "grid",
+            gap: "0.75rem",
+          }}
+        >
+          {/* Source MLA Table */}
+          <div style={{ display: "grid", gridTemplateColumns: "140px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
+            <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text)" }}>Source Table (MLA)</label>
+            <select
+              value={effectiveKey}
+              onChange={(e) => {
+                const nextKey = e.target.value;
+                setAddLinkedTableFieldKey(nextKey);
+                const nextMla = addMultiLineFields.find((f) => f.key === nextKey);
+                if (nextMla?.sub_fields) {
+                  setAddLinkedTableColumns(nextMla.sub_fields.slice(0, 6).map((s: any) => s.key));
+                }
+              }}
+              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem", width: "100%", borderRadius: "6px", border: "1px solid var(--border)" }}
+            >
+              <option value="">— Select MLA Table —</option>
+              {addMultiLineFields.map((f) => (
+                <option key={f.key} value={f.key}>
+                  {f.name} ({f.key})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Columns Selector */}
+          {availSubFields.length === 0 ? (
+            <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
+              No columns found. Select a source MLA table above.
+            </p>
+          ) : (
+            <div style={{ display: "grid", gap: "0.4rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+                  Visible Drill-Down Columns
+                  <span style={{ marginLeft: "0.4rem", color: "var(--accent, #3b82f6)", fontWeight: 700 }}>
+                    ({addLinkedTableColumns.length} selected)
+                  </span>
+                </label>
+                <div style={{ display: "flex", gap: "0.4rem" }}>
+                  <button
+                    type="button"
+                    onClick={() => setAddLinkedTableColumns(availSubFields.map((s: any) => s.key))}
+                    style={{ background: "none", border: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 600, padding: 0 }}
+                  >
+                    Select All
+                  </button>
+                  <span style={{ color: "var(--border)" }}>|</span>
+                  <button
+                    type="button"
+                    onClick={() => setAddLinkedTableColumns([])}
+                    style={{ background: "none", border: "none", color: "var(--muted)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500, padding: 0 }}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  maxHeight: "160px",
+                  overflowY: "auto",
+                  display: "grid",
+                  gap: "0.25rem",
+                  padding: "0.35rem",
+                  background: "var(--surface)",
+                  borderRadius: "6px",
+                  border: "1px solid var(--border)",
+                }}
+              >
+                {availSubFields.map((sf: any) => {
+                  const checked = addLinkedTableColumns.includes(sf.key);
+                  return (
+                    <label
+                      key={sf.key}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.25rem 0.45rem",
+                        borderRadius: "4px",
+                        cursor: "pointer",
+                        fontSize: "0.82rem",
+                        background: checked ? "rgba(59, 130, 246, 0.08)" : "transparent",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setAddLinkedTableColumns((prev) => [...prev, sf.key]);
+                          } else {
+                            setAddLinkedTableColumns((prev) => prev.filter((k) => k !== sf.key));
+                          }
+                        }}
+                      />
+                      <span style={{ fontWeight: checked ? 600 : 400, flex: 1 }}>{sf.name}</span>
+                      <code style={{ fontSize: "0.72rem", color: "var(--muted)" }}>{sf.key}</code>
+                    </label>
+                  );
+                })}
+              </div>
+
+              {/* Selected Columns Order Controls */}
+              {addLinkedTableColumns.length > 0 && (
+                <div style={{ display: "grid", gap: "0.3rem", marginTop: "0.35rem" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <label style={{ fontSize: "0.8rem", fontWeight: 650, color: "var(--text)" }}>
+                      Column Display Order
+                    </label>
+                    <span style={{ fontSize: "0.74rem", color: "var(--muted)" }}>
+                      First column is used for primary grouping & sorting
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      maxHeight: "180px",
+                      overflowY: "auto",
+                      display: "grid",
+                      gap: "0.25rem",
+                      padding: "0.35rem",
+                      background: "var(--surface)",
+                      borderRadius: "6px",
+                      border: "1px solid var(--border)",
+                    }}
+                  >
+                    {addLinkedTableColumns.map((colKey, idx) => {
+                      const sf = availSubFields.find((s: any) => s.key === colKey);
+                      const colName = sf?.name || colKey;
+                      const isFirst = idx === 0;
+                      const isLast = idx === addLinkedTableColumns.length - 1;
+
+                      const moveUp = (e: React.MouseEvent) => {
+                        e.stopPropagation();
+                        if (isFirst) return;
+                        setAddLinkedTableColumns((prev) => {
+                          const next = [...prev];
+                          const tmp = next[idx - 1];
+                          next[idx - 1] = next[idx];
+                          next[idx] = tmp;
+                          return next;
+                        });
+                      };
+
+                      const moveDown = (e: React.MouseEvent) => {
+                        e.stopPropagation();
+                        if (isLast) return;
+                        setAddLinkedTableColumns((prev) => {
+                          const next = [...prev];
+                          const tmp = next[idx + 1];
+                          next[idx + 1] = next[idx];
+                          next[idx] = tmp;
+                          return next;
+                        });
+                      };
+
+                      const removeCol = (e: React.MouseEvent) => {
+                        e.stopPropagation();
+                        setAddLinkedTableColumns((prev) => prev.filter((k) => k !== colKey));
+                      };
+
+                      return (
+                        <div
+                          key={colKey}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "0.4rem",
+                            padding: "0.25rem 0.5rem",
+                            borderRadius: "4px",
+                            fontSize: "0.82rem",
+                            background: "rgba(59, 130, 246, 0.05)",
+                            border: "1px solid var(--border)",
+                          }}
+                        >
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              width: 20,
+                              height: 20,
+                              borderRadius: "50%",
+                              background: "var(--accent, #3b82f6)",
+                              color: "#ffffff",
+                              fontSize: "0.72rem",
+                              fontWeight: 700,
+                              flexShrink: 0,
+                            }}
+                          >
+                            {idx + 1}
+                          </span>
+                          <span style={{ fontWeight: 600, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {colName}
+                          </span>
+                          <code style={{ fontSize: "0.72rem", color: "var(--muted)", marginRight: "0.25rem" }}>
+                            {colKey}
+                          </code>
+                          <div style={{ display: "flex", gap: "0.2rem", alignItems: "center", flexShrink: 0 }}>
+                            <button
+                              type="button"
+                              onClick={moveUp}
+                              disabled={isFirst}
+                              style={{
+                                padding: "0.15rem 0.35rem",
+                                fontSize: "0.75rem",
+                                borderRadius: "4px",
+                                border: "1px solid var(--border)",
+                                background: isFirst ? "transparent" : "var(--surface)",
+                                color: isFirst ? "var(--muted)" : "var(--text)",
+                                cursor: isFirst ? "not-allowed" : "pointer",
+                                opacity: isFirst ? 0.4 : 1,
+                              }}
+                              title="Move Up"
+                              aria-label={`Move ${colName} up`}
+                            >
+                              ▲
+                            </button>
+                            <button
+                              type="button"
+                              onClick={moveDown}
+                              disabled={isLast}
+                              style={{
+                                padding: "0.15rem 0.35rem",
+                                fontSize: "0.75rem",
+                                borderRadius: "4px",
+                                border: "1px solid var(--border)",
+                                background: isLast ? "transparent" : "var(--surface)",
+                                color: isLast ? "var(--muted)" : "var(--text)",
+                                cursor: isLast ? "not-allowed" : "pointer",
+                                opacity: isLast ? 0.4 : 1,
+                              }}
+                              title="Move Down"
+                              aria-label={`Move ${colName} down`}
+                            >
+                              ▼
+                            </button>
+                            <button
+                              type="button"
+                              onClick={removeCol}
+                              style={{
+                                padding: "0.15rem 0.35rem",
+                                fontSize: "0.85rem",
+                                borderRadius: "4px",
+                                border: "1px solid transparent",
+                                background: "transparent",
+                                color: "var(--error, #ef4444)",
+                                cursor: "pointer",
+                                lineHeight: 1,
+                              }}
+                              title="Remove column"
+                              aria-label={`Remove ${colName}`}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type Widget =
   | { id: string; type: "text"; title?: string; text?: string; full_width?: boolean; col_span?: number }
   | {
@@ -124,6 +484,9 @@ type Widget =
       field_key: string;
       enable_linked_widgets?: boolean;
       linked_widget_ids?: string[];
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -147,6 +510,9 @@ type Widget =
       start_year: number;
       end_year: number;
       period_key?: string | null;
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -179,6 +545,9 @@ type Widget =
       filter_sub_field_keys?: string[];
       filter_labels?: Record<string, string>;
       filters?: MultiItemsFilterPayloadV2 | null;
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -213,6 +582,9 @@ type Widget =
       filter_sub_field_keys?: string[];
       filter_labels?: Record<string, string>;
       filters?: MultiItemsFilterPayloadV2 | null;
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -251,6 +623,9 @@ type Widget =
       filters?: MultiItemsFilterPayloadV2 | null;
       enable_linked_widgets?: boolean;
       linked_widget_ids?: string[];
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -428,6 +803,8 @@ export default function DashboardDesignPage() {
   if (error) return <p className="form-error">{error}</p>;
   if (!dashboard) return null;
 
+  const currentYear = new Date().getFullYear();
+
   return (
     <DashboardCustomizationProvider
       dashboardId={id}
@@ -435,6 +812,8 @@ export default function DashboardDesignPage() {
       consistentColors={dashboard.layout?.consistent_colors}
       colorMappings={dashboard.layout?.color_mappings}
       fetchDataWithDate={dashboard.fetch_data_with_date}
+      selectedPeriodType="by_default"
+      selectedPeriod={String(currentYear)}
       fetchDataWithColumn={(dashboard as any).fetch_data_with_column}
       columnFetchingConfig={(dashboard as any).column_fetching_config}
     >
@@ -689,6 +1068,9 @@ function DashboardDesignContent({
   const [addCardFgColor, setAddCardFgColor] = useState<string>("");
   const [addEnableLinkedWidgets, setAddEnableLinkedWidgets] = useState<boolean>(false);
   const [addLinkedWidgetIds, setAddLinkedWidgetIds] = useState<string[]>([]);
+  const [addLinkWithTable, setAddLinkWithTable] = useState<boolean>(false);
+  const [addLinkedTableFieldKey, setAddLinkedTableFieldKey] = useState<string>("");
+  const [addLinkedTableColumns, setAddLinkedTableColumns] = useState<string[]>([]);
   const [addMultiLineTableFieldKey, setAddMultiLineTableFieldKey] = useState<string>("");
   const [addMultiLineTableSubKeys, setAddMultiLineTableSubKeys] = useState<string[]>([]);
   const [addMultiLineTableTopRows, setAddMultiLineTableTopRows] = useState<number>(5);
@@ -782,6 +1164,9 @@ function DashboardDesignContent({
     setAddCardFgColor("");
     setAddEnableLinkedWidgets(false);
     setAddLinkedWidgetIds([]);
+    setAddLinkWithTable(false);
+    setAddLinkedTableFieldKey("");
+    setAddLinkedTableColumns([]);
     setAddMultiLineTableFieldKey("");
     setAddMultiLineTableSubKeys([]);
     setAddMultiLineTableTopRows(5);
@@ -824,6 +1209,9 @@ function DashboardDesignContent({
     setAddMultiLineFieldKey((w as any).source_field_key || "");
     setAddGroupBySubFieldKey((w as any).group_by_sub_field_key || "");
     setAddValueSubFieldKey((w as any).value_sub_field_key || "");
+    setAddLinkWithTable(Boolean((w as any).link_with_table));
+    setAddLinkedTableFieldKey((w as any).linked_table_field_key || (w as any).source_field_key || "");
+    setAddLinkedTableColumns(Array.isArray((w as any).linked_table_columns) ? [...(w as any).linked_table_columns] : []);
     if (w.type === "kpi_bar_chart") {
       setAddAggFn((((w as any).agg as any) || "count_rows") as any);
       setAddBarSortBy((((w as any).sort_by as any) || "value") as any);
@@ -1255,6 +1643,9 @@ function DashboardDesignContent({
         field_key: addFieldKey.trim(),
         enable_linked_widgets: addEnableLinkedWidgets,
         linked_widget_ids: addEnableLinkedWidgets ? addLinkedWidgetIds : [],
+        link_with_table: addLinkWithTable,
+        linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || undefined) : undefined,
+        linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
       };
       applyWidgetUpsert(w);
       return;
@@ -1293,6 +1684,9 @@ function DashboardDesignContent({
         start_year: a,
         end_year: b,
         period_key,
+        link_with_table: addLinkWithTable,
+        linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || undefined) : undefined,
+        linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
       };
       applyWidgetUpsert(w);
       return;
@@ -1354,6 +1748,9 @@ function DashboardDesignContent({
               filter_sub_field_keys: addFilterSubFieldKeys.length > 0 ? addFilterSubFieldKeys : (addFilterSubFieldKey.trim() ? [addFilterSubFieldKey.trim()] : undefined),
               filter_labels: Object.keys(addFilterLabels).length > 0 ? addFilterLabels : undefined,
               filters: addAdvancedFilters,
+              link_with_table: addLinkWithTable,
+              linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || addMultiLineFieldKey.trim() || undefined) : undefined,
+              linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
             }
           : {
               id: editingWidgetId ?? newId(),
@@ -1377,6 +1774,9 @@ function DashboardDesignContent({
                 .map((x) => x.trim())
                 .filter(Boolean),
               filters: null,
+              link_with_table: addLinkWithTable,
+              linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || undefined) : undefined,
+              linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
             };
       applyWidgetUpsert(w as Widget);
       return;
@@ -1418,6 +1818,9 @@ function DashboardDesignContent({
           bar_palette_scheme: addBarColorMode === "palette" ? addBarPaletteScheme : undefined,
           bar_gradient_from: addBarColorMode === "gradient" ? (addBarGradientFrom.trim() || undefined) : undefined,
           bar_gradient_to: addBarColorMode === "gradient" ? (addBarGradientTo.trim() || undefined) : undefined,
+          link_with_table: addLinkWithTable,
+          linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || undefined) : undefined,
+          linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
         };
         applyWidgetUpsert(w);
         return;
@@ -1466,6 +1869,9 @@ function DashboardDesignContent({
         filter_sub_field_keys: addFilterSubFieldKeys.length > 0 ? addFilterSubFieldKeys : (addFilterSubFieldKey.trim() ? [addFilterSubFieldKey.trim()] : undefined),
         filter_labels: Object.keys(addFilterLabels).length > 0 ? addFilterLabels : undefined,
         filters: addAdvancedFilters,
+        link_with_table: addLinkWithTable,
+        linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || addMultiLineFieldKey.trim() || undefined) : undefined,
+        linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
       };
       applyWidgetUpsert(w);
       return;
@@ -1510,6 +1916,9 @@ function DashboardDesignContent({
         filters: addCardSourceMode === "multi_line_agg" ? addAdvancedFilters : null,
         enable_linked_widgets: addEnableLinkedWidgets,
         linked_widget_ids: addEnableLinkedWidgets ? addLinkedWidgetIds : [],
+        link_with_table: addLinkWithTable,
+        linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || addMultiLineFieldKey.trim() || undefined) : undefined,
+        linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
       } as any;
       applyWidgetUpsert(w);
       return;
@@ -3389,6 +3798,20 @@ function DashboardDesignContent({
                       </div>
                     )}
 
+                    {addType === "kpi_bar_chart" && (
+                      <WidgetLinkWithTableConfigUI
+                        addLinkWithTable={addLinkWithTable}
+                        setAddLinkWithTable={setAddLinkWithTable}
+                        addLinkedTableFieldKey={addLinkedTableFieldKey}
+                        setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
+                        addLinkedTableColumns={addLinkedTableColumns}
+                        setAddLinkedTableColumns={setAddLinkedTableColumns}
+                        addMultiLineFields={addMultiLineFields}
+                        defaultFieldKey={addMultiLineFieldKey}
+                        defaultSubFields={selectedMultiLineSubFields}
+                      />
+                    )}
+
                     {addType === "kpi_trend" && addTrendMode === "multi_line_items" && (
                       <div style={{ display: "grid", gap: "0.75rem" }}>
                         <div style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
@@ -3575,9 +3998,38 @@ function DashboardDesignContent({
                       </div>
                     )}
 
+                    {addType === "kpi_trend" && (
+                      <WidgetLinkWithTableConfigUI
+                        addLinkWithTable={addLinkWithTable}
+                        setAddLinkWithTable={setAddLinkWithTable}
+                        addLinkedTableFieldKey={addLinkedTableFieldKey}
+                        setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
+                        addLinkedTableColumns={addLinkedTableColumns}
+                        setAddLinkedTableColumns={setAddLinkedTableColumns}
+                        addMultiLineFields={addMultiLineFields}
+                        defaultFieldKey={addMultiLineFieldKey}
+                        defaultSubFields={selectedMultiLineSubFields}
+                      />
+                    )}
+
+                    {addType === "kpi_line_chart" && (
+                      <WidgetLinkWithTableConfigUI
+                        addLinkWithTable={addLinkWithTable}
+                        setAddLinkWithTable={setAddLinkWithTable}
+                        addLinkedTableFieldKey={addLinkedTableFieldKey}
+                        setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
+                        addLinkedTableColumns={addLinkedTableColumns}
+                        setAddLinkedTableColumns={setAddLinkedTableColumns}
+                        addMultiLineFields={addMultiLineFields}
+                        defaultFieldKey={addMultiLineFieldKey}
+                        defaultSubFields={selectedMultiLineSubFields}
+                      />
+                    )}
+
                     {addType !== "kpi_table" &&
                       addType !== "kpi_bar_chart" &&
                       addType !== "kpi_trend" &&
+                      addType !== "kpi_line_chart" &&
                       addType !== "kpi_multi_line_table" &&
                       addType !== "kpi_card_single_value" &&
                       addType !== "kpi_single_value" &&
@@ -3901,6 +4353,18 @@ function DashboardDesignContent({
                             </div>
                           )}
                         </div>
+
+                        <WidgetLinkWithTableConfigUI
+                          addLinkWithTable={addLinkWithTable}
+                          setAddLinkWithTable={setAddLinkWithTable}
+                          addLinkedTableFieldKey={addLinkedTableFieldKey}
+                          setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
+                          addLinkedTableColumns={addLinkedTableColumns}
+                          setAddLinkedTableColumns={setAddLinkedTableColumns}
+                          addMultiLineFields={addMultiLineFields}
+                          defaultFieldKey={addMultiLineFieldKey}
+                          defaultSubFields={selectedMultiLineSubFields}
+                        />
                       </div>
                     )}
 
@@ -4045,6 +4509,18 @@ function DashboardDesignContent({
                             })()}
                           </div>
                         )}
+
+                        <WidgetLinkWithTableConfigUI
+                          addLinkWithTable={addLinkWithTable}
+                          setAddLinkWithTable={setAddLinkWithTable}
+                          addLinkedTableFieldKey={addLinkedTableFieldKey}
+                          setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
+                          addLinkedTableColumns={addLinkedTableColumns}
+                          setAddLinkedTableColumns={setAddLinkedTableColumns}
+                          addMultiLineFields={addMultiLineFields}
+                          defaultFieldKey={addMultiLineFieldKey}
+                          defaultSubFields={selectedMultiLineSubFields}
+                        />
                       </div>
                     )}
                   </div>

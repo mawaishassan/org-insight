@@ -4,7 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { WidgetRenderer, type Widget } from "../../widgets";
+import { WidgetRenderer, type Widget, type DrillDownRequestPayload } from "../../widgets";
+import { WidgetDrillDownModal } from "@/components/WidgetDrillDownModal";
 
 interface DashboardDetail {
   id: number;
@@ -35,6 +36,7 @@ export default function DashboardWidgetFullPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [rowsPerPage, setRowsPerPage] = useState<number>(10);
+  const [activeDrillDown, setActiveDrillDown] = useState<DrillDownRequestPayload | null>(null);
 
   useEffect(() => {
     if (!dashboardId || !token) return;
@@ -65,7 +67,20 @@ export default function DashboardWidgetFullPage() {
         tableRowsPerPage={widget.type === "kpi_multi_line_table" ? rowsPerPage : undefined}
         onTableRowsPerPageChange={widget.type === "kpi_multi_line_table" ? setRowsPerPage : undefined}
         tableRowsPerPageOptions={[5, 10, 25, 50, 100]}
+        onDrillDownRequest={setActiveDrillDown}
       />
+
+      {activeDrillDown && (
+        <WidgetDrillDownModal
+          isOpen={Boolean(activeDrillDown)}
+          onClose={() => setActiveDrillDown(null)}
+          widget={activeDrillDown.widget}
+          organizationId={dashboard.organization_id}
+          dashboardId={dashboard.id}
+          dimensionFilter={activeDrillDown.dimensionFilter}
+          label={activeDrillDown.label}
+        />
+      )}
     </div>
   );
 }

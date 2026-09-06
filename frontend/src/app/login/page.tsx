@@ -49,6 +49,28 @@ export default function LoginPage() {
     fetchCaptcha();
   }, []);
 
+  // Show session-expired message when redirected due to inactivity.
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const sp = new URLSearchParams(window.location.search);
+      const reason = sp.get("reason");
+      if (reason === "idle") {
+        toast("You were logged out due to 15 minutes of inactivity.", {
+          id: "idle-logout-toast",
+          duration: 6000,
+          style: {
+            background: "#ffffff",
+            color: "#1e293b",
+            border: "1px solid #e2e8f0",
+            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.08)",
+            fontWeight: 500,
+          },
+        });
+        window.history.replaceState(null, "", window.location.pathname);
+      }
+    }
+  }, []);
+
   async function onSubmit(data: FormData) {
     setError(null);
     try {

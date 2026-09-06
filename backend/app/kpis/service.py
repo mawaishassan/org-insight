@@ -134,7 +134,9 @@ async def get_kpi_with_tags(db: AsyncSession, kpi_id: int, org_id: int) -> KPI |
             selectinload(KPI.category_tags).selectinload(KPICategory.category).selectinload(Category.domain),
             selectinload(KPI.organization_tags).selectinload(KPIOrganizationTag.tag),
             selectinload(KPI.assignments).selectinload(KPIAssignment.user),
+            selectinload(KPI.role_assignments).selectinload(KpiRoleAssignment.organization_role),
             selectinload(KPI.report_template_kpis).selectinload(ReportTemplateKPI.report_template),
+            selectinload(KPI.fields),
         )
     )
     return result.scalar_one_or_none()
@@ -151,7 +153,9 @@ async def get_kpi_with_tags_by_id(db: AsyncSession, kpi_id: int) -> KPI | None:
             selectinload(KPI.category_tags).selectinload(KPICategory.category).selectinload(Category.domain),
             selectinload(KPI.organization_tags).selectinload(KPIOrganizationTag.tag),
             selectinload(KPI.assignments).selectinload(KPIAssignment.user),
+            selectinload(KPI.role_assignments).selectinload(KpiRoleAssignment.organization_role),
             selectinload(KPI.report_template_kpis).selectinload(ReportTemplateKPI.report_template),
+            selectinload(KPI.fields),
         )
     )
     return result.scalar_one_or_none()
