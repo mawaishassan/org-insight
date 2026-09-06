@@ -89,3 +89,13 @@ class UserResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class BulkDeleteUsersRequest(BaseModel):
+    user_ids: list[int]
+    organization_id: int | None = None
+
+
+class BulkDeleteUsersResponse(BaseModel):
+    deleted_count: int
+    message: str

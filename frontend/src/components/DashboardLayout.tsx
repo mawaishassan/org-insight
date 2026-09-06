@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { api } from "@/lib/api";
 import { KpiSearchInput } from "@/components/KpiSearchInput";
 import {
@@ -63,6 +63,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [breadcrumbTail, setBreadcrumbTail] = useState<{ orgId: number; orgName: string | null; segments: { label: string; href: string }[] } | null>(null);
   /** Ignore stale breadcrumb API responses when pathname/query changes quickly (avoids clearing tail or showing wrong year). */
   const breadcrumbFetchGenRef = useRef(0);
+
+  // ── Inactivity auto-logout ───────────────────────────────────────────────────
+  /** Total inactivity timeout: 15 minutes (900 000 ms). */
+  const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+  /** Show warning 60 seconds before forced logout. */
+  const WARN_BEFORE_MS = 60 * 1000;
+  const [showIdleWarning, setShowIdleWarning] = useState(false);
+  const [idleCountdown, setIdleCountdown] = useState(60);
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const warnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ────────────────────────────────────────────────────────────────────────────
 
   const currentPath = pathname || "";
   const onEntries = currentPath === "/dashboard/entries";
@@ -168,6 +180,60 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       })
       .finally(() => setLoading(false));
   }, [router, pathname, searchParams]);
+
+  // ── Inactivity logout logic ──────────────────────────────────────────────────
+  const doLogout = useCallback(() => {
+    clearTokens();
+    router.push("/login?reason=idle");
+  }, [router]);
+
+  const clearIdleTimers = useCallback(() => {
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    if (warnTimerRef.current) clearTimeout(warnTimerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+  }, []);
+
+  const resetIdleTimer = useCallback(() => {
+    // Only run when a user is authenticated.
+    if (!getAccessToken()) return;
+    clearIdleTimers();
+    setShowIdleWarning(false);
+    setIdleCountdown(60);
+    // Show warning 60 s before the full 15 min timeout.
+    warnTimerRef.current = setTimeout(() => {
+      setShowIdleWarning(true);
+      setIdleCountdown(60);
+      // Tick countdown every second.
+      countdownRef.current = setInterval(() => {
+        setIdleCountdown((c) => {
+          if (c <= 1) {
+            if (countdownRef.current) clearInterval(countdownRef.current);
+            return 0;
+          }
+          return c - 1;
+        });
+      }, 1000);
+      // Logout after the remaining 60 s.
+      idleTimerRef.current = setTimeout(() => {
+        doLogout();
+      }, WARN_BEFORE_MS);
+    }, IDLE_TIMEOUT_MS - WARN_BEFORE_MS);
+  }, [clearIdleTimers, doLogout, IDLE_TIMEOUT_MS, WARN_BEFORE_MS]);
+
+  useEffect(() => {
+    // Attach activity listeners to reset the idle timer on any interaction.
+    const events: (keyof WindowEventMap)[] = ["mousemove", "mousedown", "keydown", "touchstart", "scroll", "click"];
+    const handleActivity = () => resetIdleTimer();
+    events.forEach((e) => window.addEventListener(e, handleActivity, { passive: true }));
+    // Start the timer on mount.
+    resetIdleTimer();
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, handleActivity));
+      clearIdleTimers();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // ────────────────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     const token = getAccessToken();
@@ -1179,6 +1245,99 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           }
         }
       `}</style>
+
+      {/* ── Idle-timeout warning modal ─────────────────────────────────────── */}
+      {showIdleWarning && (
+        <div
+          id="idle-warning-overlay"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 99999,
+            background: "rgba(0,0,0,0.55)",
+            backdropFilter: "blur(4px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            id="idle-warning-modal"
+            style={{
+              background: "#ffffff",
+              border: "1px solid #e2e8f0",
+              borderRadius: "12px",
+              padding: "1.75rem 2rem",
+              maxWidth: "380px",
+              width: "90%",
+              textAlign: "center",
+              boxShadow: "0 20px 40px rgba(0,0,0,0.18), 0 2px 6px rgba(0,0,0,0.06)",
+              animation: "idleFadeIn 0.2s ease",
+            }}
+          >
+            <p
+              style={{
+                margin: "0 0 1.5rem",
+                fontSize: "1rem",
+                color: "#1e293b",
+                fontWeight: 600,
+                lineHeight: 1.5,
+              }}
+            >
+              your session will expire after 1 minute
+            </p>
+
+            <div style={{ display: "flex", gap: "0.75rem", justifyContent: "center" }}>
+              <button
+                id="idle-stay-btn"
+                onClick={() => resetIdleTimer()}
+                style={{
+                  padding: "0.55rem 1.25rem",
+                  borderRadius: "6px",
+                  border: "none",
+                  background: "#2563eb",
+                  color: "#ffffff",
+                  fontWeight: 600,
+                  fontSize: "0.875rem",
+                  cursor: "pointer",
+                  transition: "background 0.2s",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "#1d4ed8")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "#2563eb")}
+              >
+                Stay Logged In
+              </button>
+              <button
+                id="idle-logout-btn"
+                onClick={() => doLogout()}
+                style={{
+                  padding: "0.55rem 1.25rem",
+                  borderRadius: "6px",
+                  border: "1px solid #cbd5e1",
+                  background: "#f8fafc",
+                  color: "#475569",
+                  fontWeight: 600,
+                  fontSize: "0.875rem",
+                  cursor: "pointer",
+                  transition: "background 0.2s",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "#e2e8f0")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "#f8fafc")}
+              >
+                Logout
+              </button>
+            </div>
+          </div>
+
+          <style>{`
+            @keyframes idleFadeIn {
+              from { opacity: 0; transform: scale(0.92); }
+              to   { opacity: 1; transform: scale(1); }
+            }
+          `}</style>
+        </div>
+      )}
+      {/* ──────────────────────────────────────────────────────────────────── */}
     </div>
   );
 }

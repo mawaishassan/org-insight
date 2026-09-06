@@ -51,7 +51,7 @@ export default function DashboardsPage() {
 
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  const canManageAssignments = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
+  const canManageAssignments = userRole === "ORG_ADMIN";
   const canAddDashboard = userRole === "SUPER_ADMIN";
 
   useEffect(() => {
@@ -213,8 +213,10 @@ export default function DashboardsPage() {
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem" }}>
           <p style={{ color: "var(--muted)", margin: 0, flex: "1 1 auto" }}>
-            {canManageAssignments
-              ? "Create dashboards (Super Admin) and share view/edit access with users in an organization."
+            {userRole === "SUPER_ADMIN"
+              ? "Create and design dashboards for organizations."
+              : canManageAssignments
+              ? "Manage and share dashboards with users in your organization."
               : "Dashboards shared with you. Open a dashboard to view its widgets."}
           </p>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>

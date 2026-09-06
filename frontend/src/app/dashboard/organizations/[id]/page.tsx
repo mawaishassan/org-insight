@@ -5059,7 +5059,7 @@ function ReportsSection({
   const [renameDescription, setRenameDescription] = useState("");
   const [renameSaving, setRenameSaving] = useState(false);
 
-  const canManageAssignments = userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN";
+  const canManageAssignments = userRole === "ORG_ADMIN";
   const canAddReport = userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN";
 
   const openRenameModal = (t: ReportTemplateRow) => {
@@ -5394,7 +5394,7 @@ function ReportsSection({
               Add report template
             </h3>
             <p id="add-report-modal-desc" style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 1.25rem 0" }}>
-              Create a new report template for this organization. You can design the layout and assign users after saving.
+              Create a new report template for this organization. You can design the layout after saving.
             </p>
             <form onSubmit={createForm.handleSubmit(onCreate)}>
               <div className="form-group" style={{ marginBottom: "1rem" }}>

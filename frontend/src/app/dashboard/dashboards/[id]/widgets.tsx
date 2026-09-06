@@ -812,6 +812,9 @@ export type Widget =
       field_key: string;
       enable_linked_widgets?: boolean;
       linked_widget_ids?: string[];
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -835,6 +838,9 @@ export type Widget =
       start_year: number;
       end_year: number;
       period_key?: string | null;
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -870,6 +876,9 @@ export type Widget =
       filter_label?: string;
       /** Advanced multi-line row filters (SUPER_ADMIN) */
       filters?: MultiItemsFilterPayloadV2 | null;
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -911,6 +920,9 @@ export type Widget =
       filter_label?: string;
       /** Advanced multi-line row filters (SUPER_ADMIN) */
       filters?: MultiItemsFilterPayloadV2 | null;
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -946,6 +958,9 @@ export type Widget =
       filters?: MultiItemsFilterPayloadV2 | null;
       enable_linked_widgets?: boolean;
       linked_widget_ids?: string[];
+      link_with_table?: boolean;
+      linked_table_field_key?: string;
+      linked_table_columns?: string[];
       full_width?: boolean;
       col_span?: number;
     }
@@ -1524,6 +1539,19 @@ function WidgetSettingsShell({
     </WidgetViewerMenuSetterContext.Provider>
   );
 }
+
+export type DrillDownRequestPayload = {
+  widget: Widget;
+  dimensionFilter?: {
+    sub_field_key?: string;
+    field_key?: string;
+    value: any;
+    year?: number;
+    label?: string;
+  };
+  label?: string;
+};
+
 export function WidgetRenderer({
   widget,
   organizationId,
@@ -1535,6 +1563,7 @@ export function WidgetRenderer({
   tableRowsPerPageOptions,
   periodOverride,
   onSingleValueCardClick,
+  onDrillDownRequest,
 }: {
   widget: Widget;
   organizationId: number;
@@ -1546,6 +1575,7 @@ export function WidgetRenderer({
   tableRowsPerPageOptions?: number[];
   periodOverride?: string;
   onSingleValueCardClick?: (widget: Widget) => void;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
 }) {
   const effectiveWidget = useMemo(() => {
     if (periodOverride) {
@@ -1572,6 +1602,7 @@ export function WidgetRenderer({
         designActions={designActions}
         dashboardId={dashboardId}
         onSingleValueCardClick={onSingleValueCardClick}
+        onDrillDownRequest={onDrillDownRequest}
       />
     );
   }
@@ -1592,6 +1623,7 @@ export function WidgetRenderer({
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
+        onDrillDownRequest={onDrillDownRequest}
       />
     );
   }
@@ -1602,6 +1634,7 @@ export function WidgetRenderer({
         organizationId={organizationId}
         dashboardId={dashboardId}
         designActions={designActions}
+        onDrillDownRequest={onDrillDownRequest}
       />
     );
   }
@@ -1612,6 +1645,7 @@ export function WidgetRenderer({
         organizationId={organizationId}
         designActions={designActions}
         dashboardId={dashboardId}
+        onDrillDownRequest={onDrillDownRequest}
       />
     );
   }
@@ -1623,6 +1657,7 @@ export function WidgetRenderer({
         designActions={designActions}
         dashboardId={dashboardId}
         onSingleValueCardClick={onSingleValueCardClick}
+        onDrillDownRequest={onDrillDownRequest}
       />
     );
   }
@@ -1743,12 +1778,14 @@ function KpiSingleValueWidget({
   designActions,
   dashboardId,
   onSingleValueCardClick,
+  onDrillDownRequest,
 }: {
   widget: Extract<Widget, { type: "kpi_single_value" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
   dashboardId?: number;
   onSingleValueCardClick?: (widget: Widget) => void;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
 }) {
   const token = getAccessToken();
   const [value, setValue] = useState<string>("");
@@ -1764,11 +1801,20 @@ function KpiSingleValueWidget({
       const w = { ...(widget as unknown as Record<string, unknown>) };
       const bundleReq =
         dashboardId != null
-          ? postDashboardSingleValueWidgetData(
+          ? enqueueDashboardUniversalBatch({
               token,
-              { version: 1, organization_id: organizationId, dashboard_id: dashboardId, widget: w },
-              { signal: ac.signal }
-            )
+              organizationId,
+              dashboardId,
+              widgetId: widget.id,
+              widget: w,
+              overrides: undefined,
+            }).then((r) => ({
+              version: 1,
+              widget_type: "kpi_single_value",
+              meta: r.meta ?? {},
+              data: r.data ?? {},
+              entry_revision: r.entry_revision ?? null,
+            }))
           : postWidgetData(
               token,
               {
@@ -1779,32 +1825,27 @@ function KpiSingleValueWidget({
               },
               { signal: ac.signal }
             );
+
       bundleReq
         .then((res) => {
-          const raw = (res.data as { raw?: unknown }).raw;
+          const d = res.data;
+          const raw = d.numeric != null ? d.numeric : d.raw;
           setValue(raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw));
         })
         .catch((e) => {
-          if (isLikelyAbortError(e)) return;
-          setError(e instanceof Error ? e.message : "Failed to load KPI value");
+          if (!ac.signal.aborted && !isLikelyAbortError(e)) {
+            setError(e instanceof Error ? e.message : "Failed to load KPI value");
+          }
         })
         .finally(() => {
           if (!ac.signal.aborted) setLoading(false);
         });
       return () => ac.abort();
     }
+
     Promise.all([
       getKpiFieldMap(token, organizationId, widget.kpi_id),
-      (async () => {
-        const q = new URLSearchParams({
-          kpi_id: String(widget.kpi_id),
-          year: String(widget.year),
-          organization_id: String(organizationId),
-        });
-        if (widget.period_key) q.set("period_key", widget.period_key);
-        // Dashboard viewers may not be assigned to this KPI; treat forbidden as "no entry".
-        return api<any>(`/entries/for-period?${q.toString()}`, { token }).catch(() => null);
-      })(),
+      fetchEntryForPeriod(token, organizationId, widget.kpi_id, widget.year, widget.period_key),
     ])
       .then(([map, entry]) => {
         const fid = map.idByKey[widget.field_key];
@@ -1821,12 +1862,26 @@ function KpiSingleValueWidget({
     return () => setWidgetLoading(widget.id, false);
   }, [widget.id, loading, setWidgetLoading]);
 
+  const isDrillDown = Boolean(widget.link_with_table && onDrillDownRequest);
   const isLinkedInteractive = Boolean(
     widget.enable_linked_widgets &&
     Array.isArray(widget.linked_widget_ids) &&
     widget.linked_widget_ids.length > 0 &&
     onSingleValueCardClick
   );
+  const isInteractive = isDrillDown || isLinkedInteractive;
+
+  const handleCardClick = () => {
+    if (isDrillDown) {
+      onDrillDownRequest?.({
+        widget,
+        dimensionFilter: undefined,
+        label: widget.title || "Single Value Card",
+      });
+    } else if (isLinkedInteractive) {
+      onSingleValueCardClick?.(widget);
+    }
+  };
 
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id} allowFullScreen={false}>
@@ -1836,26 +1891,32 @@ function KpiSingleValueWidget({
         <p className="form-error">{error}</p>
       ) : (
         <div
-          onClick={isLinkedInteractive ? () => onSingleValueCardClick?.(widget) : undefined}
+          onClick={isInteractive ? handleCardClick : undefined}
           onKeyDown={
-            isLinkedInteractive
+            isInteractive
               ? (e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    onSingleValueCardClick?.(widget);
+                    handleCardClick();
                   }
                 }
               : undefined
           }
-          role={isLinkedInteractive ? "button" : undefined}
-          tabIndex={isLinkedInteractive ? 0 : undefined}
+          role={isInteractive ? "button" : undefined}
+          tabIndex={isInteractive ? 0 : undefined}
           style={{
             fontSize: "1.6rem",
             fontWeight: 700,
-            cursor: isLinkedInteractive ? "pointer" : "default",
+            cursor: isInteractive ? "pointer" : "default",
             userSelect: "none",
           }}
-          title={isLinkedInteractive ? "Click to view linked detailed widgets" : undefined}
+          title={
+            isDrillDown
+              ? "Click to view underlying records table"
+              : isLinkedInteractive
+              ? "Click to view linked detailed widgets"
+              : undefined
+          }
         >
           <div>{value || "—"}</div>
         </div>
@@ -1870,12 +1931,14 @@ function KpiCardSingleValueWidget({
   designActions,
   dashboardId,
   onSingleValueCardClick,
+  onDrillDownRequest,
 }: {
   widget: Extract<Widget, { type: "kpi_card_single_value" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
   dashboardId?: number;
   onSingleValueCardClick?: (widget: Widget) => void;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
 }) {
   const token = getAccessToken();
   const { selectedPeriod, selectedPeriodType, selectedColumnValue, selectedDashboardFilterValues, requestGeneration } = useDashboardCustomization();
@@ -2093,12 +2156,26 @@ function KpiCardSingleValueWidget({
     return () => setWidgetLoading(widget.id, false);
   }, [widget.id, loading, refreshing, setWidgetLoading]);
 
+  const isDrillDown = Boolean(widget.link_with_table && onDrillDownRequest);
   const isLinkedInteractive = Boolean(
     widget.enable_linked_widgets &&
     Array.isArray(widget.linked_widget_ids) &&
     widget.linked_widget_ids.length > 0 &&
     onSingleValueCardClick
   );
+  const isInteractive = isDrillDown || isLinkedInteractive;
+
+  const handleCardClick = () => {
+    if (isDrillDown) {
+      onDrillDownRequest?.({
+        widget,
+        dimensionFilter: undefined,
+        label: widget.title || "KPI Card",
+      });
+    } else if (isLinkedInteractive) {
+      onSingleValueCardClick?.(widget);
+    }
+  };
 
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id} allowFullScreen={false}>
@@ -2108,20 +2185,26 @@ function KpiCardSingleValueWidget({
         <p className="form-error">{error}</p>
       ) : (
         <div
-          onClick={isLinkedInteractive ? () => onSingleValueCardClick?.(widget) : undefined}
+          onClick={isInteractive ? handleCardClick : undefined}
           onKeyDown={
-            isLinkedInteractive
+            isInteractive
               ? (e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    onSingleValueCardClick?.(widget);
+                    handleCardClick();
                   }
                 }
               : undefined
           }
-          role={isLinkedInteractive ? "button" : undefined}
-          tabIndex={isLinkedInteractive ? 0 : undefined}
-          title={isLinkedInteractive ? "Click to view linked detailed widgets" : undefined}
+          role={isInteractive ? "button" : undefined}
+          tabIndex={isInteractive ? 0 : undefined}
+          title={
+            isDrillDown
+              ? "Click to view underlying records table"
+              : isLinkedInteractive
+              ? "Click to view linked detailed widgets"
+              : undefined
+          }
           style={{
             borderRadius: 14,
             padding: "1rem 1.1rem",
@@ -2141,10 +2224,10 @@ function KpiCardSingleValueWidget({
             boxShadow: isLinkedInteractive
               ? "0 4px 12px rgba(59, 130, 246, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)"
               : undefined,
-            cursor: isLinkedInteractive ? "pointer" : "default",
+            cursor: isInteractive ? "pointer" : "default",
             opacity: showRefreshing ? 0.75 : 1,
             transition: "all 0.25s ease",
-            userSelect: isLinkedInteractive ? "none" : "auto",
+            userSelect: isInteractive ? "none" : "auto",
             position: "relative",
             ...bgStyle,
           }}
@@ -2166,11 +2249,13 @@ function KpiLineChartWidget({
   organizationId,
   designActions,
   dashboardId,
+  onDrillDownRequest,
 }: {
   widget: Extract<Widget, { type: "kpi_line_chart" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
   dashboardId?: number;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
 }) {
   const token = getAccessToken();
   const [points, setPoints] = useState<Array<{ year: number; value: number | null }>>([]);
@@ -2416,7 +2501,29 @@ function KpiLineChartWidget({
                   </text>
                   <path d={pathD} fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
                   {xs.map((x, i) => (
-                    <circle key={numeric[i].year} cx={x} cy={ys[i]} r={4} fill="var(--accent)" stroke="var(--surface)" strokeWidth="1" />
+                    <circle
+                      key={numeric[i].year}
+                      cx={x}
+                      cy={ys[i]}
+                      r={widget.link_with_table ? 6 : 4}
+                      fill="var(--accent)"
+                      stroke="var(--surface)"
+                      strokeWidth={widget.link_with_table ? 2 : 1}
+                      style={{ cursor: widget.link_with_table ? "pointer" : "default" }}
+                      onClick={() => {
+                        if (widget.link_with_table && onDrillDownRequest) {
+                          onDrillDownRequest({
+                            widget,
+                            dimensionFilter: {
+                              year: numeric[i].year,
+                              value: numeric[i].value,
+                              label: `${numeric[i].year}`,
+                            },
+                            label: `${numeric[i].year}`,
+                          });
+                        }
+                      }}
+                    />
                   ))}
                   {/* Always show labels for extreme points (min/max) */}
                   <g>
@@ -2568,11 +2675,13 @@ function KpiBarChartWidgetInner({
   widget,
   organizationId,
   dashboardId,
+  onDrillDownRequest,
 }: {
   widget: Extract<Widget, { type: "kpi_bar_chart" }>;
   organizationId: number;
   /** When set with bundle mode, uses fast `POST /widget-data/chart` (dashboard auth only). */
   dashboardId?: number;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
 }) {
   const token = getAccessToken();
   const { getDisplayLabel, registerWidgetLabels, fetchDataWithDate, periodOptions, selectedPeriod, selectedPeriodType, selectedColumnValue, selectedDashboardFilterValues, requestGeneration } = useDashboardCustomization();
@@ -2616,14 +2725,14 @@ function KpiBarChartWidgetInner({
   };
 
   useEffect(() => {
-    if (fetchDataWithDate && selectedPeriod) {
+    if ((fetchDataWithDate || selectedPeriodType === "by_default") && selectedPeriod) {
       setViewerYear(selectedPeriod);
     } else if (fetchDataWithDate && periodOptions && periodOptions.length > 0) {
       if (!periodOptions.some(opt => opt.value === String(viewerYear))) {
         setViewerYear(findDefaultPeriod(periodOptions));
       }
     }
-  }, [periodOptions, fetchDataWithDate, selectedPeriod]);
+  }, [periodOptions, fetchDataWithDate, selectedPeriod, selectedPeriodType]);
   const configuredFilterKeys = useMemo(() => {
     if (Array.isArray((widget as any).filter_sub_field_keys) && (widget as any).filter_sub_field_keys.length > 0) {
       return (widget as any).filter_sub_field_keys.filter(Boolean);
@@ -2664,10 +2773,10 @@ function KpiBarChartWidgetInner({
   useEffect(() => {
     setViewerChartType(widget.chart_type || "bar");
     setHiddenSeriesKeys([]);
-    setViewerYear(fetchDataWithDate && selectedPeriod ? selectedPeriod : widget.year);
+    setViewerYear((fetchDataWithDate || selectedPeriodType === "by_default") && selectedPeriod ? selectedPeriod : widget.year);
     setSelectedWidgetFilters({});
     setSqlAggBuckets(null);
-  }, [widget.id, widget.chart_type, widget.mode, widget.year, fetchDataWithDate, selectedPeriod]);
+  }, [widget.id, widget.chart_type, widget.mode, widget.year, fetchDataWithDate, selectedPeriod, selectedPeriodType]);
 
   useEffect(() => {
     if (!token) return;
@@ -2705,7 +2814,7 @@ function KpiBarChartWidgetInner({
       const ac = new AbortController();
       const w = { ...(widget as unknown as Record<string, unknown>) };
       const widgetId = String((w as any)?.id ?? "");
-      const effectivePeriod = fetchDataWithDate && selectedPeriod ? selectedPeriod : viewerYear;
+      const effectivePeriod = (fetchDataWithDate || selectedPeriodType === "by_default") && selectedPeriod ? selectedPeriod : viewerYear;
       const sanitizedYear = selectedPeriodType === "by_default"
         ? (/^\d{4}$/.test(String(effectivePeriod)) ? effectivePeriod : undefined)
         : effectivePeriod;
@@ -3316,6 +3425,18 @@ function KpiBarChartWidgetInner({
               fullWidth={widget.full_width}
               colorForIndex={colorForIndex}
               onChartTypeChange={setViewerChartType}
+              isDrillDownEnabled={Boolean(widget.link_with_table)}
+              onDrillDown={(item) => {
+                onDrillDownRequest?.({
+                  widget,
+                  dimensionFilter: {
+                    sub_field_key: widget.group_by_sub_field_key,
+                    value: item.key || item.label,
+                    label: item.label,
+                  },
+                  label: item.label,
+                });
+              }}
             />
           )}
         </div>
@@ -3342,6 +3463,18 @@ function KpiBarChartWidgetInner({
           fullWidth={widget.full_width}
           colorForIndex={colorForIndex}
           onChartTypeChange={setViewerChartType}
+          isDrillDownEnabled={Boolean(widget.link_with_table)}
+          onDrillDown={(item) => {
+            onDrillDownRequest?.({
+              widget,
+              dimensionFilter: {
+                field_key: item.key,
+                value: item.value,
+                label: item.label,
+              },
+              label: item.label,
+            });
+          }}
         />
       )}
     </>
@@ -3353,15 +3486,22 @@ function KpiBarChartWidget({
   organizationId,
   dashboardId,
   designActions,
+  onDrillDownRequest,
 }: {
   widget: Extract<Widget, { type: "kpi_bar_chart" }>;
   organizationId: number;
   dashboardId?: number;
   designActions?: WidgetDesignMenuActions;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
 }) {
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
-      <KpiBarChartWidgetInner widget={widget} organizationId={organizationId} dashboardId={dashboardId} />
+      <KpiBarChartWidgetInner
+        widget={widget}
+        organizationId={organizationId}
+        dashboardId={dashboardId}
+        onDrillDownRequest={onDrillDownRequest}
+      />
     </WidgetSettingsShell>
   );
 }
@@ -3381,15 +3521,22 @@ function KpiTrendWidget({
   organizationId,
   designActions,
   dashboardId,
+  onDrillDownRequest,
 }: {
   widget: Extract<Widget, { type: "kpi_trend" }>;
   organizationId: number;
   designActions?: WidgetDesignMenuActions;
   dashboardId?: number;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
 }) {
   return (
     <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
-      <KpiTrendWidgetInner widget={widget} organizationId={organizationId} dashboardId={dashboardId} />
+      <KpiTrendWidgetInner
+        widget={widget}
+        organizationId={organizationId}
+        dashboardId={dashboardId}
+        onDrillDownRequest={onDrillDownRequest}
+      />
     </WidgetSettingsShell>
   );
 }
@@ -3398,10 +3545,12 @@ function KpiTrendWidgetInner({
   widget,
   organizationId,
   dashboardId,
+  onDrillDownRequest,
 }: {
   widget: Extract<Widget, { type: "kpi_trend" }>;
   organizationId: number;
   dashboardId?: number;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
 }) {
   const token = getAccessToken();
   const { getDisplayLabel, registerWidgetLabels, consistentColors, getColorForValue, selectedColumnValue, selectedDashboardFilterValues, requestGeneration } = useDashboardCustomization();
@@ -4176,51 +4325,62 @@ function KpiTrendWidgetInner({
                                 <>
 
                                   <rect
-
                                     key={`${c}:${y}`}
-
                                     x={x}
-
                                     y={yy}
-
                                     width={barW}
-
                                     height={h}
-
                                     fill={yearColors[y]}
-
                                     opacity={hoverTrendPt && hoverTrendPt.label === c && hoverTrendPt.series === String(y) ? 1.0 : 0.9}
-
-                                    style={{ transition: "opacity 0.15s ease" }}
-
+                                    style={{
+                                      transition: "opacity 0.15s ease",
+                                      cursor: widget.link_with_table ? "pointer" : "default",
+                                    }}
                                     rx={2}
-
+                                    onClick={() => {
+                                      if (widget.link_with_table && onDrillDownRequest) {
+                                        const displayCat = getDisplayLabel(c, widget.id) || c;
+                                        onDrillDownRequest({
+                                          widget,
+                                          dimensionFilter: {
+                                            sub_field_key: widget.group_by_sub_field_key,
+                                            value: c,
+                                            year: y,
+                                            label: `${displayCat} (${y})`,
+                                          },
+                                          label: `${displayCat} (${y})`,
+                                        });
+                                      }
+                                    }}
                                   />
 
                                   <rect
-
                                     key={`${c}:${y}:hover`}
-
                                     x={x}
-
                                     y={top}
-
                                     width={barW}
-
                                     height={innerH}
-
                                     fill="transparent"
-
-                                    style={{ cursor: "pointer" }}
-
+                                    style={{ cursor: widget.link_with_table ? "pointer" : "default" }}
+                                    onClick={() => {
+                                      if (widget.link_with_table && onDrillDownRequest) {
+                                        const displayCat = getDisplayLabel(c, widget.id) || c;
+                                        onDrillDownRequest({
+                                          widget,
+                                          dimensionFilter: {
+                                            sub_field_key: widget.group_by_sub_field_key,
+                                            value: c,
+                                            year: y,
+                                            label: `${displayCat} (${y})`,
+                                          },
+                                          label: `${displayCat} (${y})`,
+                                        });
+                                      }
+                                    }}
                                     onMouseEnter={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
-
                                     onMouseMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
-
                                     onTouchStart={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
-
                                     onTouchMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: c, value: v, series: String(y) })}
-
                                   />
 
                                 </>
@@ -4345,8 +4505,24 @@ function KpiTrendWidgetInner({
                                 key={`${c}:${i}`}
                                 cx={p.x}
                                 cy={p.y}
-                                r="3"
+                                r={widget.link_with_table ? "5" : "3"}
                                 fill={catColor(idx)}
+                                style={{ cursor: widget.link_with_table ? "pointer" : "default" }}
+                                onClick={() => {
+                                  if (widget.link_with_table && onDrillDownRequest) {
+                                    const displayCat = getDisplayLabel(c, widget.id) || c;
+                                    onDrillDownRequest({
+                                      widget,
+                                      dimensionFilter: {
+                                        sub_field_key: widget.group_by_sub_field_key,
+                                        value: c,
+                                        year: years[i],
+                                        label: `${displayCat} (${years[i]})`,
+                                      },
+                                      label: `${displayCat} (${years[i]})`,
+                                    });
+                                  }
+                                }}
                                 onMouseEnter={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
                                 onMouseMove={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
                                 onTouchStart={() => setHoverTrendPt({ x: p.x, y: p.y, label: c, value: p.v, series: String(years[i]) })}
@@ -4357,7 +4533,25 @@ function KpiTrendWidgetInner({
                         );
                       })}
                       {hoverTrendPt ? (
-                        <g>
+                        <g
+                          style={{ cursor: widget.link_with_table ? "pointer" : "default" }}
+                          onClick={() => {
+                            if (widget.link_with_table && onDrillDownRequest) {
+                              const yVal = Number(hoverTrendPt.series) || undefined;
+                              const displayCat = getDisplayLabel(hoverTrendPt.label, widget.id) || hoverTrendPt.label;
+                              onDrillDownRequest({
+                                widget,
+                                dimensionFilter: {
+                                  sub_field_key: widget.group_by_sub_field_key,
+                                  value: hoverTrendPt.label,
+                                  year: yVal,
+                                  label: `${displayCat} (${hoverTrendPt.series})`,
+                                },
+                                label: `${displayCat} (${hoverTrendPt.series})`,
+                              });
+                            }
+                          }}
+                        >
                           <line x1={hoverTrendPt.x} y1={top} x2={hoverTrendPt.x} y2={top + innerH} stroke="rgba(0,0,0,0.12)" strokeWidth="1" />
                           <circle cx={hoverTrendPt.x} cy={hoverTrendPt.y} r={6} fill="var(--surface)" stroke="var(--accent)" strokeWidth="2" />
                           {(() => {
@@ -4461,51 +4655,56 @@ function KpiTrendWidgetInner({
                               <>
 
                                 <rect
-
                                   key={`${k}:${y}`}
-
                                   x={x}
-
                                   y={yy}
-
                                   width={barW}
-
                                   height={h}
-
                                   fill={yearColors[y]}
-
                                   opacity={hoverTrendPt && hoverTrendPt.label === k && hoverTrendPt.series === String(y) ? 1.0 : 0.9}
-
-                                  style={{ transition: "opacity 0.15s ease" }}
-
+                                  style={{ transition: "opacity 0.15s ease", cursor: widget.link_with_table ? "pointer" : "default" }}
                                   rx={2}
-
+                                  onClick={() => {
+                                    if (widget.link_with_table && onDrillDownRequest) {
+                                      onDrillDownRequest({
+                                        widget,
+                                        dimensionFilter: {
+                                          sub_field_key: k,
+                                          value: k,
+                                          year: y,
+                                          label: `${k} (${y})`,
+                                        },
+                                        label: `${k} (${y})`,
+                                      });
+                                    }
+                                  }}
                                 />
-
                                 <rect
-
                                   key={`${k}:${y}:hover`}
-
                                   x={x}
-
                                   y={top}
-
                                   width={barW}
-
                                   height={innerH}
-
                                   fill="transparent"
-
-                                  style={{ cursor: "pointer" }}
-
+                                  style={{ cursor: widget.link_with_table ? "pointer" : "default" }}
+                                  onClick={() => {
+                                    if (widget.link_with_table && onDrillDownRequest) {
+                                      onDrillDownRequest({
+                                        widget,
+                                        dimensionFilter: {
+                                          sub_field_key: k,
+                                          value: k,
+                                          year: y,
+                                          label: `${k} (${y})`,
+                                        },
+                                        label: `${k} (${y})`,
+                                      });
+                                    }
+                                  }}
                                   onMouseEnter={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
-
                                   onMouseMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
-
                                   onTouchStart={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
-
                                   onTouchMove={() => setHoverTrendPt({ x: x + barW / 2, y: Math.max(top, yy), label: k, value: v, series: String(y) })}
-
                                 />
 
                               </>
@@ -4767,14 +4966,14 @@ function KpiMultiLineTableWidgetInner({
   };
 
   useEffect(() => {
-    if (fetchDataWithDate && selectedPeriod) {
+    if ((fetchDataWithDate || selectedPeriodType === "by_default") && selectedPeriod) {
       setViewerYear(selectedPeriod);
     } else if (fetchDataWithDate && periodOptions && periodOptions.length > 0) {
       if (!periodOptions.some(opt => opt.value === String(viewerYear))) {
         setViewerYear(findDefaultPeriod(periodOptions));
       }
     }
-  }, [periodOptions, fetchDataWithDate, selectedPeriod]);
+  }, [periodOptions, fetchDataWithDate, selectedPeriod, selectedPeriodType]);
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [viewerFilters, setViewerFilters] = useState<MultiItemsFilterPayloadV2 | null>(
     (widget.filters as MultiItemsFilterPayloadV2 | null) ?? null
@@ -4889,7 +5088,7 @@ function KpiMultiLineTableWidgetInner({
     if (!token) return;
     setLoading(true);
     const isByDefault = selectedPeriodType === "by_default";
-    const effectiveTablePeriod = fetchDataWithDate && selectedPeriod ? selectedPeriod : viewerYear;
+    const effectiveTablePeriod = (fetchDataWithDate || selectedPeriodType === "by_default") && selectedPeriod ? selectedPeriod : viewerYear;
     const sanitizedTableYear = isByDefault
       ? (/^\d{4}$/.test(String(effectiveTablePeriod)) ? effectiveTablePeriod : undefined)
       : effectiveTablePeriod;

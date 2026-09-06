@@ -500,13 +500,15 @@ export default function CustomReportsPage() {
           >
             Design Layout
           </Link>
-          <Link
-            className="btn"
-            href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`}
-            style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
-          >
-            Assign Users
-          </Link>
+          {userRole !== "SUPER_ADMIN" && (
+            <Link
+              className="btn"
+              href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`}
+              style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
+            >
+              Assign Users
+            </Link>
+          )}
           <button
             type="button"
             className="btn"

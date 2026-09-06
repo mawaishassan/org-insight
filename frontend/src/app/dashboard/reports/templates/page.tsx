@@ -34,7 +34,7 @@ export default function ReportTemplatesPage() {
     <div>
       <h1 style={{ marginBottom: "1rem", fontSize: "1.5rem" }}>Report templates</h1>
       <div className="card">
-        <p style={{ color: "var(--muted)", marginBottom: "1rem" }}>Design official report formats and assign to users.</p>
+        <p style={{ color: "var(--muted)", marginBottom: "1rem" }}>Design official report formats.</p>
         <ul style={{ listStyle: "none" }}>
           {list.map((t) => (
             <li key={t.id} style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border)" }}>

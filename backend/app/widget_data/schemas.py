@@ -87,7 +87,45 @@ class DashboardMultiLineTableRowsRequestV1(BaseModel):
     widget: dict[str, Any]
     overrides: dict[str, Any] | None = None
     page: int = Field(1, ge=1)
-    page_size: int = Field(50, ge=1, le=200)
+    page_size: int = Field(50, ge=1, le=50000)
     search: str | None = None
     sort_by: str | None = None
     sort_dir: str = Field("asc", pattern="^(asc|desc)$")
+
+
+class WidgetDrillDownRequestV1(BaseModel):
+    """Request for drilling down from a dashboard widget into its underlying MLA table rows."""
+
+    version: int = Field(1, ge=1, le=1)
+    organization_id: int
+    dashboard_id: int = Field(..., ge=1)
+    widget: dict[str, Any]
+    overrides: dict[str, Any] | None = None
+    dimension_filter: dict[str, Any] | None = None
+    page: int = Field(1, ge=1)
+    page_size: int = Field(50, ge=1, le=50000)
+    search: str | None = None
+    sort_by: str | None = None
+    sort_dir: str = Field("asc", pattern="^(asc|desc)$")
+
+
+class WidgetDrillDownResponseV1(BaseModel):
+    """Response containing paged MLA rows and column metadata for drill-down table."""
+
+    version: int = 1
+    widget_id: str | None = None
+    widget_title: str | None = None
+    kpi_id: int | None = None
+    kpi_title: str | None = None
+    source_field_key: str | None = None
+    source_field_name: str | None = None
+    source_field_id: int | None = None
+    columns: list[dict[str, Any]] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 50
+    dimension_filter: dict[str, Any] | None = None
+    entry_ids: list[int] = Field(default_factory=list)
+    meta: dict[str, Any] = Field(default_factory=dict)
+

@@ -187,6 +187,8 @@ export function SmartChartViewer({
   fullWidth = false,
   colorForIndex,
   onChartTypeChange,
+  isDrillDownEnabled,
+  onDrillDown,
 }: {
   rawItems: RawChartItem[];
   widgetId: string;
@@ -194,6 +196,8 @@ export function SmartChartViewer({
   fullWidth?: boolean;
   colorForIndex: (idx: number, total: number) => string;
   onChartTypeChange?: (type: "bar" | "pie") => void;
+  isDrillDownEnabled?: boolean;
+  onDrillDown?: (info: { key?: string; label: string; value?: any }) => void;
 }) {
   const { getDisplayLabel, consistentColors, getColorForValue } = useDashboardCustomization();
   const isFullScreen = useWidgetFullScreen();
@@ -250,7 +254,8 @@ export function SmartChartViewer({
     const map = new Map<string, { key: string; label: string; value: number }>();
 
     for (const it of rawItems) {
-      const displayLabel = (getDisplayLabel(it.label, widgetId) || it.label || it.key || "").trim();
+      const rawVal = (it.key !== undefined && it.key !== null && it.key !== "" ? it.key : it.label || "").trim();
+      const displayLabel = (getDisplayLabel(it.label, widgetId) || getDisplayLabel(it.key, widgetId) || it.label || it.key || "").trim();
       const val = Math.max(0, Number(it.value) || 0);
       if (!displayLabel) continue;
 
@@ -262,11 +267,10 @@ export function SmartChartViewer({
         const currentUpper = (displayLabel.match(/[A-Z]/g) || []).length;
         if (currentUpper > existingUpper) {
           existing.label = displayLabel;
-          existing.key = displayLabel;
         }
       } else {
         map.set(key, {
-          key: displayLabel,
+          key: rawVal,
           label: displayLabel,
           value: val,
         });
@@ -422,8 +426,16 @@ export function SmartChartViewer({
                           fill={fill}
                           stroke="var(--surface)"
                           strokeWidth="1"
-                          style={{ transition: "opacity 0.15s ease" }}
+                          style={{
+                            transition: "opacity 0.15s ease",
+                            cursor: isDrillDownEnabled && !item.isOther ? "pointer" : "default",
+                          }}
                           opacity={hoverKey === null || hoverKey === item.key ? 1.0 : 0.65}
+                          onClick={() => {
+                            if (isDrillDownEnabled && onDrillDown && !item.isOther) {
+                              onDrillDown({ key: item.key, label: item.label, value: item.value });
+                            }
+                          }}
                         />
                       );
                     })}
@@ -681,7 +693,15 @@ export function SmartChartViewer({
                   fill={fill}
                   rx={n > 40 ? 0 : 2}
                   opacity={hoverKey === null || hoverKey === b.key ? 0.9 : 0.5}
-                  style={{ transition: "opacity 0.15s ease" }}
+                  style={{
+                    transition: "opacity 0.15s ease",
+                    cursor: isDrillDownEnabled ? "pointer" : "default",
+                  }}
+                  onClick={() => {
+                    if (isDrillDownEnabled && onDrillDown) {
+                      onDrillDown({ key: b.key, label: b.label, value: b.value });
+                    }
+                  }}
                 />
 
                 <rect
@@ -690,6 +710,12 @@ export function SmartChartViewer({
                   width={Math.max(barW + gap, 6)}
                   height={innerH}
                   fill="transparent"
+                  style={{ cursor: isDrillDownEnabled ? "pointer" : "default" }}
+                  onClick={() => {
+                    if (isDrillDownEnabled && onDrillDown) {
+                      onDrillDown({ key: b.key, label: b.label, value: b.value });
+                    }
+                  }}
                   onMouseEnter={() => {
                     setHoverKey(b.key);
                     setHoverPt({
