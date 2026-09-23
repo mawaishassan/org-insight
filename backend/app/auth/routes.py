@@ -51,11 +51,12 @@ async def login(
             detail="Invalid username or password",
         )
     
-    # 3. Record session and login audit activity via activity hook
+    # 3. Build tokens BEFORE committing the activity (user attrs may expire after commit)
+    access, refresh, expires_in, force_reset = create_tokens_for_user(user)
+
+    # 4. Record session and login audit activity via activity hook
     from app.activity_log.hooks import log_auth_login
     await log_auth_login(user=user, request=request, db=db)
-
-    access, refresh, expires_in, force_reset = create_tokens_for_user(user)
     return TokenResponse(
         access_token=access,
         refresh_token=refresh,
