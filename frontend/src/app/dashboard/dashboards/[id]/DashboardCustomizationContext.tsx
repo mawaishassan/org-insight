@@ -29,6 +29,7 @@ interface DashboardCustomizationContextProps {
   globalCustomizations: Record<string, string>;
   widgetCustomizations: Record<string, Record<string, string>>;
   isOrgAdmin: boolean;
+  canEditLabels: boolean;
   loading: boolean;
   registerWidgetLabels: (widgetId: string, labels: string[]) => void;
   getDisplayLabel: (originalLabel: string, widgetId?: string) => string;
@@ -76,6 +77,7 @@ export function useDashboardCustomization() {
       globalCustomizations: {},
       widgetCustomizations: {},
       isOrgAdmin: false,
+      canEditLabels: false,
       loading: false,
       registerWidgetLabels: () => {},
       getDisplayLabel: (originalLabel: string) => originalLabel,
@@ -121,6 +123,7 @@ export function DashboardCustomizationProvider({
   selectedPeriodType = "",
   fetchDataWithColumn = false,
   columnFetchingConfig = null,
+  allowEditingLabels = false,
 }: {
   children: React.ReactNode;
   dashboardId: number;
@@ -133,11 +136,13 @@ export function DashboardCustomizationProvider({
   selectedPeriodType?: string;
   fetchDataWithColumn?: boolean;
   columnFetchingConfig?: any;
+  allowEditingLabels?: boolean;
 }) {
   const token = getAccessToken();
   const [globalCustomizations, setGlobalCustomizations] = useState<Record<string, string>>({});
   const [widgetCustomizations, setWidgetCustomizations] = useState<Record<string, Record<string, string>>>({});
   const [isOrgAdmin, setIsOrgAdmin] = useState(false);
+  const canEditLabels = isOrgAdmin && !!allowEditingLabels;
   const [loading, setLoading] = useState(true);
   
   // Specific column filter & Dashboard normal filter states
@@ -459,6 +464,7 @@ export function DashboardCustomizationProvider({
         globalCustomizations,
         widgetCustomizations,
         isOrgAdmin,
+        canEditLabels,
         loading,
         registerWidgetLabels,
         getDisplayLabel,

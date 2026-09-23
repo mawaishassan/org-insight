@@ -308,7 +308,28 @@ export async function api<T>(
 
   const run = (async () => {
     try {
-      const res = await fetch(url, { ...init, body, headers });
+      let res: Response;
+      try {
+        res = await fetch(url, { ...init, body, headers });
+      } catch (fetchErr: any) {
+        // Gracefully retry once for GET requests if server is reloading or network had a transient blip
+        if (
+          isGet &&
+          !controller?.signal?.aborted &&
+          !init.signal?.aborted &&
+          (fetchErr?.name === "TypeError" ||
+            /failed to fetch|network|load failed|econnrefused/i.test(fetchErr?.message || ""))
+        ) {
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            res = await fetch(url, { ...init, body, headers });
+          } catch (retryErr: any) {
+            throw retryErr || fetchErr;
+          }
+        } else {
+          throw fetchErr;
+        }
+      }
       if (!res.ok) {
         if (res.status === 401 && typeof window !== "undefined") {
           clearTokens();
@@ -352,9 +373,11 @@ export async function api<T>(
 
   if (canDedupe) {
     inflightRequests.set(dedupeKey, run);
-    run.finally(() => {
-      inflightRequests.delete(dedupeKey);
-    });
+    run
+      .catch(() => {})
+      .finally(() => {
+        inflightRequests.delete(dedupeKey);
+      });
   }
 
   return run;

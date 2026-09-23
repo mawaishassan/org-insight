@@ -105,314 +105,63 @@ async def delete_dashboard(db: AsyncSession, dashboard_id: int, org_id: int) -> 
     return True
 
 
-async def assign_dashboard_to_user(
-    db: AsyncSession,
-    dashboard_id: int,
-    org_id: int,
-    user_id: int,
-    *,
-    can_view: bool = True,
-    can_edit: bool = False,
-    can_load_lms: bool = True,
-    can_change_period: bool = True,
-    can_use_unique_value: bool = False,
-    filter_kpi_id: int | None = None,
-    filter_mli_id: int | None = None,
-    filter_sub_field_key: str | None = None,
-    filter_column_configs: dict[str, str] | None = None,
-    filter_operator: str = "=",
-) -> DashboardAccessPermission | None:
-    d = await get_dashboard(db, dashboard_id, org_id)
-    if not d:
+async def duplicate_dashboard(db: AsyncSession, dashboard_id: int, org_id: int) -> Dashboard | None:
+    """Duplicate an existing dashboard with all its layout, widgets, configs, and customizations."""
+    orig = await get_dashboard(db, dashboard_id, org_id)
+    if not orig:
         return None
-    u = (await db.execute(select(User).where(User.id == user_id, User.organization_id == org_id))).scalar_one_or_none()
-    if not u:
-        return None
-    res = await db.execute(
-        select(DashboardAccessPermission).where(
-            DashboardAccessPermission.dashboard_id == dashboard_id,
-            DashboardAccessPermission.user_id == user_id,
-        )
-    )
-    perm = res.scalar_one_or_none()
-    if not perm:
-        perm = DashboardAccessPermission(
-            dashboard_id=dashboard_id,
-            user_id=user_id,
-            can_view=can_view,
-            can_edit=can_edit,
-            can_load_lms=can_load_lms,
-            can_change_period=can_change_period,
-            can_use_unique_value=can_use_unique_value,
-            filter_kpi_id=filter_kpi_id,
-            filter_mli_id=filter_mli_id,
-            filter_sub_field_key=filter_sub_field_key,
-            filter_column_configs=filter_column_configs,
-            filter_operator=filter_operator,
-        )
-        db.add(perm)
-        await db.flush()
-        return perm
 
-    perm.can_view = bool(can_view)
-    perm.can_edit = bool(can_edit)
-    perm.can_load_lms = bool(can_load_lms)
-    perm.can_change_period = bool(can_change_period)
-    perm.can_use_unique_value = bool(can_use_unique_value)
-    perm.filter_kpi_id = filter_kpi_id
-    perm.filter_mli_id = filter_mli_id
-    perm.filter_sub_field_key = filter_sub_field_key
-    perm.filter_column_configs = filter_column_configs
-    perm.filter_operator = filter_operator
+    import copy
+    from app.core.models import DashboardLabelCustomization
+
+    copied_layout = copy.deepcopy(orig.layout) if orig.layout is not None else None
+    copied_date_config = copy.deepcopy(orig.date_fetching_config) if orig.date_fetching_config is not None else None
+    copied_column_config = copy.deepcopy(orig.column_fetching_config) if orig.column_fetching_config is not None else None
+
+    new_dash = Dashboard(
+        organization_id=org_id,
+        name=f"Copy of {orig.name}",
+        description=orig.description,
+        layout=copied_layout,
+        fetch_data_with_date=orig.fetch_data_with_date,
+        date_fetching_config=copied_date_config,
+        fetch_data_with_column=orig.fetch_data_with_column,
+        column_fetching_config=copied_column_config,
+    )
+    db.add(new_dash)
     await db.flush()
-    return perm
 
-
-async def bulk_assign_dashboards_to_users(
-    db: AsyncSession,
-    org_id: int,
-    dashboard_ids: list[int],
-    user_ids: list[int],
-    *,
-    can_view: bool = True,
-    can_edit: bool = False,
-    can_load_lms: bool = True,
-    can_change_period: bool = True,
-    can_use_unique_value: bool = False,
-    filter_kpi_id: int | None = None,
-    filter_mli_id: int | None = None,
-    filter_sub_field_key: str | None = None,
-    filter_column_configs: dict[str, str] | None = None,
-    filter_operator: str = "=",
-) -> int:
-    """Bulk create/update assignments for multiple dashboards & users. Returns total updated count."""
-    count = 0
-    for d_id in dashboard_ids:
-        for u_id in user_ids:
-            res = await assign_dashboard_to_user(
-                db,
-                d_id,
-                org_id,
-                u_id,
-                can_view=can_view,
-                can_edit=can_edit,
-                can_load_lms=can_load_lms,
-                can_change_period=can_change_period,
-                can_use_unique_value=can_use_unique_value,
-                filter_kpi_id=filter_kpi_id,
-                filter_mli_id=filter_mli_id,
-                filter_sub_field_key=filter_sub_field_key,
-                filter_column_configs=filter_column_configs,
-                filter_operator=filter_operator,
-            )
-            if res:
-                count += 1
-    return count
-
-
-async def unassign_dashboard_from_user(
-    db: AsyncSession, dashboard_id: int, org_id: int, user_id: int
-) -> bool:
-    d = await get_dashboard(db, dashboard_id, org_id)
-    if not d:
-        return False
-    res = await db.execute(
-        select(DashboardAccessPermission).where(
-            DashboardAccessPermission.dashboard_id == dashboard_id,
-            DashboardAccessPermission.user_id == user_id,
+    # Also duplicate widget label customizations
+    labels_res = await db.execute(
+        select(DashboardLabelCustomization).where(
+            DashboardLabelCustomization.dashboard_id == dashboard_id,
+            DashboardLabelCustomization.organization_id == org_id,
         )
     )
-    perm = res.scalar_one_or_none()
-    if not perm:
-        return False
-    await db.delete(perm)
+    for lbl in labels_res.scalars().all():
+        db.add(
+            DashboardLabelCustomization(
+                organization_id=org_id,
+                dashboard_id=new_dash.id,
+                widget_id=lbl.widget_id,
+                original_label=lbl.original_label,
+                customized_label=lbl.customized_label,
+            )
+        )
+
     await db.flush()
-    return True
+    return new_dash
 
 
-async def list_dashboard_assignments(db: AsyncSession, dashboard_id: int, org_id: int) -> list[dict]:
-    d = await get_dashboard(db, dashboard_id, org_id)
-    if not d:
-        return []
-    res = await db.execute(
-        select(DashboardAccessPermission, User)
-        .join(User, DashboardAccessPermission.user_id == User.id)
-        .where(DashboardAccessPermission.dashboard_id == dashboard_id)
-    )
-    rows = res.all()
-    return [
-        {
-            "id": perm.id,
-            "dashboard_id": perm.dashboard_id,
-            "user_id": perm.user_id,
-            "username": user.username,
-            "email": user.email,
-            "full_name": user.full_name,
-            "unique_user_key": getattr(user, "unique_user_key", None),
-            "can_view": perm.can_view,
-            "can_edit": perm.can_edit,
-            "can_load_lms": getattr(perm, "can_load_lms", True),
-            "can_change_period": getattr(perm, "can_change_period", True),
-            "can_use_unique_value": getattr(perm, "can_use_unique_value", False),
-            "filter_kpi_id": getattr(perm, "filter_kpi_id", None),
-            "filter_mli_id": getattr(perm, "filter_mli_id", None),
-            "filter_sub_field_key": getattr(perm, "filter_sub_field_key", None),
-            "filter_column_configs": getattr(perm, "filter_column_configs", None),
-            "filter_operator": getattr(perm, "filter_operator", "="),
-        }
-        for perm, user in rows
-    ]
+# Re-export centralized rights functions for backward compatibility
+from app.access_management.service import (
+    assign_dashboard_to_user,
+    bulk_assign_dashboards_to_users,
+    unassign_dashboard_from_user,
+    list_dashboard_assignments,
+    get_dashboard_filterable_columns,
+)
 
-
-async def get_dashboard_filterable_columns(db: AsyncSession, dashboard_id: int, org_id: int) -> list[dict]:
-    """Inspect dashboard layout and return available MLI columns strictly for MLIs used in the dashboard."""
-    from app.core.models import KPIField, KPIFieldSubField
-    d = await get_dashboard(db, dashboard_id, org_id)
-    if not d:
-        return []
-
-    layout = d.layout or {}
-    widgets = []
-    if isinstance(layout, list):
-        widgets = layout
-    elif isinstance(layout, dict) and isinstance(layout.get("widgets"), list):
-        widgets = layout["widgets"]
-
-    kpi_ids = set()
-    used_mli_pairs: set[tuple[int, str]] = set()  # (kpi_id, source_field_key)
-    used_field_ids: set[int] = set()
-
-    for w in widgets:
-        if not isinstance(w, dict):
-            continue
-        k_id = w.get("kpi_id")
-        if k_id:
-            try:
-                k_int = int(k_id)
-                kpi_ids.add(k_int)
-
-                src_key = w.get("source_field_key")
-                if src_key and str(src_key).strip():
-                    used_mli_pairs.add((k_int, str(src_key).strip()))
-
-                src_id = w.get("source_field_id")
-                if src_id:
-                    try:
-                        used_field_ids.add(int(src_id))
-                    except (ValueError, TypeError):
-                        pass
-
-                joins = w.get("joins")
-                if isinstance(joins, list):
-                    for j in joins:
-                        if isinstance(j, dict):
-                            jk = j.get("kpi_id")
-                            jsk = j.get("source_field_key")
-                            if jk and jsk:
-                                try:
-                                    used_mli_pairs.add((int(jk), str(jsk).strip()))
-                                    kpi_ids.add(int(jk))
-                                except (ValueError, TypeError):
-                                    pass
-            except (ValueError, TypeError):
-                pass
-
-    if not kpi_ids:
-        return []
-
-    res = await db.execute(
-        select(KPI, KPIField, KPIFieldSubField)
-        .join(KPIField, KPIField.kpi_id == KPI.id)
-        .join(KPIFieldSubField, KPIFieldSubField.field_id == KPIField.id)
-        .where(
-            KPI.id.in_(list(kpi_ids)),
-            KPI.organization_id == org_id,
-            KPIField.field_type == FieldType.multi_line_items,
-        )
-        .order_by(KPI.id, KPIField.id, KPIFieldSubField.id)
-    )
-    rows = res.all()
-
-    items = []
-    seen = set()
-    for kpi_obj, field_obj, sub_obj in rows:
-        # If specific MLIs were used in widgets, only include those MLIs!
-        if used_mli_pairs or used_field_ids:
-            is_matched = (kpi_obj.id, field_obj.key) in used_mli_pairs or field_obj.id in used_field_ids
-            if not is_matched:
-                continue
-
-        key_tuple = (kpi_obj.id, field_obj.id, sub_obj.key)
-        if key_tuple in seen:
-            continue
-        seen.add(key_tuple)
-        items.append({
-            "kpi_id": kpi_obj.id,
-            "kpi_title": kpi_obj.name or f"KPI #{kpi_obj.id}",
-            "mli_id": field_obj.id,
-            "mli_title": field_obj.name or field_obj.key,
-            "sub_field_id": sub_obj.id,
-            "sub_field_key": sub_obj.key,
-            "label": f"{kpi_obj.name} -> {field_obj.name} -> {sub_obj.name or sub_obj.key} ({sub_obj.key})",
-        })
-
-    # For any joined KPI, ensure any additional columns defined in joined_config mappings are also included
-    joined_kpis_res = await db.execute(
-        select(KPI).where(KPI.id.in_(list(kpi_ids)), KPI.is_joined == True)
-    )
-    for jkpi in joined_kpis_res.scalars().all():
-        cfg = getattr(jkpi, "joined_config", None) or {}
-        mappings = cfg.get("mappings") or []
-        for m in mappings:
-            f_key = m.get("joined_field_key")
-            if not f_key:
-                continue
-            if (used_mli_pairs or used_field_ids) and (jkpi.id, f_key) not in used_mli_pairs:
-                continue
-
-            fld_res = await db.execute(
-                select(KPIField).where(KPIField.kpi_id == jkpi.id, KPIField.key == f_key)
-            )
-            fld = fld_res.scalar_one_or_none()
-            if not fld:
-                continue
-
-            existing_sub_keys = {item["sub_field_key"] for item in items if item["kpi_id"] == jkpi.id and item["mli_id"] == fld.id}
-            
-            # Primary subfields
-            for sk in (m.get("primary_sub_field_keys") or []):
-                if sk and sk not in existing_sub_keys:
-                    key_tuple = (jkpi.id, fld.id, sk)
-                    if key_tuple not in seen:
-                        seen.add(key_tuple)
-                        items.append({
-                            "kpi_id": jkpi.id,
-                            "kpi_title": jkpi.name or f"KPI #{jkpi.id}",
-                            "mli_id": fld.id,
-                            "mli_title": fld.name or fld.key,
-                            "sub_field_id": 0,
-                            "sub_field_key": sk,
-                            "label": f"{jkpi.name} -> {fld.name} -> {sk} ({sk})",
-                        })
-
-            # Joined subfields
-            for j in (m.get("joins") or []):
-                for sk in (j.get("sub_field_keys") or []):
-                    if sk and sk not in existing_sub_keys:
-                        key_tuple = (jkpi.id, fld.id, sk)
-                        if key_tuple not in seen:
-                            seen.add(key_tuple)
-                            items.append({
-                                "kpi_id": jkpi.id,
-                                "kpi_title": jkpi.name or f"KPI #{jkpi.id}",
-                                "mli_id": fld.id,
-                                "mli_title": fld.name or fld.key,
-                                "sub_field_id": 0,
-                                "sub_field_key": sk,
-                                "label": f"{jkpi.name} -> {fld.name} -> {sk} ({sk})",
-                            })
-
-    return items
 
 
 async def can_view_dashboard_for_user(
@@ -518,11 +267,19 @@ async def can_view_dashboard_for_kpi_chart(
         except Exception:
             pass
         return allowed
+    if user.organization_id != org_id:
+        db.info[cache_key] = False
+        try:
+            _auth_cache.set(cache_key, False)
+        except Exception:
+            pass
+        return False
     perm = (
         await db.execute(
             select(DashboardAccessPermission.can_view).where(
                 DashboardAccessPermission.dashboard_id == dashboard_id,
                 DashboardAccessPermission.user_id == uid,
+                DashboardAccessPermission.is_active == True,
             ).limit(1)
         )
     ).scalar_one_or_none()
@@ -537,34 +294,40 @@ async def can_view_dashboard_for_kpi_chart(
 
 
 async def user_can_access_dashboard(
-    db: AsyncSession, user_id: int, dashboard_id: int, action: str = "view"
+    db: AsyncSession, user_id: int, dashboard_id: int, action: str = "view", org_id: int | None = None
 ) -> bool:
     """Access rules:
-    - SUPER_ADMIN: any dashboard
+    - Organization Boundary: Dashboard must exist and match target_org_id.
+    - SUPER_ADMIN: any dashboard within target_org_id (or any if no org context)
     - ORG_ADMIN: any dashboard within their org
-    - Others: must be explicitly assigned
+    - Others: must belong to the same org AND be explicitly assigned with active permission
     """
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
         return False
     role_str = str(getattr(user.role, "value", user.role) or "").upper()
+
     if role_str == "SUPER_ADMIN":
-        ok = (await db.execute(select(Dashboard.id).where(Dashboard.id == dashboard_id).limit(1))).scalar_one_or_none()
-        return ok is not None
-    if role_str == "ORG_ADMIN" and user.organization_id:
-        ok = (
-            await db.execute(
-                select(Dashboard.id).where(
-                    Dashboard.id == dashboard_id, Dashboard.organization_id == user.organization_id
-                ).limit(1)
-            )
-        ).scalar_one_or_none()
-        return ok is not None
+        target_org_id = org_id if org_id is not None else user.organization_id
+    else:
+        target_org_id = user.organization_id
+
+    # Verify dashboard existence and strict organization matching
+    d = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
+    if not d:
+        return False
+    if target_org_id is not None and d.organization_id != target_org_id:
+        return False
+
+    if role_str in ("SUPER_ADMIN", "ORG_ADMIN"):
+        return True
+
     perm = (
         await db.execute(
             select(DashboardAccessPermission).where(
                 DashboardAccessPermission.dashboard_id == dashboard_id,
                 DashboardAccessPermission.user_id == user_id,
+                DashboardAccessPermission.is_active == True,
             )
         )
     ).scalar_one_or_none()

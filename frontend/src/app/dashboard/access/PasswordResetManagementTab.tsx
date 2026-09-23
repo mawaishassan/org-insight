@@ -426,8 +426,18 @@ export function PasswordResetManagementTab({ token, orgId }: Props) {
                         <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>{item.role}</div>
                       </td>
                       <td style={{ padding: "0.65rem 0.75rem" }}>
-                        <div>{item.email || "—"}</div>
-                        <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>@{item.username}</div>
+                        {item.email && item.username && item.email !== item.username && !item.username.includes("@") ? (
+                          <>
+                            <div style={{ fontWeight: 500 }}>{item.email}</div>
+                            <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
+                              @{item.username}
+                            </div>
+                          </>
+                        ) : (
+                          <div style={{ fontWeight: 500 }}>
+                            {item.email || item.username || "—"}
+                          </div>
+                        )}
                       </td>
                       <td style={{ padding: "0.65rem 0.75rem" }}>
                         <span
@@ -563,39 +573,77 @@ export function PasswordResetManagementTab({ token, orgId }: Props) {
                 : `Are you sure you want to cancel the mandatory password reset requirement for the ${targetUserIds.length} selected user(s)?`}
             </p>
 
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.6rem" }}>
+            <div className="confirm-modal-actions">
               <button
                 type="button"
-                className="btn"
+                className="btn confirm-modal-btn"
                 disabled={isProcessing}
                 onClick={() => setShowConfirmModal(false)}
                 style={{
                   fontSize: "0.9rem",
-                  padding: "0.45rem 1rem",
+                  padding: "0.5rem 1.1rem",
                   borderColor: "#cbd5e1",
                   color: "#334155",
                   background: "#ffffff",
+                  cursor: isProcessing ? "not-allowed" : "pointer",
                 }}
               >
                 Cancel
               </button>
               <button
                 type="button"
-                className="btn btn-primary"
+                className="btn btn-primary confirm-modal-btn"
                 disabled={isProcessing}
                 onClick={handleExecuteAction}
                 style={{
                   fontSize: "0.9rem",
-                  padding: "0.45rem 1.1rem",
+                  padding: "0.5rem 1.25rem",
                   background: confirmModalAction === "force" ? "var(--primary, #2563eb)" : "#ef4444",
                   borderColor: confirmModalAction === "force" ? "var(--primary, #2563eb)" : "#ef4444",
                   color: "#ffffff",
                   fontWeight: 600,
+                  cursor: isProcessing ? "not-allowed" : "pointer",
                 }}
               >
                 {isProcessing ? "Processing..." : "Confirm"}
               </button>
             </div>
+            <style>{`
+              .confirm-modal-actions {
+                display: flex;
+                justify-content: flex-end;
+                align-items: center;
+                gap: 0.6rem;
+                flex-wrap: wrap;
+              }
+              .confirm-modal-btn {
+                min-width: 95px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                transition: all 0.15s ease-in-out;
+                border-radius: 8px;
+              }
+              .confirm-modal-btn:hover:not(:disabled) {
+                filter: brightness(0.96);
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+              }
+              .confirm-modal-btn:active:not(:disabled) {
+                transform: scale(0.98);
+              }
+              @media (max-width: 480px) {
+                .confirm-modal-actions {
+                  width: 100%;
+                  display: flex;
+                  gap: 0.5rem;
+                }
+                .confirm-modal-btn {
+                  flex: 1;
+                  min-width: 0;
+                  padding: 0.65rem 0.75rem !important;
+                }
+              }
+            `}</style>
           </div>
         </div>
       )}

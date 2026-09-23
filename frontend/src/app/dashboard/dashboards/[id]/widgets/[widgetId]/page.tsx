@@ -79,6 +79,7 @@ export default function DashboardWidgetFullPage() {
           dashboardId={dashboard.id}
           dimensionFilter={activeDrillDown.dimensionFilter}
           label={activeDrillDown.label}
+          normalFilters={activeDrillDown.normalFilters || activeDrillDown.widgetFilters}
         />
       )}
     </div>

@@ -43,17 +43,21 @@ class CustomReportUpdate(BaseModel):
 class CustomReportAssignmentRequest(BaseModel):
     user_id: int
     can_view: bool = True
-    can_print: bool = True
-    can_export: bool = True
-    can_change_period: bool = True
+    can_print: bool = False
+    can_export: bool = False
+    can_download_word: bool = False
+    can_change_period: bool = False
+    can_load_lms: bool = False
 
 
 class CustomReportBulkAssignmentRequest(BaseModel):
     user_ids: list[int]
     can_view: bool = True
-    can_print: bool = True
-    can_export: bool = True
-    can_change_period: bool = True
+    can_print: bool = False
+    can_export: bool = False
+    can_download_word: bool = False
+    can_change_period: bool = False
+    can_load_lms: bool = False
 
 
 class ReportUserFilterConfigCreateUpdate(BaseModel):
@@ -86,7 +90,9 @@ class CustomReportAssignmentResponse(BaseModel):
     can_view: bool
     can_print: bool
     can_export: bool
+    can_download_word: bool
     can_change_period: bool
+    can_load_lms: bool
     created_at: datetime
     user_name: str | None = None
     user_role: str | None = None
@@ -118,9 +124,11 @@ class CustomReportResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     can_view: bool = True
-    can_print: bool = True
-    can_export: bool = True
-    can_change_period: bool = True
+    can_print: bool = False
+    can_export: bool = False
+    can_download_word: bool = False
+    can_change_period: bool = False
+    can_load_lms: bool = False
 
     class Config:
         from_attributes = True

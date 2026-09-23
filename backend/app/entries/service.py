@@ -273,7 +273,7 @@ async def load_multi_line_items_rows(db: AsyncSession, *, entry_id: int, field: 
     total_count = count_res.scalar() or 0
 
     if total_count == 0:
-        kpi = getattr(field, "kpi", None)
+        kpi = field.__dict__.get("kpi") if hasattr(field, "__dict__") and "kpi" in field.__dict__ else None
         if kpi is None and getattr(field, "kpi_id", None):
             kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
             kpi = kpi_res.scalar_one_or_none()
@@ -2418,6 +2418,10 @@ async def recompute_formula_fields_for_entry(
     )
     kpi = result.scalar_one_or_none()
     if not kpi:
+        return False
+
+    # If the KPI has auto_compute_formulas disabled, treat stored MLI and scalar values as final without recomputing
+    if not getattr(kpi, "auto_compute_formulas", True):
         return False
 
     fields = list(kpi.fields or [])

@@ -9,6 +9,8 @@ import { generatePeriodOptions } from "@/lib/periodHelpers";
 import { VirtualTable } from "@/components/VirtualTable";
 import toast from "react-hot-toast";
 import { downloadBlob } from "@/lib/download";
+import { buildReportPrintDocument, printReportDocument, ReportData } from "@/app/dashboard/reports/reportPrint";
+import { AccessDenied } from "@/components/AccessDenied";
 
 
 interface Field {
@@ -46,7 +48,8 @@ export default function CustomReportViewPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const id = Number(params?.id);
-  const orgId = Number(searchParams?.get("organization_id"));
+  const orgIdParam = searchParams?.get("organization_id");
+  const orgId = orgIdParam ? Number(orgIdParam) : null;
   const token = getAccessToken();
 
   const [userRole, setUserRole] = useState<string | null>(null);
@@ -85,9 +88,21 @@ export default function CustomReportViewPage() {
 
   // Load custom report metadata and organization custom periods
   useEffect(() => {
-    if (!id || !token || !orgId) return;
-    api<any>(`/custom-reports/${id}/detail?organization_id=${orgId}`, { token })
+    if (!id || !token) return;
+    setError(null);
+    const query = orgId ? `?organization_id=${orgId}` : "";
+    api<any>(`/custom-reports/${id}/detail${query}`, { token })
       .then((t) => {
+        if (!t) {
+          setError("Custom report not found or inaccessible in this organization.");
+          setLoading(false);
+          return;
+        }
+        if (orgId && t.organization_id !== orgId) {
+          setError("Access denied. This custom report belongs to another organization.");
+          setLoading(false);
+          return;
+        }
         setTemplate(t);
         if (t.date_fetching_config?.default_period_type === "by_default" && t.date_fetching_config?.default_period) {
           const parsedYear = Number(t.date_fetching_config.default_period);
@@ -95,14 +110,19 @@ export default function CustomReportViewPage() {
             setReportYear(parsedYear);
           }
         }
+        const effOrg = t.organization_id || orgId;
+        if (effOrg) {
+          api<any>(`/organizations/${effOrg}`, { token })
+            .then((orgData) => {
+              setOrg(orgData);
+            })
+            .catch((e) => console.error("Failed to load org details", e));
+        }
       })
-      .catch((e) => console.error("Failed to load custom report details", e));
-
-    api<any>(`/organizations/${orgId}`, { token })
-      .then((orgData) => {
-        setOrg(orgData);
-      })
-      .catch((e) => console.error("Failed to load org details", e));
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : "Failed to load custom report details");
+        setLoading(false);
+      });
   }, [id, orgId, token]);
 
   const customPeriods = useMemo(() => {
@@ -185,7 +205,7 @@ export default function CustomReportViewPage() {
   }, [periodOptions, selectedPeriod, selectedPeriodType, template]);
 
   useEffect(() => {
-    if (!id || !token || !orgId || !template) return;
+    if (!id || !token || !template || error) return;
     if (template?.fetch_data_with_date && selectedPeriodType !== "by_default" && !selectedPeriod) return;
 
     const currentGen = ++requestGenRef.current;
@@ -201,7 +221,9 @@ export default function CustomReportViewPage() {
     // For Data Entry mode, always send the numeric reportYear (e.g. 2026).
     // For custom periods (e.g. "2026/27"), send the selectedPeriod string so the backend can resolve the date range.
     const yr = isByDefault ? reportYear : (selectedPeriod || reportYear);
-    const url = `/custom-reports/${id}/generate?year=${yr}&organization_id=${orgId}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`;
+    const effOrgId = orgId || template?.organization_id;
+    const orgQuery = effOrgId ? `&organization_id=${effOrgId}` : "";
+    const url = `/custom-reports/${id}/generate?year=${yr}${orgQuery}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`;
     api<any>(url, { token, cache: "no-store" })
       .then((res) => {
         if (currentGen === requestGenRef.current) {
@@ -283,7 +305,9 @@ export default function CustomReportViewPage() {
 
   const handlePrint = async () => {
     if (!token) return;
+
     setPrintLoading(true);
+    const toastId = toast.loading("Preparing print layout...");
     try {
       const isByDefault = selectedPeriodType === "by_default";
       const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
@@ -316,29 +340,18 @@ export default function CustomReportViewPage() {
         console.error("Failed to inject period metadata to heading", e);
       }
 
-      const iframe = document.createElement("iframe");
-      iframe.style.position = "fixed";
-      iframe.style.right = "0";
-      iframe.style.bottom = "0";
-      iframe.style.width = "0";
-      iframe.style.height = "0";
-      iframe.style.border = "none";
-      document.body.appendChild(iframe);
-
-      const doc = iframe.contentWindow?.document || iframe.contentDocument;
-      if (doc) {
-        doc.open();
-        doc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:sans-serif;margin:2rem;color:#111;line-height:1.5;position:relative;}</style></head><body>${finalHtml}</body></html>`);
-        doc.close();
-
-        setTimeout(() => {
-          iframe.contentWindow?.focus();
-          iframe.contentWindow?.print();
-          document.body.removeChild(iframe);
-        }, 500);
-      }
+      const reportData: ReportData = {
+        template_name: metadata?.name || template?.name || "Custom Report",
+        template_id: Number(id),
+        year: typeof yr === "number" ? yr : Number(yr) || new Date().getFullYear(),
+        rendered_html: finalHtml,
+        kpis: [],
+      };
+      const doc = buildReportPrintDocument(reportData);
+      await printReportDocument(doc);
+      toast.success("Ready to print", { id: toastId });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to trigger print");
+      toast.error(err instanceof Error ? err.message : "Failed to trigger print", { id: toastId });
     } finally {
       setPrintLoading(false);
     }
@@ -429,6 +442,28 @@ export default function CustomReportViewPage() {
     }
   };
 
+  if (error) {
+    return (
+      <AccessDenied
+        title="Access Denied"
+        message={error}
+        returnUrl={orgId ? `/dashboard/reports?organization_id=${orgId}` : "/dashboard/reports"}
+        returnLabel="Return to Reports"
+      />
+    );
+  }
+
+  if (!template && !loading) {
+    return (
+      <AccessDenied
+        title="Custom Report Not Found"
+        message="This custom report does not exist or is not available in your organization."
+        returnUrl={orgId ? `/dashboard/reports?organization_id=${orgId}` : "/dashboard/reports"}
+        returnLabel="Return to Reports"
+      />
+    );
+  }
+
   return (
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "1rem" }}>
       {/* Top Left Back Navigation */}
@@ -463,7 +498,8 @@ export default function CustomReportViewPage() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-          {/* Period & Year selector */}          {template?.can_change_period !== false && (
+          {/* Period & Year selector */}
+          {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN" || template?.can_change_period === true) && (
             showDatePeriods ? (
               <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -552,14 +588,14 @@ export default function CustomReportViewPage() {
               disabled={loading || printLoading || isShiftingPeriod}
               style={{ padding: "0.4rem 0.8rem", fontSize: "0.9rem", background: "#10b981", color: "white", border: "none", borderRadius: 8, cursor: (loading || printLoading || isShiftingPeriod) ? "not-allowed" : "pointer", opacity: (loading || printLoading || isShiftingPeriod) ? 0.6 : 1 }}
             >
-              {printLoading ? "Working..." : "Print / Export"}
+              {printLoading ? "Working..." : "Download / Print"}
             </button>
           </div>
         </div>
       </div>
 
       {/* Load Data from LMS Button */}
-      {template?.show_odoo_button && (
+      {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN" || template?.show_odoo_button || template?.can_load_lms === true) && (
         <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: "1rem" }}>
           <button
             type="button"
@@ -574,7 +610,7 @@ export default function CustomReportViewPage() {
               opacity: (odooSyncing || loading || isShiftingPeriod) ? 0.6 : 1,
             }}
           >
-            {odooSyncing ? "Syncing from LMS..." : "Load Data from LMS"}
+            {odooSyncing ? "Syncing from LMS..." : "LMS Sync"}
           </button>
         </div>
       )}
@@ -902,48 +938,46 @@ export default function CustomReportViewPage() {
             </div>
             
             <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-              <button
-                type="button"
-                className="btn"
-                onClick={handlePrint}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.6rem", padding: "0.65rem 1rem", fontWeight: 600, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
-                Print Report (PDF System Dialog)
-              </button>
+              {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN" || template?.can_print === true) && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={handlePrint}
+                  style={{ padding: "0.65rem 1rem", fontWeight: 600, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
+                >
+                  Print Report
+                </button>
+              )}
 
               <button
                 type="button"
-                className="btn"
+                className="btn btn-primary"
                 onClick={() => handleExport("pdf")}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.6rem", padding: "0.65rem 1rem", fontWeight: 600, background: "#fff5f5", color: "#991b1b", border: "1px solid #fca5a5" }}
+                style={{ padding: "0.65rem 1rem", fontWeight: 600 }}
               >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                Direct Download PDF (.pdf)
+                Download PDF
               </button>
               
-              {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN") && (
-                <>
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => handleExport("docx")}
-                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.6rem", padding: "0.65rem 1rem", fontWeight: 600, backgroundColor: "#eff6ff", color: "#1e40af", border: "1px solid #bfdbfe" }}
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-                    Export Word (.docx)
-                  </button>
-                  
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => handleExport("xlsx")}
-                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.6rem", padding: "0.65rem 1rem", fontWeight: 600, backgroundColor: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0" }}
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>
-                    Export Excel (.xlsx)
-                  </button>
-                </>
+              {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN" || template?.can_download_word === true) && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => handleExport("docx")}
+                  style={{ padding: "0.65rem 1rem", fontWeight: 600, backgroundColor: "#eff6ff", color: "#1e40af", border: "1px solid #bfdbfe" }}
+                >
+                  Export Word (.docx)
+                </button>
+              )}
+              
+              {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN" || template?.can_export === true) && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => handleExport("xlsx")}
+                  style={{ padding: "0.65rem 1rem", fontWeight: 600, backgroundColor: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0" }}
+                >
+                  Export Excel (.xlsx)
+                </button>
               )}
             </div>
           </div>

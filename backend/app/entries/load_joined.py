@@ -53,9 +53,9 @@ async def load_joined_multi_line_rows(
                     KPIEntry.organization_id == organization_id,
                     KPIEntry.year == year,
                     KPIEntry.period_key == period_key
-                )
+                ).order_by(KPIEntry.is_draft.asc(), KPIEntry.id.desc()).limit(1)
             )
-            src_entry = src_entry_res.scalar_one_or_none()
+            src_entry = src_entry_res.scalars().first()
             if src_entry:
                 src_rows = await load_multi_line_row_dicts(db, entry_id=src_entry.id, field=src_field)
                 psub_keys = mapping.get("primary_sub_field_keys")
@@ -99,9 +99,9 @@ async def load_joined_multi_line_rows(
                     KPIEntry.organization_id == organization_id,
                     KPIEntry.year == year,
                     KPIEntry.period_key == period_key
-                )
+                ).order_by(KPIEntry.is_draft.asc(), KPIEntry.id.desc()).limit(1)
             )
-            src_entry = src_entry_res.scalar_one_or_none()
+            src_entry = src_entry_res.scalars().first()
             if not src_entry:
                 continue
                 
@@ -318,9 +318,9 @@ async def load_joined_scalar_values(
                 KPIEntry.organization_id == entry.organization_id,
                 KPIEntry.year == entry.year,
                 KPIEntry.period_key == entry.period_key
-            )
+            ).order_by(KPIEntry.is_draft.asc(), KPIEntry.id.desc()).limit(1)
         )
-        src_entry = src_entry_res.scalar_one_or_none()
+        src_entry = src_entry_res.scalars().first()
         if not src_entry:
             continue
             
@@ -409,11 +409,20 @@ async def load_joined_scalar_values(
                 db, entry.year, entry.organization_id, refs, period_key=entry.period_key or "", is_draft=entry.is_draft
             )
 
+        auto_compute = getattr(joined_kpi, "auto_compute_formulas", True)
         # Sort formula fields by sort_order
         ordered_formula_fields = sorted(formula_fields, key=lambda f: (getattr(f, "sort_order", 0), getattr(f, "id", 0)))
         for ff in ordered_formula_fields:
             expr = ff.formula_expression or (ff.config.get("formula_expression") if isinstance(ff.config, dict) else "")
-            if not expr:
+            if not expr or not auto_compute:
+                mock_fv = KPIFieldValue(
+                    id=ff.id + 60000000,
+                    entry_id=entry_id,
+                    field_id=ff.id,
+                    value_number=None,
+                    value_text=None,
+                )
+                virtual_values.append(mock_fv)
                 continue
             computed = evaluate_formula(
                 expr,

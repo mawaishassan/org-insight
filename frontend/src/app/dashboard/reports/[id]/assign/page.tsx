@@ -1,237 +1,61 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, Suspense } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
 
-function qs(params: Record<string, string | number | undefined>) {
-  const entries = Object.entries(params)
-    .filter(([, v]) => v !== undefined && v !== "")
-    .map(([k, v]) => [k, String(v)] as [string, string]);
-  return new URLSearchParams(entries).toString();
-}
-
-interface TemplateRow {
-  id: number;
-  organization_id: number;
-  name: string;
-  description: string | null;
-}
-
-interface AssignmentRow {
-  user_id: number;
-  email: string | null;
-  full_name: string | null;
-  can_view: boolean;
-  can_print: boolean;
-  can_export: boolean;
-  can_change_period: boolean;
-}
-
-interface UserRow {
-  id: number;
-  username: string;
-  email: string | null;
-  full_name: string | null;
-  role: string;
-}
-
-type Rights = { can_view: boolean; can_print: boolean; can_export: boolean; can_change_period: boolean };
-
-export default function ReportAssignPage() {
+function SingleReportAssignRedirect() {
+  const router = useRouter();
   const params = useParams();
-  const id = Number(params?.id);
-  const token = getAccessToken();
-
-  const [template, setTemplate] = useState<TemplateRow | null>(null);
-  const [orgUsers, setOrgUsers] = useState<UserRow[]>([]);
-  const [assignments, setAssignments] = useState<AssignmentRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [userFilter, setUserFilter] = useState("");
-  const [rightsByUserId, setRightsByUserId] = useState<Record<number, Rights>>({});
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const searchParams = useSearchParams();
+  const id = params?.id;
+  const orgId = searchParams?.get("organization_id");
 
   useEffect(() => {
-    if (!id || !token) return;
-    setLoading(true);
-    setError(null);
-    Promise.all([
-      api<TemplateRow>(`/reports/templates/${id}`, { token }),
-      api<AssignmentRow[]>(`/reports/templates/${id}/users`, { token }),
-    ])
-      .then(([t, a]) => {
-        setTemplate(t);
-        setAssignments(a);
-        const orgId = t.organization_id;
-        return api<UserRow[]>(`/users?${qs({ organization_id: orgId })}`, { token }).then((users) => {
-          setOrgUsers(users);
-          const initial: Record<number, Rights> = {};
-          users.forEach((u) => {
-            const existing = a.find((x) => x.user_id === u.id);
-            initial[u.id] = existing
-              ? { can_view: existing.can_view, can_print: existing.can_print, can_export: existing.can_export, can_change_period: existing.can_change_period }
-              : { can_view: false, can_print: false, can_export: false, can_change_period: true };
-          });
-          setRightsByUserId(initial);
-        });
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
-      .finally(() => setLoading(false));
-  }, [id, token]);
+    if (!id) return;
+    const q = new URLSearchParams();
+    q.set("tab", "resource");
+    q.set("resource_type", "report");
+    q.set("resource_id", String(id));
+    if (orgId) q.set("organization_id", orgId);
 
-  const filteredUsers = useMemo(() => {
-    const q = userFilter.trim().toLowerCase();
-    if (!q) return orgUsers;
-    return orgUsers.filter((u) => {
-      const name = (u.full_name || "").toLowerCase();
-      const email = (u.email || "").toLowerCase();
-      const username = (u.username || "").toLowerCase();
-      return name.includes(q) || email.includes(q) || username.includes(q);
-    });
-  }, [orgUsers, userFilter]);
-
-  const setRights = (userId: number, patch: Partial<Rights>) => {
-    setRightsByUserId((prev) => ({
-      ...prev,
-      [userId]: { ...(prev[userId] ?? { can_view: false, can_print: false, can_export: false, can_change_period: true }), ...patch },
-    }));
-  };
-
-  const handleSave = async () => {
-    if (!token || !template) return;
-    setSaveError(null);
-    setSaving(true);
-    try {
-      const orgId = template.organization_id;
-      const base = `?${qs({ organization_id: orgId })}`;
-      for (const u of orgUsers) {
-        const r = rightsByUserId[u.id] ?? { can_view: false, can_print: false, can_export: false, can_change_period: true };
-        const hadAssignment = assignments.some((a) => a.user_id === u.id);
-        if (r.can_view || r.can_print || r.can_export) {
-          await api(`/reports/templates/${id}/assign${base}`, {
-            method: "POST",
-            token,
-            body: JSON.stringify({
-              user_id: u.id,
-              can_view: r.can_view,
-              can_print: r.can_print,
-              can_export: r.can_export,
-              can_change_period: r.can_change_period,
-            }),
-          });
-        } else if (hadAssignment) {
-          await api(`/reports/templates/${id}/users/${u.id}${base}`, { method: "DELETE", token });
-        }
-      }
-      const next = await api<AssignmentRow[]>(`/reports/templates/${id}/users`, { token });
-      setAssignments(next);
-      const updated: Record<number, Rights> = {};
-      orgUsers.forEach((u) => {
-        const a = next.find((x) => x.user_id === u.id);
-        updated[u.id] = a
-          ? { can_view: a.can_view, can_print: a.can_print, can_export: a.can_export, can_change_period: a.can_change_period }
-          : { can_view: false, can_print: false, can_export: false, can_change_period: true };
-      });
-      setRightsByUserId(updated);
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (loading) return <p>Loading…</p>;
-  if (error) return <p className="form-error">{error}</p>;
-  if (!template) return null;
+    router.replace(`/dashboard/access/rights?${q.toString()}`);
+  }, [router, id, orgId]);
 
   return (
-    <div style={{ padding: "0 1rem 1rem" }}>
-      <h1 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>Assign users: {template.name}</h1>
-      <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginBottom: "1rem" }}>
-        Set view, print, export, and period shifting rights per user. Only users in this organization are listed. Save to apply changes.
+    <div style={{ maxWidth: 600, margin: "4rem auto", textAlign: "center", padding: "2rem" }}>
+      <div style={{ fontSize: "2rem", marginBottom: "1rem" }}>🛡️</div>
+      <h2 style={{ fontSize: "1.25rem", fontWeight: 700, marginBottom: "0.5rem" }}>
+        Redirecting to Centralized Rights Management...
+      </h2>
+      <p style={{ color: "#64748b", fontSize: "0.875rem", marginBottom: "1.5rem" }}>
+        Report access management has been unified into the centralized Access Management module.
       </p>
-
-      <div className="card">
-        <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
-          <input
-            type="text"
-            placeholder="Filter by name, email, username…"
-            value={userFilter}
-            onChange={(e) => setUserFilter(e.target.value)}
-            style={{ minWidth: 220, padding: "0.5rem 0.6rem" }}
-          />
-          <button type="button" className="btn btn-primary" onClick={handleSave} disabled={saving}>
-            {saving ? "Saving…" : "Save changes"}
-          </button>
-          {saveError && <span className="form-error">{saveError}</span>}
-        </div>
-
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ borderBottom: "2px solid var(--border)", textAlign: "left" }}>
-                <th style={{ padding: "0.5rem 0.75rem" }}>User</th>
-                <th style={{ padding: "0.5rem 0.75rem" }}>View</th>
-                <th style={{ padding: "0.5rem 0.75rem" }}>Print</th>
-                <th style={{ padding: "0.5rem 0.75rem" }}>Export</th>
-                <th style={{ padding: "0.5rem 0.75rem" }}>Allow Period Shifting</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredUsers.map((u) => {
-                const r = rightsByUserId[u.id] ?? { can_view: false, can_print: false, can_export: false, can_change_period: true };
-                const display = u.full_name || u.email || u.username || `User #${u.id}`;
-                return (
-                  <tr key={u.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>{display}</td>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>
-                      <input
-                        type="checkbox"
-                        checked={r.can_view}
-                        onChange={(e) => setRights(u.id, { can_view: e.target.checked })}
-                        aria-label={`View for ${display}`}
-                      />
-                    </td>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>
-                      <input
-                        type="checkbox"
-                        checked={r.can_print}
-                        onChange={(e) => setRights(u.id, { can_print: e.target.checked })}
-                        aria-label={`Print for ${display}`}
-                      />
-                    </td>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>
-                      <input
-                        type="checkbox"
-                        checked={r.can_export}
-                        onChange={(e) => setRights(u.id, { can_export: e.target.checked })}
-                        aria-label={`Export for ${display}`}
-                      />
-                    </td>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>
-                      <input
-                        type="checkbox"
-                        checked={r.can_change_period}
-                        onChange={(e) => setRights(u.id, { can_change_period: e.target.checked })}
-                        aria-label={`Allow Period Shifting for ${display}`}
-                      />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        {filteredUsers.length === 0 && (
-          <p style={{ color: "var(--muted)", padding: "1rem 0", margin: 0 }}>
-            {userFilter.trim() ? "No users match the filter." : "No users in this organization."}
-          </p>
-        )}
-      </div>
+      {id && (
+        <Link
+          href={`/dashboard/access/rights?tab=resource&resource_type=report&resource_id=${id}`}
+          style={{
+            display: "inline-block",
+            padding: "0.5rem 1.25rem",
+            background: "#2563eb",
+            color: "#ffffff",
+            borderRadius: "6px",
+            textDecoration: "none",
+            fontWeight: 600,
+            fontSize: "0.875rem",
+          }}
+        >
+          Manage Report Rights →
+        </Link>
+      )}
     </div>
+  );
+}
+
+export default function ReportAssignPage() {
+  return (
+    <Suspense fallback={<div style={{ padding: "3rem", textAlign: "center" }}>Loading...</div>}>
+      <SingleReportAssignRedirect />
+    </Suspense>
   );
 }

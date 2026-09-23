@@ -2,6 +2,7 @@
 
 import datetime
 import re
+from typing import Any
 from contextvars import ContextVar
 import os
 import time
@@ -163,6 +164,14 @@ def _cache_set(key: tuple, val: dict) -> None:
     _report_data_cache[key] = (time.time(), val)
 
 
+def invalidate_report_data_cache() -> None:
+    """Clear cached report data."""
+    _report_data_cache.clear()
+
+
+REPORT_DATA_CACHE = _report_data_cache
+
+
 def _ml_cell_raw(c: KpiMultiLineCell):
     if getattr(c, "value_json", None) is not None:
         return c.value_json
@@ -192,13 +201,13 @@ def _kpi_multi_line_orm_row_to_dict(r: KpiMultiLineRow) -> dict:
 
 
 async def _load_multi_line_items_rows_batch(
-    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None, resolving_linked_fields: set[int] = None, resolve_links: bool = False, custom_report_id: int | None = None, current_user: User | None = None
+    db: AsyncSession, *, entry_ids: list[int], field: KPIField, limit: int | None = None, offset: int | None = None, current_user_id: int | None = None, date_range: tuple[datetime.date, datetime.date, str] | None = None, resolving_linked_fields: set[int] = None, resolve_links: bool = False, custom_report_id: int | None = None, template_id: int | None = None, template_perm: Any = None, current_user: User | None = None
 ) -> dict[int, list[dict]]:
     """Optimized direct load of multi-line rows and cells to handle large datasets efficiently without ORM eager load overhead."""
     if not entry_ids:
         return {}
         
-    from app.core.models import KPI, ReportUserFilterConfiguration, KPIFieldSubField, KpiMultiLineCell
+    from app.core.models import KPI, ReportUserFilterConfiguration, KPIFieldSubField, KpiMultiLineCell, ReportAccessPermission, CustomReportAssignment, User
     kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
     kpi = kpi_res.scalar_one_or_none()
         
@@ -245,31 +254,144 @@ async def _load_multi_line_items_rows_batch(
                 if "unique_user_key" in current_user.__dict__:
                     u_key = current_user.unique_user_key
                 else:
-                    from app.core.models import User
                     u_key = (await db.execute(select(User.unique_user_key).where(User.id == current_user.id))).scalar_one_or_none()
+            elif current_user_id is not None:
+                u_obj = (await db.execute(select(User).where(User.id == current_user_id))).scalar_one_or_none()
+                if u_obj:
+                    current_user = u_obj
+                    u_key = u_obj.unique_user_key
 
-            if custom_report_id is not None and current_user is not None and u_key is not None:
-                filter_config_res = await db.execute(
-                    select(ReportUserFilterConfiguration)
-                    .where(
-                        ReportUserFilterConfiguration.report_id == custom_report_id,
-                        ReportUserFilterConfiguration.enabled == True,
-                        ReportUserFilterConfiguration.mli_id == field.id
+            custom_perm = None
+            if template_perm is None and template_id is not None and current_user is not None:
+                p_res = await db.execute(
+                    select(ReportAccessPermission).where(
+                        ReportAccessPermission.report_template_id == template_id,
+                        ReportAccessPermission.user_id == current_user.id,
                     )
                 )
-                filter_config = filter_config_res.scalar_one_or_none()
-                if filter_config and filter_config.field_id is not None:
-                    sf_res = await db.execute(select(KPIFieldSubField).where(KPIFieldSubField.id == filter_config.field_id))
-                    sf = sf_res.scalar_one_or_none()
-                    if sf:
-                        sf_key = sf.key
-                        val_str = u_key.lower().strip()
-                        filtered = []
-                        for row in combined_rows:
-                            row_val = str(row.get(sf_key, "")).lower().strip()
-                            if row_val == val_str:
-                                filtered.append(row)
-                        combined_rows = filtered
+                template_perm = p_res.scalar_one_or_none()
+            elif custom_report_id is not None and current_user is not None:
+                cp_res = await db.execute(
+                    select(CustomReportAssignment).where(
+                        CustomReportAssignment.custom_report_id == custom_report_id,
+                        CustomReportAssignment.user_id == current_user.id,
+                    )
+                )
+                custom_perm = cp_res.scalar_one_or_none()
+
+            effective_perm = template_perm or custom_perm
+
+            if current_user is not None and u_key is not None:
+                sf_key = None
+                if effective_perm is not None:
+                    if getattr(effective_perm, "can_use_unique_value", False):
+                        cfg = getattr(effective_perm, "filter_column_configs", None)
+                        if isinstance(cfg, dict):
+                            grp_key = f"{field.kpi_id}_{field.id}"
+                            sf_key = (
+                                cfg.get(grp_key)
+                                or cfg.get(str(field.id))
+                                or cfg.get(field.id)
+                                or cfg.get(str(field.kpi_id))
+                                or cfg.get(field.kpi_id)
+                            )
+                            if not sf_key:
+                                for k, v in cfg.items():
+                                    if str(k).endswith(f"_{field.id}") or str(k) == str(field.id):
+                                        sf_key = v
+                                        break
+                        elif isinstance(cfg, list):
+                            for item in cfg:
+                                if isinstance(item, dict) and (item.get("mli_id") == field.id or item.get("kpi_id") == field.kpi_id):
+                                    sf_key = item.get("sub_field_key")
+                                    break
+                        if not sf_key:
+                            perm_sub_k = getattr(effective_perm, "filter_sub_field_key", None)
+                            if perm_sub_k and combined_rows and any(c for c in combined_rows[0].keys() if c.lower() == perm_sub_k.lower()):
+                                for c in combined_rows[0].keys():
+                                    if c.lower() == perm_sub_k.lower():
+                                        sf_key = c
+                                        break
+                            elif perm_sub_k:
+                                sf_key = perm_sub_k
+                        if not sf_key and custom_report_id is not None:
+                            filter_config_res = await db.execute(
+                                select(ReportUserFilterConfiguration)
+                                .where(
+                                    ReportUserFilterConfiguration.report_id == custom_report_id,
+                                    ReportUserFilterConfiguration.enabled == True,
+                                )
+                            )
+                            f_cfg = filter_config_res.scalar_one_or_none()
+                            if f_cfg and f_cfg.field_id:
+                                sf = await db.get(KPIFieldSubField, f_cfg.field_id)
+                                if sf:
+                                    sf_key = sf.key
+                        if not sf_key and combined_rows:
+                            for candidate in combined_rows[0].keys():
+                                c_norm = str(candidate).lower()
+                                if any(dk in c_norm for dk in ("dept", "department", "user_key", "unique_key")):
+                                    sf_key = candidate
+                                    break
+                else:
+                    filter_config = None
+                    if custom_report_id is not None:
+                        filter_config_res = await db.execute(
+                            select(ReportUserFilterConfiguration)
+                            .where(
+                                ReportUserFilterConfiguration.report_id == custom_report_id,
+                                ReportUserFilterConfiguration.enabled == True,
+                                or_(
+                                    ReportUserFilterConfiguration.mli_id == field.id,
+                                    ReportUserFilterConfiguration.mli_id.is_(None)
+                                )
+                            )
+                        )
+                        filter_config = filter_config_res.scalar_one_or_none()
+
+                    if filter_config and getattr(filter_config, "enabled", False):
+                        target_f_id = getattr(filter_config, "field_id", None)
+                        if target_f_id is not None:
+                            sf_res = await db.execute(select(KPIFieldSubField).where(KPIFieldSubField.id == target_f_id))
+                            sf = sf_res.scalar_one_or_none()
+                            if sf:
+                                sf_key = sf.key
+                        else:
+                            sf_res = await db.execute(
+                                select(KPIFieldSubField).where(KPIFieldSubField.field_id == field.id).order_by(KPIFieldSubField.id)
+                            )
+                            sfs = sf_res.scalars().all()
+                            for sf in sfs:
+                                k_norm = sf.key.lower()
+                                n_norm = (sf.name or "").lower()
+                                if any(dk in k_norm or dk in n_norm for dk in ("dept", "department", "user_key", "unique_key")):
+                                    sf_key = sf.key
+                                    break
+                            if not sf_key and sfs:
+                                sf_key = sfs[0].key
+
+                if sf_key and u_key:
+                    val_str = str(u_key).strip()
+                    val_lower = val_str.lower()
+                    variants = [val_str]
+                    if val_lower.startswith("department of "):
+                        variants.append(val_str[len("department of "):].strip())
+                    elif val_lower.endswith(" department"):
+                        variants.append(val_str[:-len(" department")].strip())
+                    else:
+                        variants.append(f"Department of {val_str}")
+                        variants.append(f"{val_str} Department")
+                    variants_lower = [v.lower().strip() for v in variants]
+
+                    filtered = []
+                    for row in combined_rows:
+                        row_val = str(row.get(sf_key, "")).lower().strip()
+                        if any(vl == row_val for vl in variants_lower if vl):
+                            filtered.append(row)
+                    combined_rows = filtered
+                elif effective_perm and getattr(effective_perm, "can_use_unique_value", False):
+                    # FAIL CLOSED: Unique key mode enabled but key or target column missing
+                    combined_rows = []
 
             start = offset if offset is not None else 0
             end = (start + limit) if limit is not None else len(combined_rows)
@@ -290,29 +412,176 @@ async def _load_multi_line_items_rows_batch(
         if "unique_user_key" in current_user.__dict__:
             u_key = current_user.unique_user_key
         else:
-            from app.core.models import User
             u_key = (await db.execute(select(User.unique_user_key).where(User.id == current_user.id))).scalar_one_or_none()
+    elif current_user_id is not None:
+        u_obj = (await db.execute(select(User).where(User.id == current_user_id))).scalar_one_or_none()
+        if u_obj:
+            current_user = u_obj
+            u_key = u_obj.unique_user_key
 
-    if custom_report_id is not None and current_user is not None and u_key is not None:
-        filter_config_res = await db.execute(
-            select(ReportUserFilterConfiguration)
-            .where(
-                ReportUserFilterConfiguration.report_id == custom_report_id,
-                ReportUserFilterConfiguration.enabled == True,
-                ReportUserFilterConfiguration.mli_id == field.id
+    custom_perm = None
+    if template_perm is None and template_id is not None and current_user is not None:
+        p_res = await db.execute(
+            select(ReportAccessPermission).where(
+                ReportAccessPermission.report_template_id == template_id,
+                ReportAccessPermission.user_id == current_user.id,
             )
         )
-        filter_config = filter_config_res.scalar_one_or_none()
-        if filter_config and filter_config.field_id is not None:
+        template_perm = p_res.scalar_one_or_none()
+    elif custom_report_id is not None and current_user is not None:
+        cp_res = await db.execute(
+            select(CustomReportAssignment).where(
+                CustomReportAssignment.custom_report_id == custom_report_id,
+                CustomReportAssignment.user_id == current_user.id,
+            )
+        )
+        custom_perm = cp_res.scalar_one_or_none()
+
+    effective_perm = template_perm or custom_perm
+
+    if current_user is not None and u_key is not None:
+        target_field_id = None
+        filter_operator = "="
+
+        if effective_perm is not None:
+            if getattr(effective_perm, "can_use_unique_value", False):
+                filter_operator = getattr(effective_perm, "filter_operator", "=") or "="
+                target_sf_key = None
+                cfg = getattr(effective_perm, "filter_column_configs", None)
+                if isinstance(cfg, dict):
+                    grp_key = f"{field.kpi_id}_{field.id}"
+                    target_sf_key = (
+                        cfg.get(grp_key)
+                        or cfg.get(str(field.id))
+                        or cfg.get(field.id)
+                        or cfg.get(str(field.kpi_id))
+                        or cfg.get(field.kpi_id)
+                    )
+                    if not target_sf_key:
+                        for k, v in cfg.items():
+                            if str(k).endswith(f"_{field.id}") or str(k) == str(field.id):
+                                target_sf_key = v
+                                break
+                elif isinstance(cfg, list):
+                    for item in cfg:
+                        if isinstance(item, dict) and (item.get("mli_id") == field.id or item.get("kpi_id") == field.kpi_id):
+                            target_sf_key = item.get("sub_field_key")
+                            break
+
+                if target_sf_key:
+                    sf_res = await db.execute(
+                        select(KPIFieldSubField.id).where(
+                            KPIFieldSubField.field_id == field.id,
+                            (KPIFieldSubField.key == target_sf_key) | (KPIFieldSubField.name == target_sf_key)
+                        )
+                    )
+                    target_field_id = sf_res.scalar_one_or_none()
+
+                if target_field_id is None:
+                    perm_sub_k = getattr(effective_perm, "filter_sub_field_key", None)
+                    if perm_sub_k:
+                        sf_res = await db.execute(
+                            select(KPIFieldSubField.id).where(
+                                KPIFieldSubField.field_id == field.id,
+                                (KPIFieldSubField.key == perm_sub_k) | (KPIFieldSubField.name == perm_sub_k)
+                            )
+                        )
+                        target_field_id = sf_res.scalar_one_or_none()
+
+                if target_field_id is None and custom_report_id is not None:
+                    filter_config_res = await db.execute(
+                        select(ReportUserFilterConfiguration)
+                        .where(
+                            ReportUserFilterConfiguration.report_id == custom_report_id,
+                            ReportUserFilterConfiguration.enabled == True,
+                        )
+                    )
+                    f_cfg = filter_config_res.scalar_one_or_none()
+                    if f_cfg and f_cfg.field_id:
+                        sf = await db.get(KPIFieldSubField, f_cfg.field_id)
+                        if sf:
+                            sf_match = (await db.execute(
+                                select(KPIFieldSubField.id).where(
+                                    KPIFieldSubField.field_id == field.id,
+                                    (KPIFieldSubField.key == sf.key) | (KPIFieldSubField.name == sf.name)
+                                )
+                            )).scalar_one_or_none()
+                            if sf_match:
+                                target_field_id = sf_match
+
+                if target_field_id is None:
+                    sf_res = await db.execute(
+                        select(KPIFieldSubField).where(KPIFieldSubField.field_id == field.id).order_by(KPIFieldSubField.id)
+                    )
+                    sfs = sf_res.scalars().all()
+                    for sf in sfs:
+                        k_norm = sf.key.lower()
+                        n_norm = (sf.name or "").lower()
+                        if any(dk in k_norm or dk in n_norm for dk in ("dept", "department", "user_key", "unique_key")):
+                            target_field_id = sf.id
+                            break
+                    if target_field_id is None and sfs:
+                        target_field_id = sfs[0].id
+        else:
+            filter_config = None
+            if custom_report_id is not None:
+                filter_config_res = await db.execute(
+                    select(ReportUserFilterConfiguration)
+                    .where(
+                        ReportUserFilterConfiguration.report_id == custom_report_id,
+                        ReportUserFilterConfiguration.enabled == True,
+                        or_(
+                            ReportUserFilterConfiguration.mli_id == field.id,
+                            ReportUserFilterConfiguration.mli_id.is_(None)
+                        )
+                    )
+                )
+                filter_config = filter_config_res.scalar_one_or_none()
+
+            if filter_config and getattr(filter_config, "enabled", False):
+                target_field_id = getattr(filter_config, "field_id", None)
+                if target_field_id is None:
+                    sf_res = await db.execute(
+                        select(KPIFieldSubField).where(KPIFieldSubField.field_id == field.id).order_by(KPIFieldSubField.id)
+                    )
+                    sfs = sf_res.scalars().all()
+                    for sf in sfs:
+                        k_norm = sf.key.lower()
+                        n_norm = (sf.name or "").lower()
+                        if any(dk in k_norm or dk in n_norm for dk in ("dept", "department", "user_key", "unique_key")):
+                            target_field_id = sf.id
+                            break
+                    if target_field_id is None and sfs:
+                        target_field_id = sfs[0].id
+
+        if target_field_id is not None:
             stmt = stmt.join(
                 KpiMultiLineCell,
                 and_(
                     KpiMultiLineCell.row_id == KpiMultiLineRow.id,
-                    KpiMultiLineCell.sub_field_id == filter_config.field_id
+                    KpiMultiLineCell.sub_field_id == target_field_id
                 )
             )
-            val_str = u_key
-            conditions = [KpiMultiLineCell.value_text == val_str]
+            val_str = str(u_key).strip()
+            val_lower = val_str.lower()
+            variants = [val_str]
+            if val_lower.startswith("department of "):
+                variants.append(val_str[len("department of "):].strip())
+            elif val_lower.endswith(" department"):
+                variants.append(val_str[:-len(" department")].strip())
+            else:
+                variants.append(f"Department of {val_str}")
+                variants.append(f"{val_str} Department")
+            variants = list(dict.fromkeys(variants))
+
+            conditions = []
+            for v in variants:
+                if v:
+                    if filter_operator in ("contains", "like"):
+                        conditions.append(func.lower(KpiMultiLineCell.value_text).contains(v.lower()))
+                    else:
+                        conditions.append(KpiMultiLineCell.value_text == v)
+                        conditions.append(func.lower(KpiMultiLineCell.value_text) == v.lower())
             try:
                 val_float = float(val_str)
                 conditions.append(KpiMultiLineCell.value_number == val_float)
@@ -321,7 +590,13 @@ async def _load_multi_line_items_rows_batch(
             val_bool = val_str.lower() in ("true", "1", "yes", "y")
             if val_bool or val_str.lower() in ("false", "0", "no", "n"):
                 conditions.append(KpiMultiLineCell.value_boolean == val_bool)
-            stmt = stmt.where(or_(*conditions))
+            if filter_operator == "!=":
+                stmt = stmt.where(~or_(*conditions))
+            else:
+                stmt = stmt.where(or_(*conditions))
+        elif effective_perm and getattr(effective_perm, "can_use_unique_value", False):
+            # FAIL CLOSED: unique key mode enabled but target column not resolvable
+            stmt = stmt.where(KpiMultiLineRow.id == -1)
     if date_range:
         start_date, end_date, date_col_key = date_range
         sf_res = await db.execute(
@@ -800,32 +1075,38 @@ async def list_template_assignments(
 
 
 async def user_can_access_report(
-    db: AsyncSession, user_id: int, template_id: int, action: str = "view"
+    db: AsyncSession, user_id: int, template_id: int, action: str = "view", org_id: int | None = None
 ) -> bool:
     """Check if user can view/print/export report.
 
     Rules:
-    - SUPER_ADMIN: can access any template.
+    - Organization Boundary: ReportTemplate must exist and match target_org_id.
+    - SUPER_ADMIN: can access any template within target_org_id (or any if no org context).
     - ORG_ADMIN: can access any template in their organization.
-    - Other roles: must be explicitly assigned (ReportAccessPermission).
+    - Other roles: must belong to the same organization AND be explicitly assigned (ReportAccessPermission).
     """
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         return False
-    if user.role.value == "SUPER_ADMIN":
-        result = await db.execute(select(ReportTemplate).where(ReportTemplate.id == template_id))
-        if result.scalar_one_or_none():
-            return True
-    if user.role.value == "ORG_ADMIN" and user.organization_id:
-        result = await db.execute(
-            select(ReportTemplate).where(
-                ReportTemplate.id == template_id,
-                ReportTemplate.organization_id == user.organization_id,
-            )
-        )
-        if result.scalar_one_or_none():
-            return True
+
+    role_str = str(getattr(user.role, "value", user.role) or "").upper()
+    if role_str == "SUPER_ADMIN":
+        target_org_id = org_id if org_id is not None else user.organization_id
+    else:
+        target_org_id = user.organization_id
+
+    # Verify template existence and strict organization matching
+    result = await db.execute(select(ReportTemplate).where(ReportTemplate.id == template_id))
+    template = result.scalar_one_or_none()
+    if not template:
+        return False
+    if target_org_id is not None and template.organization_id != target_org_id:
+        return False
+
+    if role_str in ("SUPER_ADMIN", "ORG_ADMIN"):
+        return True
+
     result = await db.execute(
         select(ReportAccessPermission).where(
             ReportAccessPermission.report_template_id == template_id,
@@ -836,13 +1117,13 @@ async def user_can_access_report(
     if not perm:
         return False
     if action == "view":
-        return perm.can_view
+        return bool(perm.can_view or perm.can_print)
     if action == "print":
-        return perm.can_print
+        return bool(perm.can_print)
     if action == "export":
-        return perm.can_export
+        return bool(perm.can_export)
     if action == "change_period":
-        return perm.can_change_period
+        return bool(perm.can_change_period)
     return False
 
 
@@ -2098,6 +2379,7 @@ async def generate_report_data(
     by_default: bool = False,
     period_type: str | None = None,
     bypass_cache: bool = False,
+    current_user: User | None = None,
 ) -> dict | None:
     """
     Compile report data from KPI entries for the template.
@@ -2105,6 +2387,18 @@ async def generate_report_data(
     Returns structured dict: { template_name, year, kpis: [ { kpi_name, entries: [ { fields } ] } ] }
     Formula fields are evaluated.
     """
+    current_user_id = current_user.id if current_user else None
+    template_perm = None
+    if current_user is not None and getattr(current_user, "role", None) and getattr(current_user.role, "value", str(current_user.role)) not in ("SUPER_ADMIN", "ORG_ADMIN"):
+        from app.core.models import ReportAccessPermission
+        p_res = await db.execute(
+            select(ReportAccessPermission).where(
+                ReportAccessPermission.report_template_id == template_id,
+                ReportAccessPermission.user_id == current_user.id,
+            )
+        )
+        template_perm = p_res.scalar_one_or_none()
+
     rt = await get_report_template(db, template_id, org_id)
     if not rt:
         return None
@@ -2175,7 +2469,8 @@ async def generate_report_data(
     # yr_display: for custom periods show the period label; for Data Entry show the numeric year
     yr_display = selected_period if (rt and getattr(rt, "fetch_data_with_date", False) and not by_default and selected_period) else yr
     t0 = time.perf_counter()
-    cache_key = (template_id, org_id, int(yr), bool(include_drafts), by_default, selected_period, period_type, "v4")
+    user_cache_token = (current_user.id, getattr(current_user, "unique_user_key", None)) if current_user else None
+    cache_key = (template_id, org_id, int(yr), bool(include_drafts), by_default, selected_period, period_type, user_cache_token, "v5")
     if not bypass_cache:
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -2521,19 +2816,28 @@ async def generate_report_data(
 
             target_entry_ids = [e.id for e in all_entries if e.id] if (date_range and mf_date_range) else entry_ids_sorted
             batch_res = await _load_multi_line_items_rows_batch(
-                db, entry_ids=target_entry_ids, field=mf, current_user_id=current_user_id, date_range=mf_date_range
+                db,
+                entry_ids=target_entry_ids,
+                field=mf,
+                current_user_id=current_user_id,
+                date_range=mf_date_range,
+                template_id=template_id,
+                template_perm=template_perm,
+                current_user=current_user,
             )
             
             # Re-evaluate any formula subfields on MLI rows
+            auto_compute = getattr(kpi, "auto_compute_formulas", True)
             sub_fields_orm = getattr(mf, "sub_fields", []) or []
             formula_sfs = []
-            for sf in sub_fields_orm:
-                cfg = getattr(sf, "config", None) or {}
-                expr = cfg.get("formula_expression")
-                cond_logic = cfg.get("conditional_logic")
-                sft = getattr(sf.field_type, "value", str(sf.field_type))
-                if sft == "formula" or expr:
-                    formula_sfs.append((sf.key, expr, cond_logic, cfg))
+            if auto_compute:
+                for sf in sub_fields_orm:
+                    cfg = getattr(sf, "config", None) or {}
+                    expr = cfg.get("formula_expression")
+                    cond_logic = cfg.get("conditional_logic")
+                    sft = getattr(sf.field_type, "value", str(sf.field_type))
+                    if sft == "formula" or expr:
+                        formula_sfs.append((sf.key, expr, cond_logic, cfg))
 
             recalculated_batch = {}
             for eid, rows_list in batch_res.items():
@@ -2783,21 +3087,26 @@ async def generate_report_data(
                         continue
 
                 # Formula fields (with multi_line_items support for SUM_ITEMS etc.)
+                kpi_auto_compute = getattr(kpi, "auto_compute_formulas", True)
                 for f in fields_to_include:
                     if f.field_type == FieldType.formula and f.formula_expression:
-                        computed = evaluate_formula(
-                            f.formula_expression,
-                            value_by_key,
-                            multi_line_items_data,
-                            other_kpi_values,
-                            other_kpi_multi_line_data=recalculated_kpi_mli_data,
-                        )
-                        # If evaluation fails (returns None), fall back to the stored formula value
-                        # so reports can still display existing computed values.
-                        if computed is None:
+                        if not kpi_auto_compute:
                             fv_formula = fv_by_field.get(f.id)
-                            if fv_formula and fv_formula.value_number is not None:
-                                computed = fv_formula.value_number
+                            computed = fv_formula.value_number if (fv_formula and fv_formula.value_number is not None) else None
+                        else:
+                            computed = evaluate_formula(
+                                f.formula_expression,
+                                value_by_key,
+                                multi_line_items_data,
+                                other_kpi_values,
+                                other_kpi_multi_line_data=recalculated_kpi_mli_data,
+                            )
+                            # If evaluation fails (returns None), fall back to the stored formula value
+                            # so reports can still display existing computed values.
+                            if computed is None:
+                                fv_formula = fv_by_field.get(f.id)
+                                if fv_formula and fv_formula.value_number is not None:
+                                    computed = fv_formula.value_number
                         card_ids_f = kpi.card_display_field_ids or []
                         show_on_card_f = f.id in card_ids_f if isinstance(card_ids_f, list) else False
                         field_values_out.append({
@@ -2930,6 +3239,7 @@ async def render_report_html(
     by_default: bool = False,
     period_type: str | None = None,
     bypass_cache: bool = False,
+    current_user: User | None = None,
 ) -> str | None:
     """
     Render report using the template's body_template or body_blocks and
@@ -2957,6 +3267,7 @@ async def render_report_html(
         by_default=by_default,
         period_type=period_type,
         bypass_cache=bypass_cache,
+        current_user=current_user,
     )
 
 
@@ -2971,6 +3282,7 @@ async def render_report_html_with_template(
     by_default: bool = False,
     period_type: str | None = None,
     bypass_cache: bool = False,
+    current_user: User | None = None,
 ) -> str | None:
     """
     Render report with given template string (for live preview) or from DB.
@@ -2989,6 +3301,7 @@ async def render_report_html_with_template(
             by_default=by_default,
             period_type=period_type,
             bypass_cache=bypass_cache,
+            current_user=current_user,
         )
     if not data:
         return None

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { fetchAllMultiItemsRows, getKpiFieldsWithSubs, type KpiFieldWithSubs } from "@/lib/fetchMultiItemsRows";
@@ -815,6 +816,7 @@ export type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -841,6 +843,7 @@ export type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -879,6 +882,7 @@ export type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -923,6 +927,7 @@ export type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -961,6 +966,7 @@ export type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -1102,8 +1108,13 @@ function WidgetSettingsShell({
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [viewerMenu, setViewerMenu] = useState<React.ReactNode>(null);
   const [headerAddon, setHeaderAddon] = useState<React.ReactNode>(null);
+  const [mounted, setMounted] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const layoutWrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const { fullScreenWidgetId, setFullScreenWidgetId, goToNext, goToPrev, hasNext, hasPrev } = useWidgetFullScreenNavigation();
   const isFullScreen = fullScreenWidgetId === widgetKey;
@@ -1133,6 +1144,15 @@ function WidgetSettingsShell({
   }, [isFullScreen, goToNext, goToPrev]);
 
   useEffect(() => {
+    if (!isFullScreen) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [isFullScreen]);
+
+  useEffect(() => {
     setOpen(false);
     setLayoutOpen(false);
   }, [widgetKey]);
@@ -1152,389 +1172,404 @@ function WidgetSettingsShell({
 
   const hasDesign = !!designActions;
   const hasViewer = viewerMenu != null;
-  const showSettingsButton = hasDesign || hasViewer;
   const showHeader = true;
+
+  const renderHeader = (isFs: boolean) => (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "flex-start",
+        alignItems: "center",
+        gap: "0.5rem",
+        marginBottom: isFs ? "1rem" : "0.75rem",
+        borderBottom: isFs ? "1px solid var(--border)" : "none",
+        paddingBottom: isFs ? "0.75rem" : 0,
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+        {title ? (
+          <h3
+            style={{
+              margin: 0,
+              fontSize: isFs ? "1.45rem" : "1.1rem",
+              fontWeight: 700,
+              lineHeight: 1.3,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              color: "var(--text)",
+            }}
+          >
+            <CustomLabel value={title} widgetId={widgetKey} />
+          </h3>
+        ) : null}
+      </div>
+      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
+        {headerAddon ? <div style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{headerAddon}</div> : null}
+        {hasDesign ? (
+          <div ref={layoutWrapRef} style={{ position: "relative", flexShrink: 0 }}>
+            <button
+              type="button"
+              className={`widget-action-btn ${layoutOpen ? "active" : ""}`}
+              aria-label="Layout"
+              aria-expanded={layoutOpen}
+              aria-haspopup="true"
+              onClick={() => setLayoutOpen((o) => !o)}
+              title="Layout"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <rect x="3" y="4" width="7" height="7" rx="1" />
+                <rect x="14" y="4" width="7" height="7" rx="1" />
+                <rect x="3" y="13" width="18" height="7" rx="1" />
+              </svg>
+            </button>
+            {layoutOpen && (
+              <div
+                role="menu"
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 6px)",
+                  minWidth: 220,
+                  maxWidth: "min(90vw, 320px)",
+                  maxHeight: "min(70vh, 380px)",
+                  overflowY: "auto",
+                  zIndex: 40,
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--surface)",
+                  boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
+                  padding: "0.35rem 0",
+                }}
+              >
+                <div
+                  style={{
+                    padding: "0.35rem 0.75rem 0.2rem",
+                    fontSize: "0.72rem",
+                    color: "var(--muted)",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  Width in row (12 columns)
+                </div>
+                {DESIGN_COL_SPAN_OPTIONS.map(({ span, label }) => (
+                  <MenuRow
+                    key={span}
+                    active={designActions!.colSpan === span}
+                    onClick={() => {
+                      designActions!.onSetColSpan(span);
+                      setLayoutOpen(false);
+                    }}
+                  >
+                    {label}
+                  </MenuRow>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
+        {(hasDesign || hasViewer) ? (
+          <div ref={wrapRef} style={{ position: "relative", flexShrink: 0, display: "flex", alignItems: "center" }}>
+            <button
+              type="button"
+              className={`widget-action-btn ${open ? "active" : ""}`}
+              aria-label="Widget options & view settings"
+              title="Chart options & view settings"
+              aria-expanded={open}
+              aria-haspopup="true"
+              onClick={() => setOpen((o) => !o)}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <line x1="4" y1="21" x2="4" y2="14" strokeLinecap="round" />
+                <line x1="4" y1="10" x2="4" y2="3" strokeLinecap="round" />
+                <line x1="12" y1="21" x2="12" y2="12" strokeLinecap="round" />
+                <line x1="12" y1="8" x2="12" y2="3" strokeLinecap="round" />
+                <line x1="20" y1="21" x2="20" y2="16" strokeLinecap="round" />
+                <line x1="20" y1="12" x2="20" y2="3" strokeLinecap="round" />
+                <line x1="1" y1="14" x2="7" y2="14" strokeLinecap="round" />
+                <line x1="9" y1="8" x2="15" y2="8" strokeLinecap="round" />
+                <line x1="17" y1="16" x2="23" y2="16" strokeLinecap="round" />
+              </svg>
+            </button>
+            {open && (
+              <div
+                role="menu"
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 6px)",
+                  minWidth: 220,
+                  maxWidth: "min(90vw, 320px)",
+                  maxHeight: "min(70vh, 380px)",
+                  overflowY: "auto",
+                  zIndex: 40,
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--surface)",
+                  boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
+                  padding: "0.35rem 0",
+                }}
+              >
+                {hasDesign && (
+                  <>
+                    <MenuRow
+                      onClick={() => {
+                        designActions!.onEdit();
+                        setOpen(false);
+                      }}
+                    >
+                      Edit
+                    </MenuRow>
+                    <MenuRow
+                      danger
+                      onClick={() => {
+                        designActions!.onDelete();
+                        setOpen(false);
+                      }}
+                    >
+                      Delete
+                    </MenuRow>
+                  </>
+                )}
+                {hasDesign && hasViewer && <div style={{ borderTop: "1px solid var(--border)", margin: "0.25rem 0" }} />}
+                {hasViewer && <div style={{ padding: "0.45rem 0.65rem" }}>{viewerMenu}</div>}
+                {!hasDesign && !hasViewer && (
+                  <div style={{ padding: "0.45rem 0.65rem", fontSize: "0.82rem", color: "var(--muted)" }}>
+                    No additional settings
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : null}
+        {allowFullScreen && (
+          <button
+            type="button"
+            className={`widget-action-btn ${isFs ? "active" : ""}`}
+            aria-label={isFs ? "Exit Full Screen" : "Expand Full Screen"}
+            title={isFs ? "Exit Full Screen" : "Expand Full Screen"}
+            onClick={() => setIsFullScreen((f) => !f)}
+            style={{
+              flexShrink: 0,
+              ...(isFs
+                ? {
+                    borderColor: "#3b82f6",
+                    color: "#2563eb",
+                    background: "rgba(59, 130, 246, 0.1)",
+                  }
+                : {}),
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              {isFs ? (
+                <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" strokeLinecap="round" strokeLinejoin="round" />
+              ) : (
+                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" strokeLinecap="round" strokeLinejoin="round" />
+              )}
+            </svg>
+          </button>
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <WidgetViewerMenuSetterContext.Provider value={setViewerMenu}>
       <WidgetHeaderAddonSetterContext.Provider value={setHeaderAddon}>
-        {isFullScreen && (
+        {isFullScreen && mounted && typeof document !== "undefined" ? (
           <>
             <div
+              className="card"
               style={{
-                position: "fixed",
-                inset: 0,
-                zIndex: 9998,
-                background: "rgba(0, 0, 0, 0.75)",
-                backdropFilter: "blur(4px)",
-              }}
-              onClick={() => setIsFullScreen(false)}
-            />
-            {hasPrev && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  goToPrev();
-                }}
-                style={{
-                  position: "fixed",
-                  left: "1vw",
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  zIndex: 10000,
-                  width: "50px",
-                  height: "50px",
-                  borderRadius: "50%",
-                  border: "none",
-                  background: "rgba(255, 255, 255, 0.15)",
-                  color: "#ffffff",
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  transition: "background 0.2s, transform 0.2s",
-                  backdropFilter: "blur(2px)",
-                  boxShadow: "0 4px 12px rgba(0, 0, 0, 0.25)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "rgba(255, 255, 255, 0.3)";
-                  e.currentTarget.style.transform = "translateY(-50%) scale(1.1)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "rgba(255, 255, 255, 0.15)";
-                  e.currentTarget.style.transform = "translateY(-50%) scale(1)";
-                }}
-                aria-label="Previous Widget"
-                title="Previous Widget"
-              >
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              </button>
-            )}
-            {hasNext && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  goToNext();
-                }}
-                style={{
-                  position: "fixed",
-                  right: "1vw",
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  zIndex: 10000,
-                  width: "50px",
-                  height: "50px",
-                  borderRadius: "50%",
-                  border: "none",
-                  background: "rgba(255, 255, 255, 0.15)",
-                  color: "#ffffff",
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  transition: "background 0.2s, transform 0.2s",
-                  backdropFilter: "blur(2px)",
-                  boxShadow: "0 4px 12px rgba(0, 0, 0, 0.25)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "rgba(255, 255, 255, 0.3)";
-                  e.currentTarget.style.transform = "translateY(-50%) scale(1.1)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "rgba(255, 255, 255, 0.15)";
-                  e.currentTarget.style.transform = "translateY(-50%) scale(1)";
-                }}
-                aria-label="Next Widget"
-                title="Next Widget"
-              >
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              </button>
-            )}
-          </>
-        )}
-        <div
-          className="card"
-          style={
-            isFullScreen
-              ? {
-                  position: "fixed",
-                  top: "4vh",
-                  left: "3vw",
-                  right: "3vw",
-                  bottom: "4vh",
-                  maxHeight: "92vh",
-                  zIndex: 9999,
-                  background: "var(--surface)",
-                  borderRadius: 16,
-                  padding: "1.75rem",
-                  boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.35)",
-                  display: "flex",
-                  flexDirection: "column",
-                  overflow: "hidden",
-                }
-              : {
-                  padding: "1rem",
-                  position: "relative",
-                  height: "100%",
-                  display: "flex",
-                  flexDirection: "column",
-                }
-          }
-        >
-          {showHeader ? (
-            <div
-              style={{
+                padding: "1rem",
+                position: "relative",
+                height: "100%",
+                minHeight: 120,
                 display: "flex",
-                justifyContent: "flex-start",
-                alignItems: "center",
-                gap: "0.5rem",
-                marginBottom: "0.75rem",
-                borderBottom: isFullScreen ? "1px solid var(--border)" : "none",
-                paddingBottom: isFullScreen ? "0.75rem" : 0,
+                flexDirection: "column",
+                boxSizing: "border-box",
+                border: "1px dashed var(--border)",
+                background: "var(--bg-subtle, #f8fafc)",
+                opacity: 0.5,
               }}
+              aria-hidden
             >
-              <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
-                {title ? (
-                  <h3
-                    style={{
-                      margin: 0,
-                      fontSize: isFullScreen ? "1.75rem" : "1.1rem",
-                      fontWeight: isFullScreen ? 800 : 700,
-                      lineHeight: 1.3,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      color: "var(--text)",
-                    }}
-                  >
-                    {title}
-                  </h3>
-                ) : null}
-              </div>
-              <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
-                {headerAddon ? <div style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{headerAddon}</div> : null}
-                {hasDesign ? (
-                  <div ref={layoutWrapRef} style={{ position: "relative", flexShrink: 0 }}>
-                    <button
-                      type="button"
-                      aria-label="Layout"
-                      aria-expanded={layoutOpen}
-                      aria-haspopup="true"
-                      onClick={() => setLayoutOpen((o) => !o)}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: 36,
-                        height: 36,
-                        padding: 0,
-                        border: "1px solid var(--border)",
-                        borderRadius: 8,
-                        background: "var(--surface)",
-                        color: "var(--text)",
-                        cursor: "pointer",
-                      }}
-                      title="Layout"
-                    >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                        <rect x="3" y="4" width="7" height="7" rx="1" />
-                        <rect x="14" y="4" width="7" height="7" rx="1" />
-                        <rect x="3" y="13" width="18" height="7" rx="1" />
-                      </svg>
-                    </button>
-                    {layoutOpen && (
-                      <div
-                        role="menu"
-                        style={{
-                          position: "absolute",
-                          right: 0,
-                          top: "calc(100% + 6px)",
-                          minWidth: 220,
-                          maxWidth: "min(90vw, 320px)",
-                          maxHeight: "min(70vh, 380px)",
-                          overflowY: "auto",
-                          zIndex: 40,
-                          border: "1px solid var(--border)",
-                          borderRadius: 10,
-                          background: "var(--surface)",
-                          boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
-                          padding: "0.35rem 0",
-                        }}
-                      >
-                        <div
-                          style={{
-                            padding: "0.35rem 0.75rem 0.2rem",
-                            fontSize: "0.72rem",
-                            color: "var(--muted)",
-                            textTransform: "uppercase",
-                            letterSpacing: "0.04em",
-                          }}
-                        >
-                          Width in row (12 columns)
-                        </div>
-                        {DESIGN_COL_SPAN_OPTIONS.map(({ span, label }) => (
-                          <MenuRow
-                            key={span}
-                            active={designActions!.colSpan === span}
-                            onClick={() => {
-                              designActions!.onSetColSpan(span);
-                              setLayoutOpen(false);
-                            }}
-                          >
-                            {label}
-                          </MenuRow>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ) : null}
-                {showSettingsButton ? (
-                  <div ref={wrapRef} style={{ position: "relative", flexShrink: 0, display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                    {allowFullScreen && (
-                      <button
-                        type="button"
-                        aria-label="Expand Full Screen"
-                        title={isFullScreen ? "Exit Full Screen" : "Expand Full Screen"}
-                        onClick={() => setIsFullScreen((f) => !f)}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          width: 36,
-                          height: 36,
-                          padding: 0,
-                          border: "1px solid var(--border)",
-                          borderRadius: 8,
-                          background: isFullScreen ? "rgba(79, 70, 229, 0.12)" : "var(--surface)",
-                          color: isFullScreen ? "var(--accent)" : "var(--text)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                          <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      aria-label="Widget options & view settings"
-                      title="Chart options & view settings"
-                      aria-expanded={open}
-                      aria-haspopup="true"
-                      onClick={() => setOpen((o) => !o)}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: 36,
-                        height: 36,
-                        padding: 0,
-                        border: "1px solid var(--border)",
-                        borderRadius: 8,
-                        background: "var(--surface)",
-                        color: "var(--text)",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                        <line x1="4" y1="21" x2="4" y2="14" strokeLinecap="round" />
-                        <line x1="4" y1="10" x2="4" y2="3" strokeLinecap="round" />
-                        <line x1="12" y1="21" x2="12" y2="12" strokeLinecap="round" />
-                        <line x1="12" y1="8" x2="12" y2="3" strokeLinecap="round" />
-                        <line x1="20" y1="21" x2="20" y2="16" strokeLinecap="round" />
-                        <line x1="20" y1="12" x2="20" y2="3" strokeLinecap="round" />
-                        <line x1="1" y1="14" x2="7" y2="14" strokeLinecap="round" />
-                        <line x1="9" y1="8" x2="15" y2="8" strokeLinecap="round" />
-                        <line x1="17" y1="16" x2="23" y2="16" strokeLinecap="round" />
-                      </svg>
-                    </button>
-                    {open && (
-                      <div
-                        role="menu"
-                        style={{
-                          position: "absolute",
-                          right: 0,
-                          top: "calc(100% + 6px)",
-                          minWidth: 220,
-                          maxWidth: "min(90vw, 320px)",
-                          maxHeight: "min(70vh, 380px)",
-                          overflowY: "auto",
-                          zIndex: 40,
-                          border: "1px solid var(--border)",
-                          borderRadius: 10,
-                          background: "var(--surface)",
-                          boxShadow: "0 10px 30px rgba(0,0,0,0.12)",
-                          padding: "0.35rem 0",
-                        }}
-                      >
-                        {hasDesign && (
-                          <>
-                            <MenuRow
-                              onClick={() => {
-                                designActions!.onEdit();
-                                setOpen(false);
-                              }}
-                            >
-                              Edit
-                            </MenuRow>
-                            <MenuRow
-                              danger
-                              onClick={() => {
-                                designActions!.onDelete();
-                                setOpen(false);
-                              }}
-                            >
-                              Delete
-                            </MenuRow>
-                          </>
-                        )}
-                        {hasDesign && hasViewer && <div style={{ borderTop: "1px solid var(--border)", margin: "0.25rem 0" }} />}
-                        {hasViewer && <div style={{ padding: "0.45rem 0.65rem" }}>{viewerMenu}</div>}
-                        {!hasDesign && !hasViewer && (
-                          <div style={{ padding: "0.45rem 0.65rem", fontSize: "0.82rem", color: "var(--muted)" }}>
-                            No additional settings
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ) : null}
-                {isFullScreen && (
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => setIsFullScreen(false)}
-                    style={{
-                      padding: "0.4rem 0.85rem",
-                      fontSize: "0.85rem",
-                      fontWeight: 600,
-                      borderRadius: 8,
-                      border: "1px solid var(--border)",
-                      background: "var(--bg-subtle, #f3f4f6)",
-                      color: "var(--text)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    ✕ Exit Full Screen
-                  </button>
-                )}
+              <div style={{ margin: "auto", fontSize: "0.85rem", color: "var(--muted)", fontWeight: 500 }}>
+                Widget expanded to full screen
               </div>
             </div>
-          ) : null}
 
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: isFullScreen ? "auto" : "hidden" }}>
-            <WidgetFullScreenProvider isFullScreen={isFullScreen}>
-              {children}
-            </WidgetFullScreenProvider>
+            {createPortal(
+              <div
+                id={`widget-fullscreen-overlay-${widgetKey}`}
+                style={{
+                  position: "fixed",
+                  inset: 0,
+                  zIndex: 99998,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                {/* Light subtle backdrop matching dashboard theme — NOT black */}
+                <div
+                  style={{
+                    position: "fixed",
+                    inset: 0,
+                    zIndex: 99998,
+                    background: "rgba(241, 245, 249, 0.88)",
+                    backdropFilter: "blur(6px)",
+                  }}
+                  onClick={() => setIsFullScreen(false)}
+                  aria-label="Close Full Screen"
+                />
+
+                {hasPrev && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      goToPrev();
+                    }}
+                    style={{
+                      position: "fixed",
+                      left: "max(12px, calc(2.5vw - 22px))",
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      zIndex: 100000,
+                      width: "44px",
+                      height: "44px",
+                      borderRadius: "50%",
+                      border: "1px solid var(--border, #e2e8f0)",
+                      background: "var(--surface, #ffffff)",
+                      color: "#334155",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      transition: "background 0.18s, box-shadow 0.18s, transform 0.18s",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "var(--bg-subtle, #f8fafc)";
+                      e.currentTarget.style.transform = "translateY(-50%) scale(1.08)";
+                      e.currentTarget.style.boxShadow = "0 4px 14px rgba(0,0,0,0.12)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "var(--surface, #ffffff)";
+                      e.currentTarget.style.transform = "translateY(-50%) scale(1)";
+                      e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)";
+                    }}
+                    aria-label="Previous Widget"
+                    title="Previous Widget"
+                  >
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </button>
+                )}
+
+                {hasNext && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      goToNext();
+                    }}
+                    style={{
+                      position: "fixed",
+                      right: "max(12px, calc(2.5vw - 22px))",
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      zIndex: 100000,
+                      width: "44px",
+                      height: "44px",
+                      borderRadius: "50%",
+                      border: "1px solid var(--border, #e2e8f0)",
+                      background: "var(--surface, #ffffff)",
+                      color: "#334155",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      transition: "background 0.18s, box-shadow 0.18s, transform 0.18s",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "var(--bg-subtle, #f8fafc)";
+                      e.currentTarget.style.transform = "translateY(-50%) scale(1.08)";
+                      e.currentTarget.style.boxShadow = "0 4px 14px rgba(0,0,0,0.12)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "var(--surface, #ffffff)";
+                      e.currentTarget.style.transform = "translateY(-50%) scale(1)";
+                      e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)";
+                    }}
+                    aria-label="Next Widget"
+                    title="Next Widget"
+                  >
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </button>
+                )}
+
+                {/* The Single-Bordered Full-Screen Card Modal */}
+                <div
+                  className="card"
+                  style={{
+                    position: "fixed",
+                    top: "max(12px, 2.5vh)",
+                    left: "max(12px, 2.5vw)",
+                    right: "max(12px, 2.5vw)",
+                    bottom: "max(12px, 2.5vh)",
+                    zIndex: 99999,
+                    background: "var(--surface, #ffffff)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 14,
+                    padding: "1.5rem 2rem",
+                    boxShadow: "0 12px 36px -6px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.04)",
+                    display: "flex",
+                    flexDirection: "column",
+                    overflow: "hidden",
+                    boxSizing: "border-box",
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {renderHeader(true)}
+                  <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "auto" }}>
+                    <WidgetFullScreenProvider isFullScreen={true}>
+                      {children}
+                    </WidgetFullScreenProvider>
+                  </div>
+                </div>
+              </div>,
+              document.body
+            )}
+          </>
+        ) : (
+          <div
+            className="card widget-interactive-card"
+            style={{
+              padding: "1rem",
+              position: "relative",
+              height: "100%",
+              flex: 1,
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              boxSizing: "border-box",
+            }}
+          >
+            {renderHeader(false)}
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+              <WidgetFullScreenProvider isFullScreen={false}>
+                {children}
+              </WidgetFullScreenProvider>
+            </div>
           </div>
-        </div>
+        )}
       </WidgetHeaderAddonSetterContext.Provider>
     </WidgetViewerMenuSetterContext.Provider>
   );
@@ -1550,6 +1585,8 @@ export type DrillDownRequestPayload = {
     label?: string;
   };
   label?: string;
+  normalFilters?: Record<string, any>;
+  widgetFilters?: Record<string, any>;
 };
 
 export function WidgetRenderer({
@@ -1589,7 +1626,7 @@ export function WidgetRenderer({
 
   if (effectiveWidget.type === "text") {
     return (
-      <WidgetSettingsShell title={effectiveWidget.title} designActions={designActions} widgetKey={effectiveWidget.id} allowFullScreen={false}>
+      <WidgetSettingsShell title={effectiveWidget.title} designActions={designActions} widgetKey={effectiveWidget.id}>
         <div style={{ whiteSpace: "pre-wrap" }}>{effectiveWidget.text || ""}</div>
       </WidgetSettingsShell>
     );
@@ -1884,13 +1921,14 @@ function KpiSingleValueWidget({
   };
 
   return (
-    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id} allowFullScreen={false}>
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
       {loading ? (
         <WidgetBlurPlaceholder minHeight={80} />
       ) : error ? (
         <p className="form-error">{error}</p>
       ) : (
         <div
+          className="widget-content-appear"
           onClick={isInteractive ? handleCardClick : undefined}
           onKeyDown={
             isInteractive
@@ -2178,7 +2216,7 @@ function KpiCardSingleValueWidget({
   };
 
   return (
-    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id} allowFullScreen={false}>
+    <WidgetSettingsShell title={widget.title} designActions={designActions} widgetKey={widget.id}>
       {showSkeleton ? (
         <WidgetBlurPlaceholder minHeight={110} />
       ) : error && !previousValueRef.current ? (
@@ -2823,9 +2861,10 @@ function KpiBarChartWidgetInner({
         by_default: selectedPeriodType === "by_default",
         period_type: selectedPeriodType || undefined,
         selected_column_value: selectedColumnValue || undefined,
-        normal_filters: Object.keys(selectedDashboardFilterValues).length
-          ? selectedDashboardFilterValues
-          : (Object.keys(selectedWidgetFilters).length ? selectedWidgetFilters : undefined),
+        normal_filters: {
+          ...selectedWidgetFilters,
+          ...selectedDashboardFilterValues,
+        },
       };
       const fp = dashboardId != null
         ? getRequestFingerprint("chart", dashboardId, widgetId, chartOverrides, gen)
@@ -3425,7 +3464,7 @@ function KpiBarChartWidgetInner({
               fullWidth={widget.full_width}
               colorForIndex={colorForIndex}
               onChartTypeChange={setViewerChartType}
-              isDrillDownEnabled={Boolean(widget.link_with_table)}
+              isDrillDownEnabled={Boolean(widget.link_with_table && onDrillDownRequest)}
               onDrillDown={(item) => {
                 onDrillDownRequest?.({
                   widget,
@@ -3435,6 +3474,7 @@ function KpiBarChartWidgetInner({
                     label: item.label,
                   },
                   label: item.label,
+                  widgetFilters: selectedWidgetFilters,
                 });
               }}
             />
@@ -3456,26 +3496,29 @@ function KpiBarChartWidgetInner({
           </div>
         </div>
       ) : (
-        <SmartChartViewer
-          rawItems={visibleNumeric.map((b) => ({ key: b.key, label: b.label, value: b.value }))}
-          widgetId={widget.id}
-          chartType={chartType}
-          fullWidth={widget.full_width}
-          colorForIndex={colorForIndex}
-          onChartTypeChange={setViewerChartType}
-          isDrillDownEnabled={Boolean(widget.link_with_table)}
-          onDrillDown={(item) => {
-            onDrillDownRequest?.({
-              widget,
-              dimensionFilter: {
-                field_key: item.key,
-                value: item.value,
+        <div className="widget-content-appear">
+          <SmartChartViewer
+            rawItems={visibleNumeric.map((b) => ({ key: b.key, label: b.label, value: b.value }))}
+            widgetId={widget.id}
+            chartType={chartType}
+            fullWidth={widget.full_width}
+            colorForIndex={colorForIndex}
+            onChartTypeChange={setViewerChartType}
+            isDrillDownEnabled={Boolean(widget.link_with_table && onDrillDownRequest)}
+            onDrillDown={(item) => {
+              onDrillDownRequest?.({
+                widget,
+                dimensionFilter: {
+                  field_key: item.key,
+                  value: item.value,
+                  label: item.label,
+                },
                 label: item.label,
-              },
-              label: item.label,
-            });
-          }}
-        />
+                widgetFilters: selectedWidgetFilters,
+              });
+            }}
+          />
+        </div>
       )}
     </>
   );
@@ -3630,7 +3673,10 @@ function KpiTrendWidgetInner({
       const trendOverrides = {
         selected_years: selectedYears,
         selected_column_value: selectedColumnValue || undefined,
-        normal_filters: Object.keys(selectedWidgetFilters).length ? selectedWidgetFilters : undefined,
+        normal_filters: {
+          ...selectedWidgetFilters,
+          ...selectedDashboardFilterValues,
+        },
       };
       const bundleReq =
         dashboardId != null
@@ -4274,7 +4320,7 @@ function KpiTrendWidgetInner({
               </div>
             </div>
           ) : viewerView === "bar" ? (
-            <div style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 840 }}>
+            <div className="widget-content-appear" style={{ width: "100%", maxWidth: widget.full_width ? "100%" : 840 }}>
               <svg
                 viewBox={`0 0 ${widget.full_width ? 1280 : 720} 320`}
                 role="img"
@@ -4332,11 +4378,12 @@ function KpiTrendWidgetInner({
                                     height={h}
                                     fill={yearColors[y]}
                                     opacity={hoverTrendPt && hoverTrendPt.label === c && hoverTrendPt.series === String(y) ? 1.0 : 0.9}
+                                    className="chart-bar-animated"
                                     style={{
                                       transition: "opacity 0.15s ease",
                                       cursor: widget.link_with_table ? "pointer" : "default",
+                                      animationDelay: `${Math.min((i * years.length + j) * 0.02, 0.4)}s`,
                                     }}
-                                    rx={2}
                                     onClick={() => {
                                       if (widget.link_with_table && onDrillDownRequest) {
                                         const displayCat = getDisplayLabel(c, widget.id) || c;
@@ -4349,6 +4396,7 @@ function KpiTrendWidgetInner({
                                             label: `${displayCat} (${y})`,
                                           },
                                           label: `${displayCat} (${y})`,
+                                          widgetFilters: selectedWidgetFilters,
                                         });
                                       }
                                     }}
@@ -4374,6 +4422,7 @@ function KpiTrendWidgetInner({
                                             label: `${displayCat} (${y})`,
                                           },
                                           label: `${displayCat} (${y})`,
+                                          widgetFilters: selectedWidgetFilters,
                                         });
                                       }
                                     }}
@@ -4498,7 +4547,7 @@ function KpiTrendWidgetInner({
                         });
                         const d = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
                         return (
-                          <g key={c}>
+                          <g key={c} className="chart-line-animated" style={{ animationDelay: `${Math.min(idx * 0.05, 0.35)}s` }}>
                             <path d={d} fill="none" stroke={catColor(idx)} strokeWidth="2.5" />
                             {pts.map((p, i) => (
                               <circle
@@ -4520,6 +4569,7 @@ function KpiTrendWidgetInner({
                                         label: `${displayCat} (${years[i]})`,
                                       },
                                       label: `${displayCat} (${years[i]})`,
+                                      widgetFilters: selectedWidgetFilters,
                                     });
                                   }
                                 }}
@@ -4875,7 +4925,7 @@ function KpiTableWidget({
       ) : rows.length === 0 ? (
         <p style={{ color: "var(--muted)", margin: 0 }}>No data.</p>
       ) : (
-        <div style={{ overflowX: "auto" }}>
+        <div className="widget-content-appear" style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
               {rows.map((r, idx) => (

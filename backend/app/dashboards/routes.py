@@ -26,6 +26,7 @@ from app.dashboards.service import (
     create_dashboard,
     update_dashboard,
     delete_dashboard,
+    duplicate_dashboard,
     assign_dashboard_to_user,
     bulk_assign_dashboards_to_users,
     unassign_dashboard_from_user,
@@ -49,13 +50,21 @@ def _org_id(user: User, org_id_param: int | None) -> int:
 async def _org_id_for_dashboard(
     db: AsyncSession, user: User, dashboard_id: int, org_id_param: int | None
 ) -> int:
-    """Resolve org for dashboard-scoped routes (mirrors reports behavior)."""
-    if user.role.value == "SUPER_ADMIN" and org_id_param is None:
-        d = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
-        if not d:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
+    """Resolve org for dashboard-scoped routes with strict organization boundary checks."""
+    d = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
+    if not d:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
+
+    if user.role.value == "SUPER_ADMIN":
+        if org_id_param is not None:
+            if d.organization_id != org_id_param:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found in this organization")
+            return org_id_param
         return d.organization_id
-    return _org_id(user, org_id_param)
+    else:
+        if user.organization_id is None or d.organization_id != user.organization_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found in this organization")
+        return user.organization_id
 
 
 @router.get("", response_model=list[DashboardResponse])
@@ -67,13 +76,14 @@ async def list_org_dashboards(
     """List dashboards (org admin: all org; others: only assigned). Super Admin with no org sees all dashboards."""
     if current_user.role.value == "SUPER_ADMIN" and organization_id is None:
         dashboards = await list_all_dashboards(db)
+        org_id = None
     else:
         org_id = _org_id(current_user, organization_id)
         dashboards = await list_dashboards(db, org_id)
     if current_user.role.value not in ("ORG_ADMIN", "SUPER_ADMIN"):
         allowed: set[int] = set()
         for d in dashboards:
-            if await user_can_access_dashboard(db, current_user.id, d.id, "view"):
+            if await user_can_access_dashboard(db, current_user.id, d.id, "view", org_id=org_id):
                 allowed.add(d.id)
         dashboards = [d for d in dashboards if d.id in allowed]
     return [DashboardResponse.model_validate(d) for d in dashboards]
@@ -114,7 +124,7 @@ async def get_one_dashboard(
     current_user: User = Depends(get_current_user),
 ):
     org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
-    can = await user_can_access_dashboard(db, current_user.id, dashboard_id, "view")
+    can = await user_can_access_dashboard(db, current_user.id, dashboard_id, "view", org_id=org_id)
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
     d = await get_dashboard(db, dashboard_id, org_id)
@@ -168,7 +178,7 @@ async def get_dashboard_column_values(
 ):
     """Fetch distinct unique values for the configured column in a dashboard."""
     org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
-    can = await user_can_access_dashboard(db, current_user.id, dashboard_id, "view")
+    can = await user_can_access_dashboard(db, current_user.id, dashboard_id, "view", org_id=org_id)
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
     
@@ -342,6 +352,25 @@ async def delete_one_dashboard(
     await db.commit()
 
 
+@router.post("/{dashboard_id}/duplicate", response_model=DashboardResponse, status_code=status.HTTP_201_CREATED)
+async def duplicate_one_dashboard(
+    dashboard_id: int,
+    organization_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """Duplicate an existing dashboard (Super Admin only)."""
+    if current_user.role.value != "SUPER_ADMIN":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Super Admin may duplicate dashboards")
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    d = await duplicate_dashboard(db, dashboard_id, org_id)
+    if not d:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard not found")
+    await db.commit()
+    await db.refresh(d)
+    return DashboardResponse.model_validate(d)
+
+
 @router.get("/{dashboard_id}/users", response_model=list[DashboardAssignmentResponse])
 async def list_users_for_dashboard(
     dashboard_id: int,
@@ -417,7 +446,7 @@ async def get_dashboard_odoo_sync_info(
     org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
     
     # Check dashboard access
-    if not await user_can_access_dashboard(db, current_user.id, dashboard_id, "view"):
+    if not await user_can_access_dashboard(db, current_user.id, dashboard_id, "view", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this dashboard")
         
     dashboard = await get_dashboard(db, dashboard_id, org_id)
@@ -551,7 +580,7 @@ async def sync_dashboard_odoo_data(
     org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
     
     # Check dashboard access
-    if not await user_can_access_dashboard(db, current_user.id, dashboard_id, "view"):
+    if not await user_can_access_dashboard(db, current_user.id, dashboard_id, "view", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this dashboard")
         
     dashboard = await get_dashboard(db, dashboard_id, org_id)
@@ -808,7 +837,7 @@ async def list_dashboard_label_customizations(
     """Get all label customizations for a dashboard."""
     org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
     # Check view permission
-    can = await user_can_access_dashboard(db, current_user.id, dashboard_id, "view")
+    can = await user_can_access_dashboard(db, current_user.id, dashboard_id, "view", org_id=org_id)
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
@@ -1015,38 +1044,19 @@ async def get_my_dashboard_permissions_route(
     current_user: User = Depends(get_current_user),
 ):
     """Retrieve current user's effective permissions for a dashboard."""
-    role_str = str(getattr(current_user.role, "value", current_user.role) or "").upper()
-    if role_str in ("SUPER_ADMIN", "ORG_ADMIN"):
-        return {
-            "can_view": True,
-            "can_edit": True,
-            "can_load_lms": True,
-            "can_change_period": True,
-            "can_use_unique_value": True,
-        }
-
-    res = await db.execute(
-        select(DashboardAccessPermission).where(
-            DashboardAccessPermission.dashboard_id == dashboard_id,
-            DashboardAccessPermission.user_id == current_user.id,
-        )
-    )
-    perm = res.scalar_one_or_none()
-    if not perm:
-        return {
-            "can_view": False,
-            "can_edit": False,
-            "can_load_lms": True,
-            "can_change_period": True,
-            "can_use_unique_value": False,
-        }
-
+    org_id = await _org_id_for_dashboard(db, current_user, dashboard_id, organization_id)
+    from app.core.access_resolver import resolve_effective_user_access
+    eff = await resolve_effective_user_access(db, current_user, "dashboard", dashboard_id, organization_id=org_id)
     return {
-        "can_view": perm.can_view,
-        "can_edit": perm.can_edit,
-        "can_load_lms": perm.can_load_lms,
-        "can_change_period": perm.can_change_period,
-        "can_use_unique_value": perm.can_use_unique_value,
+        "can_view": eff.can_view,
+        "can_edit": eff.can_edit,
+        "can_load_lms": eff.can_load_lms,
+        "can_change_period": eff.can_change_period,
+        "can_use_unique_value": eff.access_type == "unique_key",
+        "can_download_widget_pdf": eff.can_download_widget_pdf,
+        "can_view_drilldown": eff.can_view_drilldown,
+        "access_type": eff.access_type,
+        "is_satisfiable": eff.is_satisfiable,
     }
 
 

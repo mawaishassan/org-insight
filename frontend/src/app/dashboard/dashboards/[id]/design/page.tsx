@@ -7,10 +7,13 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { WidgetRenderer, clearClientWidgetCache } from "../widgets";
+import { WidgetRenderer, clearClientWidgetCache, type DrillDownRequestPayload } from "../widgets";
+import { WidgetDrillDownModal } from "@/components/WidgetDrillDownModal";
 import { DashboardCustomizationProvider, useDashboardCustomization } from "../DashboardCustomizationContext";
+import { WidgetFullScreenNavigationProvider, useWidgetFullScreenNavigation } from "../WidgetFullScreenContext";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
+import { AccessDenied } from "@/components/AccessDenied";
 import {
   DASHBOARD_GRID_COLUMNS,
   effectiveColSpan,
@@ -112,6 +115,1055 @@ function deriveGradientStopsFromBase(base: string) {
   return { from: `#${hex.toLowerCase()}`, to: `rgba(${r}, ${g}, ${b}, 0.35)` };
 }
 
+function toHexColor(val: string, fallback: string): string {
+  const s = (val || "").trim();
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
+  if (!m) return fallback;
+  const hex = m[1].length === 3 ? m[1].split("").map((c) => c + c).join("") : m[1];
+  return `#${hex.toLowerCase()}`;
+}
+
+function WidgetDrillDownConfigModal({
+  isOpen,
+  onClose,
+  onSave,
+  initialFieldKey,
+  initialColumns,
+  initialColumnLabels,
+  addMultiLineFields,
+  defaultFieldKey,
+  defaultSubFields,
+  isUpdate,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (data: { fieldKey: string; columns: string[]; columnLabels: Record<string, string> }) => void;
+  initialFieldKey: string;
+  initialColumns: string[];
+  initialColumnLabels: Record<string, string>;
+  addMultiLineFields: Array<{ id: number; key: string; name: string; sub_fields?: any[] }>;
+  defaultFieldKey?: string;
+  defaultSubFields?: Array<{ key: string; name: string }>;
+  isUpdate: boolean;
+}) {
+  const [selectedFieldKey, setSelectedFieldKey] = useState(initialFieldKey || defaultFieldKey || "");
+  const [columns, setColumns] = useState<string[]>(initialColumns);
+  const [columnLabels, setColumnLabels] = useState<Record<string, string>>(initialColumnLabels);
+  const [filterQuery, setFilterQuery] = useState("");
+
+  useEffect(() => {
+    if (isOpen) {
+      const key = initialFieldKey || defaultFieldKey || "";
+      setSelectedFieldKey(key);
+      const targetMla = addMultiLineFields.find((f) => f.key === key);
+      const avail = targetMla?.sub_fields || defaultSubFields || [];
+      if (initialColumns.length > 0) {
+        setColumns([...initialColumns]);
+      } else if (avail.length > 0) {
+        setColumns(avail.slice(0, 6).map((s: any) => s.key));
+      } else {
+        setColumns([]);
+      }
+      setColumnLabels(initialColumnLabels ? { ...initialColumnLabels } : {});
+      setFilterQuery("");
+    }
+  }, [isOpen, initialFieldKey, initialColumns, initialColumnLabels, defaultFieldKey, defaultSubFields, addMultiLineFields]);
+
+  if (!isOpen) return null;
+
+  const targetMla = addMultiLineFields.find((f) => f.key === selectedFieldKey);
+  const availSubFields: any[] = targetMla?.sub_fields || defaultSubFields || [];
+
+  const handleMlaChange = (newKey: string) => {
+    setSelectedFieldKey(newKey);
+    const nextMla = addMultiLineFields.find((f) => f.key === newKey);
+    const nextSubs = nextMla?.sub_fields || [];
+    setColumns(nextSubs.slice(0, 6).map((s: any) => s.key));
+    setColumnLabels({});
+  };
+
+  const handleToggleColumn = (colKey: string) => {
+    setColumns((prev) => {
+      if (prev.includes(colKey)) {
+        return prev.filter((k) => k !== colKey);
+      } else {
+        return [...prev, colKey];
+      }
+    });
+  };
+
+  const handleSelectAll = () => {
+    setColumns(availSubFields.map((s: any) => s.key));
+  };
+
+  const handleClearAll = () => {
+    setColumns([]);
+  };
+
+  const moveCol = (index: number, direction: "up" | "down") => {
+    if (direction === "up" && index === 0) return;
+    if (direction === "down" && index === columns.length - 1) return;
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    setColumns((prev) => {
+      const next = [...prev];
+      const temp = next[index];
+      next[index] = next[targetIndex];
+      next[targetIndex] = temp;
+      return next;
+    });
+  };
+
+  const handleLabelChange = (colKey: string, label: string) => {
+    setColumnLabels((prev) => {
+      const next = { ...prev };
+      if (label.trim()) {
+        next[colKey] = label;
+      } else {
+        delete next[colKey];
+      }
+      return next;
+    });
+  };
+
+  const handleSave = () => {
+    if (!selectedFieldKey && availSubFields.length === 0) {
+      toast.error("Please select a source table (MLA)");
+      return;
+    }
+    if (columns.length === 0) {
+      toast.error("Please select at least one column to display in drill-down");
+      return;
+    }
+    onSave({
+      fieldKey: selectedFieldKey,
+      columns,
+      columnLabels,
+    });
+  };
+
+  const filteredAvail = availSubFields.filter((sf: any) => {
+    if (!filterQuery) return true;
+    const q = filterQuery.toLowerCase();
+    return sf.name?.toLowerCase().includes(q) || sf.key?.toLowerCase().includes(q);
+  });
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: "rgba(15, 23, 42, 0.6)",
+        backdropFilter: "blur(4px)",
+        zIndex: 1100,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "1rem",
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        style={{
+          background: "var(--surface, #ffffff)",
+          color: "var(--text, #0f172a)",
+          border: "1px solid var(--border, #e2e8f0)",
+          borderRadius: "12px",
+          width: "100%",
+          maxWidth: "760px",
+          maxHeight: "90vh",
+          display: "flex",
+          flexDirection: "column",
+          boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.25)",
+          overflow: "hidden",
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            padding: "1.25rem 1.4rem",
+            borderBottom: "1px solid var(--border, #e2e8f0)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <div>
+            <h2 style={{ margin: 0, fontSize: "1.12rem", fontWeight: 700, color: "var(--text)" }}>
+              {isUpdate ? "Update Drill-Down Configuration" : "Configure Drill-Down"}
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              border: "none",
+              background: "transparent",
+              fontSize: "1.2rem",
+              lineHeight: 1,
+              color: "var(--muted)",
+              cursor: "pointer",
+              padding: "0.2rem 0.4rem",
+              borderRadius: "4px",
+            }}
+            aria-label="Close dialog"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Scrollable Body */}
+        <div style={{ padding: "1.25rem 1.4rem", overflowY: "auto", display: "grid", gap: "1.25rem" }}>
+          {/* Section 1: Target MLA */}
+          <div>
+            <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 650, marginBottom: "0.35rem" }}>
+              Target / Linked Table (MLA)
+            </label>
+            <select
+              value={selectedFieldKey}
+              onChange={(e) => handleMlaChange(e.target.value)}
+              style={{
+                width: "100%",
+                padding: "0.45rem 0.65rem",
+                fontSize: "0.86rem",
+                borderRadius: "6px",
+                border: "1px solid var(--border, #cbd5e1)",
+                background: "var(--surface)",
+                color: "var(--text)",
+              }}
+            >
+              <option value="">— Select Source MLA Table —</option>
+              {addMultiLineFields.map((f) => (
+                <option key={f.key} value={f.key}>
+                  {f.name} ({f.key})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Section 2: Available Columns Selection */}
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+              <div>
+                <span style={{ fontSize: "0.85rem", fontWeight: 650 }}>
+                  Available Columns
+                </span>
+                <span style={{ marginLeft: "0.4rem", fontSize: "0.8rem", color: "var(--accent, #3b82f6)", fontWeight: 600 }}>
+                  ({columns.length} of {availSubFields.length} selected)
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <button
+                  type="button"
+                  onClick={handleSelectAll}
+                  style={{ background: "none", border: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 600, padding: 0 }}
+                >
+                  Select All
+                </button>
+                <span style={{ color: "var(--border)" }}>|</span>
+                <button
+                  type="button"
+                  onClick={handleClearAll}
+                  style={{ background: "none", border: "none", color: "var(--muted)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500, padding: 0 }}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            {availSubFields.length > 8 && (
+              <input
+                type="text"
+                placeholder="Filter columns..."
+                value={filterQuery}
+                onChange={(e) => setFilterQuery(e.target.value)}
+                style={{
+                  width: "100%",
+                  marginBottom: "0.45rem",
+                  padding: "0.35rem 0.6rem",
+                  fontSize: "0.8rem",
+                  borderRadius: "6px",
+                  border: "1px solid var(--border, #cbd5e1)",
+                  background: "var(--surface)",
+                }}
+              />
+            )}
+
+            <div
+              style={{
+                maxHeight: "140px",
+                overflowY: "auto",
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                gap: "0.3rem",
+                padding: "0.45rem",
+                background: "var(--bg-subtle, rgba(0,0,0,0.02))",
+                borderRadius: "6px",
+                border: "1px solid var(--border, #e2e8f0)",
+              }}
+            >
+              {filteredAvail.length === 0 ? (
+                <div style={{ fontSize: "0.8rem", color: "var(--muted)", padding: "0.5rem", gridColumn: "1 / -1" }}>
+                  {availSubFields.length === 0 ? "No columns available. Please select an MLA table first." : "No columns match filter."}
+                </div>
+              ) : (
+                filteredAvail.map((sf: any) => {
+                  const isChecked = columns.includes(sf.key);
+                  return (
+                    <label
+                      key={sf.key}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.45rem",
+                        padding: "0.3rem 0.5rem",
+                        borderRadius: "4px",
+                        cursor: "pointer",
+                        fontSize: "0.8rem",
+                        background: isChecked ? "rgba(59, 130, 246, 0.08)" : "transparent",
+                        border: isChecked ? "1px solid rgba(59, 130, 246, 0.2)" : "1px solid transparent",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => handleToggleColumn(sf.key)}
+                      />
+                      <span style={{ fontWeight: isChecked ? 600 : 400, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {sf.name}
+                      </span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          {/* Section 3: Column Presentation (Ordering & Display Name) */}
+          <div>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <span style={{ fontSize: "0.85rem", fontWeight: 650 }}>
+                Drill-Down Columns (Display Order & Labels)
+              </span>
+            </div>
+
+            {columns.length === 0 ? (
+              <div style={{ padding: "1rem", textAlign: "center", border: "1px dashed var(--border)", borderRadius: "6px", fontSize: "0.82rem", color: "var(--muted)" }}>
+                No columns selected. Check one or more columns above.
+              </div>
+            ) : (
+              <div
+                style={{
+                  border: "1px solid var(--border, #e2e8f0)",
+                  borderRadius: "6px",
+                  overflow: "hidden",
+                  maxHeight: "260px",
+                  overflowY: "auto",
+                }}
+              >
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
+                  <thead style={{ background: "var(--bg-subtle, #f8fafc)", borderBottom: "1px solid var(--border)" }}>
+                    <tr>
+                      <th style={{ width: "42px", padding: "0.45rem 0.5rem", textAlign: "center", fontWeight: 650, color: "var(--muted)" }}>#</th>
+                      <th style={{ padding: "0.45rem 0.6rem", textAlign: "left", fontWeight: 650, color: "var(--muted)" }}>Database Field</th>
+                      <th style={{ padding: "0.45rem 0.6rem", textAlign: "left", fontWeight: 650, color: "var(--muted)" }}>Display Name</th>
+                      <th style={{ width: "110px", padding: "0.45rem 0.6rem", textAlign: "center", fontWeight: 650, color: "var(--muted)" }}>Order</th>
+                      <th style={{ width: "40px", padding: "0.45rem 0.4rem", textAlign: "center" }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {columns.map((colKey, idx) => {
+                      const sf = availSubFields.find((s: any) => s.key === colKey);
+                      const defaultName = sf?.name || colKey;
+                      const customName = columnLabels[colKey] ?? "";
+                      const isFirst = idx === 0;
+                      const isLast = idx === columns.length - 1;
+
+                      return (
+                        <tr
+                          key={colKey}
+                          style={{
+                            borderBottom: "1px solid var(--border, #f1f5f9)",
+                            background: idx % 2 === 0 ? "transparent" : "rgba(0,0,0,0.015)",
+                          }}
+                        >
+                          <td style={{ textAlign: "center", fontWeight: 700, color: "var(--muted)" }}>
+                            {idx + 1}
+                          </td>
+                          <td style={{ padding: "0.35rem 0.6rem" }}>
+                            <div style={{ fontWeight: 600, color: "var(--text)" }}>{defaultName}</div>
+                            <code style={{ fontSize: "0.72rem", color: "var(--muted)" }}>{colKey}</code>
+                          </td>
+                          <td style={{ padding: "0.35rem 0.6rem" }}>
+                            <input
+                              type="text"
+                              value={customName}
+                              placeholder={defaultName}
+                              onChange={(e) => handleLabelChange(colKey, e.target.value)}
+                              style={{
+                                width: "100%",
+                                padding: "0.3rem 0.5rem",
+                                fontSize: "0.82rem",
+                                borderRadius: "4px",
+                                border: "1px solid var(--border, #cbd5e1)",
+                                background: "var(--surface)",
+                              }}
+                            />
+                          </td>
+                          <td style={{ padding: "0.35rem 0.6rem", textAlign: "center" }}>
+                            <div style={{ display: "inline-flex", gap: "0.25rem", alignItems: "center" }}>
+                              <button
+                                type="button"
+                                onClick={() => moveCol(idx, "up")}
+                                disabled={isFirst}
+                                style={{
+                                  padding: "0.15rem 0.35rem",
+                                  fontSize: "0.75rem",
+                                  borderRadius: "4px",
+                                  border: "1px solid var(--border)",
+                                  background: isFirst ? "transparent" : "var(--surface)",
+                                  color: isFirst ? "var(--muted)" : "var(--text)",
+                                  cursor: isFirst ? "not-allowed" : "pointer",
+                                  opacity: isFirst ? 0.35 : 1,
+                                }}
+                                title="Move Up"
+                              >
+                                ▲
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => moveCol(idx, "down")}
+                                disabled={isLast}
+                                style={{
+                                  padding: "0.15rem 0.35rem",
+                                  fontSize: "0.75rem",
+                                  borderRadius: "4px",
+                                  border: "1px solid var(--border)",
+                                  background: isLast ? "transparent" : "var(--surface)",
+                                  color: isLast ? "var(--muted)" : "var(--text)",
+                                  cursor: isLast ? "not-allowed" : "pointer",
+                                  opacity: isLast ? 0.35 : 1,
+                                }}
+                                title="Move Down"
+                              >
+                                ▼
+                              </button>
+                            </div>
+                          </td>
+                          <td style={{ padding: "0.35rem 0.4rem", textAlign: "center" }}>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleColumn(colKey)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                color: "var(--muted)",
+                                cursor: "pointer",
+                                fontSize: "0.9rem",
+                                padding: "0.2rem",
+                              }}
+                              title="Remove column"
+                            >
+                              ✕
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div
+          className="modal-footer-responsive"
+          style={{
+            padding: "0.85rem 1.4rem",
+            borderTop: "1px solid var(--border, #e2e8f0)",
+            background: "var(--bg-subtle, #f8fafc)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "0.75rem",
+          }}
+        >
+          <div style={{ fontSize: "0.8rem", color: "var(--muted)", flex: "1 1 auto", minWidth: "120px" }}>
+            {columns.length} column{columns.length === 1 ? "" : "s"} selected
+          </div>
+          <div className="modal-footer-actions" style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", flex: "1 1 auto" }}>
+            <button
+              type="button"
+              className="modal-btn-cancel"
+              onClick={onClose}
+              style={{
+                fontSize: "0.84rem",
+                padding: "0.45rem 1.1rem",
+                borderRadius: "6px",
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="modal-btn-confirm"
+              onClick={handleSave}
+              style={{
+                fontSize: "0.84rem",
+                padding: "0.45rem 1.25rem",
+                borderRadius: "6px",
+              }}
+            >
+              {isUpdate ? "Update Configuration" : "Save Configuration"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WidgetLinkedNavConfigModal({
+  isOpen,
+  onClose,
+  onSave,
+  initialSelectedIds,
+  eligibleWidgets,
+  isUpdate,
+  currentDashboard,
+  allDashboards = [],
+  token,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (selectedIds: string[]) => void;
+  initialSelectedIds: string[];
+  eligibleWidgets: Widget[];
+  isUpdate: boolean;
+  currentDashboard?: { id: number; name: string; organization_id?: number };
+  allDashboards?: Array<{ id: number; name: string; organization_id?: number }>;
+  token?: string | null;
+}) {
+  const currentDashId = currentDashboard?.id ?? 0;
+  const [selectedIds, setSelectedIds] = useState<string[]>(initialSelectedIds);
+  const [selectedDashboardId, setSelectedDashboardId] = useState<number>(currentDashId);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [filterView, setFilterView] = useState<"all" | "selected">("all");
+  const [remoteWidgetsCache, setRemoteWidgetsCache] = useState<Record<number, Widget[]>>({});
+  const [loadingRemote, setLoadingRemote] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedIds([...initialSelectedIds]);
+      setSelectedDashboardId(currentDashId);
+      setSearchQuery("");
+      setFilterView("all");
+    }
+  }, [isOpen, initialSelectedIds, currentDashId]);
+
+  // Pre-fetch remote widgets for any IDs in initialSelectedIds that point to another dashboard
+  useEffect(() => {
+    if (!isOpen || !token) return;
+    const remoteDashIds = Array.from(
+      new Set(
+        initialSelectedIds
+          .filter((id) => id.includes("::"))
+          .map((id) => parseInt(id.split("::")[0], 10))
+          .filter((dId) => !isNaN(dId) && dId !== currentDashId && !remoteWidgetsCache[dId])
+      )
+    );
+    if (remoteDashIds.length === 0) return;
+
+    const orgId = currentDashboard?.organization_id;
+    const q = orgId ? `?organization_id=${orgId}` : "";
+    remoteDashIds.forEach((dId) => {
+      api<DashboardDetail>(`/dashboards/${dId}${q}`, { token })
+        .then((dash) => {
+          const wList: Widget[] = Array.isArray(dash.layout)
+            ? dash.layout
+            : (dash.layout?.widgets || []);
+          setRemoteWidgetsCache((prev) => ({ ...prev, [dId]: wList }));
+        })
+        .catch(() => {});
+    });
+  }, [isOpen, initialSelectedIds, currentDashId, remoteWidgetsCache, token, currentDashboard?.organization_id]);
+
+  // Fetch remote dashboard widgets when user selects another dashboard in the dropdown
+  useEffect(() => {
+    if (!isOpen || !token || !selectedDashboardId) return;
+    if (selectedDashboardId === currentDashId) return;
+    if (remoteWidgetsCache[selectedDashboardId]) return;
+
+    let isMounted = true;
+    setLoadingRemote(true);
+    const orgId = currentDashboard?.organization_id;
+    const q = orgId ? `?organization_id=${orgId}` : "";
+    api<DashboardDetail>(`/dashboards/${selectedDashboardId}${q}`, { token })
+      .then((dash) => {
+        if (!isMounted) return;
+        const wList: Widget[] = Array.isArray(dash.layout)
+          ? dash.layout
+          : (dash.layout?.widgets || []);
+        setRemoteWidgetsCache((prev) => ({ ...prev, [selectedDashboardId]: wList }));
+      })
+      .catch((err) => {
+        console.error("Failed to load dashboard widgets for linking:", err);
+      })
+      .finally(() => {
+        if (isMounted) setLoadingRemote(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, selectedDashboardId, currentDashId, remoteWidgetsCache, token, currentDashboard?.organization_id]);
+
+  // Lookup for dashboard names
+  const dashNameById = useMemo(() => {
+    const map: Record<number, string> = {};
+    if (currentDashboard) {
+      map[currentDashboard.id] = currentDashboard.name;
+    }
+    allDashboards.forEach((d) => {
+      map[d.id] = d.name;
+    });
+    return map;
+  }, [currentDashboard, allDashboards]);
+
+  // Is a widget selected?
+  const isWidgetSelected = (wId: string, dashId: number) => {
+    if (dashId === currentDashId) {
+      return selectedIds.includes(wId) || selectedIds.includes(`${dashId}::${wId}`);
+    }
+    return selectedIds.includes(`${dashId}::${wId}`);
+  };
+
+  const handleToggleWidget = (wId: string, dashId: number) => {
+    const key = dashId === currentDashId ? wId : `${dashId}::${wId}`;
+    setSelectedIds((prev) => {
+      const isSel = isWidgetSelected(wId, dashId);
+      if (isSel) {
+        return prev.filter((id) => id !== key && id !== `${dashId}::${wId}` && id !== wId);
+      }
+      return [...prev, key];
+    });
+  };
+
+  // Active widgets list in current category/dashboard view
+  const currentCategoryWidgets: Array<{ widget: Widget; dashId: number }> = useMemo(() => {
+    if (selectedDashboardId === currentDashId) {
+      return eligibleWidgets.map((w) => ({ widget: w, dashId: currentDashId }));
+    }
+    const remoteList = remoteWidgetsCache[selectedDashboardId] || [];
+    return remoteList.map((w) => ({ widget: w, dashId: selectedDashboardId }));
+  }, [selectedDashboardId, currentDashId, eligibleWidgets, remoteWidgetsCache]);
+
+  // All selected widgets across all dashboards for "selected" view
+  const allSelectedWidgetsList: Array<{ widget: Widget; dashId: number }> = useMemo(() => {
+    const list: Array<{ widget: Widget; dashId: number }> = [];
+    selectedIds.forEach((ref) => {
+      let dashId = currentDashId;
+      let wId = ref;
+      if (ref.includes("::")) {
+        const [dStr, idStr] = ref.split("::");
+        dashId = parseInt(dStr, 10);
+        wId = idStr;
+      }
+      let found: Widget | undefined;
+      if (dashId === currentDashId) {
+        found = eligibleWidgets.find((w) => w.id === wId);
+      } else {
+        found = (remoteWidgetsCache[dashId] || []).find((w) => w.id === wId);
+      }
+      if (found) {
+        list.push({ widget: found, dashId });
+      } else {
+        list.push({
+          widget: { id: wId, type: "kpi_single_value", title: `Widget (${wId})` } as Widget,
+          dashId,
+        });
+      }
+    });
+    return list;
+  }, [selectedIds, currentDashId, eligibleWidgets, remoteWidgetsCache]);
+
+  const displayedList = filterView === "selected" ? allSelectedWidgetsList : currentCategoryWidgets;
+
+  const filteredWidgets = displayedList.filter(({ widget, dashId }) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    const title = (widget.title || "").toLowerCase();
+    const typeLabel = getWidgetTypeLabel(widget.type).toLowerCase();
+    const dashName = (dashNameById[dashId] || "").toLowerCase();
+    return title.includes(q) || typeLabel.includes(q) || dashName.includes(q);
+  });
+
+  const handleSelectAllInView = () => {
+    const newKeys = currentCategoryWidgets.map(({ widget, dashId }) =>
+      dashId === currentDashId ? widget.id : `${dashId}::${widget.id}`
+    );
+    setSelectedIds((prev) => Array.from(new Set([...prev, ...newKeys])));
+  };
+
+  const handleClearAll = () => {
+    setSelectedIds([]);
+  };
+
+  // Other dashboards in the org (excluding current)
+  const otherDashboards = useMemo(() => {
+    return allDashboards.filter((d) => d.id !== currentDashId);
+  }, [allDashboards, currentDashId]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: "rgba(15, 23, 42, 0.6)",
+        backdropFilter: "blur(4px)",
+        zIndex: 1100,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "1rem",
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        style={{
+          background: "var(--surface, #ffffff)",
+          color: "var(--text, #0f172a)",
+          border: "1px solid var(--border, #e2e8f0)",
+          borderRadius: "12px",
+          width: "100%",
+          maxWidth: "640px",
+          maxHeight: "88vh",
+          display: "flex",
+          flexDirection: "column",
+          boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.25)",
+          overflow: "hidden",
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            padding: "1.25rem 1.4rem",
+            borderBottom: "1px solid var(--border, #e2e8f0)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <div>
+            <h2 style={{ margin: 0, fontSize: "1.12rem", fontWeight: 700, color: "var(--text)" }}>
+              {isUpdate ? "Update Linked Widget Navigation" : "Configure Linked Widget Navigation"}
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              border: "none",
+              background: "transparent",
+              fontSize: "1.2rem",
+              lineHeight: 1,
+              color: "var(--muted)",
+              cursor: "pointer",
+              padding: "0.2rem 0.4rem",
+              borderRadius: "4px",
+            }}
+            aria-label="Close dialog"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Scrollable Body */}
+        <div style={{ padding: "1.25rem 1.4rem", overflowY: "auto", display: "grid", gap: "1rem" }}>
+          {/* Dashboard Selector */}
+          <div style={{ display: "grid", gap: "0.35rem" }}>
+            <label style={{ fontSize: "0.85rem", fontWeight: 650, color: "var(--text)" }}>
+              Select Dashboard
+            </label>
+            <select
+              value={selectedDashboardId}
+              onChange={(e) => {
+                setSelectedDashboardId(Number(e.target.value));
+                setFilterView("all");
+              }}
+              style={{
+                width: "100%",
+                padding: "0.5rem 0.75rem",
+                borderRadius: "6px",
+                border: "1px solid var(--border, #cbd5e1)",
+                fontSize: "0.85rem",
+                background: "var(--surface, #ffffff)",
+                color: "var(--text)",
+                fontWeight: 500,
+                cursor: "pointer",
+                boxSizing: "border-box",
+              }}
+            >
+              <option value={currentDashId}>
+                {currentDashboard?.name || "Current Dashboard"} (This Dashboard)
+              </option>
+              {otherDashboards.length > 0 && (
+                <optgroup label="Other Dashboards in Organization">
+                  {otherDashboards.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          </div>
+
+          {/* Sub-header & Quick Filters */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+            <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() => setFilterView("all")}
+                style={{
+                  padding: "0.25rem 0.65rem",
+                  borderRadius: "4px",
+                  fontSize: "0.78rem",
+                  fontWeight: filterView === "all" ? 700 : 500,
+                  background: filterView === "all" ? "var(--accent, #2563eb)" : "var(--surface)",
+                  color: filterView === "all" ? "#ffffff" : "var(--muted)",
+                  border: "1px solid var(--border)",
+                  cursor: "pointer",
+                }}
+              >
+                Browse (
+                {selectedDashboardId === currentDashId
+                  ? eligibleWidgets.length
+                  : (remoteWidgetsCache[selectedDashboardId]?.length ?? "...")}
+                )
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilterView("selected")}
+                style={{
+                  padding: "0.25rem 0.65rem",
+                  borderRadius: "4px",
+                  fontSize: "0.78rem",
+                  fontWeight: filterView === "selected" ? 700 : 500,
+                  background: filterView === "selected" ? "var(--accent, #2563eb)" : "var(--surface)",
+                  color: filterView === "selected" ? "#ffffff" : "var(--muted)",
+                  border: "1px solid var(--border)",
+                  cursor: "pointer",
+                }}
+              >
+                Selected ({selectedIds.length})
+              </button>
+            </div>
+
+            {filterView === "all" && currentCategoryWidgets.length > 0 && (
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <button
+                  type="button"
+                  onClick={handleSelectAllInView}
+                  style={{ background: "none", border: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 600, padding: 0 }}
+                >
+                  Select All
+                </button>
+                <span style={{ color: "var(--border)" }}>|</span>
+                <button
+                  type="button"
+                  onClick={handleClearAll}
+                  style={{ background: "none", border: "none", color: "var(--muted)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500, padding: 0 }}
+                >
+                  Clear All
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Search */}
+          <input
+            type="text"
+            placeholder={
+              filterView === "selected"
+                ? "Filter selected widgets..."
+                : `Search widgets in ${dashNameById[selectedDashboardId] || "dashboard"}...`
+            }
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={{
+              width: "100%",
+              padding: "0.45rem 0.7rem",
+              fontSize: "0.82rem",
+              borderRadius: "6px",
+              border: "1px solid var(--border, #cbd5e1)",
+              background: "var(--surface)",
+              boxSizing: "border-box",
+            }}
+          />
+
+          {/* Widget Cards List */}
+          <div
+            style={{
+              maxHeight: "320px",
+              minHeight: "140px",
+              overflowY: "auto",
+              display: "grid",
+              gap: "0.4rem",
+              padding: "0.5rem",
+              background: "var(--bg-subtle, rgba(0,0,0,0.02))",
+              borderRadius: "8px",
+              border: "1px solid var(--border, #e2e8f0)",
+            }}
+          >
+            {loadingRemote ? (
+              <div style={{ padding: "2rem", textAlign: "center", color: "var(--muted)", fontSize: "0.85rem" }}>
+                Loading widgets from {dashNameById[selectedDashboardId] || "dashboard"}...
+              </div>
+            ) : filteredWidgets.length === 0 ? (
+              <div style={{ padding: "2rem", textAlign: "center", color: "var(--muted)", fontSize: "0.82rem" }}>
+                {filterView === "selected"
+                  ? "No widgets currently selected. Switch to Browse to select widgets."
+                  : displayedList.length === 0
+                  ? `No widgets found in ${dashNameById[selectedDashboardId] || "this dashboard"}.`
+                  : "No widgets match your search."}
+              </div>
+            ) : (
+              filteredWidgets.map(({ widget: ew, dashId }) => {
+                const isChecked = isWidgetSelected(ew.id, dashId);
+                const title = ew.title || `Untitled (${getWidgetTypeLabel(ew.type)})`;
+                const isForeign = dashId !== currentDashId;
+                const dashName = dashNameById[dashId] || `Dashboard #${dashId}`;
+
+                return (
+                  <label
+                    key={`${dashId}-${ew.id}`}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "0.5rem 0.75rem",
+                      borderRadius: "6px",
+                      cursor: "pointer",
+                      fontSize: "0.84rem",
+                      background: isChecked ? "rgba(59, 130, 246, 0.08)" : "var(--surface)",
+                      border: isChecked ? "1px solid rgba(59, 130, 246, 0.3)" : "1px solid var(--border)",
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flex: 1, overflow: "hidden", marginRight: "0.5rem" }}>
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => handleToggleWidget(ew.id, dashId)}
+                      />
+                      <span style={{ fontWeight: isChecked ? 650 : 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {title}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.35rem", flexShrink: 0 }}>
+                      {isForeign && (
+                        <span
+                          style={{
+                            fontSize: "0.7rem",
+                            padding: "0.15rem 0.45rem",
+                            borderRadius: "4px",
+                            background: "rgba(37, 99, 235, 0.1)",
+                            color: "var(--accent, #2563eb)",
+                            fontWeight: 600,
+                            maxWidth: "140px",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={`Dashboard: ${dashName}`}
+                        >
+                          {dashName}
+                        </span>
+                      )}
+                      <span
+                        style={{
+                          fontSize: "0.72rem",
+                          padding: "0.15rem 0.45rem",
+                          borderRadius: "4px",
+                          background: isChecked ? "rgba(59, 130, 246, 0.15)" : "rgba(0,0,0,0.05)",
+                          color: isChecked ? "var(--accent, #2563eb)" : "var(--muted)",
+                          fontWeight: 600,
+                        }}
+                      >
+                        {getWidgetTypeLabel(ew.type)}
+                      </span>
+                    </div>
+                  </label>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div
+          className="modal-footer-responsive"
+          style={{
+            padding: "0.85rem 1.4rem",
+            borderTop: "1px solid var(--border, #e2e8f0)",
+            background: "var(--bg-subtle, #f8fafc)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "0.75rem",
+          }}
+        >
+          <div style={{ fontSize: "0.8rem", color: "var(--muted)", flex: "1 1 auto", minWidth: "120px" }}>
+            {selectedIds.length} widget{selectedIds.length === 1 ? "" : "s"} selected
+          </div>
+          <div className="modal-footer-actions" style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", flex: "1 1 auto" }}>
+            <button
+              type="button"
+              className="modal-btn-cancel"
+              onClick={onClose}
+              style={{
+                fontSize: "0.84rem",
+                padding: "0.45rem 1.1rem",
+                borderRadius: "6px",
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="modal-btn-confirm"
+              onClick={() => onSave(selectedIds)}
+              style={{
+                fontSize: "0.84rem",
+                padding: "0.45rem 1.25rem",
+                borderRadius: "6px",
+              }}
+            >
+              {isUpdate ? "Update Configuration" : "Save Configuration"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function WidgetLinkWithTableConfigUI({
   addLinkWithTable,
   setAddLinkWithTable,
@@ -119,6 +1171,8 @@ function WidgetLinkWithTableConfigUI({
   setAddLinkedTableFieldKey,
   addLinkedTableColumns,
   setAddLinkedTableColumns,
+  addLinkedTableColumnLabels,
+  setAddLinkedTableColumnLabels,
   addMultiLineFields,
   defaultFieldKey,
   defaultSubFields,
@@ -129,29 +1183,52 @@ function WidgetLinkWithTableConfigUI({
   setAddLinkedTableFieldKey: (val: string) => void;
   addLinkedTableColumns: string[];
   setAddLinkedTableColumns: React.Dispatch<React.SetStateAction<string[]>>;
+  addLinkedTableColumnLabels?: Record<string, string>;
+  setAddLinkedTableColumnLabels?: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   addMultiLineFields: Array<{ id: number; key: string; name: string; sub_fields?: any[] }>;
   defaultFieldKey?: string;
   defaultSubFields?: Array<{ key: string; name: string }>;
 }) {
+  const [modalOpen, setModalOpen] = useState(false);
+
   const effectiveKey = addLinkedTableFieldKey || defaultFieldKey || "";
   const targetMla = addMultiLineFields.find((f) => f.key === effectiveKey);
-  const availSubFields: any[] = targetMla?.sub_fields || defaultSubFields || [];
+  const isConfigured = addLinkWithTable && (addLinkedTableColumns.length > 0 || Boolean(effectiveKey));
+
+  const handleToggleYes = () => {
+    setModalOpen(true);
+  };
+
+  const handleToggleNo = () => {
+    setAddLinkWithTable(false);
+  };
+
+  const handleModalSave = (data: { fieldKey: string; columns: string[]; columnLabels: Record<string, string> }) => {
+    setAddLinkWithTable(true);
+    setAddLinkedTableFieldKey(data.fieldKey);
+    setAddLinkedTableColumns(data.columns);
+    if (setAddLinkedTableColumnLabels) {
+      setAddLinkedTableColumnLabels(data.columnLabels);
+    }
+    setModalOpen(false);
+  };
+
+  const handleModalClose = () => {
+    setModalOpen(false);
+  };
 
   return (
     <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.85rem", marginTop: "0.5rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
         <div>
           <label style={{ fontSize: "0.9rem", fontWeight: 650, color: "var(--text)", display: "block" }}>
             Link with Table (Drill-Down)
           </label>
-          <span style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
-            When enabled, clicking a chart element (bar, slice, data point) drills down to matching MLA records.
-          </span>
         </div>
-        <div style={{ display: "inline-flex", borderRadius: "6px", border: "1px solid var(--border)", overflow: "hidden" }}>
+        <div style={{ display: "inline-flex", borderRadius: "6px", border: "1px solid var(--border)", overflow: "hidden", flexShrink: 0, marginLeft: "0.75rem" }}>
           <button
             type="button"
-            onClick={() => setAddLinkWithTable(false)}
+            onClick={handleToggleNo}
             style={{
               padding: "0.25rem 0.75rem",
               fontSize: "0.82rem",
@@ -166,15 +1243,7 @@ function WidgetLinkWithTableConfigUI({
           </button>
           <button
             type="button"
-            onClick={() => {
-              setAddLinkWithTable(true);
-              if (!addLinkedTableFieldKey && defaultFieldKey) {
-                setAddLinkedTableFieldKey(defaultFieldKey);
-              }
-              if (addLinkedTableColumns.length === 0 && availSubFields.length > 0) {
-                setAddLinkedTableColumns(availSubFields.slice(0, 6).map((s: any) => s.key));
-              }
-            }}
+            onClick={handleToggleYes}
             style={{
               padding: "0.25rem 0.75rem",
               fontSize: "0.82rem",
@@ -194,280 +1263,200 @@ function WidgetLinkWithTableConfigUI({
         <div
           style={{
             marginTop: "0.5rem",
-            padding: "0.85rem",
-            background: "rgba(59, 130, 246, 0.03)",
+            padding: "0.75rem 0.9rem",
+            background: "rgba(59, 130, 246, 0.04)",
             borderRadius: "8px",
             border: "1px solid var(--border)",
-            display: "grid",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
             gap: "0.75rem",
           }}
         >
-          {/* Source MLA Table */}
-          <div style={{ display: "grid", gridTemplateColumns: "140px minmax(0, 1fr)", gap: "0.5rem", alignItems: "center" }}>
-            <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text)" }}>Source Table (MLA)</label>
-            <select
-              value={effectiveKey}
-              onChange={(e) => {
-                const nextKey = e.target.value;
-                setAddLinkedTableFieldKey(nextKey);
-                const nextMla = addMultiLineFields.find((f) => f.key === nextKey);
-                if (nextMla?.sub_fields) {
-                  setAddLinkedTableColumns(nextMla.sub_fields.slice(0, 6).map((s: any) => s.key));
-                }
-              }}
-              style={{ padding: "0.35rem 0.45rem", fontSize: "0.85rem", width: "100%", borderRadius: "6px", border: "1px solid var(--border)" }}
-            >
-              <option value="">— Select MLA Table —</option>
-              {addMultiLineFields.map((f) => (
-                <option key={f.key} value={f.key}>
-                  {f.name} ({f.key})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Columns Selector */}
-          {availSubFields.length === 0 ? (
-            <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
-              No columns found. Select a source MLA table above.
-            </p>
-          ) : (
-            <div style={{ display: "grid", gap: "0.4rem" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <label style={{ fontSize: "0.85rem", fontWeight: 600 }}>
-                  Visible Drill-Down Columns
-                  <span style={{ marginLeft: "0.4rem", color: "var(--accent, #3b82f6)", fontWeight: 700 }}>
-                    ({addLinkedTableColumns.length} selected)
-                  </span>
-                </label>
-                <div style={{ display: "flex", gap: "0.4rem" }}>
-                  <button
-                    type="button"
-                    onClick={() => setAddLinkedTableColumns(availSubFields.map((s: any) => s.key))}
-                    style={{ background: "none", border: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 600, padding: 0 }}
-                  >
-                    Select All
-                  </button>
-                  <span style={{ color: "var(--border)" }}>|</span>
-                  <button
-                    type="button"
-                    onClick={() => setAddLinkedTableColumns([])}
-                    style={{ background: "none", border: "none", color: "var(--muted)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500, padding: 0 }}
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-
-              <div
-                style={{
-                  maxHeight: "160px",
-                  overflowY: "auto",
-                  display: "grid",
-                  gap: "0.25rem",
-                  padding: "0.35rem",
-                  background: "var(--surface)",
-                  borderRadius: "6px",
-                  border: "1px solid var(--border)",
-                }}
-              >
-                {availSubFields.map((sf: any) => {
-                  const checked = addLinkedTableColumns.includes(sf.key);
-                  return (
-                    <label
-                      key={sf.key}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        padding: "0.25rem 0.45rem",
-                        borderRadius: "4px",
-                        cursor: "pointer",
-                        fontSize: "0.82rem",
-                        background: checked ? "rgba(59, 130, 246, 0.08)" : "transparent",
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setAddLinkedTableColumns((prev) => [...prev, sf.key]);
-                          } else {
-                            setAddLinkedTableColumns((prev) => prev.filter((k) => k !== sf.key));
-                          }
-                        }}
-                      />
-                      <span style={{ fontWeight: checked ? 600 : 400, flex: 1 }}>{sf.name}</span>
-                      <code style={{ fontSize: "0.72rem", color: "var(--muted)" }}>{sf.key}</code>
-                    </label>
-                  );
-                })}
-              </div>
-
-              {/* Selected Columns Order Controls */}
-              {addLinkedTableColumns.length > 0 && (
-                <div style={{ display: "grid", gap: "0.3rem", marginTop: "0.35rem" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <label style={{ fontSize: "0.8rem", fontWeight: 650, color: "var(--text)" }}>
-                      Column Display Order
-                    </label>
-                    <span style={{ fontSize: "0.74rem", color: "var(--muted)" }}>
-                      First column is used for primary grouping & sorting
-                    </span>
-                  </div>
-                  <div
-                    style={{
-                      maxHeight: "180px",
-                      overflowY: "auto",
-                      display: "grid",
-                      gap: "0.25rem",
-                      padding: "0.35rem",
-                      background: "var(--surface)",
-                      borderRadius: "6px",
-                      border: "1px solid var(--border)",
-                    }}
-                  >
-                    {addLinkedTableColumns.map((colKey, idx) => {
-                      const sf = availSubFields.find((s: any) => s.key === colKey);
-                      const colName = sf?.name || colKey;
-                      const isFirst = idx === 0;
-                      const isLast = idx === addLinkedTableColumns.length - 1;
-
-                      const moveUp = (e: React.MouseEvent) => {
-                        e.stopPropagation();
-                        if (isFirst) return;
-                        setAddLinkedTableColumns((prev) => {
-                          const next = [...prev];
-                          const tmp = next[idx - 1];
-                          next[idx - 1] = next[idx];
-                          next[idx] = tmp;
-                          return next;
-                        });
-                      };
-
-                      const moveDown = (e: React.MouseEvent) => {
-                        e.stopPropagation();
-                        if (isLast) return;
-                        setAddLinkedTableColumns((prev) => {
-                          const next = [...prev];
-                          const tmp = next[idx + 1];
-                          next[idx + 1] = next[idx];
-                          next[idx] = tmp;
-                          return next;
-                        });
-                      };
-
-                      const removeCol = (e: React.MouseEvent) => {
-                        e.stopPropagation();
-                        setAddLinkedTableColumns((prev) => prev.filter((k) => k !== colKey));
-                      };
-
-                      return (
-                        <div
-                          key={colKey}
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "0.4rem",
-                            padding: "0.25rem 0.5rem",
-                            borderRadius: "4px",
-                            fontSize: "0.82rem",
-                            background: "rgba(59, 130, 246, 0.05)",
-                            border: "1px solid var(--border)",
-                          }}
-                        >
-                          <span
-                            style={{
-                              display: "inline-flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              width: 20,
-                              height: 20,
-                              borderRadius: "50%",
-                              background: "var(--accent, #3b82f6)",
-                              color: "#ffffff",
-                              fontSize: "0.72rem",
-                              fontWeight: 700,
-                              flexShrink: 0,
-                            }}
-                          >
-                            {idx + 1}
-                          </span>
-                          <span style={{ fontWeight: 600, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {colName}
-                          </span>
-                          <code style={{ fontSize: "0.72rem", color: "var(--muted)", marginRight: "0.25rem" }}>
-                            {colKey}
-                          </code>
-                          <div style={{ display: "flex", gap: "0.2rem", alignItems: "center", flexShrink: 0 }}>
-                            <button
-                              type="button"
-                              onClick={moveUp}
-                              disabled={isFirst}
-                              style={{
-                                padding: "0.15rem 0.35rem",
-                                fontSize: "0.75rem",
-                                borderRadius: "4px",
-                                border: "1px solid var(--border)",
-                                background: isFirst ? "transparent" : "var(--surface)",
-                                color: isFirst ? "var(--muted)" : "var(--text)",
-                                cursor: isFirst ? "not-allowed" : "pointer",
-                                opacity: isFirst ? 0.4 : 1,
-                              }}
-                              title="Move Up"
-                              aria-label={`Move ${colName} up`}
-                            >
-                              ▲
-                            </button>
-                            <button
-                              type="button"
-                              onClick={moveDown}
-                              disabled={isLast}
-                              style={{
-                                padding: "0.15rem 0.35rem",
-                                fontSize: "0.75rem",
-                                borderRadius: "4px",
-                                border: "1px solid var(--border)",
-                                background: isLast ? "transparent" : "var(--surface)",
-                                color: isLast ? "var(--muted)" : "var(--text)",
-                                cursor: isLast ? "not-allowed" : "pointer",
-                                opacity: isLast ? 0.4 : 1,
-                              }}
-                              title="Move Down"
-                              aria-label={`Move ${colName} down`}
-                            >
-                              ▼
-                            </button>
-                            <button
-                              type="button"
-                              onClick={removeCol}
-                              style={{
-                                padding: "0.15rem 0.35rem",
-                                fontSize: "0.85rem",
-                                borderRadius: "4px",
-                                border: "1px solid transparent",
-                                background: "transparent",
-                                color: "var(--error, #ef4444)",
-                                cursor: "pointer",
-                                lineHeight: 1,
-                              }}
-                              title="Remove column"
-                              aria-label={`Remove ${colName}`}
-                            >
-                              ×
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+          <div>
+            <div style={{ fontSize: "0.84rem", fontWeight: 650, color: "var(--text)" }}>
+              Source: <span style={{ color: "var(--accent, #2563eb)" }}>{targetMla?.name || effectiveKey || "Not configured"}</span>
             </div>
-          )}
+            <div style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: "0.15rem" }}>
+              {addLinkedTableColumns.length > 0
+                ? `${addLinkedTableColumns.length} columns configured (ordered & labeled)`
+                : "No columns configured yet. Click Configure below."}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setModalOpen(true)}
+            style={{
+              padding: "0.35rem 0.85rem",
+              fontSize: "0.82rem",
+              fontWeight: 600,
+              borderRadius: "6px",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              color: "var(--accent, #2563eb)",
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {isConfigured ? "Update Drill-Down" : "Configure Drill-Down"}
+          </button>
         </div>
       )}
+
+      <WidgetDrillDownConfigModal
+        isOpen={modalOpen}
+        onClose={handleModalClose}
+        onSave={handleModalSave}
+        initialFieldKey={addLinkedTableFieldKey || defaultFieldKey || ""}
+        initialColumns={addLinkedTableColumns}
+        initialColumnLabels={addLinkedTableColumnLabels || {}}
+        addMultiLineFields={addMultiLineFields}
+        defaultFieldKey={defaultFieldKey}
+        defaultSubFields={defaultSubFields}
+        isUpdate={isConfigured}
+      />
+    </div>
+  );
+}
+
+function WidgetLinkedNavigationConfigUI({
+  addEnableLinkedWidgets,
+  setAddEnableLinkedWidgets,
+  addLinkedWidgetIds,
+  setAddLinkedWidgetIds,
+  widgets,
+  editingWidgetId,
+  currentDashboard,
+  allDashboards = [],
+  token,
+}: {
+  addEnableLinkedWidgets: boolean;
+  setAddEnableLinkedWidgets: (val: boolean) => void;
+  addLinkedWidgetIds: string[];
+  setAddLinkedWidgetIds: React.Dispatch<React.SetStateAction<string[]>>;
+  widgets: Widget[];
+  editingWidgetId: string | null;
+  currentDashboard?: { id: number; name: string; organization_id?: number };
+  allDashboards?: Array<{ id: number; name: string; organization_id?: number }>;
+  token?: string | null;
+}) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const eligibleWidgets = widgets.filter((w) => w.id !== editingWidgetId);
+  const isConfigured = addEnableLinkedWidgets && addLinkedWidgetIds.length > 0;
+
+  const handleToggleYes = () => {
+    setModalOpen(true);
+  };
+
+  const handleToggleNo = () => {
+    setAddEnableLinkedWidgets(false);
+  };
+
+  const handleModalSave = (selectedIds: string[]) => {
+    setAddEnableLinkedWidgets(true);
+    setAddLinkedWidgetIds(selectedIds);
+    setModalOpen(false);
+  };
+
+  const handleModalClose = () => {
+    setModalOpen(false);
+  };
+
+  return (
+    <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.85rem", marginTop: "0.5rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
+        <div>
+          <label style={{ fontSize: "0.9rem", fontWeight: 650, color: "var(--text)", display: "block" }}>
+            Enable Linked Widgets Navigation
+          </label>
+        </div>
+        <div style={{ display: "inline-flex", borderRadius: "6px", border: "1px solid var(--border)", overflow: "hidden", flexShrink: 0, marginLeft: "0.75rem" }}>
+          <button
+            type="button"
+            onClick={handleToggleNo}
+            style={{
+              padding: "0.25rem 0.75rem",
+              fontSize: "0.82rem",
+              fontWeight: !addEnableLinkedWidgets ? 700 : 500,
+              background: !addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
+              color: !addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            No
+          </button>
+          <button
+            type="button"
+            onClick={handleToggleYes}
+            style={{
+              padding: "0.25rem 0.75rem",
+              fontSize: "0.82rem",
+              fontWeight: addEnableLinkedWidgets ? 700 : 500,
+              background: addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
+              color: addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            Yes
+          </button>
+        </div>
+      </div>
+
+      {addEnableLinkedWidgets && (
+        <div
+          style={{
+            marginTop: "0.5rem",
+            padding: "0.75rem 0.9rem",
+            background: "rgba(59, 130, 246, 0.04)",
+            borderRadius: "8px",
+            border: "1px solid var(--border)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "0.75rem",
+          }}
+        >
+          <div>
+            <div style={{ fontSize: "0.84rem", fontWeight: 650, color: "var(--text)" }}>
+              Navigation: <span style={{ color: "var(--accent, #2563eb)" }}>{addLinkedWidgetIds.length} widget{addLinkedWidgetIds.length === 1 ? "" : "s"} linked</span>
+            </div>
+            <div style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: "0.15rem" }}>
+              Clicking card navigates to selected dashboard widgets
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setModalOpen(true)}
+            style={{
+              padding: "0.35rem 0.85rem",
+              fontSize: "0.82rem",
+              fontWeight: 600,
+              borderRadius: "6px",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              color: "var(--accent, #2563eb)",
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {isConfigured ? "Update Linked Widgets" : "Configure Linked Widgets"}
+          </button>
+        </div>
+      )}
+
+      <WidgetLinkedNavConfigModal
+        isOpen={modalOpen}
+        onClose={handleModalClose}
+        onSave={handleModalSave}
+        initialSelectedIds={addLinkedWidgetIds}
+        eligibleWidgets={eligibleWidgets}
+        isUpdate={isConfigured}
+        currentDashboard={currentDashboard}
+        allDashboards={allDashboards}
+        token={token}
+      />
     </div>
   );
 }
@@ -487,6 +1476,7 @@ type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -513,6 +1503,7 @@ type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -548,6 +1539,7 @@ type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -585,6 +1577,7 @@ type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -626,6 +1619,7 @@ type Widget =
       link_with_table?: boolean;
       linked_table_field_key?: string;
       linked_table_columns?: string[];
+      linked_table_column_labels?: Record<string, string>;
       full_width?: boolean;
       col_span?: number;
     }
@@ -794,14 +1788,42 @@ export default function DashboardDesignPage() {
     setError(null);
     const query = orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : "";
     api<DashboardDetail>(`/dashboards/${id}${query}`, { token })
-      .then(setDashboard)
+      .then((dash) => {
+        if (!dash) {
+          setError("Dashboard not found or inaccessible.");
+          return;
+        }
+        if (orgIdFromQuery && dash.organization_id !== Number(orgIdFromQuery)) {
+          setError("Access denied. This dashboard does not belong to the requested organization.");
+          return;
+        }
+        setDashboard(dash);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load dashboard"))
       .finally(() => setLoading(false));
   }, [id, token, orgIdFromQuery]);
 
-  if (loading) return <p>Loading…</p>;
-  if (error) return <p className="form-error">{error}</p>;
-  if (!dashboard) return null;
+  if (loading) return <p style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>Loading dashboard design...</p>;
+  if (error) {
+    return (
+      <AccessDenied
+        title="Access Denied"
+        message={error}
+        returnUrl={orgIdFromQuery ? `/dashboard?organization_id=${orgIdFromQuery}` : "/dashboard"}
+        returnLabel="Return to Dashboards"
+      />
+    );
+  }
+  if (!dashboard) {
+    return (
+      <AccessDenied
+        title="Dashboard Not Found"
+        message="This dashboard does not exist or is not available in this organization."
+        returnUrl={orgIdFromQuery ? `/dashboard?organization_id=${orgIdFromQuery}` : "/dashboard"}
+        returnLabel="Return to Dashboards"
+      />
+    );
+  }
 
   const currentYear = new Date().getFullYear();
 
@@ -816,6 +1838,7 @@ export default function DashboardDesignPage() {
       selectedPeriod={String(currentYear)}
       fetchDataWithColumn={(dashboard as any).fetch_data_with_column}
       columnFetchingConfig={(dashboard as any).column_fetching_config}
+      allowEditingLabels={true}
     >
       <DashboardDesignContent
         dashboard={dashboard}
@@ -825,6 +1848,191 @@ export default function DashboardDesignPage() {
         orgIdFromQuery={orgIdFromQuery}
       />
     </DashboardCustomizationProvider>
+  );
+}
+
+function DesignWidgetGridItem({
+  w,
+  canDesign,
+  hoveredDesignWidgetId,
+  setHoveredDesignWidgetId,
+  selectedDesignWidgetId,
+  setSelectedDesignWidgetId,
+  draggingWidgetId,
+  setDraggingWidgetId,
+  reorderWidgets,
+  nb,
+  swapWidgetsInLayout,
+  dashboard,
+  openEditWidget,
+  removeWidget,
+  toggleWidgetFullWidth,
+  setWidgetColSpan,
+  isActiveCard,
+  onCardClick,
+  onDrillDownRequest,
+}: {
+  w: any;
+  canDesign: boolean;
+  hoveredDesignWidgetId: string | null;
+  setHoveredDesignWidgetId: React.Dispatch<React.SetStateAction<string | null>>;
+  selectedDesignWidgetId: string | null;
+  setSelectedDesignWidgetId: React.Dispatch<React.SetStateAction<string | null>>;
+  draggingWidgetId: string | null;
+  setDraggingWidgetId: React.Dispatch<React.SetStateAction<string | null>>;
+  reorderWidgets: (fromId: string, toId: string) => void;
+  nb?: { up: string | null; down: string | null; left: string | null; right: string | null };
+  swapWidgetsInLayout?: (idA: string, idB: string) => void;
+  dashboard: DashboardDetail;
+  openEditWidget: (w: any) => void;
+  removeWidget: (id: string) => void;
+  toggleWidgetFullWidth: (id: string) => void;
+  setWidgetColSpan: (id: string, span: number) => void;
+  isActiveCard?: boolean;
+  onCardClick?: (widget: any) => void;
+  onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
+}) {
+  const { fullScreenWidgetId } = useWidgetFullScreenNavigation();
+  const isCellFullScreen = fullScreenWidgetId === w.id;
+  const isAnyFullScreen = Boolean(fullScreenWidgetId);
+
+  const showMoveChrome =
+    !isAnyFullScreen && canDesign && (hoveredDesignWidgetId === w.id || selectedDesignWidgetId === w.id);
+  const isDesignActive = showMoveChrome;
+
+  return (
+    <div
+      key={w.id}
+      id={`widget-${w.id}`}
+      data-design-widget-cell
+      className="widget-entrance-item"
+      style={{
+        position: isCellFullScreen ? "static" : "relative",
+        paddingLeft: canDesign && !isCellFullScreen ? 28 : undefined,
+        display: isCellFullScreen ? undefined : "flex",
+        flexDirection: isCellFullScreen ? undefined : "column",
+        boxSizing: "border-box",
+        ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
+        opacity: draggingWidgetId === w.id ? 0.55 : 1,
+        outline: isActiveCard
+          ? "2px solid var(--accent, #3b82f6)"
+          : isDesignActive
+          ? "2px solid #3b82f6"
+          : undefined,
+        outlineOffset: isDesignActive || isActiveCard ? 2 : undefined,
+        borderRadius: isDesignActive || isActiveCard ? 12 : undefined,
+        boxShadow: isActiveCard ? "0 0 0 3px rgba(59, 130, 246, 0.25)" : undefined,
+        transition: "outline-color 0.15s ease, outline-offset 0.15s ease, box-shadow 0.15s ease",
+      }}
+      onMouseEnter={() => canDesign && !isAnyFullScreen && setHoveredDesignWidgetId(w.id)}
+      onMouseLeave={() => canDesign && setHoveredDesignWidgetId((cur) => (cur === w.id ? null : cur))}
+      onMouseDown={(e) => {
+        if (!canDesign || e.button !== 0 || isAnyFullScreen) return;
+        if ((e.target as HTMLElement).closest("[data-design-move-arrow]")) return;
+        setSelectedDesignWidgetId(w.id);
+      }}
+      onDragOver={
+        canDesign && !isAnyFullScreen
+          ? (e) => {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "move";
+            }
+          : undefined
+      }
+      onDrop={
+        canDesign && !isAnyFullScreen
+          ? (e) => {
+              e.preventDefault();
+              const from = e.dataTransfer.getData("text/plain");
+              if (from) reorderWidgets(from, w.id);
+            }
+          : undefined
+      }
+    >
+      {showMoveChrome && nb ? (
+        <>
+          <DesignMoveArrow
+            dir="up"
+            disabled={!nb.up}
+            positionStyle={{ top: -14, left: "50%", marginLeft: -14 }}
+            onClick={() => nb.up && swapWidgetsInLayout && swapWidgetsInLayout(w.id, nb.up)}
+          />
+          <DesignMoveArrow
+            dir="down"
+            disabled={!nb.down}
+            positionStyle={{ bottom: -14, left: "50%", marginLeft: -14 }}
+            onClick={() => nb.down && swapWidgetsInLayout && swapWidgetsInLayout(w.id, nb.down)}
+          />
+          <DesignMoveArrow
+            dir="left"
+            disabled={!nb.left}
+            positionStyle={{ left: -14, top: "50%", marginTop: -14 }}
+            onClick={() => nb.left && swapWidgetsInLayout && swapWidgetsInLayout(w.id, nb.left)}
+          />
+          <DesignMoveArrow
+            dir="right"
+            disabled={!nb.right}
+            positionStyle={{ right: -14, top: "50%", marginTop: -14 }}
+            onClick={() => nb.right && swapWidgetsInLayout && swapWidgetsInLayout(w.id, nb.right)}
+          />
+        </>
+      ) : null}
+      {canDesign && !isAnyFullScreen ? (
+        <div
+          draggable
+          onMouseDown={(e) => e.stopPropagation()}
+          onDragStart={(e) => {
+            e.stopPropagation();
+            e.dataTransfer.setData("text/plain", w.id);
+            e.dataTransfer.effectAllowed = "move";
+            setDraggingWidgetId(w.id);
+          }}
+          onDragEnd={() => setDraggingWidgetId(null)}
+          title="Drag to reorder"
+          role="button"
+          aria-label="Drag to reorder widget"
+          style={{
+            position: "absolute",
+            top: 6,
+            left: 6,
+            zIndex: 5,
+            cursor: "grab",
+            padding: "4px 6px",
+            lineHeight: 1,
+            fontSize: "14px",
+            color: "var(--muted)",
+            borderRadius: 6,
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            userSelect: "none",
+          }}
+        >
+          ⋮⋮
+        </div>
+      ) : null}
+
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", width: "100%" }}>
+        <WidgetRenderer
+          widget={w as any}
+          organizationId={dashboard.organization_id}
+          dashboardId={w.dashboard_id || dashboard.id}
+          onSingleValueCardClick={onCardClick as any}
+          onDrillDownRequest={onDrillDownRequest}
+          designActions={
+            canDesign && !isAnyFullScreen && (!w.dashboard_id || w.dashboard_id === dashboard.id)
+              ? {
+                  onEdit: () => openEditWidget(w),
+                  onDelete: () => removeWidget(w.id),
+                  onToggleFullWidth: () => toggleWidgetFullWidth(w.id),
+                  isFullWidth: !!(w as { full_width?: boolean }).full_width,
+                  colSpan: effectiveColSpan(w as { full_width?: boolean; col_span?: number }),
+                  onSetColSpan: (span) => setWidgetColSpan(w.id, span),
+                }
+              : undefined
+          }
+        />
+      </div>
+    </div>
   );
 }
 
@@ -843,10 +2051,155 @@ function DashboardDesignContent({
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const {
+    openGlobalModal,
+    selectedPeriod,
+    selectedPeriodType,
+    selectedColumnValue,
+    selectedDashboardFilterValues,
+  } = useDashboardCustomization();
 
   const [widgets, setWidgets] = useState<Widget[]>(() => ensureLayout(dashboard.layout).widgets);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
   const [fieldsByKpiId, setFieldsByKpiId] = useState<Record<number, KpiFieldRow[]>>({});
+
+  // Linked widgets navigation state & Drill-Down modal state
+  const [activeLinkedCardId, setActiveLinkedCardId] = useState<string | null>(null);
+  const [activeDrillDown, setActiveDrillDown] = useState<DrillDownRequestPayload | null>(null);
+  const [remoteDashboards, setRemoteDashboards] = useState<Record<number, DashboardDetail>>({});
+  const [loadingRemoteDashboards, setLoadingRemoteDashboards] = useState<boolean>(false);
+
+  const activeLinkedCard = useMemo(() => {
+    if (!activeLinkedCardId) return null;
+    return widgets.find((w) => w.id === activeLinkedCardId) || null;
+  }, [activeLinkedCardId, widgets]);
+
+  useEffect(() => {
+    if (!activeLinkedCard || !token) return;
+    const card = activeLinkedCard as any;
+    if (!card.enable_linked_widgets) return;
+    const ids: string[] = Array.isArray(card.linked_widget_ids) ? card.linked_widget_ids : [];
+    const foreignDashIds = Array.from(
+      new Set(
+        ids
+          .filter((idStr) => idStr.includes("::"))
+          .map((idStr) => Number(idStr.split("::")[0]))
+          .filter((dashId) => !isNaN(dashId) && dashId !== dashboard.id && !remoteDashboards[dashId])
+      )
+    );
+
+    if (foreignDashIds.length === 0) return;
+
+    setLoadingRemoteDashboards(true);
+    const orgQuery = dashboard.organization_id ? `?organization_id=${dashboard.organization_id}` : "";
+    Promise.all(
+      foreignDashIds.map((dashId) =>
+        api<DashboardDetail>(`/dashboards/${dashId}${orgQuery}`, { token })
+          .then((res) => ({ dashId, res }))
+          .catch((err) => {
+            console.error(`Failed to load linked dashboard ${dashId}:`, err);
+            return null;
+          })
+      )
+    )
+      .then((results) => {
+        const newDashboards: Record<number, DashboardDetail> = {};
+        results.forEach((r) => {
+          if (r && r.res) {
+            newDashboards[r.dashId] = r.res;
+          }
+        });
+        if (Object.keys(newDashboards).length > 0) {
+          setRemoteDashboards((prev) => ({ ...prev, ...newDashboards }));
+        }
+      })
+      .finally(() => {
+        setLoadingRemoteDashboards(false);
+      });
+  }, [activeLinkedCard, token, dashboard.id, dashboard.organization_id, remoteDashboards]);
+
+  const linkedWidgets = useMemo<Widget[]>(() => {
+    if (!activeLinkedCard) return [];
+    const card = activeLinkedCard as any;
+    if (!card.enable_linked_widgets) return [];
+    const ids: string[] = Array.isArray(card.linked_widget_ids) ? card.linked_widget_ids : [];
+    return ids
+      .map((idStr: string) => {
+        if (idStr.includes("::")) {
+          const [dashIdStr, wId] = idStr.split("::");
+          const foreignDashId = Number(dashIdStr);
+          const foreignDash = remoteDashboards[foreignDashId];
+          if (!foreignDash) return undefined;
+          const foreignWidgets = (foreignDash.layout?.widgets || []) as Widget[];
+          const found = foreignWidgets.find((w) => w.id === wId);
+          if (found) {
+            return {
+              ...found,
+              dashboard_id: foreignDashId,
+              dashboard_name: foreignDash.name || `Dashboard #${foreignDashId}`,
+            } as unknown as Widget;
+          }
+          return undefined;
+        } else {
+          const found = widgets.find((w: Widget) => w.id === idStr);
+          if (found) {
+            return {
+              ...found,
+              dashboard_id: dashboard.id,
+              dashboard_name: dashboard.name,
+            } as unknown as Widget;
+          }
+          return undefined;
+        }
+      })
+      .filter((w: Widget | undefined): w is Widget => Boolean(w));
+  }, [activeLinkedCard, widgets, remoteDashboards, dashboard.id, dashboard.name]);
+
+  const singleValueCards = useMemo(() => {
+    return widgets.filter((w: Widget) => w.type === "kpi_card_single_value" || w.type === "kpi_single_value");
+  }, [widgets]);
+
+  // Smooth scroll to the dedicated linked widgets section when a card is clicked or re-clicked
+  const [linkedTriggerCount, setLinkedTriggerCount] = useState<number>(0);
+
+  const handleCardClick = (card: any) => {
+    setActiveLinkedCardId(card.id);
+    setLinkedTriggerCount((c) => c + 1);
+  };
+
+  useEffect(() => {
+    if (activeLinkedCardId) {
+      const timer = setTimeout(() => {
+        const el = document.getElementById("linked-widgets-section");
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+          // Highlight/pulse effect to give clear visual feedback on every trigger
+          el.style.transition = "none";
+          el.style.transform = "scale(1.006)";
+          el.style.boxShadow = "0 0 0 4px rgba(59, 130, 246, 0.3), 0 10px 25px -5px rgba(59, 130, 246, 0.15)";
+          setTimeout(() => {
+            el.style.transition = "all 0.35s ease";
+            el.style.transform = "none";
+            el.style.boxShadow = "0 10px 25px -5px rgba(59, 130, 246, 0.08), 0 8px 10px -6px rgba(59, 130, 246, 0.04)";
+          }, 200);
+        }
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [activeLinkedCardId, linkedTriggerCount]);
+
+  const handleBackToDashboard = () => {
+    const prevId = activeLinkedCardId;
+    setActiveLinkedCardId(null);
+    setTimeout(() => {
+      if (prevId) {
+        const cardEl = document.getElementById(`widget-${prevId}`);
+        if (cardEl) {
+          cardEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
+    }, 50);
+  };
 
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -1071,6 +2424,7 @@ function DashboardDesignContent({
   const [addLinkWithTable, setAddLinkWithTable] = useState<boolean>(false);
   const [addLinkedTableFieldKey, setAddLinkedTableFieldKey] = useState<string>("");
   const [addLinkedTableColumns, setAddLinkedTableColumns] = useState<string[]>([]);
+  const [addLinkedTableColumnLabels, setAddLinkedTableColumnLabels] = useState<Record<string, string>>({});
   const [addMultiLineTableFieldKey, setAddMultiLineTableFieldKey] = useState<string>("");
   const [addMultiLineTableSubKeys, setAddMultiLineTableSubKeys] = useState<string[]>([]);
   const [addMultiLineTableTopRows, setAddMultiLineTableTopRows] = useState<number>(5);
@@ -1167,6 +2521,7 @@ function DashboardDesignContent({
     setAddLinkWithTable(false);
     setAddLinkedTableFieldKey("");
     setAddLinkedTableColumns([]);
+    setAddLinkedTableColumnLabels({});
     setAddMultiLineTableFieldKey("");
     setAddMultiLineTableSubKeys([]);
     setAddMultiLineTableTopRows(5);
@@ -1212,6 +2567,11 @@ function DashboardDesignContent({
     setAddLinkWithTable(Boolean((w as any).link_with_table));
     setAddLinkedTableFieldKey((w as any).linked_table_field_key || (w as any).source_field_key || "");
     setAddLinkedTableColumns(Array.isArray((w as any).linked_table_columns) ? [...(w as any).linked_table_columns] : []);
+    setAddLinkedTableColumnLabels(
+      (w as any).linked_table_column_labels && typeof (w as any).linked_table_column_labels === "object"
+        ? { ...(w as any).linked_table_column_labels }
+        : {}
+    );
     if (w.type === "kpi_bar_chart") {
       setAddAggFn((((w as any).agg as any) || "count_rows") as any);
       setAddBarSortBy((((w as any).sort_by as any) || "value") as any);
@@ -1646,6 +3006,7 @@ function DashboardDesignContent({
         link_with_table: addLinkWithTable,
         linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || undefined) : undefined,
         linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
+        linked_table_column_labels: addLinkWithTable && Object.keys(addLinkedTableColumnLabels).length > 0 ? addLinkedTableColumnLabels : undefined,
       };
       applyWidgetUpsert(w);
       return;
@@ -1687,6 +3048,7 @@ function DashboardDesignContent({
         link_with_table: addLinkWithTable,
         linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || undefined) : undefined,
         linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
+        linked_table_column_labels: addLinkWithTable && Object.keys(addLinkedTableColumnLabels).length > 0 ? addLinkedTableColumnLabels : undefined,
       };
       applyWidgetUpsert(w);
       return;
@@ -1751,6 +3113,7 @@ function DashboardDesignContent({
               link_with_table: addLinkWithTable,
               linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || addMultiLineFieldKey.trim() || undefined) : undefined,
               linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
+              linked_table_column_labels: addLinkWithTable && Object.keys(addLinkedTableColumnLabels).length > 0 ? addLinkedTableColumnLabels : undefined,
             }
           : {
               id: editingWidgetId ?? newId(),
@@ -1777,6 +3140,7 @@ function DashboardDesignContent({
               link_with_table: addLinkWithTable,
               linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || undefined) : undefined,
               linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
+              linked_table_column_labels: addLinkWithTable && Object.keys(addLinkedTableColumnLabels).length > 0 ? addLinkedTableColumnLabels : undefined,
             };
       applyWidgetUpsert(w as Widget);
       return;
@@ -1821,6 +3185,7 @@ function DashboardDesignContent({
           link_with_table: addLinkWithTable,
           linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || undefined) : undefined,
           linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
+          linked_table_column_labels: addLinkWithTable && Object.keys(addLinkedTableColumnLabels).length > 0 ? addLinkedTableColumnLabels : undefined,
         };
         applyWidgetUpsert(w);
         return;
@@ -1872,6 +3237,7 @@ function DashboardDesignContent({
         link_with_table: addLinkWithTable,
         linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || addMultiLineFieldKey.trim() || undefined) : undefined,
         linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
+        linked_table_column_labels: addLinkWithTable && Object.keys(addLinkedTableColumnLabels).length > 0 ? addLinkedTableColumnLabels : undefined,
       };
       applyWidgetUpsert(w);
       return;
@@ -1919,6 +3285,7 @@ function DashboardDesignContent({
         link_with_table: addLinkWithTable,
         linked_table_field_key: addLinkWithTable ? (addLinkedTableFieldKey.trim() || addMultiLineFieldKey.trim() || undefined) : undefined,
         linked_table_columns: addLinkWithTable && addLinkedTableColumns.length > 0 ? addLinkedTableColumns : undefined,
+        linked_table_column_labels: addLinkWithTable && Object.keys(addLinkedTableColumnLabels).length > 0 ? addLinkedTableColumnLabels : undefined,
       } as any;
       applyWidgetUpsert(w);
       return;
@@ -2077,36 +3444,65 @@ function DashboardDesignContent({
     return () => document.removeEventListener("mousedown", onDoc, true);
   }, [selectedDesignWidgetId]);
 
-  if (error) return <p className="form-error">{error}</p>;
+  const activeWidgets = useMemo(() => {
+    if (activeLinkedCardId && activeLinkedCard) {
+      return linkedWidgets;
+    }
+    return widgets;
+  }, [activeLinkedCardId, activeLinkedCard, linkedWidgets, widgets]);
 
   return (
-    <div style={{ display: "grid", gap: "1rem" }}>
+    <WidgetFullScreenNavigationProvider widgets={activeWidgets}>
+      <div style={{ display: "grid", gap: "1rem" }}>
       {!widgetModalOpen && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)", paddingBottom: "1rem", gap: "1rem", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
             <button
               type="button"
               className="btn btn-secondary"
-              onClick={() => router.push(`/dashboard/dashboards/${dashboard.id}${orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : ""}`)}
+              onClick={() => router.push(`/dashboard/dashboards${orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : ""}`)}
             >
-              ← Back to Dashboard
+              ← Back to Dashboards
             </button>
             <h1 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 700 }}>
               Design Mode: {dashboard.name}
             </h1>
           </div>
           {isSuperAdminRole(userRole) && (
-            <button
-              type="button"
-              className="btn"
-              style={{
-                background: dashboardSettingsOpen ? "var(--border)" : "var(--accent)",
-                color: "white",
-              }}
-              onClick={() => setDashboardSettingsOpen(!dashboardSettingsOpen)}
-            >
-              ⚙️ Dashboard Settings
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={openGlobalModal}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  padding: "0.5rem 1rem",
+                  fontSize: "0.875rem",
+                  height: 38,
+                }}
+              >
+                <svg style={{ width: 16, height: 16 }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                </svg>
+                Customize Labels
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{
+                  background: dashboardSettingsOpen ? "var(--border)" : "var(--accent)",
+                  color: "white",
+                  height: 38,
+                  display: "inline-flex",
+                  alignItems: "center",
+                }}
+                onClick={() => setDashboardSettingsOpen(!dashboardSettingsOpen)}
+              >
+                ⚙️ Dashboard Settings
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -2489,6 +3885,170 @@ function DashboardDesignContent({
           <div className="card" style={{ padding: "1rem" }}>
             <p style={{ color: "var(--muted)", margin: 0 }}>No widgets yet. Click “Add widget”.</p>
           </div>
+        ) : activeLinkedCardId && activeLinkedCard ? (
+          /* Focused Linked Widgets View Mode in Design Mode */
+          <div style={{ display: "grid", gap: "1.25rem" }}>
+            {/* Single Value Cards row at top to show context and allow switching */}
+            {singleValueCards.length > 0 && (
+              <div
+                style={{
+                  display: "grid",
+                  gap: "1rem",
+                  gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+                }}
+              >
+                {singleValueCards.map((w) => {
+                  const canDesign = isSuperAdminRole(userRole);
+                  const nb = widgetMoveNeighbors.get(w.id);
+                  return (
+                    <DesignWidgetGridItem
+                      key={w.id}
+                      w={w}
+                      canDesign={canDesign}
+                      hoveredDesignWidgetId={hoveredDesignWidgetId}
+                      setHoveredDesignWidgetId={setHoveredDesignWidgetId}
+                      selectedDesignWidgetId={selectedDesignWidgetId}
+                      setSelectedDesignWidgetId={setSelectedDesignWidgetId}
+                      draggingWidgetId={draggingWidgetId}
+                      setDraggingWidgetId={setDraggingWidgetId}
+                      reorderWidgets={reorderWidgets}
+                      nb={nb}
+                      swapWidgetsInLayout={swapWidgetsInLayout}
+                      dashboard={dashboard}
+                      openEditWidget={openEditWidget}
+                      removeWidget={removeWidget}
+                      toggleWidgetFullWidth={toggleWidgetFullWidth}
+                      setWidgetColSpan={setWidgetColSpan}
+                      isActiveCard={w.id === activeLinkedCardId}
+                      onCardClick={handleCardClick}
+                      onDrillDownRequest={setActiveDrillDown}
+                    />
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Dedicated Linked Widgets Section Container */}
+            <div
+              id="linked-widgets-section"
+              style={{
+                marginTop: "0.25rem",
+                padding: "1.25rem",
+                background: "var(--surface)",
+                borderRadius: "14px",
+                border: "1.5px solid var(--accent, #3b82f6)",
+                boxShadow: "0 10px 25px -5px rgba(59, 130, 246, 0.08), 0 8px 10px -6px rgba(59, 130, 246, 0.04)",
+                display: "grid",
+                gap: "1.25rem",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: "0.75rem",
+                  paddingBottom: "0.25rem",
+                }}
+              >
+                <div>
+                  <h3 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 700, color: "var(--text)" }}>
+                    {(activeLinkedCard.title || "Single Value Card")} – Detailed Analysis
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleBackToDashboard}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    padding: "0.5rem 1rem",
+                    fontSize: "0.875rem",
+                    fontWeight: 600,
+                    borderRadius: "8px",
+                    boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+                  }}
+                >
+                  ← Back to Dashboard
+                </button>
+              </div>
+
+              {linkedWidgets.length === 0 ? (
+                <div
+                  style={{
+                    padding: "3rem 1.5rem",
+                    textAlign: "center",
+                    background: "rgba(0,0,0,0.02)",
+                    borderRadius: "10px",
+                    border: "1.5px dashed var(--border)",
+                  }}
+                >
+                  {loadingRemoteDashboards ? (
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.75rem" }}>
+                      <div className="spinner" style={{ width: 26, height: 26 }} />
+                      <p style={{ margin: 0, fontSize: "0.95rem", color: "var(--text)", fontWeight: 500 }}>
+                        Loading linked widgets from dashboards...
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>🔍</div>
+                      <p style={{ margin: 0, fontSize: "1rem", color: "var(--text)", fontWeight: 600 }}>
+                        No detailed widgets are linked to this card.
+                      </p>
+                      <p style={{ margin: "0.35rem 0 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                        Edit this card and select linked widgets in the options tab.
+                      </p>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={handleBackToDashboard}
+                        style={{ marginTop: "1.25rem", padding: "0.4rem 0.9rem", fontSize: "0.85rem" }}
+                      >
+                        Return to Dashboard
+                      </button>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: "grid",
+                    gap: "1rem",
+                    gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+                  }}
+                >
+                  {linkedWidgets.map((w: Widget) => {
+                    const canDesign = isSuperAdminRole(userRole);
+                    return (
+                      <DesignWidgetGridItem
+                        key={`linked-${w.id}-${linkedTriggerCount}`}
+                        w={w}
+                        canDesign={canDesign}
+                        hoveredDesignWidgetId={hoveredDesignWidgetId}
+                        setHoveredDesignWidgetId={setHoveredDesignWidgetId}
+                        selectedDesignWidgetId={selectedDesignWidgetId}
+                        setSelectedDesignWidgetId={setSelectedDesignWidgetId}
+                        draggingWidgetId={draggingWidgetId}
+                        setDraggingWidgetId={setDraggingWidgetId}
+                        reorderWidgets={reorderWidgets}
+                        dashboard={dashboard}
+                        openEditWidget={openEditWidget}
+                        removeWidget={removeWidget}
+                        toggleWidgetFullWidth={toggleWidgetFullWidth}
+                        setWidgetColSpan={setWidgetColSpan}
+                        onCardClick={handleCardClick}
+                        onDrillDownRequest={setActiveDrillDown}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
         ) : (
           <div
             style={{
@@ -2499,128 +4059,29 @@ function DashboardDesignContent({
           >
             {widgets.map((w) => {
               const canDesign = isSuperAdminRole(userRole);
-              const showMoveChrome =
-                canDesign && (hoveredDesignWidgetId === w.id || selectedDesignWidgetId === w.id);
-              const isDesignActive = showMoveChrome;
               const nb = widgetMoveNeighbors.get(w.id);
               return (
-                <div
+                <DesignWidgetGridItem
                   key={w.id}
-                  data-design-widget-cell
-                  style={{
-                    position: "relative",
-                    paddingLeft: canDesign ? 28 : undefined,
-                    ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
-                    opacity: draggingWidgetId === w.id ? 0.55 : 1,
-                    outline: isDesignActive ? "2px solid #3b82f6" : undefined,
-                    outlineOffset: isDesignActive ? 2 : undefined,
-                    borderRadius: isDesignActive ? 12 : undefined,
-                    transition: "outline-color 0.15s ease, outline-offset 0.15s ease",
-                  }}
-                  onMouseEnter={() => canDesign && setHoveredDesignWidgetId(w.id)}
-                  onMouseLeave={() => canDesign && setHoveredDesignWidgetId((cur) => (cur === w.id ? null : cur))}
-                  onMouseDown={(e) => {
-                    if (!canDesign || e.button !== 0) return;
-                    if ((e.target as HTMLElement).closest("[data-design-move-arrow]")) return;
-                    setSelectedDesignWidgetId(w.id);
-                  }}
-                  onDragOver={
-                    canDesign
-                      ? (e) => {
-                          e.preventDefault();
-                          e.dataTransfer.dropEffect = "move";
-                        }
-                      : undefined
-                  }
-                  onDrop={
-                    canDesign
-                      ? (e) => {
-                          e.preventDefault();
-                          const from = e.dataTransfer.getData("text/plain");
-                          if (from) reorderWidgets(from, w.id);
-                        }
-                      : undefined
-                  }
-                >
-                  {showMoveChrome && nb ? (
-                    <>
-                      <DesignMoveArrow
-                        dir="up"
-                        disabled={!nb.up}
-                        positionStyle={{ top: -14, left: "50%", marginLeft: -14 }}
-                        onClick={() => nb.up && swapWidgetsInLayout(w.id, nb.up)}
-                      />
-                      <DesignMoveArrow
-                        dir="down"
-                        disabled={!nb.down}
-                        positionStyle={{ bottom: -14, left: "50%", marginLeft: -14 }}
-                        onClick={() => nb.down && swapWidgetsInLayout(w.id, nb.down)}
-                      />
-                      <DesignMoveArrow
-                        dir="left"
-                        disabled={!nb.left}
-                        positionStyle={{ left: -14, top: "50%", marginTop: -14 }}
-                        onClick={() => nb.left && swapWidgetsInLayout(w.id, nb.left)}
-                      />
-                      <DesignMoveArrow
-                        dir="right"
-                        disabled={!nb.right}
-                        positionStyle={{ right: -14, top: "50%", marginTop: -14 }}
-                        onClick={() => nb.right && swapWidgetsInLayout(w.id, nb.right)}
-                      />
-                    </>
-                  ) : null}
-                  {canDesign ? (
-                    <div
-                      draggable
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onDragStart={(e) => {
-                        e.stopPropagation();
-                        e.dataTransfer.setData("text/plain", w.id);
-                        e.dataTransfer.effectAllowed = "move";
-                        setDraggingWidgetId(w.id);
-                      }}
-                      onDragEnd={() => setDraggingWidgetId(null)}
-                      title="Drag to reorder"
-                      role="button"
-                      aria-label="Drag to reorder widget"
-                      style={{
-                        position: "absolute",
-                        top: 6,
-                        left: 6,
-                        zIndex: 5,
-                        cursor: "grab",
-                        padding: "4px 6px",
-                        lineHeight: 1,
-                        fontSize: "14px",
-                        color: "var(--muted)",
-                        borderRadius: 6,
-                        background: "var(--surface)",
-                        border: "1px solid var(--border)",
-                        userSelect: "none",
-                      }}
-                    >
-                      ⋮⋮
-                    </div>
-                  ) : null}
-                  <WidgetRenderer
-                    widget={w as any}
-                    organizationId={dashboard.organization_id}
-                    dashboardId={dashboard.id}
-                    designActions={
-                      canDesign
-                        ? {
-                            onEdit: () => openEditWidget(w),
-                            onDelete: () => removeWidget(w.id),
-                            onToggleFullWidth: () => toggleWidgetFullWidth(w.id),
-                            isFullWidth: !!(w as { full_width?: boolean }).full_width,
-                            colSpan: effectiveColSpan(w as { full_width?: boolean; col_span?: number }),
-                            onSetColSpan: (span) => setWidgetColSpan(w.id, span),
-                          }
-                        : undefined
-                    }
-                  />
-                </div>
+                  w={w}
+                  canDesign={canDesign}
+                  hoveredDesignWidgetId={hoveredDesignWidgetId}
+                  setHoveredDesignWidgetId={setHoveredDesignWidgetId}
+                  selectedDesignWidgetId={selectedDesignWidgetId}
+                  setSelectedDesignWidgetId={setSelectedDesignWidgetId}
+                  draggingWidgetId={draggingWidgetId}
+                  setDraggingWidgetId={setDraggingWidgetId}
+                  reorderWidgets={reorderWidgets}
+                  nb={nb}
+                  swapWidgetsInLayout={swapWidgetsInLayout}
+                  dashboard={dashboard}
+                  openEditWidget={openEditWidget}
+                  removeWidget={removeWidget}
+                  toggleWidgetFullWidth={toggleWidgetFullWidth}
+                  setWidgetColSpan={setWidgetColSpan}
+                  onCardClick={handleCardClick}
+                  onDrillDownRequest={setActiveDrillDown}
+                />
               );
             })}
           </div>
@@ -3806,6 +5267,8 @@ function DashboardDesignContent({
                         setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
                         addLinkedTableColumns={addLinkedTableColumns}
                         setAddLinkedTableColumns={setAddLinkedTableColumns}
+                        addLinkedTableColumnLabels={addLinkedTableColumnLabels}
+                        setAddLinkedTableColumnLabels={setAddLinkedTableColumnLabels}
                         addMultiLineFields={addMultiLineFields}
                         defaultFieldKey={addMultiLineFieldKey}
                         defaultSubFields={selectedMultiLineSubFields}
@@ -4006,6 +5469,8 @@ function DashboardDesignContent({
                         setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
                         addLinkedTableColumns={addLinkedTableColumns}
                         setAddLinkedTableColumns={setAddLinkedTableColumns}
+                        addLinkedTableColumnLabels={addLinkedTableColumnLabels}
+                        setAddLinkedTableColumnLabels={setAddLinkedTableColumnLabels}
                         addMultiLineFields={addMultiLineFields}
                         defaultFieldKey={addMultiLineFieldKey}
                         defaultSubFields={selectedMultiLineSubFields}
@@ -4020,6 +5485,8 @@ function DashboardDesignContent({
                         setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
                         addLinkedTableColumns={addLinkedTableColumns}
                         setAddLinkedTableColumns={setAddLinkedTableColumns}
+                        addLinkedTableColumnLabels={addLinkedTableColumnLabels}
+                        setAddLinkedTableColumnLabels={setAddLinkedTableColumnLabels}
                         addMultiLineFields={addMultiLineFields}
                         defaultFieldKey={addMultiLineFieldKey}
                         defaultSubFields={selectedMultiLineSubFields}
@@ -4199,160 +5666,99 @@ function DashboardDesignContent({
                           Allow custom colors
                         </label>
                         {addCardAllowCustomColors && (
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.6rem" }}>
-                            <div style={{ display: "grid", gap: "0.25rem" }}>
-                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Background</label>
-                              <input value={addCardBgColor} onChange={(e) => setAddCardBgColor(e.target.value)} style={{ padding: "0.35rem 0.45rem" }} placeholder="#22c55e or linear-gradient(...)" />
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginTop: "0.25rem" }}>
+                            <div style={{ display: "grid", gap: "0.3rem" }}>
+                              <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text)" }}>Background</label>
+                              <div style={{ display: "flex", gap: "0.45rem", alignItems: "center" }}>
+                                <input
+                                  type="color"
+                                  value={toHexColor(addCardBgColor, "#22c55e")}
+                                  onChange={(e) => setAddCardBgColor(e.target.value)}
+                                  title="Choose background color"
+                                  style={{
+                                    width: "42px",
+                                    height: "36px",
+                                    padding: "2px",
+                                    borderRadius: "6px",
+                                    border: "1.5px solid var(--border, #cbd5e1)",
+                                    cursor: "pointer",
+                                    background: "var(--surface, #ffffff)",
+                                    flexShrink: 0,
+                                    boxSizing: "border-box",
+                                  }}
+                                />
+                                <input
+                                  type="text"
+                                  value={addCardBgColor}
+                                  onChange={(e) => setAddCardBgColor(e.target.value)}
+                                  style={{
+                                    flex: 1,
+                                    minWidth: 0,
+                                    padding: "0.45rem 0.6rem",
+                                    fontSize: "0.85rem",
+                                    borderRadius: "6px",
+                                    border: "1px solid var(--border, #cbd5e1)",
+                                    background: "var(--surface, #ffffff)",
+                                    color: "var(--text)",
+                                    boxSizing: "border-box",
+                                  }}
+                                  placeholder="#22c55e"
+                                />
+                              </div>
                             </div>
-                            <div style={{ display: "grid", gap: "0.25rem" }}>
-                              <label style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Text color</label>
-                              <input value={addCardFgColor} onChange={(e) => setAddCardFgColor(e.target.value)} style={{ padding: "0.35rem 0.45rem" }} placeholder="#ffffff" />
+                            <div style={{ display: "grid", gap: "0.3rem" }}>
+                              <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text)" }}>Text color</label>
+                              <div style={{ display: "flex", gap: "0.45rem", alignItems: "center" }}>
+                                <input
+                                  type="color"
+                                  value={toHexColor(addCardFgColor, "#ffffff")}
+                                  onChange={(e) => setAddCardFgColor(e.target.value)}
+                                  title="Choose text color"
+                                  style={{
+                                    width: "42px",
+                                    height: "36px",
+                                    padding: "2px",
+                                    borderRadius: "6px",
+                                    border: "1.5px solid var(--border, #cbd5e1)",
+                                    cursor: "pointer",
+                                    background: "var(--surface, #ffffff)",
+                                    flexShrink: 0,
+                                    boxSizing: "border-box",
+                                  }}
+                                />
+                                <input
+                                  type="text"
+                                  value={addCardFgColor}
+                                  onChange={(e) => setAddCardFgColor(e.target.value)}
+                                  style={{
+                                    flex: 1,
+                                    minWidth: 0,
+                                    padding: "0.45rem 0.6rem",
+                                    fontSize: "0.85rem",
+                                    borderRadius: "6px",
+                                    border: "1px solid var(--border, #cbd5e1)",
+                                    background: "var(--surface, #ffffff)",
+                                    color: "var(--text)",
+                                    boxSizing: "border-box",
+                                  }}
+                                  placeholder="#ffffff"
+                                />
+                              </div>
                             </div>
                           </div>
                         )}
 
-                        {/* Linked Widgets Navigation Section (Strictly from the same dashboard) */}
-                        <div style={{ height: 1, background: "var(--border)", margin: "0.4rem 0" }} />
-                        <div style={{ display: "grid", gap: "0.6rem" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                            <label style={{ fontSize: "0.9rem", fontWeight: 650, color: "var(--text)" }}>
-                              Enable Linked Widgets Navigation
-                            </label>
-                            <div style={{ display: "inline-flex", borderRadius: "6px", border: "1px solid var(--border)", overflow: "hidden" }}>
-                              <button
-                                type="button"
-                                onClick={() => setAddEnableLinkedWidgets(false)}
-                                style={{
-                                  padding: "0.25rem 0.75rem",
-                                  fontSize: "0.82rem",
-                                  fontWeight: !addEnableLinkedWidgets ? 700 : 500,
-                                  background: !addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
-                                  color: !addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
-                                  border: "none",
-                                  cursor: "pointer",
-                                }}
-                              >
-                                No
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setAddEnableLinkedWidgets(true)}
-                                style={{
-                                  padding: "0.25rem 0.75rem",
-                                  fontSize: "0.82rem",
-                                  fontWeight: addEnableLinkedWidgets ? 700 : 500,
-                                  background: addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
-                                  color: addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
-                                  border: "none",
-                                  cursor: "pointer",
-                                }}
-                              >
-                                Yes
-                              </button>
-                            </div>
-                          </div>
-                          <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
-                            When enabled, clicking this Single Value Card navigates viewers to all linked widgets on this dashboard.
-                          </p>
-
-                          {addEnableLinkedWidgets && (
-                            <div style={{ marginTop: "0.25rem", padding: "0.75rem", background: "rgba(59, 130, 246, 0.03)", borderRadius: "8px", border: "1px solid var(--border)" }}>
-                              {(() => {
-                                const eligibleWidgets = widgets.filter((w) => w.id !== editingWidgetId);
-                                return (
-                                  <>
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-                                      <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>
-                                        Linked Widgets (Same Dashboard)
-                                        {addLinkedWidgetIds.length > 0 && (
-                                          <span style={{ marginLeft: "0.4rem", color: "var(--accent, #3b82f6)", fontWeight: 700 }}>
-                                            ({addLinkedWidgetIds.length} selected)
-                                          </span>
-                                        )}
-                                      </span>
-                                      {eligibleWidgets.length > 0 && (
-                                        <div style={{ display: "flex", gap: "0.4rem" }}>
-                                          <button
-                                            type="button"
-                                            onClick={() => setAddLinkedWidgetIds(eligibleWidgets.map((w) => w.id))}
-                                            style={{ background: "none", border: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 600, padding: 0 }}
-                                          >
-                                            Select All
-                                          </button>
-                                          <span style={{ color: "var(--border)" }}>|</span>
-                                          <button
-                                            type="button"
-                                            onClick={() => setAddLinkedWidgetIds([])}
-                                            style={{ background: "none", border: "none", color: "var(--muted)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500, padding: 0 }}
-                                          >
-                                            Clear
-                                          </button>
-                                        </div>
-                                      )}
-                                    </div>
-
-                                    {eligibleWidgets.length === 0 ? (
-                                      <div style={{ padding: "0.6rem", fontSize: "0.82rem", color: "var(--muted)", background: "var(--surface)", borderRadius: "6px", textAlign: "center" }}>
-                                        No other widgets available on this dashboard yet. Add widgets to this dashboard first to link them to this card.
-                                      </div>
-                                    ) : (
-                                      <div style={{ maxHeight: "200px", overflowY: "auto", display: "grid", gap: "0.35rem", paddingRight: "0.25rem" }}>
-                                        {eligibleWidgets.map((ew) => {
-                                          const isChecked = addLinkedWidgetIds.includes(ew.id);
-                                          const title = ew.title || `Untitled (${getWidgetTypeLabel(ew.type)})`;
-                                          return (
-                                            <label
-                                              key={ew.id}
-                                              style={{
-                                                display: "flex",
-                                                alignItems: "center",
-                                                gap: "0.5rem",
-                                                padding: "0.4rem 0.6rem",
-                                                borderRadius: "6px",
-                                                background: isChecked ? "rgba(59, 130, 246, 0.08)" : "var(--surface)",
-                                                border: isChecked ? "1px solid rgba(59, 130, 246, 0.3)" : "1px solid var(--border)",
-                                                cursor: "pointer",
-                                                fontSize: "0.85rem",
-                                                transition: "background 0.15s ease",
-                                              }}
-                                            >
-                                              <input
-                                                type="checkbox"
-                                                checked={isChecked}
-                                                onChange={(e) => {
-                                                  if (e.target.checked) {
-                                                    setAddLinkedWidgetIds((prev) => [...prev, ew.id]);
-                                                  } else {
-                                                    setAddLinkedWidgetIds((prev) => prev.filter((id) => id !== ew.id));
-                                                  }
-                                                }}
-                                              />
-                                              <span style={{ flex: 1, fontWeight: isChecked ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                                {title}
-                                              </span>
-                                              <span
-                                                style={{
-                                                  fontSize: "0.72rem",
-                                                  padding: "0.15rem 0.45rem",
-                                                  borderRadius: "4px",
-                                                  background: "rgba(0,0,0,0.06)",
-                                                  color: "var(--muted)",
-                                                  fontWeight: 500,
-                                                }}
-                                              >
-                                                {getWidgetTypeLabel(ew.type)}
-                                              </span>
-                                            </label>
-                                          );
-                                        })}
-                                      </div>
-                                    )}
-                                  </>
-                                );
-                              })()}
-                            </div>
-                          )}
-                        </div>
+                        <WidgetLinkedNavigationConfigUI
+                          addEnableLinkedWidgets={addEnableLinkedWidgets}
+                          setAddEnableLinkedWidgets={setAddEnableLinkedWidgets}
+                          addLinkedWidgetIds={addLinkedWidgetIds}
+                          setAddLinkedWidgetIds={setAddLinkedWidgetIds}
+                          widgets={widgets}
+                          editingWidgetId={editingWidgetId}
+                          currentDashboard={dashboard}
+                          allDashboards={allDashboards}
+                          token={token}
+                        />
 
                         <WidgetLinkWithTableConfigUI
                           addLinkWithTable={addLinkWithTable}
@@ -4361,6 +5767,8 @@ function DashboardDesignContent({
                           setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
                           addLinkedTableColumns={addLinkedTableColumns}
                           setAddLinkedTableColumns={setAddLinkedTableColumns}
+                          addLinkedTableColumnLabels={addLinkedTableColumnLabels}
+                          setAddLinkedTableColumnLabels={setAddLinkedTableColumnLabels}
                           addMultiLineFields={addMultiLineFields}
                           defaultFieldKey={addMultiLineFieldKey}
                           defaultSubFields={selectedMultiLineSubFields}
@@ -4370,145 +5778,17 @@ function DashboardDesignContent({
 
                     {addType === "kpi_single_value" && (
                       <div style={{ display: "grid", gap: "0.75rem" }}>
-                        {/* Linked Widgets Navigation Section for basic single value */}
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                          <label style={{ fontSize: "0.9rem", fontWeight: 650, color: "var(--text)" }}>
-                            Enable Linked Widgets Navigation
-                          </label>
-                          <div style={{ display: "inline-flex", borderRadius: "6px", border: "1px solid var(--border)", overflow: "hidden" }}>
-                            <button
-                              type="button"
-                              onClick={() => setAddEnableLinkedWidgets(false)}
-                              style={{
-                                padding: "0.25rem 0.75rem",
-                                fontSize: "0.82rem",
-                                fontWeight: !addEnableLinkedWidgets ? 700 : 500,
-                                background: !addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
-                                color: !addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
-                                border: "none",
-                                cursor: "pointer",
-                              }}
-                            >
-                              No
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setAddEnableLinkedWidgets(true)}
-                              style={{
-                                padding: "0.25rem 0.75rem",
-                                fontSize: "0.82rem",
-                                fontWeight: addEnableLinkedWidgets ? 700 : 500,
-                                background: addEnableLinkedWidgets ? "var(--accent, #3b82f6)" : "var(--surface)",
-                                color: addEnableLinkedWidgets ? "#ffffff" : "var(--muted)",
-                                border: "none",
-                                cursor: "pointer",
-                              }}
-                            >
-                              Yes
-                            </button>
-                          </div>
-                        </div>
-                        <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
-                          When enabled, clicking this Single Value Card navigates viewers to all linked widgets on this dashboard.
-                        </p>
-
-                        {addEnableLinkedWidgets && (
-                          <div style={{ marginTop: "0.25rem", padding: "0.75rem", background: "rgba(59, 130, 246, 0.03)", borderRadius: "8px", border: "1px solid var(--border)" }}>
-                            {(() => {
-                              const eligibleWidgets = widgets.filter((w) => w.id !== editingWidgetId);
-                              return (
-                                <>
-                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-                                    <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>
-                                      Linked Widgets (Same Dashboard)
-                                      {addLinkedWidgetIds.length > 0 && (
-                                        <span style={{ marginLeft: "0.4rem", color: "var(--accent, #3b82f6)", fontWeight: 700 }}>
-                                          ({addLinkedWidgetIds.length} selected)
-                                        </span>
-                                      )}
-                                    </span>
-                                    {eligibleWidgets.length > 0 && (
-                                      <div style={{ display: "flex", gap: "0.4rem" }}>
-                                        <button
-                                          type="button"
-                                          onClick={() => setAddLinkedWidgetIds(eligibleWidgets.map((w) => w.id))}
-                                          style={{ background: "none", border: "none", color: "var(--accent, #3b82f6)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 600, padding: 0 }}
-                                        >
-                                          Select All
-                                        </button>
-                                        <span style={{ color: "var(--border)" }}>|</span>
-                                        <button
-                                          type="button"
-                                          onClick={() => setAddLinkedWidgetIds([])}
-                                          style={{ background: "none", border: "none", color: "var(--muted)", fontSize: "0.78rem", cursor: "pointer", fontWeight: 500, padding: 0 }}
-                                        >
-                                          Clear
-                                        </button>
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  {eligibleWidgets.length === 0 ? (
-                                    <div style={{ padding: "0.6rem", fontSize: "0.82rem", color: "var(--muted)", background: "var(--surface)", borderRadius: "6px", textAlign: "center" }}>
-                                      No other widgets available on this dashboard yet. Add widgets to this dashboard first to link them to this card.
-                                    </div>
-                                  ) : (
-                                    <div style={{ maxHeight: "200px", overflowY: "auto", display: "grid", gap: "0.35rem", paddingRight: "0.25rem" }}>
-                                      {eligibleWidgets.map((ew) => {
-                                        const isChecked = addLinkedWidgetIds.includes(ew.id);
-                                        const title = ew.title || `Untitled (${getWidgetTypeLabel(ew.type)})`;
-                                        return (
-                                          <label
-                                            key={ew.id}
-                                            style={{
-                                              display: "flex",
-                                              alignItems: "center",
-                                              gap: "0.5rem",
-                                              padding: "0.4rem 0.6rem",
-                                              borderRadius: "6px",
-                                              background: isChecked ? "rgba(59, 130, 246, 0.08)" : "var(--surface)",
-                                              border: isChecked ? "1px solid rgba(59, 130, 246, 0.3)" : "1px solid var(--border)",
-                                              cursor: "pointer",
-                                              fontSize: "0.85rem",
-                                              transition: "background 0.15s ease",
-                                            }}
-                                          >
-                                            <input
-                                              type="checkbox"
-                                              checked={isChecked}
-                                              onChange={(e) => {
-                                                if (e.target.checked) {
-                                                  setAddLinkedWidgetIds((prev) => [...prev, ew.id]);
-                                                } else {
-                                                  setAddLinkedWidgetIds((prev) => prev.filter((id) => id !== ew.id));
-                                                }
-                                              }}
-                                            />
-                                            <span style={{ flex: 1, fontWeight: isChecked ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                              {title}
-                                            </span>
-                                            <span
-                                              style={{
-                                                fontSize: "0.72rem",
-                                                padding: "0.15rem 0.45rem",
-                                                borderRadius: "4px",
-                                                background: "rgba(0,0,0,0.06)",
-                                                color: "var(--muted)",
-                                                fontWeight: 500,
-                                              }}
-                                            >
-                                              {getWidgetTypeLabel(ew.type)}
-                                            </span>
-                                          </label>
-                                        );
-                                      })}
-                                    </div>
-                                  )}
-                                </>
-                              );
-                            })()}
-                          </div>
-                        )}
+                        <WidgetLinkedNavigationConfigUI
+                          addEnableLinkedWidgets={addEnableLinkedWidgets}
+                          setAddEnableLinkedWidgets={setAddEnableLinkedWidgets}
+                          addLinkedWidgetIds={addLinkedWidgetIds}
+                          setAddLinkedWidgetIds={setAddLinkedWidgetIds}
+                          widgets={widgets}
+                          editingWidgetId={editingWidgetId}
+                          currentDashboard={dashboard}
+                          allDashboards={allDashboards}
+                          token={token}
+                        />
 
                         <WidgetLinkWithTableConfigUI
                           addLinkWithTable={addLinkWithTable}
@@ -4517,6 +5797,8 @@ function DashboardDesignContent({
                           setAddLinkedTableFieldKey={setAddLinkedTableFieldKey}
                           addLinkedTableColumns={addLinkedTableColumns}
                           setAddLinkedTableColumns={setAddLinkedTableColumns}
+                          addLinkedTableColumnLabels={addLinkedTableColumnLabels}
+                          setAddLinkedTableColumnLabels={setAddLinkedTableColumnLabels}
                           addMultiLineFields={addMultiLineFields}
                           defaultFieldKey={addMultiLineFieldKey}
                           defaultSubFields={selectedMultiLineSubFields}
@@ -4530,6 +5812,27 @@ function DashboardDesignContent({
           </div>
         </div>
       )}
+
+      {activeDrillDown && (
+        <WidgetDrillDownModal
+          isOpen={Boolean(activeDrillDown)}
+          onClose={() => setActiveDrillDown(null)}
+          widget={activeDrillDown.widget}
+          organizationId={dashboard.organization_id}
+          dashboardId={dashboard.id}
+          dimensionFilter={activeDrillDown.dimensionFilter}
+          label={activeDrillDown.label}
+          periodOverride={selectedPeriod}
+          periodType={selectedPeriodType}
+          normalFilters={{
+            ...selectedDashboardFilterValues,
+            ...(activeDrillDown.normalFilters || activeDrillDown.widgetFilters || {}),
+          }}
+          selectedColumnValue={selectedColumnValue}
+          canDownloadWidgetPdf={true}
+        />
+      )}
     </div>
+    </WidgetFullScreenNavigationProvider>
   );
 }

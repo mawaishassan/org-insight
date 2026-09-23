@@ -48,19 +48,47 @@ def _org_id(user: User, org_id_param: int | None) -> int:
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization required")
 
 
-async def check_custom_report_access(db: AsyncSession, user: User, custom_report_id: int, action: str) -> bool:
+async def _org_id_for_custom_report(
+    db: AsyncSession, user: User, custom_report_id: int, org_id_param: int | None
+) -> int:
+    """Resolve organization id for custom report with strict tenant boundary enforcement."""
+    cr = (await db.execute(select(CustomReport).where(CustomReport.id == custom_report_id))).scalar_one_or_none()
+    if not cr:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+
     if user.role.value == "SUPER_ADMIN":
-        return True
+        if org_id_param is not None:
+            if cr.organization_id != org_id_param:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found in this organization")
+            return org_id_param
+        return cr.organization_id
+    else:
+        if user.organization_id is None or cr.organization_id != user.organization_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found in this organization")
+        return user.organization_id
+
+
+async def check_custom_report_access(
+    db: AsyncSession, user: User, custom_report_id: int, action: str, org_id: int | None = None
+) -> bool:
+    role_str = str(getattr(user.role, "value", user.role) or "").upper()
+    if role_str == "SUPER_ADMIN":
+        target_org_id = org_id if org_id is not None else user.organization_id
+    else:
+        target_org_id = user.organization_id
 
     report = (await db.execute(select(CustomReport).where(CustomReport.id == custom_report_id))).scalar_one_or_none()
     if not report:
         return False
 
-    if user.organization_id != report.organization_id:
+    if target_org_id is not None and report.organization_id != target_org_id:
         return False
 
-    if user.role.value == "ORG_ADMIN":
-        if action in ("view", "assign", "generate", "print", "export", "change_period"):
+    if role_str == "SUPER_ADMIN":
+        return True
+
+    if role_str == "ORG_ADMIN":
+        if action in ("view", "assign", "generate", "print", "export", "change_period", "download_word"):
             return True
         return False
 
@@ -68,7 +96,11 @@ async def check_custom_report_access(db: AsyncSession, user: User, custom_report
     assignment = (
         await db.execute(
             select(CustomReportAssignment)
-            .where(CustomReportAssignment.custom_report_id == custom_report_id, CustomReportAssignment.user_id == user.id)
+            .where(
+                CustomReportAssignment.custom_report_id == custom_report_id,
+                CustomReportAssignment.user_id == user.id,
+                CustomReportAssignment.is_active == True,
+            )
         )
     ).scalar_one_or_none()
 
@@ -76,13 +108,15 @@ async def check_custom_report_access(db: AsyncSession, user: User, custom_report
         return False
 
     if action in ("view", "generate"):
-        return assignment.can_view
+        return bool(assignment.can_view or assignment.can_print)
     elif action == "print":
-        return assignment.can_print
+        return bool(assignment.can_print)
     elif action == "export":
-        return assignment.can_export
+        return bool(assignment.can_export)
+    elif action == "download_word":
+        return bool(getattr(assignment, "can_download_word", False))
     elif action == "change_period":
-        return assignment.can_change_period
+        return bool(assignment.can_change_period)
 
     return False
 
@@ -109,7 +143,9 @@ async def list_reports(
             r.can_view = True
             r.can_print = True
             r.can_export = True
+            r.can_download_word = True
             r.can_change_period = True
+            r.can_load_lms = True
             result_reports.append(r)
         else:
             assignment = (
@@ -118,11 +154,13 @@ async def list_reports(
                     .where(CustomReportAssignment.custom_report_id == r.id, CustomReportAssignment.user_id == current_user.id)
                 )
             ).scalar_one_or_none()
-            if assignment and assignment.can_view:
-                r.can_view = assignment.can_view
-                r.can_print = assignment.can_print
-                r.can_export = assignment.can_export
-                r.can_change_period = assignment.can_change_period
+            if assignment and getattr(assignment, "is_active", True) and (assignment.can_view or getattr(assignment, "can_print", False) or getattr(assignment, "can_export", False)):
+                r.can_view = bool(assignment.can_view)
+                r.can_print = bool(getattr(assignment, "can_print", False))
+                r.can_export = bool(getattr(assignment, "can_export", False))
+                r.can_download_word = bool(getattr(assignment, "can_download_word", False))
+                r.can_change_period = bool(getattr(assignment, "can_change_period", False))
+                r.can_load_lms = bool(getattr(assignment, "can_load_lms", False))
                 result_reports.append(r)
     return result_reports
 
@@ -148,36 +186,28 @@ async def create_template(
 
 
 @router.get("/odoo-configured-kpis")
-async def get_odoo_configured_kpis(
+async def list_odoo_configured_kpis_endpoint(
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_org_admin),
 ):
-    """Return all KPIs in the org that have an Odoo config (for Super Admin designer selection)."""
-    from app.core.models import KPI, KpiOdooConfig
-
+    """List all KPIs that have at least one Odoo model/field integration configured across all fields."""
+    from app.reports.custom_service import list_odoo_configured_kpis
     org_id = _org_id(current_user, organization_id)
+    return await list_odoo_configured_kpis(db, org_id)
 
-    result = await db.execute(
-        select(KPI)
-        .join(KpiOdooConfig, KpiOdooConfig.kpi_id == KPI.id)
-        .where(KPI.organization_id == org_id)
-        .order_by(KPI.name)
-    )
-    kpis = list(result.scalars().all())
-    return [{"id": k.id, "name": k.name} for k in kpis]
 
 
 @router.get("/{id}", response_model=CustomReportResponse)
-async def get_report_metadata(
+async def get_report(
     id: int,
     organization_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get custom report metadata."""
-    org_id = _org_id(current_user, organization_id)
-    if not await check_custom_report_access(db, current_user, id, "view"):
+    """Get custom report by ID."""
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "view", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
     report = await get_custom_report(db, id, org_id)
     if not report:
@@ -187,19 +217,27 @@ async def get_report_metadata(
         report.can_view = True
         report.can_print = True
         report.can_export = True
+        report.can_download_word = True
         report.can_change_period = True
+        report.can_load_lms = True
     else:
         assignment = (
             await db.execute(
                 select(CustomReportAssignment)
-                .where(CustomReportAssignment.custom_report_id == id, CustomReportAssignment.user_id == current_user.id)
+                .where(
+                    CustomReportAssignment.custom_report_id == id,
+                    CustomReportAssignment.user_id == current_user.id,
+                    CustomReportAssignment.is_active == True,
+                )
             )
         ).scalar_one_or_none()
         if assignment:
             report.can_view = assignment.can_view
-            report.can_print = assignment.can_print
-            report.can_export = assignment.can_export
-            report.can_change_period = assignment.can_change_period
+            report.can_print = getattr(assignment, "can_print", False)
+            report.can_export = getattr(assignment, "can_export", False)
+            report.can_download_word = getattr(assignment, "can_download_word", False)
+            report.can_change_period = getattr(assignment, "can_change_period", False)
+            report.can_load_lms = getattr(assignment, "can_load_lms", False)
 
     return report
 
@@ -212,8 +250,8 @@ async def get_report_details(
     current_user: User = Depends(get_current_user),
 ):
     """Get custom report with sections and fields (for builder)."""
-    org_id = _org_id(current_user, organization_id)
-    if not await check_custom_report_access(db, current_user, id, "view"):
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "view", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
     report = await get_custom_report(db, id, org_id)
     if not report:
@@ -598,8 +636,8 @@ async def generate_report(
     current_user: User = Depends(get_current_user),
 ):
     """Generate custom report data (with optional preview capping and cache support)."""
-    org_id = _org_id(current_user, organization_id)
-    if not await check_custom_report_access(db, current_user, id, "generate"):
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "generate", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
     # Fetch report metadata to check show_odoo_button config
@@ -609,7 +647,7 @@ async def generate_report(
 
     # Enforce period shifting permission for non-admins
     if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
-        can_shift = await check_custom_report_access(db, current_user, id, "change_period")
+        can_shift = await check_custom_report_access(db, current_user, id, "change_period", org_id=org_id)
         if not can_shift:
             config = getattr(report, "date_fetching_config", None) or {}
             admin_period_type = (config.get("default_period_type") or config.get("period_type") or "").strip() or None
@@ -626,17 +664,9 @@ async def generate_report(
 
     # Cache key includes all dimensions that determine the unique output.
     # Use normalized year string + period_type so "2026/27" and 2027 don't collide.
-    year_key = str(year).strip() if year is not None else "current"
-    cache_key = (id, org_id, year_key, "preview" if preview else "full", include_attachments, by_default, period_type or "", "v4")
-
-    filter_config = (
-        await db.execute(
-            select(ReportUserFilterConfiguration)
-            .where(ReportUserFilterConfiguration.report_id == id, ReportUserFilterConfiguration.enabled == True)
-        )
-    ).scalar_one_or_none()
-    if filter_config:
-        cache_key = cache_key + (current_user.id,)
+    year_key = str(year or "").strip()
+    u_key = str(getattr(current_user, "unique_user_key", "") or "").strip()
+    cache_key = (id, org_id, year_key, "preview" if preview else "full", include_attachments, by_default, period_type or "", "v10", current_user.id, u_key)
 
     # The _t parameter is a cache-buster.  Historically the frontend sent _t=Date.now()
     # on EVERY request (including routine period shifts), which meant the cache was never
@@ -686,8 +716,8 @@ async def list_assignments(
     current_user: User = Depends(require_org_admin),
 ):
     """List user assignments (Org Admin / Super Admin)."""
-    org_id = _org_id(current_user, organization_id)
-    if not await check_custom_report_access(db, current_user, id, "assign"):
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "assign", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
     assignments = await list_custom_report_assignments(db, id)
@@ -720,8 +750,8 @@ async def assign_user(
     current_user: User = Depends(require_org_admin),
 ):
     """Assign custom report to user (Org Admin / Super Admin)."""
-    org_id = _org_id(current_user, organization_id)
-    if not await check_custom_report_access(db, current_user, id, "assign"):
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "assign", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
     perm = await assign_custom_report(
@@ -757,8 +787,8 @@ async def bulk_assign_users_route(
     current_user: User = Depends(require_org_admin),
 ):
     """Assign custom report to multiple users (Org Admin / Super Admin)."""
-    org_id = _org_id(current_user, organization_id)
-    if not await check_custom_report_access(db, current_user, id, "assign"):
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "assign", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
     perms = await bulk_assign_custom_report(
@@ -805,7 +835,7 @@ async def get_report_filter_config(
     current_user: User = Depends(get_current_user),
 ):
     """Get user-based dynamic filtering configuration for custom report."""
-    org_id = _org_id(current_user, organization_id)
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
     report = await get_custom_report(db, id, org_id)
     if not report:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
@@ -828,8 +858,8 @@ async def upsert_report_filter_config(
     current_user: User = Depends(require_org_admin),
 ):
     """Configure or update user-based dynamic filtering for custom report (Org Admin / Super Admin)."""
-    org_id = _org_id(current_user, organization_id)
-    if not await check_custom_report_access(db, current_user, id, "assign"):
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "assign", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
     config = (
@@ -865,8 +895,8 @@ async def unassign_user_route(
     current_user: User = Depends(require_org_admin),
 ):
     """Unassign custom report from user (Org Admin / Super Admin)."""
-    org_id = _org_id(current_user, organization_id)
-    if not await check_custom_report_access(db, current_user, id, "assign"):
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "assign", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
     ok = await unassign_custom_report(db, id, user_id)
@@ -888,8 +918,10 @@ async def export_custom_report(
     current_user: User = Depends(get_current_user),
 ):
     """Export custom report as PDF, DOCX, or XLSX (or ZIP for multiple attachments)."""
-    org_id = _org_id(current_user, organization_id)
-    if not await check_custom_report_access(db, current_user, id, "export"):
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    fmt = str(format or "pdf").lower().strip()
+    required_action = "export" if fmt in ("xlsx", "excel", "csv") else ("download_word" if fmt in ("docx", "word") else "view")
+    if not await check_custom_report_access(db, current_user, id, required_action, org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
     # Fetch report metadata
@@ -899,7 +931,7 @@ async def export_custom_report(
 
     # Enforce period shifting permission for non-admins
     if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
-        can_shift = await check_custom_report_access(db, current_user, id, "change_period")
+        can_shift = await check_custom_report_access(db, current_user, id, "change_period", org_id=org_id)
         if not can_shift:
             config = getattr(report, "date_fetching_config", None) or {}
             admin_period_type = (config.get("default_period_type") or config.get("period_type") or "").strip() or None
@@ -935,6 +967,22 @@ async def export_custom_report(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to export report: {str(e)}"
         )
+
+    # Log report download activity non-blockingly via activity hook
+    from app.activity_log.hooks import log_report_export
+    log_report_export(
+        user=current_user,
+        org_id=org_id,
+        report_id=id,
+        report_name=getattr(report, "name", f"Report #{id}"),
+        fmt=fmt,
+        year=year,
+        period_type=period_type,
+        filename=filename,
+        by_default=by_default,
+        report_obj=report,
+    )
+
 
     from fastapi.responses import StreamingResponse
     import io
@@ -995,7 +1043,8 @@ async def sync_odoo_for_custom_report(
             parsed_year = datetime.now().year
 
     # 1. Access check
-    if not await check_custom_report_access(db, current_user, id, "view"):
+    org_id = await _org_id_for_custom_report(db, current_user, id, organization_id)
+    if not await check_custom_report_access(db, current_user, id, "view", org_id=org_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this custom report")
 
     report = await get_custom_report(db, id, org_id)

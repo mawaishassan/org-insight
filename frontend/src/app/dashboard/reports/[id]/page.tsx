@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo, useRef } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { generatePeriodOptions } from "@/lib/periodHelpers";
@@ -12,11 +12,15 @@ import {
   type ReportData,
 } from "@/app/dashboard/reports/reportPrint";
 import { ReportLoadProgress } from "@/app/dashboard/reports/ReportLoadProgress";
+import { logReportView, logUserActivity } from "@/lib/activityLogger";
+import { AccessDenied } from "@/components/AccessDenied";
 
 export default function ReportPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const id = Number(params?.id);
+  const orgIdFromQuery = searchParams?.get("organization_id");
   const token = getAccessToken();
 
   const [userRole, setUserRole] = useState<string | null>(null);
@@ -41,9 +45,24 @@ export default function ReportPage() {
   // Load template details and organization custom periods
   useEffect(() => {
     if (!id || !token) return;
-    api<any>(`/reports/templates/${id}`, { token })
+    const query = orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : "";
+    setError(null);
+    api<any>(`/reports/templates/${id}${query}`, { token })
       .then((t) => {
+        if (!t) {
+          setError("Report not found or inaccessible in this organization.");
+          setLoading(false);
+          return;
+        }
+        if (orgIdFromQuery && t.organization_id !== Number(orgIdFromQuery)) {
+          setError("Access denied. This report belongs to another organization.");
+          setLoading(false);
+          return;
+        }
         setTemplate(t);
+        if (t?.id && t?.name) {
+          logReportView(t.id, t.name);
+        }
         if (t.organization_id) {
           api<any>(`/organizations/${t.organization_id}`, { token })
             .then((orgData) => {
@@ -52,8 +71,11 @@ export default function ReportPage() {
             .catch((e) => console.error("Failed to load org details", e));
         }
       })
-      .catch((e) => console.error("Failed to load template", e));
-  }, [id, token]);
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : "Failed to load template");
+        setLoading(false);
+      });
+  }, [id, token, orgIdFromQuery]);
 
   const customPeriods = useMemo(() => {
     if (!org) return [];
@@ -108,7 +130,7 @@ export default function ReportPage() {
   }, [periodOptions, selectedPeriod, selectedPeriodType]);
 
   useEffect(() => {
-    if (!id || !token) return;
+    if (!id || !token || !template || error) return;
     if (template?.fetch_data_with_date && selectedPeriodType !== "by_default" && !selectedPeriod) return;
 
     const currentGen = ++requestGenRef.current;
@@ -116,9 +138,10 @@ export default function ReportPage() {
     setError(null);
     const isByDefault = selectedPeriodType === "by_default";
     const yr = (template?.fetch_data_with_date && !isByDefault) ? selectedPeriod : reportYear;
+    const effOrgId = orgIdFromQuery ? Number(orgIdFromQuery) : template?.organization_id;
     let url = `/reports/templates/${id}/generate?format=json&year=${yr}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`;
-    if (template?.organization_id) {
-      url += `&organization_id=${template.organization_id}`;
+    if (effOrgId) {
+      url += `&organization_id=${effOrgId}`;
     }
     api<ReportData>(url, { token, cache: "no-store" })
       .then((res) => {
@@ -136,7 +159,7 @@ export default function ReportPage() {
           setLoading(false);
         }
       });
-  }, [id, reportYear, selectedPeriod, selectedPeriodType, template, token]);
+  }, [id, reportYear, selectedPeriod, selectedPeriodType, template, token, orgIdFromQuery, error]);
 
   const handlePrint = () => {
     if (!data || !token) return;
@@ -149,6 +172,15 @@ export default function ReportPage() {
       const doc = buildReportPrintDocument(reportData);
       const opened = openReportPrintWindow(doc, true);
       if (!opened) setPopupBlockedMsg("Pop-up was blocked. Allow pop-ups for this site to open print/PDF in a new tab.");
+      logUserActivity({
+        module: "report",
+        resourceType: "report",
+        resourceId: id,
+        resourceName: template?.name || `Report #${id}`,
+        actionType: "DOWNLOAD_PDF",
+        period: String(yr),
+        details: `Printed/Exported PDF report: ${template?.name || id}`,
+      });
     };
     if (useCached) {
       try {
@@ -158,15 +190,38 @@ export default function ReportPage() {
       }
       return;
     }
+    const effOrgId = orgIdFromQuery ? Number(orgIdFromQuery) : template?.organization_id;
     let url = `/reports/templates/${id}/generate?format=json&year=${yr}${isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(selectedPeriodType)}`}&_t=${Date.now()}`;
-    if (template?.organization_id) {
-      url += `&organization_id=${template.organization_id}`;
+    if (effOrgId) {
+      url += `&organization_id=${effOrgId}`;
     }
     api<ReportData>(url, { token, cache: "no-store" })
       .then(run)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load report"))
       .finally(() => setPrintLoading(false));
   };
+
+  if (error) {
+    return (
+      <AccessDenied
+        title="Access Denied"
+        message={error}
+        returnUrl={orgIdFromQuery ? `/dashboard/reports?organization_id=${orgIdFromQuery}` : "/dashboard/reports"}
+        returnLabel="Return to Reports"
+      />
+    );
+  }
+
+  if (!template && !loading) {
+    return (
+      <AccessDenied
+        title="Report Not Found"
+        message="This report template does not exist or is not available in this organization."
+        returnUrl={orgIdFromQuery ? `/dashboard/reports?organization_id=${orgIdFromQuery}` : "/dashboard/reports"}
+        returnLabel="Return to Reports"
+      />
+    );
+  }
 
   const previewDoc =
     data?.rendered_html != null
@@ -179,7 +234,7 @@ export default function ReportPage() {
     <div style={{ padding: "0 1rem 1rem" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem" }}>
         <h1 style={{ fontSize: "1.5rem", margin: 0 }}>Report</h1>
-        {template?.can_change_period !== false && (
+        {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN" || template?.can_change_period === true) && (
           (template?.fetch_data_with_date || customPeriods.length > 0) ? (
             <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -195,7 +250,7 @@ export default function ReportPage() {
                     background: "var(--surface)"
                   }}
                 >
-                  <option value="by_default">Default</option>
+                  <option value="by_default">Data Entry</option>
                   {customPeriods.map((cp: any) => (
                     <option key={cp.custom_period_name} value={cp.custom_period_name}>
                       {cp.custom_period_name}
@@ -268,14 +323,16 @@ export default function ReportPage() {
             Design report
           </Link>
         )}
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={handlePrint}
-          disabled={loading || printLoading || !data}
-        >
-          {printLoading ? "Opening…" : "Print / Export PDF"}
-        </button>
+        {(userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN" || template?.can_print === true) && (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handlePrint}
+            disabled={loading || printLoading || !data}
+          >
+            {printLoading ? "Opening…" : "Print"}
+          </button>
+        )}
       </div>
 
       {popupBlockedMsg && (

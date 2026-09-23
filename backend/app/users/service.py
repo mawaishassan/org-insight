@@ -1,10 +1,11 @@
 """User CRUD with tenant isolation and KPI/report assignments."""
 
 from datetime import datetime
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
-from app.core.models import User, UserRole, KPI, KPIAssignment, ReportAccessPermission
+from app.core.models import User, UserRole, KPI, KPIAssignment, ReportAccessPermission, ReportTemplate
 from app.core.security import get_password_hash
 from uuid import uuid4
 
@@ -27,6 +28,28 @@ async def create_user(
     data: UserCreate,
 ) -> User:
     """Create user in organization and assign KPIs and report templates."""
+    # Validate KPI IDs belong to org_id
+    assigned_kpi_ids = [a.kpi_id for a in data.kpi_assignments] if data.kpi_assignments is not None else list(data.kpi_ids)
+    if assigned_kpi_ids:
+        kpi_res = await db.execute(select(KPI.id).where(KPI.id.in_(assigned_kpi_ids), KPI.organization_id == org_id))
+        valid_kpi_ids = set(kpi_res.scalars().all())
+        invalid_kpis = set(assigned_kpi_ids) - valid_kpi_ids
+        if invalid_kpis:
+            raise HTTPException(status_code=400, detail=f"KPI IDs do not belong to this organization: {sorted(list(invalid_kpis))}")
+
+    # Validate ReportTemplate IDs belong to org_id
+    if data.report_template_ids:
+        rt_res = await db.execute(
+            select(ReportTemplate.id).where(
+                ReportTemplate.id.in_(data.report_template_ids),
+                ReportTemplate.organization_id == org_id,
+            )
+        )
+        valid_rt_ids = set(rt_res.scalars().all())
+        invalid_rts = set(data.report_template_ids) - valid_rt_ids
+        if invalid_rts:
+            raise HTTPException(status_code=400, detail=f"Report template IDs do not belong to this organization: {sorted(list(invalid_rts))}")
+
     user = User(
         organization_id=org_id,
         username=data.username,
@@ -162,6 +185,24 @@ async def update_user(
     if data.unique_user_key is not None:
         val = data.unique_user_key.strip()
         user.unique_user_key = val if val else None
+    if "default_dashboard_id" in data.model_dump(exclude_unset=True):
+        if data.default_dashboard_id is not None:
+            from app.core.models import Dashboard
+            from app.dashboards.service import user_can_access_dashboard
+            d_res = await db.execute(
+                select(Dashboard.id).where(
+                    Dashboard.id == data.default_dashboard_id,
+                    Dashboard.organization_id == org_id,
+                )
+            )
+            if not d_res.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="Selected dashboard does not exist in this organization")
+            can_access = await user_can_access_dashboard(db, user.id, data.default_dashboard_id, "view")
+            if not can_access and user.role != UserRole.ORG_ADMIN:
+                raise HTTPException(status_code=400, detail="User does not have access to the selected dashboard")
+            user.default_dashboard_id = data.default_dashboard_id
+        else:
+            user.default_dashboard_id = None
     if data.force_password_reset is not None:
         user.force_password_reset = data.force_password_reset
         now = datetime.utcnow()
@@ -188,6 +229,14 @@ async def update_user(
                 pa.status = "CANCELLED"
                 pa.cancelled_at = now
     if data.kpi_assignments is not None:
+        assigned_kpi_ids = [a.kpi_id for a in data.kpi_assignments]
+        if assigned_kpi_ids:
+            kpi_res = await db.execute(select(KPI.id).where(KPI.id.in_(assigned_kpi_ids), KPI.organization_id == org_id))
+            valid_kpi_ids = set(kpi_res.scalars().all())
+            invalid_kpis = set(assigned_kpi_ids) - valid_kpi_ids
+            if invalid_kpis:
+                raise HTTPException(status_code=400, detail=f"KPI IDs do not belong to this organization: {sorted(list(invalid_kpis))}")
+
         await db.execute(delete(KPIAssignment).where(KPIAssignment.user_id == user_id))
         for a in data.kpi_assignments:
             perm = (a.permission or "data_entry").strip().lower()
@@ -195,10 +244,29 @@ async def update_user(
                 perm = "data_entry"
             db.add(KPIAssignment(user_id=user_id, kpi_id=a.kpi_id, assignment_type=perm))
     elif data.kpi_ids is not None:
+        if data.kpi_ids:
+            kpi_res = await db.execute(select(KPI.id).where(KPI.id.in_(data.kpi_ids), KPI.organization_id == org_id))
+            valid_kpi_ids = set(kpi_res.scalars().all())
+            invalid_kpis = set(data.kpi_ids) - valid_kpi_ids
+            if invalid_kpis:
+                raise HTTPException(status_code=400, detail=f"KPI IDs do not belong to this organization: {sorted(list(invalid_kpis))}")
+
         await db.execute(delete(KPIAssignment).where(KPIAssignment.user_id == user_id))
         for kpi_id in data.kpi_ids:
             db.add(KPIAssignment(user_id=user_id, kpi_id=kpi_id))
     if data.report_template_ids is not None:
+        if data.report_template_ids:
+            rt_res = await db.execute(
+                select(ReportTemplate.id).where(
+                    ReportTemplate.id.in_(data.report_template_ids),
+                    ReportTemplate.organization_id == org_id,
+                )
+            )
+            valid_rt_ids = set(rt_res.scalars().all())
+            invalid_rts = set(data.report_template_ids) - valid_rt_ids
+            if invalid_rts:
+                raise HTTPException(status_code=400, detail=f"Report template IDs do not belong to this organization: {sorted(list(invalid_rts))}")
+
         await db.execute(
             delete(ReportAccessPermission).where(ReportAccessPermission.user_id == user_id)
         )
@@ -213,6 +281,11 @@ async def update_user(
                 )
             )
     await db.flush()
+    try:
+        from app.access_management import invalidate_all_access_and_report_caches
+        invalidate_all_access_and_report_caches(db)
+    except Exception:
+        pass
     return user
 
 

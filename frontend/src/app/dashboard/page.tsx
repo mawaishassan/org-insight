@@ -23,7 +23,7 @@ export default function DashboardPage() {
     }
     (async () => {
       try {
-        const me = await api<{ role: string; organization_id: number | null }>("/auth/me", { token });
+        const me = await api<{ role: string; organization_id: number | null; default_dashboard_id?: number | null }>("/auth/me", { token });
         if (me.role === "SUPER_ADMIN") {
           router.replace("/dashboard/organizations");
           return;
@@ -33,6 +33,12 @@ export default function DashboardPage() {
         const orgId = me.organization_id;
         if (!orgId) {
           router.replace("/dashboard/no-access");
+          return;
+        }
+
+        // If the user has a configured Default Dashboard, automatically display it
+        if (me.default_dashboard_id) {
+          router.replace(`/dashboard/dashboards/${me.default_dashboard_id}?organization_id=${orgId}`);
           return;
         }
 

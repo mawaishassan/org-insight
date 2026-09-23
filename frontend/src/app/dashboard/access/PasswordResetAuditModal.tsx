@@ -113,21 +113,6 @@ export function PasswordResetAuditModal({
               Detailed event history for user: <strong style={{ color: "var(--text)" }}>{userName}</strong>
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            style={{
-              background: "transparent",
-              border: "none",
-              fontSize: "1.25rem",
-              cursor: "pointer",
-              color: "var(--muted)",
-              lineHeight: 1,
-              padding: "0.25rem",
-            }}
-          >
-            ✕
-          </button>
         </div>
 
         {/* Modal Content */}
@@ -155,7 +140,6 @@ export function PasswordResetAuditModal({
 
           {!loading && !error && history.length === 0 && (
             <div style={{ textAlign: "center", padding: "2.5rem 1rem", color: "var(--muted)" }}>
-              <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>📋</div>
               <p style={{ margin: 0, fontSize: "0.9rem" }}>
                 No password reset history recorded for this user yet.
               </p>

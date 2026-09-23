@@ -73,6 +73,7 @@ async def get_current_user(
                 User.is_active,
                 User.unique_user_key,
                 User.force_password_reset,
+                User.default_dashboard_id,
             ),
         )
     )
@@ -119,6 +120,7 @@ async def get_current_user_optional(
                 User.organization_id,
                 User.is_active,
                 User.unique_user_key,
+                User.default_dashboard_id,
             ),
         )
     )

@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 import type { UserRow } from "../users/shared";
 import { PasswordResetManagementTab } from "./PasswordResetManagementTab";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 interface MeInfo {
   id: number;
@@ -29,8 +31,44 @@ interface OrgRole {
   updated_at?: string | null;
 }
 
-export default function AccessDashboardPage() {
+function AccessDashboardContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const token = getAccessToken();
+
+  const tabParam = searchParams?.get("tab");
+  const getInitialTab = (): "roles" | "users" | "password-resets" => {
+    if (tabParam === "users" || tabParam === "password-resets" || tabParam === "roles") {
+      return tabParam;
+    }
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("access_active_tab");
+      if (saved === "users" || saved === "password-resets" || saved === "roles") {
+        return saved;
+      }
+    }
+    return "roles";
+  };
+
+  const [activeTab, setActiveTabState] = useState<"roles" | "users" | "password-resets">(getInitialTab);
+
+  useEffect(() => {
+    const tabParam = searchParams?.get("tab");
+    if (tabParam === "users" || tabParam === "password-resets" || tabParam === "roles") {
+      setActiveTabState(tabParam);
+      if (typeof window !== "undefined") {
+        localStorage.setItem("access_active_tab", tabParam);
+      }
+    }
+  }, [searchParams]);
+
+  const handleTabChange = (tab: "roles" | "users" | "password-resets") => {
+    setActiveTabState(tab);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("access_active_tab", tab);
+    }
+    router.replace(`/dashboard/access?tab=${tab}`, { scroll: false });
+  };
 
   const [me, setMe] = useState<MeInfo | null>(null);
   const [org, setOrg] = useState<OrgInfo | null>(null);
@@ -60,7 +98,6 @@ export default function AccessDashboardPage() {
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserFullName, setNewUserFullName] = useState("");
   const [newUserUniqueKey, setNewUserUniqueKey] = useState("");
-  const [activeTab, setActiveTab] = useState<"roles" | "users" | "password-resets">("roles");
   const [newUserType, setNewUserType] = useState<"internal" | "external">("internal");
   const [newExternalDescription, setNewExternalDescription] = useState("");
   const [newExternalIsActive, setNewExternalIsActive] = useState(true);
@@ -72,17 +109,43 @@ export default function AccessDashboardPage() {
   const [externalDbName, setExternalDbName] = useState<string>("OBE");
   const [externalLoginSaving, setExternalLoginSaving] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
-  const [bulkUploading, setBulkUploading] = useState(false);
+  const [bulkUploading, setBulkUploading] = useState<"system" | "external" | null>(null);
   const [bulkErrors, setBulkErrors] = useState<string[]>([]);
   const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
   const [deletingUsers, setDeletingUsers] = useState(false);
   const [userCategoryFilter, setUserCategoryFilter] = useState<"all" | "internal" | "external">("all");
+  const [userSearchQuery, setUserSearchQuery] = useState("");
 
   const displayedUsers = useMemo(() => {
-    if (userCategoryFilter === "internal") return users.filter((u) => !u.is_external);
-    if (userCategoryFilter === "external") return users.filter((u) => Boolean(u.is_external));
-    return users;
-  }, [users, userCategoryFilter]);
+    let result = users;
+    if (userCategoryFilter === "internal") {
+      result = result.filter((u) => !u.is_external);
+    } else if (userCategoryFilter === "external") {
+      result = result.filter((u) => Boolean(u.is_external));
+    }
+
+    if (userSearchQuery.trim()) {
+      const q = userSearchQuery.trim().toLowerCase();
+      result = result.filter((u) => {
+        const name = (u.full_name || "").toLowerCase();
+        const username = (u.username || "").toLowerCase();
+        const email = (u.email || "").toLowerCase();
+        const desc = (u.description || "").toLowerCase();
+        const key = (u.unique_user_key || "").toLowerCase();
+        const role = (u.role || "").toLowerCase();
+        return (
+          name.includes(q) ||
+          username.includes(q) ||
+          email.includes(q) ||
+          desc.includes(q) ||
+          key.includes(q) ||
+          role.includes(q)
+        );
+      });
+    }
+
+    return result;
+  }, [users, userCategoryFilter, userSearchQuery]);
 
   const internalCount = useMemo(() => users.filter((u) => !u.is_external).length, [users]);
   const externalCount = useMemo(() => users.filter((u) => Boolean(u.is_external)).length, [users]);
@@ -239,11 +302,7 @@ export default function AccessDashboardPage() {
   }
 
   if (loading) {
-    return (
-      <div style={{ padding: "2rem" }}>
-        <p style={{ color: "var(--muted)" }}>Loading access dashboard…</p>
-      </div>
-    );
+    return <WidgetSpinnerLoader size="large" text="Loading access dashboard..." minHeight={350} />;
   }
 
   if (!isOrgAdmin && !isSuperAdmin) {
@@ -358,7 +417,7 @@ export default function AccessDashboardPage() {
               ? { background: "var(--accent)", color: "var(--on-muted)" }
               : {}),
           }}
-          onClick={() => setActiveTab("roles")}
+          onClick={() => handleTabChange("roles")}
         >
           Roles
         </button>
@@ -370,7 +429,7 @@ export default function AccessDashboardPage() {
               ? { background: "var(--accent)", color: "var(--on-muted)" }
               : {}),
           }}
-          onClick={() => setActiveTab("users")}
+          onClick={() => handleTabChange("users")}
         >
           Users
         </button>
@@ -382,10 +441,22 @@ export default function AccessDashboardPage() {
               ? { background: "var(--accent)", color: "var(--on-muted)" }
               : {}),
           }}
-          onClick={() => setActiveTab("password-resets")}
+          onClick={() => handleTabChange("password-resets")}
         >
           Password Reset Management
         </button>
+        <Link
+          href="/dashboard/access/rights"
+          className="btn"
+          style={{
+            textDecoration: "none",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "0.4rem",
+          }}
+        >
+          Dashboard & Report Rights
+        </Link>
       </div>
 
       {/* Roles tab */}
@@ -532,6 +603,7 @@ export default function AccessDashboardPage() {
                     setNewUserType("internal");
                     setShowCreateUser(true);
                     setCreateUserError(null);
+                    setBulkOpen(false);
                   }
                 }}
               >
@@ -554,27 +626,44 @@ export default function AccessDashboardPage() {
                     setNewUserType("external");
                     setShowCreateUser(true);
                     setCreateUserError(null);
+                    setBulkOpen(false);
                   }
                 }}
               >
-                {showCreateUser && newUserType === "external" ? "Cancel" : "+ External User (Odoo)"}
+                {showCreateUser && newUserType === "external" ? "Cancel" : "+ External User (LMS)"}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{
+                  fontSize: "0.85rem",
+                  borderColor: "var(--border)",
+                  fontWeight: 500,
+                  backgroundColor: bulkOpen ? "var(--bg-subtle, rgba(0,0,0,0.05))" : undefined,
+                }}
+                onClick={() => {
+                  setBulkOpen((v) => !v);
+                  setBulkErrors([]);
+                  if (!bulkOpen) {
+                    setShowCreateUser(false);
+                  }
+                }}
+              >
+                {bulkOpen ? "Cancel Bulk Import" : "Bulk Import Users"}
               </button>
             </div>
           </div>
-          <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
-            View and manage all users in this organization. System users authenticate locally; external users authenticate via Odoo.
-          </p>
           {showCreateUser && (
             <div className="card" style={{ padding: "0.85rem 1rem", marginBottom: "0.9rem" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
                 <div>
                   <h3 style={{ margin: "0 0 0.2rem", fontSize: "0.95rem" }}>
-                    {newUserType === "internal" ? "Add System User" : "Add External User (Odoo)"}
+                    {newUserType === "internal" ? "Add System User" : "Add External User (LMS)"}
                   </h3>
                   <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
                     {newUserType === "internal"
                       ? "System users authenticate directly with their local password."
-                      : "External users authenticate using their Odoo passwords (no local password required)."}
+                      : "External users authenticate using their LMS passwords (no local password required)."}
                   </p>
                 </div>
                 <div style={{ display: "flex", gap: "0.35rem" }}>
@@ -608,7 +697,7 @@ export default function AccessDashboardPage() {
                       setCreateUserError(null);
                     }}
                   >
-                    External user (Odoo)
+                    External user (LMS)
                   </button>
                 </div>
               </div>
@@ -794,163 +883,258 @@ export default function AccessDashboardPage() {
                   }
                 }}
               >
-                {createUserSaving ? "Saving…" : newUserType === "internal" ? "Create system user" : "Add external user (Odoo)"}
+                {createUserSaving ? "Saving…" : newUserType === "internal" ? "Create system user" : "Add external user (LMS)"}
               </button>
             </div>
           )}
 
-          {/* Bulk Import Card */}
-          <div className="card" style={{ padding: "0.75rem 0.9rem", marginBottom: "0.9rem" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: "0.5rem",
-                marginBottom: "0.5rem",
-              }}
-            >
-              <h3 style={{ margin: 0, fontSize: "0.95rem" }}>Bulk import users</h3>
-              <button
-                type="button"
-                className="btn"
-                style={{ fontSize: "0.85rem" }}
-                onClick={() => {
-                  setBulkOpen((v) => !v);
-                  setBulkErrors([]);
-                }}
-              >
-                {bulkOpen ? "Hide" : "Bulk import"}
-              </button>
-            </div>
+          {bulkOpen && (
+            <div className="card" style={{ padding: "0.85rem 1rem", marginBottom: "0.9rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
+                <div>
+                  <h3 style={{ margin: "0 0 0.2rem", fontSize: "0.95rem" }}>Bulk Import Users</h3>
+                  <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--muted)" }}>
+                    Download templates and upload Excel files to import System or External Users in bulk.
+                  </p>
+                </div>
+              </div>
 
-            {bulkOpen && (
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ fontSize: "0.85rem" }}
-                    onClick={async () => {
-                      if (!token || orgId == null) return;
-                      try {
-                        const url = getApiUrl(
-                          `/users/bulk-template?${new URLSearchParams({
-                            organization_id: String(orgId),
-                          }).toString()}`
-                        );
-                        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-                        if (!res.ok) {
-                          toast.error("Template download failed");
-                          return;
-                        }
-                        const blob = await res.blob();
-                        const a = document.createElement("a");
-                        a.href = URL.createObjectURL(blob);
-                        a.download = `system_users_template_${orgId}.xlsx`;
-                        a.click();
-                        URL.revokeObjectURL(a.href);
-                      } catch {
-                        toast.error("Template download failed");
-                      }
-                    }}
-                  >
-                    Download System Users Template
-                  </button>
-
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ fontSize: "0.85rem" }}
-                    onClick={async () => {
-                      if (!token || orgId == null) return;
-                      try {
-                        const url = getApiUrl(
-                          `/users/external/template?${new URLSearchParams({
-                            organization_id: String(orgId),
-                          }).toString()}`
-                        );
-                        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-                        if (!res.ok) {
-                          toast.error("External template download failed");
-                          return;
-                        }
-                        const blob = await res.blob();
-                        const a = document.createElement("a");
-                        a.href = URL.createObjectURL(blob);
-                        a.download = `external_users_template_${orgId}.xlsx`;
-                        a.click();
-                        URL.revokeObjectURL(a.href);
-                      } catch {
-                        toast.error("External template download failed");
-                      }
-                    }}
-                  >
-                    Download External Users Template (Odoo)
-                  </button>
-
-                  <label
-                    className="btn btn-primary"
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "0.85rem" }}>
+                  {/* System Users Panel */}
+                  <div
                     style={{
-                      cursor: !bulkUploading ? "pointer" : "not-allowed",
-                      opacity: bulkUploading ? 0.7 : 1,
-                      fontSize: "0.85rem",
+                      padding: "0.85rem 1rem",
+                      borderRadius: "8px",
+                      border: "1px solid rgba(59, 130, 246, 0.25)",
+                      background: "rgba(59, 130, 246, 0.03)",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "0.5rem",
                     }}
                   >
-                    {bulkUploading ? "Uploading…" : "Upload Excel"}
-                    <input
-                      type="file"
-                      accept=".xlsx"
-                      style={{ display: "none" }}
-                      disabled={bulkUploading || orgId == null}
-                      onChange={async (e) => {
-                        const file = e.target.files?.[0];
-                        e.target.value = "";
-                        if (!file || !token || orgId == null) return;
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#2563eb" }} />
+                      <strong style={{ fontSize: "0.9rem", color: "#1d4ed8" }}>System Users (Internal)</strong>
+                    </div>
 
-                        setBulkUploading(true);
-                        setBulkErrors([]);
-                        try {
-                          const form = new FormData();
-                          form.append("file", file);
-                          const url = getApiUrl(
-                            `/users/bulk-upload?${new URLSearchParams({
-                              organization_id: String(orgId),
-                            }).toString()}`
-                          );
-                          const res = await fetch(url, {
-                            method: "POST",
-                            headers: { Authorization: `Bearer ${token}` },
-                            body: form,
-                          });
-
-                          if (res.ok) {
-                            const payload = await res.json().catch(() => ({} as any));
-                            const added = Number((payload as any)?.rows_added ?? 0);
-                            toast.success(`Success: ${added} users created`);
-
-                            const refreshed = await api<any[]>(`/users?organization_id=${orgId}`, { token }).catch(() => null);
-                            if (Array.isArray(refreshed)) setUsers(refreshed);
-
-                            setBulkOpen(false);
-                          } else {
-                            const err = await res.json().catch(() => ({} as any));
-                            const detail = err?.detail;
-                            if (detail && typeof detail === "object" && Array.isArray(detail.errors)) {
-                              setBulkErrors(detail.errors);
-                              toast.error(detail.message || "Bulk upload validation failed");
-                            } else {
-                              toast.error(typeof detail === "string" ? detail : "Bulk upload failed");
+                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.25rem" }}>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: "0.82rem", padding: "0.3rem 0.65rem" }}
+                        onClick={async () => {
+                          if (!token || orgId == null) return;
+                          try {
+                            const url = getApiUrl(
+                              `/users/bulk-template?${new URLSearchParams({
+                                organization_id: String(orgId),
+                              }).toString()}`
+                            );
+                            const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                            if (!res.ok) {
+                              toast.error("Template download failed");
+                              return;
                             }
+                            const blob = await res.blob();
+                            const a = document.createElement("a");
+                            a.href = URL.createObjectURL(blob);
+                            a.download = `system_users_template_${orgId}.xlsx`;
+                            a.click();
+                            URL.revokeObjectURL(a.href);
+                          } catch {
+                            toast.error("Template download failed");
                           }
-                        } catch (ex) {
-                          toast.error(ex instanceof Error ? ex.message : "Bulk upload failed");
-                        } finally {
-                          setBulkUploading(false);
-                        }
-                      }}
-                    />
-                  </label>
+                        }}
+                      >
+                        Download Template
+                      </button>
+
+                      <label
+                        className="btn btn-primary"
+                        style={{
+                          cursor: bulkUploading == null ? "pointer" : "not-allowed",
+                          opacity: bulkUploading != null ? 0.7 : 1,
+                          fontSize: "0.82rem",
+                          padding: "0.3rem 0.65rem",
+                        }}
+                      >
+                        {bulkUploading === "system" ? "Uploading…" : "Upload System Users Excel"}
+                        <input
+                          type="file"
+                          accept=".xlsx"
+                          style={{ display: "none" }}
+                          disabled={bulkUploading != null || orgId == null}
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = "";
+                            if (!file || !token || orgId == null) return;
+
+                            setBulkUploading("system");
+                            setBulkErrors([]);
+                            try {
+                              const form = new FormData();
+                              form.append("file", file);
+                              const url = getApiUrl(
+                                `/users/bulk-upload?${new URLSearchParams({
+                                  organization_id: String(orgId),
+                                }).toString()}`
+                              );
+                              const res = await fetch(url, {
+                                method: "POST",
+                                headers: { Authorization: `Bearer ${token}` },
+                                body: form,
+                              });
+
+                              if (res.ok) {
+                                const payload = await res.json().catch(() => ({} as any));
+                                const added = Number((payload as any)?.rows_added ?? 0);
+                                toast.success(`Success: ${added} system users created`);
+
+                                const refreshed = await api<any[]>(`/users?organization_id=${orgId}`, { token }).catch(() => null);
+                                if (Array.isArray(refreshed)) setUsers(refreshed);
+
+                                setBulkOpen(false);
+                              } else {
+                                const err = await res.json().catch(() => ({} as any));
+                                const detail = err?.detail;
+                                if (detail && typeof detail === "object" && Array.isArray(detail.errors)) {
+                                  setBulkErrors(detail.errors);
+                                  toast.error(detail.message || "Bulk upload validation failed");
+                                } else {
+                                  toast.error(typeof detail === "string" ? detail : "Bulk upload failed");
+                                }
+                              }
+                            } catch (ex) {
+                              toast.error(ex instanceof Error ? ex.message : "Bulk upload failed");
+                            } finally {
+                              setBulkUploading(null);
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* External Users (LMS) Panel */}
+                  <div
+                    style={{
+                      padding: "0.85rem 1rem",
+                      borderRadius: "8px",
+                      border: "1px solid rgba(139, 92, 246, 0.25)",
+                      background: "rgba(139, 92, 246, 0.03)",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#7c3aed" }} />
+                      <strong style={{ fontSize: "0.9rem", color: "#6d28d9" }}>External Users (LMS)</strong>
+                    </div>
+
+                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.25rem" }}>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: "0.82rem", padding: "0.3rem 0.65rem" }}
+                        onClick={async () => {
+                          if (!token || orgId == null) return;
+                          try {
+                            const url = getApiUrl(
+                              `/users/external/template?${new URLSearchParams({
+                                organization_id: String(orgId),
+                              }).toString()}`
+                            );
+                            const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                            if (!res.ok) {
+                              toast.error("External template download failed");
+                              return;
+                            }
+                            const blob = await res.blob();
+                            const a = document.createElement("a");
+                            a.href = URL.createObjectURL(blob);
+                            a.download = `external_users_template_${orgId}.xlsx`;
+                            a.click();
+                            URL.revokeObjectURL(a.href);
+                          } catch {
+                            toast.error("External template download failed");
+                          }
+                        }}
+                      >
+                        Download Template
+                      </button>
+
+                      <label
+                        className="btn"
+                        style={{
+                          cursor: bulkUploading == null ? "pointer" : "not-allowed",
+                          opacity: bulkUploading != null ? 0.7 : 1,
+                          fontSize: "0.82rem",
+                          padding: "0.3rem 0.65rem",
+                          background: "#7c3aed",
+                          color: "#ffffff",
+                          border: "none",
+                        }}
+                      >
+                        {bulkUploading === "external" ? "Uploading…" : "Upload External Users Excel"}
+                        <input
+                          type="file"
+                          accept=".xlsx"
+                          style={{ display: "none" }}
+                          disabled={bulkUploading != null || orgId == null}
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = "";
+                            if (!file || !token || orgId == null) return;
+
+                            setBulkUploading("external");
+                            setBulkErrors([]);
+                            try {
+                              const form = new FormData();
+                              form.append("file", file);
+                              const url = getApiUrl(
+                                `/users/external/bulk-upload?${new URLSearchParams({
+                                  organization_id: String(orgId),
+                                  append: "false",
+                                }).toString()}`
+                              );
+                              const res = await fetch(url, {
+                                method: "POST",
+                                headers: { Authorization: `Bearer ${token}` },
+                                body: form,
+                              });
+
+                              if (res.ok) {
+                                const payload = await res.json().catch(() => ({} as any));
+                                const added = Number((payload as any)?.rows_added ?? 0);
+                                const overridden = Number((payload as any)?.rows_overridden ?? 0);
+                                toast.success(`Success: ${added} added, ${overridden} updated`);
+
+                                const refreshed = await api<any[]>(`/users?organization_id=${orgId}`, { token }).catch(() => null);
+                                if (Array.isArray(refreshed)) setUsers(refreshed);
+
+                                setBulkOpen(false);
+                              } else {
+                                const err = await res.json().catch(() => ({} as any));
+                                const detail = err?.detail;
+                                if (detail && typeof detail === "object" && Array.isArray(detail.errors)) {
+                                  setBulkErrors(detail.errors);
+                                  toast.error(detail.message || "Bulk upload validation failed");
+                                } else {
+                                  toast.error(typeof detail === "string" ? detail : "Bulk upload failed");
+                                }
+                              }
+                            } catch (ex) {
+                              toast.error(ex instanceof Error ? ex.message : "Bulk upload failed");
+                            } finally {
+                              setBulkUploading(null);
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+                  </div>
                 </div>
 
                 {bulkErrors.length > 0 && (
@@ -978,8 +1162,8 @@ export default function AccessDashboardPage() {
                   </div>
                 )}
               </div>
-            )}
-          </div>
+            </div>
+          )}
 
           {users.length === 0 ? (
             <p style={{ marginTop: "0.25rem", color: "var(--muted)", fontSize: "0.9rem" }}>
@@ -988,59 +1172,101 @@ export default function AccessDashboardPage() {
           ) : (
             <div style={{ maxHeight: 420, overflow: "auto" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
-                {/* Filter Tabs for Internal vs External Users */}
-                <div style={{ display: "inline-flex", background: "var(--bg-subtle, rgba(0,0,0,0.04))", padding: "2px", borderRadius: "8px", border: "1px solid var(--border)" }}>
-                  <button
-                    type="button"
-                    onClick={() => setUserCategoryFilter("all")}
-                    style={{
-                      padding: "0.25rem 0.65rem",
-                      fontSize: "0.82rem",
-                      borderRadius: "6px",
-                      border: "none",
-                      background: userCategoryFilter === "all" ? "var(--surface, #fff)" : "transparent",
-                      color: userCategoryFilter === "all" ? "var(--foreground)" : "var(--muted)",
-                      fontWeight: userCategoryFilter === "all" ? 600 : 400,
-                      cursor: "pointer",
-                      boxShadow: userCategoryFilter === "all" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
-                    }}
-                  >
-                    All Users ({users.length})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setUserCategoryFilter("internal")}
-                    style={{
-                      padding: "0.25rem 0.65rem",
-                      fontSize: "0.82rem",
-                      borderRadius: "6px",
-                      border: "none",
-                      background: userCategoryFilter === "internal" ? "var(--surface, #fff)" : "transparent",
-                      color: userCategoryFilter === "internal" ? "var(--foreground)" : "var(--muted)",
-                      fontWeight: userCategoryFilter === "internal" ? 600 : 400,
-                      cursor: "pointer",
-                      boxShadow: userCategoryFilter === "internal" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
-                    }}
-                  >
-                    System Users ({internalCount})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setUserCategoryFilter("external")}
-                    style={{
-                      padding: "0.25rem 0.65rem",
-                      fontSize: "0.82rem",
-                      borderRadius: "6px",
-                      border: "none",
-                      background: userCategoryFilter === "external" ? "var(--surface, #fff)" : "transparent",
-                      color: userCategoryFilter === "external" ? "var(--foreground)" : "var(--muted)",
-                      fontWeight: userCategoryFilter === "external" ? 600 : 400,
-                      cursor: "pointer",
-                      boxShadow: userCategoryFilter === "external" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
-                    }}
-                  >
-                    External Users (Odoo) ({externalCount})
-                  </button>
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+                  {/* Filter Tabs for Internal vs External Users */}
+                  <div style={{ display: "inline-flex", background: "var(--bg-subtle, rgba(0,0,0,0.04))", padding: "2px", borderRadius: "8px", border: "1px solid var(--border)" }}>
+                    <button
+                      type="button"
+                      onClick={() => setUserCategoryFilter("all")}
+                      style={{
+                        padding: "0.25rem 0.65rem",
+                        fontSize: "0.82rem",
+                        borderRadius: "6px",
+                        border: "none",
+                        background: userCategoryFilter === "all" ? "var(--surface, #fff)" : "transparent",
+                        color: userCategoryFilter === "all" ? "var(--foreground)" : "var(--muted)",
+                        fontWeight: userCategoryFilter === "all" ? 600 : 400,
+                        cursor: "pointer",
+                        boxShadow: userCategoryFilter === "all" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
+                      }}
+                    >
+                      All Users ({users.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setUserCategoryFilter("internal")}
+                      style={{
+                        padding: "0.25rem 0.65rem",
+                        fontSize: "0.82rem",
+                        borderRadius: "6px",
+                        border: "none",
+                        background: userCategoryFilter === "internal" ? "var(--surface, #fff)" : "transparent",
+                        color: userCategoryFilter === "internal" ? "var(--foreground)" : "var(--muted)",
+                        fontWeight: userCategoryFilter === "internal" ? 600 : 400,
+                        cursor: "pointer",
+                        boxShadow: userCategoryFilter === "internal" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
+                      }}
+                    >
+                      System Users ({internalCount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setUserCategoryFilter("external")}
+                      style={{
+                        padding: "0.25rem 0.65rem",
+                        fontSize: "0.82rem",
+                        borderRadius: "6px",
+                        border: "none",
+                        background: userCategoryFilter === "external" ? "var(--surface, #fff)" : "transparent",
+                        color: userCategoryFilter === "external" ? "var(--foreground)" : "var(--muted)",
+                        fontWeight: userCategoryFilter === "external" ? 600 : 400,
+                        cursor: "pointer",
+                        boxShadow: userCategoryFilter === "external" ? "0 1px 2px rgba(0,0,0,0.05)" : "none",
+                      }}
+                    >
+                      External Users (LMS) ({externalCount})
+                    </button>
+                  </div>
+
+                  <div style={{ position: "relative", minWidth: "220px", maxWidth: "320px" }}>
+                    <input
+                      type="text"
+                      value={userSearchQuery}
+                      onChange={(e) => setUserSearchQuery(e.target.value)}
+                      placeholder="Search users..."
+                      style={{
+                        width: "100%",
+                        padding: "0.35rem 0.65rem",
+                        fontSize: "0.82rem",
+                        borderRadius: "6px",
+                        border: "1px solid var(--border, #cbd5e1)",
+                        background: "var(--surface, #ffffff)",
+                        outline: "none",
+                        color: "var(--foreground)",
+                      }}
+                    />
+                    {userSearchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setUserSearchQuery("")}
+                        style={{
+                          position: "absolute",
+                          right: "0.4rem",
+                          top: "50%",
+                          transform: "translateY(-50%)",
+                          background: "none",
+                          border: "none",
+                          color: "var(--muted, #94a3b8)",
+                          fontSize: "0.85rem",
+                          cursor: "pointer",
+                          padding: "0 0.2rem",
+                        }}
+                        title="Clear search"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {selectedUserIds.length > 0 && (
@@ -1140,7 +1366,7 @@ export default function AccessDashboardPage() {
                               whiteSpace: "nowrap",
                             }}
                           >
-                            External (Odoo)
+                            External (LMS)
                           </span>
                         ) : (
                           <span
@@ -1398,7 +1624,7 @@ export default function AccessDashboardPage() {
                               type="button"
                               className="btn"
                               style={{ fontSize: "0.78rem", padding: "0.25rem 0.5rem" }}
-                              onClick={() => setActiveTab("password-resets")}
+                              onClick={() => handleTabChange("password-resets")}
                               title="Manage password reset"
                             >
                               Reset
@@ -1410,9 +1636,9 @@ export default function AccessDashboardPage() {
                                 color: "var(--muted)",
                                 padding: "0.2rem 0.3rem",
                               }}
-                              title="Password authenticated via Odoo"
+                              title="Password authenticated via LMS"
                             >
-                              Odoo Auth
+                              LMS Auth
                             </span>
                           )}
                           {u.id !== me?.id && (
@@ -1708,6 +1934,14 @@ export default function AccessDashboardPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function AccessDashboardPage() {
+  return (
+    <Suspense fallback={<WidgetSpinnerLoader size="large" text="Loading access dashboard..." minHeight={350} />}>
+      <AccessDashboardContent />
+    </Suspense>
   );
 }
 

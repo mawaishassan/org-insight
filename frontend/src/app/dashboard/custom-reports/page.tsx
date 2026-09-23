@@ -18,6 +18,10 @@ interface CustomReportRow {
   description: string | null;
   fetch_data_with_date?: boolean;
   date_fetching_config?: any;
+  can_change_period?: boolean;
+  can_export?: boolean;
+  can_download_word?: boolean;
+  can_print?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -484,13 +488,8 @@ export default function CustomReportsPage() {
             type="button"
             className="btn btn-outline"
             onClick={() => openDownloadModal(t)}
-            style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem", display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
+            style={{ fontSize: "0.85rem", padding: "0.4rem 0.8rem" }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
             Download
           </button>
           <Link
@@ -964,12 +963,12 @@ export default function CustomReportsPage() {
             onClick={(e) => e.stopPropagation()}
           >
             {downloadLoading ? (
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "2.5rem 0", textAlign: "center" }}>
-                <div style={{ position: "relative", width: "64px", height: "64px", marginBottom: "1.25rem" }}>
-                  <div style={{ position: "absolute", width: "100%", height: "100%", border: "4px solid var(--border)", borderRadius: "50%" }}></div>
-                  <div style={{ position: "absolute", width: "100%", height: "100%", border: "4px solid transparent", borderTopColor: "var(--primary)", borderRadius: "50%", animation: "spin 1s linear infinite" }}></div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "3rem 1.5rem", textAlign: "center" }}>
+                <div style={{ position: "relative", width: "64px", height: "64px", marginBottom: "1.5rem" }}>
+                  <div style={{ position: "absolute", inset: 0, border: "4px solid #e2e8f0", borderRadius: "50%" }}></div>
+                  <div style={{ position: "absolute", inset: 0, border: "4px solid transparent", borderTopColor: "#2563eb", borderRadius: "50%", animation: "spin 1s linear infinite" }}></div>
                 </div>
-                <h4 style={{ margin: 0, fontSize: "1.3rem", fontWeight: 700, color: "var(--text)" }}>
+                <h4 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 700, color: "#0f172a", letterSpacing: "-0.01em" }}>
                   Downloading {selectedFormat.toUpperCase()} Report
                 </h4>
                 <style>{`
@@ -1008,8 +1007,8 @@ export default function CustomReportsPage() {
                   </button>
                 </div>
 
-                {/* Conditional Period Options: Only if fetch_data_with_date is TRUE */}
-                {activeDownloadReport.fetch_data_with_date ? (
+                {/* Conditional Period Options: Only if fetch_data_with_date is TRUE and user has period shifting permission */}
+                {activeDownloadReport.fetch_data_with_date && (userRole === "SUPER_ADMIN" || userRole === "ORG_ADMIN" || Boolean(activeDownloadReport.can_change_period)) ? (
                   <div style={{ background: "#f8fafc", padding: "1rem", borderRadius: "10px", border: "1px solid #e2e8f0", marginBottom: "1.25rem" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.75rem", fontSize: "0.85rem", fontWeight: 600, color: "#1e3a8a" }}>
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1146,11 +1145,6 @@ export default function CustomReportsPage() {
                     }
                     onClick={handleExecuteDownload}
                   >
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                      <polyline points="7 10 12 15 17 10" />
-                      <line x1="12" y1="15" x2="12" y2="3" />
-                    </svg>
                     Download {selectedFormat === "xlsx" ? "Excel" : selectedFormat === "docx" ? "Word" : "PDF"}
                   </button>
                 </div>

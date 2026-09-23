@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
@@ -11,8 +11,8 @@ import { generatePeriodOptions } from "@/lib/periodHelpers";
 import { DASHBOARD_GRID_COLUMNS, widgetGridColumnStyle } from "./layoutGrid";
 import { DashboardCustomizationProvider, useDashboardCustomization } from "./DashboardCustomizationContext";
 import { WidgetFullScreenNavigationProvider } from "./WidgetFullScreenContext";
-
-import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
+import { logDashboardView } from "@/lib/activityLogger";
+import { AccessDenied } from "@/components/AccessDenied";
 
 interface DashboardDetail {
   id: number;
@@ -40,6 +40,7 @@ function WidgetWithPeriodSelector({
   onCardClick,
   isActiveCard,
   onDrillDownRequest,
+  canViewDrilldown = true,
 }: {
   widget: Widget;
   organizationId: number;
@@ -47,28 +48,30 @@ function WidgetWithPeriodSelector({
   onCardClick?: (widget: Widget) => void;
   isActiveCard?: boolean;
   onDrillDownRequest?: (payload: DrillDownRequestPayload) => void;
+  canViewDrilldown?: boolean;
 }) {
   return (
     <div
       id={`widget-${widget.id}`}
-      className="card"
       style={{
         display: "flex",
         flexDirection: "column",
         height: "100%",
-        padding: "0.5rem",
-        border: isActiveCard ? "2px solid var(--accent, #3b82f6)" : undefined,
+        width: "100%",
+        borderRadius: 10,
+        outline: isActiveCard ? "2px solid var(--accent, #3b82f6)" : undefined,
+        outlineOffset: isActiveCard ? 2 : undefined,
         boxShadow: isActiveCard ? "0 0 0 3px rgba(59, 130, 246, 0.25)" : undefined,
-        transition: "border 0.25s ease, box-shadow 0.25s ease",
+        transition: "outline-color 0.25s ease, box-shadow 0.25s ease",
       }}
     >
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", width: "100%", height: "100%" }}>
         <WidgetRenderer
           widget={widget}
           organizationId={organizationId}
           dashboardId={dashboardId}
           onSingleValueCardClick={onCardClick}
-          onDrillDownRequest={onDrillDownRequest}
+          onDrillDownRequest={canViewDrilldown !== false ? onDrillDownRequest : undefined}
         />
       </div>
     </div>
@@ -85,6 +88,7 @@ function Card({ title, children }: { title?: string; children: React.ReactNode }
 }
 
 export default function DashboardViewPage() {
+  const router = useRouter();
   const params = useParams();
   const searchParams = useSearchParams();
   const id = Number(params?.id);
@@ -95,6 +99,19 @@ export default function DashboardViewPage() {
   const [dashboard, setDashboard] = useState<DashboardDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Check user role: if SUPER_ADMIN, redirect to Design mode
+  useEffect(() => {
+    if (!token || !id) return;
+    api<{ role: string }>("/auth/me", { token })
+      .then((me) => {
+        if (me?.role === "SUPER_ADMIN") {
+          const q = organizationId ? `?organization_id=${organizationId}` : "";
+          router.replace(`/dashboard/dashboards/${id}/design${q}`);
+        }
+      })
+      .catch(() => {});
+  }, [token, id, organizationId, router]);
 
   // Odoo sync states
   const [syncInfo, setSyncInfo] = useState<{ has_odoo_graphs: boolean } | null>(null);
@@ -111,12 +128,16 @@ export default function DashboardViewPage() {
     can_load_lms: boolean;
     can_change_period: boolean;
     can_use_unique_value: boolean;
+    can_download_widget_pdf?: boolean;
+    can_view_drilldown?: boolean;
   }>({
     can_view: true,
     can_edit: true,
     can_load_lms: true,
     can_change_period: true,
     can_use_unique_value: true,
+    can_download_widget_pdf: true,
+    can_view_drilldown: true,
   });
 
   // Fetch all page-load data in parallel: permissions + dashboard + odoo-sync start at the same time.
@@ -135,6 +156,8 @@ export default function DashboardViewPage() {
         can_load_lms: boolean;
         can_change_period: boolean;
         can_use_unique_value: boolean;
+        can_download_widget_pdf?: boolean;
+        can_view_drilldown?: boolean;
       }>(`/dashboards/${id}/my-permissions${query}`, { token }).catch(() => null),
 
       // 2. Dashboard detail
@@ -144,8 +167,25 @@ export default function DashboardViewPage() {
       api<{ has_odoo_graphs: boolean }>(`/dashboards/${id}/odoo-sync-info${query}`, { token }).catch(() => null),
     ])
       .then(async ([perms, d, syncInfoData]) => {
-        if (perms) setUserPermissions(perms);
+        if (perms) {
+          setUserPermissions(perms);
+          if (perms.can_view === false) {
+            setError("Access denied. You do not have permission to view this dashboard.");
+            return;
+          }
+        }
+        if (!d) {
+          setError("Dashboard not found or inaccessible in this organization.");
+          return;
+        }
+        if (organizationId && d.organization_id !== organizationId) {
+          setError("Access denied. This dashboard does not belong to the selected organization.");
+          return;
+        }
         setDashboard(d);
+        if (d?.id && d?.name) {
+          logDashboardView(d.id, d.name);
+        }
         if (syncInfoData !== null) setSyncInfo(syncInfoData);
 
         const dConfig = d?.date_fetching_config || {};
@@ -384,7 +424,6 @@ export default function DashboardViewPage() {
           inset: 0,
           zIndex: 9999,
           display: "flex",
-          flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
           background: "rgba(248, 250, 252, 0.75)",
@@ -394,8 +433,7 @@ export default function DashboardViewPage() {
       >
         <div
           style={{
-            width: "320px",
-            height: "155px",
+            padding: "1.5rem 2.5rem",
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
@@ -428,8 +466,27 @@ export default function DashboardViewPage() {
       </div>
     );
   }
-  if (error) return <p className="form-error">{error}</p>;
-  if (!dashboard) return null;
+
+  if (error || (userPermissions && !userPermissions.can_view)) {
+    return (
+      <AccessDenied
+        title="Access Denied"
+        message={error || "You do not have permission to view this dashboard, or it belongs to another organization."}
+        returnUrl={organizationId ? `/dashboard?organization_id=${organizationId}` : "/dashboard"}
+        returnLabel="Return to Dashboards"
+      />
+    );
+  }
+  if (!dashboard) {
+    return (
+      <AccessDenied
+        title="Dashboard Not Found"
+        message="This dashboard does not exist or is not available in your organization."
+        returnUrl={organizationId ? `/dashboard?organization_id=${organizationId}` : "/dashboard"}
+        returnLabel="Return to Dashboards"
+      />
+    );
+  }
 
   return (
     <DashboardCustomizationProvider
@@ -444,13 +501,12 @@ export default function DashboardViewPage() {
       fetchDataWithColumn={!!dashboard.fetch_data_with_column}
       columnFetchingConfig={dashboard.column_fetching_config}
     >
-      <WidgetFullScreenNavigationProvider widgets={widgets}>
-        <DashboardViewContent
-          dashboard={dashboard}
-          userPermissions={userPermissions}
-          syncInfo={syncInfo}
-          syncing={syncing}
-          handleSync={handleSync}
+      <DashboardViewContent
+        dashboard={dashboard}
+        userPermissions={userPermissions}
+        syncInfo={syncInfo}
+        syncing={syncing}
+        handleSync={handleSync}
           widgets={widgets}
           refreshCount={refreshCount}
           org={org}
@@ -461,8 +517,7 @@ export default function DashboardViewPage() {
           customPeriods={customPeriods}
           periodOptions={periodOptions}
         />
-      </WidgetFullScreenNavigationProvider>
-    </DashboardCustomizationProvider>
+      </DashboardCustomizationProvider>
   );
 }
 
@@ -489,6 +544,8 @@ function DashboardViewContent({
     can_load_lms: boolean;
     can_change_period: boolean;
     can_use_unique_value: boolean;
+    can_download_widget_pdf?: boolean;
+    can_view_drilldown?: boolean;
   };
   syncInfo: { has_odoo_graphs: boolean } | null;
   syncing: boolean;
@@ -504,8 +561,6 @@ function DashboardViewContent({
   periodOptions: any[];
 }) {
   const {
-    isOrgAdmin,
-    openGlobalModal,
     isAnyWidgetLoading,
     isGlobalFilterLoading,
     isInitialLoad,
@@ -544,11 +599,57 @@ function DashboardViewContent({
   // Linked widgets navigation state
   const [activeLinkedCardId, setActiveLinkedCardId] = useState<string | null>(null);
   const [activeDrillDown, setActiveDrillDown] = useState<DrillDownRequestPayload | null>(null);
+  const [remoteDashboards, setRemoteDashboards] = useState<Record<number, DashboardDetail>>({});
+  const [loadingRemoteDashboards, setLoadingRemoteDashboards] = useState<boolean>(false);
 
   const activeLinkedCard = useMemo(() => {
     if (!activeLinkedCardId) return null;
     return widgets.find((w) => w.id === activeLinkedCardId) || null;
   }, [activeLinkedCardId, widgets]);
+
+  useEffect(() => {
+    if (!activeLinkedCard || !token) return;
+    const card = activeLinkedCard as any;
+    if (!card.enable_linked_widgets) return;
+    const ids: string[] = Array.isArray(card.linked_widget_ids) ? card.linked_widget_ids : [];
+    const foreignDashIds = Array.from(
+      new Set(
+        ids
+          .filter((idStr) => idStr.includes("::"))
+          .map((idStr) => Number(idStr.split("::")[0]))
+          .filter((dashId) => !isNaN(dashId) && dashId !== dashboard.id && !remoteDashboards[dashId])
+      )
+    );
+
+    if (foreignDashIds.length === 0) return;
+
+    setLoadingRemoteDashboards(true);
+    const orgQuery = dashboard.organization_id ? `?organization_id=${dashboard.organization_id}` : "";
+    Promise.all(
+      foreignDashIds.map((dashId) =>
+        api<DashboardDetail>(`/dashboards/${dashId}${orgQuery}`, { token })
+          .then((res) => ({ dashId, res }))
+          .catch((err) => {
+            console.error(`Failed to load linked dashboard ${dashId}:`, err);
+            return null;
+          })
+      )
+    )
+      .then((results) => {
+        const newDashboards: Record<number, DashboardDetail> = {};
+        results.forEach((r) => {
+          if (r && r.res) {
+            newDashboards[r.dashId] = r.res;
+          }
+        });
+        if (Object.keys(newDashboards).length > 0) {
+          setRemoteDashboards((prev) => ({ ...prev, ...newDashboards }));
+        }
+      })
+      .finally(() => {
+        setLoadingRemoteDashboards(false);
+      });
+  }, [activeLinkedCard, token, dashboard.id, dashboard.organization_id, remoteDashboards]);
 
   const linkedWidgets = useMemo<Widget[]>(() => {
     if (!activeLinkedCard) return [];
@@ -556,26 +657,69 @@ function DashboardViewContent({
     if (!card.enable_linked_widgets) return [];
     const ids: string[] = Array.isArray(card.linked_widget_ids) ? card.linked_widget_ids : [];
     return ids
-      .map((id: string) => widgets.find((w: Widget) => w.id === id))
+      .map((idStr: string) => {
+        if (idStr.includes("::")) {
+          const [dashIdStr, wId] = idStr.split("::");
+          const foreignDashId = Number(dashIdStr);
+          const foreignDash = remoteDashboards[foreignDashId];
+          if (!foreignDash) return undefined;
+          const foreignWidgets = asWidgets(foreignDash.layout);
+          const found = foreignWidgets.find((w) => w.id === wId);
+          if (found) {
+            return {
+              ...found,
+              dashboard_id: foreignDashId,
+              dashboard_name: foreignDash.name || `Dashboard #${foreignDashId}`,
+            } as unknown as Widget;
+          }
+          return undefined;
+        } else {
+          const found = widgets.find((w: Widget) => w.id === idStr);
+          if (found) {
+            return {
+              ...found,
+              dashboard_id: dashboard.id,
+              dashboard_name: dashboard.name,
+            } as unknown as Widget;
+          }
+          return undefined;
+        }
+      })
       .filter((w: Widget | undefined): w is Widget => Boolean(w));
-  }, [activeLinkedCard, widgets]);
+  }, [activeLinkedCard, widgets, remoteDashboards, dashboard.id, dashboard.name]);
 
   const singleValueCards = useMemo(() => {
     return widgets.filter((w: Widget) => w.type === "kpi_card_single_value" || w.type === "kpi_single_value");
   }, [widgets]);
 
-  // Smooth scroll to the dedicated linked widgets section when a card is clicked
+  // Smooth scroll to the dedicated linked widgets section when a card is clicked or re-clicked
+  const [linkedTriggerCount, setLinkedTriggerCount] = useState<number>(0);
+
+  const handleCardClick = (card: Widget) => {
+    setActiveLinkedCardId(card.id);
+    setLinkedTriggerCount((c) => c + 1);
+  };
+
   useEffect(() => {
     if (activeLinkedCardId) {
       const timer = setTimeout(() => {
         const el = document.getElementById("linked-widgets-section");
         if (el) {
           el.scrollIntoView({ behavior: "smooth", block: "start" });
+          // Highlight/pulse effect to give clear visual feedback on every trigger
+          el.style.transition = "none";
+          el.style.transform = "scale(1.006)";
+          el.style.boxShadow = "0 0 0 4px rgba(59, 130, 246, 0.3), 0 10px 25px -5px rgba(59, 130, 246, 0.15)";
+          setTimeout(() => {
+            el.style.transition = "all 0.35s ease";
+            el.style.transform = "none";
+            el.style.boxShadow = "0 10px 25px -5px rgba(59, 130, 246, 0.08), 0 8px 10px -6px rgba(59, 130, 246, 0.04)";
+          }, 200);
         }
       }, 50);
       return () => clearTimeout(timer);
     }
-  }, [activeLinkedCardId]);
+  }, [activeLinkedCardId, linkedTriggerCount]);
 
   const handleBackToDashboard = () => {
     const prevId = activeLinkedCardId;
@@ -592,9 +736,17 @@ function DashboardViewContent({
 
 
 
+  const activeWidgets = useMemo(() => {
+    if (activeLinkedCardId && activeLinkedCard) {
+      return linkedWidgets;
+    }
+    return widgets;
+  }, [activeLinkedCardId, activeLinkedCard, linkedWidgets, widgets]);
+
   return (
-    <div style={{ display: "grid", gap: "1rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem", flexWrap: "wrap", gap: "0.75rem" }}>
+    <WidgetFullScreenNavigationProvider widgets={activeWidgets}>
+      <div style={{ display: "grid", gap: "1rem" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem", flexWrap: "wrap", gap: "0.75rem" }}>
         <div>
           <h2 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 600 }}>{dashboard.name}</h2>
           {dashboard.description && (
@@ -713,27 +865,6 @@ function DashboardViewContent({
               </div>
             </div>
           )}
-
-          {isOrgAdmin && (
-            <button
-              type="button"
-              className="btn"
-              onClick={openGlobalModal}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.5rem",
-                padding: "0.5rem 1rem",
-                fontSize: "0.875rem",
-                height: 38,
-              }}
-            >
-              <svg style={{ width: 16, height: 16 }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-              </svg>
-              Customize Labels
-            </button>
-          )}
         </div>
       </div>
 
@@ -790,9 +921,8 @@ function DashboardViewContent({
           style={{
             position: "fixed",
             inset: 0,
-            zIndex: 9998,
+            zIndex: 9999,
             display: "flex",
-            flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
             background: "rgba(248, 250, 252, 0.75)",
@@ -802,8 +932,7 @@ function DashboardViewContent({
         >
           <div
             style={{
-              width: "320px",
-              height: "155px",
+              padding: "1.5rem 2.5rem",
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
@@ -854,7 +983,6 @@ function DashboardViewContent({
                 pointerEvents: "auto",
               }}
             />
-            {/* Centered spinner badge pinned to the viewport center — exact same 320x155px size */}
             <div
               style={{
                 position: "fixed",
@@ -862,13 +990,12 @@ function DashboardViewContent({
                 left: "50%",
                 transform: "translate(-50%, -50%)",
                 zIndex: 100,
-                width: "320px",
-                height: "155px",
                 display: "flex",
                 flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
                 background: "var(--surface, #ffffff)",
+                padding: "1.25rem 2rem",
                 borderRadius: "1rem",
                 boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
                 border: "1px solid var(--border, #e2e8f0)",
@@ -957,9 +1084,10 @@ function DashboardViewContent({
                       widget={w}
                       organizationId={dashboard.organization_id}
                       dashboardId={dashboard.id}
-                      onCardClick={(card) => setActiveLinkedCardId(card.id)}
+                      onCardClick={handleCardClick}
                       isActiveCard={w.id === activeLinkedCardId}
                       onDrillDownRequest={setActiveDrillDown}
+                      canViewDrilldown={userPermissions.can_view_drilldown !== false}
                     />
                   </div>
                 ))}
@@ -987,15 +1115,10 @@ function DashboardViewContent({
                   alignItems: "center",
                   flexWrap: "wrap",
                   gap: "0.75rem",
-                  borderBottom: "1px solid var(--border)",
-                  paddingBottom: "0.9rem",
+                  paddingBottom: "0.25rem",
                 }}
               >
                 <div>
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", fontSize: "0.78rem", fontWeight: 700, color: "var(--accent, #3b82f6)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.25rem" }}>
-                    <span>●</span>
-                    <span>Linked Graphs View</span>
-                  </div>
                   <h3 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 700, color: "var(--text)" }}>
                     {(activeLinkedCard.title || "Single Value Card")} – Detailed Analysis
                   </h3>
@@ -1029,21 +1152,32 @@ function DashboardViewContent({
                     border: "1.5px dashed var(--border)",
                   }}
                 >
-                  <div style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>🔍</div>
-                  <p style={{ margin: 0, fontSize: "1rem", color: "var(--text)", fontWeight: 600 }}>
-                    No detailed widgets are available for this dashboard card.
-                  </p>
-                  <p style={{ margin: "0.35rem 0 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
-                    None of the linked widgets are accessible under your current permissions or no widgets were linked.
-                  </p>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={handleBackToDashboard}
-                    style={{ marginTop: "1.25rem", padding: "0.4rem 0.9rem", fontSize: "0.85rem" }}
-                  >
-                    Return to Dashboard
-                  </button>
+                  {loadingRemoteDashboards ? (
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.75rem" }}>
+                      <div className="spinner" style={{ width: 26, height: 26 }} />
+                      <p style={{ margin: 0, fontSize: "0.95rem", color: "var(--text)", fontWeight: 500 }}>
+                        Loading linked widgets from dashboards...
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>🔍</div>
+                      <p style={{ margin: 0, fontSize: "1rem", color: "var(--text)", fontWeight: 600 }}>
+                        No detailed widgets are available for this dashboard card.
+                      </p>
+                      <p style={{ margin: "0.35rem 0 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                        None of the linked widgets are accessible under your current permissions or no widgets were linked.
+                      </p>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={handleBackToDashboard}
+                        style={{ marginTop: "1.25rem", padding: "0.4rem 0.9rem", fontSize: "0.85rem" }}
+                      >
+                        Return to Dashboard
+                      </button>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div
@@ -1053,16 +1187,33 @@ function DashboardViewContent({
                     gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
                   }}
                 >
-                  {linkedWidgets.map((w: Widget) => (
-                    <div key={`linked-${w.id}-${refreshCount}`} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
-                      <WidgetWithPeriodSelector
-                        widget={w}
-                        organizationId={dashboard.organization_id}
-                        dashboardId={dashboard.id}
-                        onDrillDownRequest={setActiveDrillDown}
-                      />
-                    </div>
-                  ))}
+                  {linkedWidgets.map((w: Widget, idx: number) => {
+                    const foreignWidget = w as any;
+                    const isForeign = foreignWidget.dashboard_id && foreignWidget.dashboard_id !== dashboard.id;
+                    return (
+                      <div
+                        key={`linked-${w.id}-${refreshCount}-${linkedTriggerCount}`}
+                        className="widget-entrance-item"
+                        style={{
+                          ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
+                          display: "flex",
+                          flexDirection: "column",
+                          animationDelay: `${Math.min(idx * 0.04, 0.4)}s`,
+                        }}
+                      >
+
+                        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", width: "100%" }}>
+                          <WidgetWithPeriodSelector
+                            widget={w}
+                            organizationId={dashboard.organization_id}
+                            dashboardId={foreignWidget.dashboard_id || dashboard.id}
+                            onDrillDownRequest={setActiveDrillDown}
+                            canViewDrilldown={userPermissions.can_view_drilldown !== false}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1076,15 +1227,27 @@ function DashboardViewContent({
               gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
             }}
           >
-            {widgets.map((w) => (
-              <div key={`${w.id}-${refreshCount}`} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
-                <WidgetWithPeriodSelector
-                  widget={w}
-                  organizationId={dashboard.organization_id}
-                  dashboardId={dashboard.id}
-                  onCardClick={(card) => setActiveLinkedCardId(card.id)}
-                  onDrillDownRequest={setActiveDrillDown}
-                />
+            {widgets.map((w, idx) => (
+              <div
+                key={`${w.id}-${refreshCount}`}
+                className="widget-entrance-item"
+                style={{
+                  ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
+                  display: "flex",
+                  flexDirection: "column",
+                  animationDelay: `${Math.min(idx * 0.04, 0.4)}s`,
+                }}
+              >
+                <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", width: "100%" }}>
+                  <WidgetWithPeriodSelector
+                    widget={w}
+                    organizationId={dashboard.organization_id}
+                    dashboardId={dashboard.id}
+                    onCardClick={handleCardClick}
+                    onDrillDownRequest={setActiveDrillDown}
+                    canViewDrilldown={userPermissions.can_view_drilldown !== false}
+                  />
+                </div>
               </div>
             ))}
           </div>
@@ -1100,15 +1263,20 @@ function DashboardViewContent({
           onClose={() => setActiveDrillDown(null)}
           widget={activeDrillDown.widget}
           organizationId={dashboard.organization_id}
-          dashboardId={dashboard.id}
+          dashboardId={(activeDrillDown.widget as any)?.dashboard_id || dashboard.id}
           dimensionFilter={activeDrillDown.dimensionFilter}
           label={activeDrillDown.label}
           periodOverride={selectedPeriod}
           periodType={selectedPeriodType}
-          normalFilters={selectedDashboardFilterValues}
+          normalFilters={{
+            ...selectedDashboardFilterValues,
+            ...(activeDrillDown.normalFilters || activeDrillDown.widgetFilters || {}),
+          }}
           selectedColumnValue={selectedColumnValue}
+          canDownloadWidgetPdf={userPermissions.can_download_widget_pdf !== false}
         />
       )}
-    </div>
+      </div>
+    </WidgetFullScreenNavigationProvider>
   );
 }
