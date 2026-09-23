@@ -162,25 +162,27 @@ async def record_user_login(
     db.add(session_record)
 
     # 3. Create Login activity
-    activity = UserActivity(
-        organization_id=user.organization_id,
-        user_id=user.id,
-        session_id=session_id,
-        unique_user_key=user.unique_user_key or user.username,
-        user_name=user.full_name or user.username,
-        user_email=user.email,
-        module="AUTH",
-        resource_type="session",
-        resource_id=session_id,
-        resource_name="User Session",
-        action_type="LOGIN",
-        action_details=f"Successful login for user '{user.username}'",
-        status="SUCCESS",
-        ip_address=ip_address,
-        user_agent=user_agent,
-        created_at=now,
-    )
-    db.add(activity)
+    # Skip activity for users without org (e.g. super admin)
+    if user.organization_id is not None:
+        activity = UserActivity(
+            organization_id=user.organization_id,
+            user_id=user.id,
+            session_id=session_id,
+            unique_user_key=user.unique_user_key or user.username,
+            user_name=user.full_name or user.username,
+            user_email=user.email,
+            module="AUTH",
+            resource_type="session",
+            resource_id=session_id,
+            resource_name="User Session",
+            action_type="LOGIN",
+            action_details=f"Successful login for user '{user.username}'",
+            status="SUCCESS",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            created_at=now,
+        )
+        db.add(activity)
     await db.commit()
 
     return session_id
@@ -201,23 +203,24 @@ async def record_user_logout(
         )
         await db.execute(stmt)
 
-    activity = UserActivity(
-        organization_id=user.organization_id,
-        user_id=user.id,
-        session_id=session_id,
-        unique_user_key=user.unique_user_key or user.username,
-        user_name=user.full_name or user.username,
-        user_email=user.email,
-        module="AUTH",
-        resource_type="session",
-        resource_id=session_id,
-        resource_name="User Session",
-        action_type="LOGOUT",
-        action_details=f"User '{user.username}' logged out",
-        status="SUCCESS",
-        created_at=now,
-    )
-    db.add(activity)
+    if user.organization_id is not None:
+        activity = UserActivity(
+            organization_id=user.organization_id,
+            user_id=user.id,
+            session_id=session_id,
+            unique_user_key=user.unique_user_key or user.username,
+            user_name=user.full_name or user.username,
+            user_email=user.email,
+            module="AUTH",
+            resource_type="session",
+            resource_id=session_id,
+            resource_name="User Session",
+            action_type="LOGOUT",
+            action_details=f"User '{user.username}' logged out",
+            status="SUCCESS",
+            created_at=now,
+        )
+        db.add(activity)
     await db.commit()
 
 
