@@ -91,6 +91,56 @@ const PALETTE_SCHEMES = [
     label: "Okabe–Ito (colorblind-safe)",
     colors: ["#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7"],
   },
+  {
+    id: "ocean_breeze",
+    label: "Ocean Breeze (cool blues)",
+    colors: ["#264653", "#2A9D8F", "#4A90D9", "#118AB2", "#06D6A0", "#1B9AAA", "#57B8FF", "#0077B6", "#2EC4B6", "#17A398"],
+  },
+  {
+    id: "sunset_warm",
+    label: "Sunset (warm tones)",
+    colors: ["#E63946", "#FF6B6B", "#FF8E53", "#F77F00", "#FFD166", "#FF9F1C", "#FFBF69", "#F4A261", "#E76F51", "#FF4D6D"],
+  },
+  {
+    id: "forest_earth",
+    label: "Forest & Earth (naturals)",
+    colors: ["#2D6A4F", "#40916C", "#52B788", "#606C38", "#DDA15E", "#BC6C25", "#774936", "#A7C957", "#95D5B2", "#344E41"],
+  },
+  {
+    id: "royal_purple",
+    label: "Royal Purple (elegant)",
+    colors: ["#7400B8", "#7B2FBE", "#9D4EDD", "#C77DFF", "#F72585", "#B5179E", "#7209B7", "#480CA8", "#E0AAFF", "#3F37C9"],
+  },
+  {
+    id: "corporate_blue",
+    label: "Corporate Blue (professional)",
+    colors: ["#03045E", "#0353A4", "#0077B6", "#0096C7", "#48CAE4", "#1B4965", "#4895EF", "#4361EE", "#2166AC", "#560BAD"],
+  },
+  {
+    id: "berry_mix",
+    label: "Berry Mix (vibrant)",
+    colors: ["#E63946", "#9B2335", "#F4A261", "#2A9D8F", "#264653", "#8338EC", "#3A86FF", "#06D6A0", "#C9184A", "#F77F00"],
+  },
+  {
+    id: "monochrome_gray",
+    label: "Monochrome (grayscale)",
+    colors: ["#1E293B", "#334155", "#475569", "#64748B", "#94A3B8", "#CBD5E1", "#374151", "#6B7280", "#9CA3AF", "#D1D5DB"],
+  },
+  {
+    id: "neon_pop",
+    label: "Neon Pop (bold & bright)",
+    colors: ["#FF006E", "#FB5607", "#FFBE0B", "#3A86FF", "#8338EC", "#06D6A0", "#EF476F", "#00F5D4", "#FF9F1C", "#F72585"],
+  },
+  {
+    id: "autumn_harvest",
+    label: "Autumn Harvest (seasonal)",
+    colors: ["#9C2929", "#C44D2A", "#E07C40", "#E8955A", "#F0AE74", "#B5541B", "#8B3A0A", "#FFBA08", "#D62828", "#F4D35E"],
+  },
+  {
+    id: "teal_coral",
+    label: "Teal & Coral (modern contrast)",
+    colors: ["#EF476F", "#F78C6B", "#FFD166", "#06D6A0", "#118AB2", "#2EC4B6", "#FF9F1C", "#E83F6F", "#26C6DA", "#32936F"],
+  },
 ] as const;
 
 type PaletteSchemeId = (typeof PALETTE_SCHEMES)[number]["id"];

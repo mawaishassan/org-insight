@@ -5124,12 +5124,12 @@ async def resolve_dashboard_widget_drill_down(
                     resolved_dim_filter["label"] = custom_lbl
                 header_meta["display_slice_label"] = custom_lbl
 
-                filter_params["drill_dim_val"] = dim_str
-                filter_params["drill_raw_val"] = raw_val
+                filter_params["drill_dim_val"] = dim_str.lower()
+                filter_params["drill_raw_val"] = raw_val.lower()
                 stmt = stmt.where(
                     or_(
-                        text("TRIM(BOTH FROM COALESCE(dim_cell.value_text, CAST(dim_cell.value_number AS text), '')) = TRIM(BOTH FROM CAST(:drill_dim_val AS text))"),
-                        text("TRIM(BOTH FROM COALESCE(dim_cell.value_text, CAST(dim_cell.value_number AS text), '')) = TRIM(BOTH FROM CAST(:drill_raw_val AS text))"),
+                        text("LOWER(TRIM(BOTH FROM COALESCE(dim_cell.value_text, CAST(dim_cell.value_number AS text), ''))) = LOWER(TRIM(BOTH FROM CAST(:drill_dim_val AS text)))"),
+                        text("LOWER(TRIM(BOTH FROM COALESCE(dim_cell.value_text, CAST(dim_cell.value_number AS text), ''))) = LOWER(TRIM(BOTH FROM CAST(:drill_raw_val AS text)))"),
                     )
                 )
 

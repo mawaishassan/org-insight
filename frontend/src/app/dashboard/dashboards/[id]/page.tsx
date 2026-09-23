@@ -706,17 +706,14 @@ function DashboardViewContent({
         const el = document.getElementById("linked-widgets-section");
         if (el) {
           el.scrollIntoView({ behavior: "smooth", block: "start" });
-          // Highlight/pulse effect to give clear visual feedback on every trigger
-          el.style.transition = "none";
-          el.style.transform = "scale(1.006)";
-          el.style.boxShadow = "0 0 0 4px rgba(59, 130, 246, 0.3), 0 10px 25px -5px rgba(59, 130, 246, 0.15)";
+          // Smooth accent highlight on the section without scaling the container (avoids chart reflow)
+          el.style.transition = "box-shadow 0.35s ease";
+          el.style.boxShadow = "0 0 0 3px rgba(59, 130, 246, 0.35), 0 10px 25px -5px rgba(59, 130, 246, 0.15)";
           setTimeout(() => {
-            el.style.transition = "all 0.35s ease";
-            el.style.transform = "none";
             el.style.boxShadow = "0 10px 25px -5px rgba(59, 130, 246, 0.08), 0 8px 10px -6px rgba(59, 130, 246, 0.04)";
-          }, 200);
+          }, 350);
         }
-      }, 50);
+      }, 60);
       return () => clearTimeout(timer);
     }
   }, [activeLinkedCardId, linkedTriggerCount]);
@@ -1066,190 +1063,198 @@ function DashboardViewContent({
           <Card title="No widgets">
             <p style={{ color: "var(--muted)", margin: 0 }}>This dashboard has no widgets yet.</p>
           </Card>
-        ) : activeLinkedCardId && activeLinkedCard ? (
-          /* Focused Linked Widgets View Mode */
-          <div style={{ display: "grid", gap: "1.25rem" }}>
-            {/* Single Value Cards row at top to show context and allow switching */}
-            {singleValueCards.length > 0 && (
-              <div
-                style={{
-                  display: "grid",
-                  gap: "1rem",
-                  gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
-                }}
-              >
-                {singleValueCards.map((w) => (
-                  <div key={`${w.id}-${refreshCount}`} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
+        ) : (
+          /* ── Dashboard Views: Normal Grid or Focused Linked View (both in normal document flow) ── */
+          <div>
+
+            {/* ── VIEW 1: Normal full-dashboard widget grid ── */}
+            <div
+              style={{
+                display: activeLinkedCardId && activeLinkedCard ? "none" : "grid",
+                gap: "1rem",
+                gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+              }}
+            >
+              {widgets.map((w, idx) => (
+                <div
+                  key={`${w.id}-${refreshCount}`}
+                  className="widget-entrance-item"
+                  style={{
+                    ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
+                    display: "flex",
+                    flexDirection: "column",
+                    animationDelay: `${Math.min(idx * 0.04, 0.4)}s`,
+                  }}
+                >
+                  <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", width: "100%" }}>
                     <WidgetWithPeriodSelector
                       widget={w}
                       organizationId={dashboard.organization_id}
                       dashboardId={dashboard.id}
                       onCardClick={handleCardClick}
-                      isActiveCard={w.id === activeLinkedCardId}
                       onDrillDownRequest={setActiveDrillDown}
                       canViewDrilldown={userPermissions.can_view_drilldown !== false}
                     />
                   </div>
-                ))}
-              </div>
-            )}
+                </div>
+            ))}
+            </div>
 
-            {/* Dedicated Linked Widgets Section Container */}
+            {/* ── VIEW 2: Linked widgets focused view — normal document flow so page scrolls naturally ── */}
             <div
-              id="linked-widgets-section"
               style={{
-                marginTop: "0.25rem",
-                padding: "1.25rem",
-                background: "var(--surface)",
-                borderRadius: "14px",
-                border: "1.5px solid var(--accent, #3b82f6)",
-                boxShadow: "0 10px 25px -5px rgba(59, 130, 246, 0.08), 0 8px 10px -6px rgba(59, 130, 246, 0.04)",
-                display: "grid",
-                gap: "1.25rem",
+                display: activeLinkedCardId && activeLinkedCard ? "block" : "none",
               }}
             >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  flexWrap: "wrap",
-                  gap: "0.75rem",
-                  paddingBottom: "0.25rem",
-                }}
-              >
-                <div>
-                  <h3 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 700, color: "var(--text)" }}>
-                    {(activeLinkedCard.title || "Single Value Card")} – Detailed Analysis
-                  </h3>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={handleBackToDashboard}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    padding: "0.5rem 1rem",
-                    fontSize: "0.875rem",
-                    fontWeight: 600,
-                    borderRadius: "8px",
-                    boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
-                  }}
-                >
-                  ← Back to Dashboard
-                </button>
-              </div>
+              <div style={{ display: "grid", gap: "1.25rem" }}>
+                {/* Single Value Cards row at top for context and switching */}
+                {singleValueCards.length > 0 && (
+                  <div
+                    style={{
+                      display: "grid",
+                      gap: "1rem",
+                      gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {singleValueCards.map((w) => (
+                      <div key={`${w.id}-${refreshCount}`} style={widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number })}>
+                        <WidgetWithPeriodSelector
+                          widget={w}
+                          organizationId={dashboard.organization_id}
+                          dashboardId={dashboard.id}
+                          onCardClick={handleCardClick}
+                          isActiveCard={w.id === activeLinkedCardId}
+                          onDrillDownRequest={setActiveDrillDown}
+                          canViewDrilldown={userPermissions.can_view_drilldown !== false}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
 
-              {linkedWidgets.length === 0 ? (
+                {/* Linked widgets container */}
                 <div
+                  id="linked-widgets-section"
                   style={{
-                    padding: "3rem 1.5rem",
-                    textAlign: "center",
-                    background: "rgba(0,0,0,0.02)",
-                    borderRadius: "10px",
-                    border: "1.5px dashed var(--border)",
+                    marginTop: "0.25rem",
+                    padding: "1.25rem",
+                    background: "var(--surface)",
+                    borderRadius: "14px",
+                    border: "1.5px solid var(--accent, #3b82f6)",
+                    boxShadow: "0 10px 25px -5px rgba(59, 130, 246, 0.08), 0 8px 10px -6px rgba(59, 130, 246, 0.04)",
+                    display: "grid",
+                    gap: "1.25rem",
                   }}
                 >
-                  {loadingRemoteDashboards ? (
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.75rem" }}>
-                      <div className="spinner" style={{ width: 26, height: 26 }} />
-                      <p style={{ margin: 0, fontSize: "0.95rem", color: "var(--text)", fontWeight: 500 }}>
-                        Loading linked widgets from dashboards...
-                      </p>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: "0.75rem",
+                      paddingBottom: "0.25rem",
+                    }}
+                  >
+                    <div>
+                      <h3 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 700, color: "var(--text)" }}>
+                        {activeLinkedCard ? (activeLinkedCard.title || "Single Value Card") : ""} – Detailed Analysis
+                      </h3>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={handleBackToDashboard}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.875rem",
+                        fontWeight: 600,
+                        borderRadius: "8px",
+                        boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+                      }}
+                    >
+                      ← Back to Dashboard
+                    </button>
+                  </div>
+
+                  {linkedWidgets.length === 0 ? (
+                    <div
+                      style={{
+                        padding: "3rem 1.5rem",
+                        textAlign: "center",
+                        background: "rgba(0,0,0,0.02)",
+                        borderRadius: "10px",
+                        border: "1.5px dashed var(--border)",
+                      }}
+                    >
+                      {loadingRemoteDashboards ? (
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.75rem" }}>
+                          <div className="spinner" style={{ width: 26, height: 26 }} />
+                          <p style={{ margin: 0, fontSize: "0.95rem", color: "var(--text)", fontWeight: 500 }}>
+                            Loading linked widgets from dashboards...
+                          </p>
+                        </div>
+                      ) : (
+                        <>
+                          <div style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>🔍</div>
+                          <p style={{ margin: 0, fontSize: "1rem", color: "var(--text)", fontWeight: 600 }}>
+                            No detailed widgets are available for this dashboard card.
+                          </p>
+                          <p style={{ margin: "0.35rem 0 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
+                            None of the linked widgets are accessible under your current permissions or no widgets were linked.
+                          </p>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={handleBackToDashboard}
+                            style={{ marginTop: "1.25rem", padding: "0.4rem 0.9rem", fontSize: "0.85rem" }}
+                          >
+                            Return to Dashboard
+                          </button>
+                        </>
+                      )}
                     </div>
                   ) : (
-                    <>
-                      <div style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>🔍</div>
-                      <p style={{ margin: 0, fontSize: "1rem", color: "var(--text)", fontWeight: 600 }}>
-                        No detailed widgets are available for this dashboard card.
-                      </p>
-                      <p style={{ margin: "0.35rem 0 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
-                        None of the linked widgets are accessible under your current permissions or no widgets were linked.
-                      </p>
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={handleBackToDashboard}
-                        style={{ marginTop: "1.25rem", padding: "0.4rem 0.9rem", fontSize: "0.85rem" }}
-                      >
-                        Return to Dashboard
-                      </button>
-                    </>
+                    <div
+                      style={{
+                        display: "grid",
+                        gap: "1rem",
+                        gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
+                      }}
+                    >
+                      {linkedWidgets.map((w: Widget, idx: number) => {
+                        const foreignWidget = w as any;
+                        return (
+                          <div
+                            key={`linked-${w.id}-${refreshCount}`}
+                            className="widget-entrance-item"
+                            style={{
+                              ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
+                              display: "flex",
+                              flexDirection: "column",
+                              animationDelay: `${Math.min(idx * 0.04, 0.4)}s`,
+                            }}
+                          >
+                            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", width: "100%" }}>
+                              <WidgetWithPeriodSelector
+                                widget={w}
+                                organizationId={dashboard.organization_id}
+                                dashboardId={foreignWidget.dashboard_id || dashboard.id}
+                                onDrillDownRequest={setActiveDrillDown}
+                                canViewDrilldown={userPermissions.can_view_drilldown !== false}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
-              ) : (
-                <div
-                  style={{
-                    display: "grid",
-                    gap: "1rem",
-                    gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
-                  }}
-                >
-                  {linkedWidgets.map((w: Widget, idx: number) => {
-                    const foreignWidget = w as any;
-                    const isForeign = foreignWidget.dashboard_id && foreignWidget.dashboard_id !== dashboard.id;
-                    return (
-                      <div
-                        key={`linked-${w.id}-${refreshCount}-${linkedTriggerCount}`}
-                        className="widget-entrance-item"
-                        style={{
-                          ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
-                          display: "flex",
-                          flexDirection: "column",
-                          animationDelay: `${Math.min(idx * 0.04, 0.4)}s`,
-                        }}
-                      >
-
-                        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", width: "100%" }}>
-                          <WidgetWithPeriodSelector
-                            widget={w}
-                            organizationId={dashboard.organization_id}
-                            dashboardId={foreignWidget.dashboard_id || dashboard.id}
-                            onDrillDownRequest={setActiveDrillDown}
-                            canViewDrilldown={userPermissions.can_view_drilldown !== false}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          /* Normal Dashboard View with all widgets */
-          <div
-            style={{
-              display: "grid",
-              gap: "1rem",
-              gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
-            }}
-          >
-            {widgets.map((w, idx) => (
-              <div
-                key={`${w.id}-${refreshCount}`}
-                className="widget-entrance-item"
-                style={{
-                  ...widgetGridColumnStyle(w as { full_width?: boolean; col_span?: number }),
-                  display: "flex",
-                  flexDirection: "column",
-                  animationDelay: `${Math.min(idx * 0.04, 0.4)}s`,
-                }}
-              >
-                <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", width: "100%" }}>
-                  <WidgetWithPeriodSelector
-                    widget={w}
-                    organizationId={dashboard.organization_id}
-                    dashboardId={dashboard.id}
-                    onCardClick={handleCardClick}
-                    onDrillDownRequest={setActiveDrillDown}
-                    canViewDrilldown={userPermissions.can_view_drilldown !== false}
-                  />
-                </div>
               </div>
-            ))}
+            </div>
           </div>
         )}
 

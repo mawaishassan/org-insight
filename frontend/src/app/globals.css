@@ -467,17 +467,11 @@ input::-ms-clear {
 @keyframes widgetEntrance {
   0% {
     opacity: 0;
-    transform: translateY(18px) scale(0.98);
-    filter: blur(3px);
-  }
-  60% {
-    opacity: 0.92;
-    filter: blur(0);
+    transform: translateY(14px) scale(0.99);
   }
   100% {
     opacity: 1;
     transform: translateY(0) scale(1);
-    filter: blur(0);
   }
 }
 
@@ -1301,4 +1295,4 @@ table.report-table th {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15) !important;
   outline: none;
 }
-
+
