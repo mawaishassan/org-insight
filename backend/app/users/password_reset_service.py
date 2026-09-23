@@ -192,7 +192,7 @@ async def get_password_reset_tracking_list(
             PasswordResetTrackingItem(
                 user_id=u.id,
                 username=u.username,
-                email=u.email,
+                email=u.email or (u.username if "@" in (u.username or "") else None),
                 full_name=u.full_name,
                 role=u.role.value if hasattr(u.role, "value") else str(u.role),
                 is_active=u.is_active,

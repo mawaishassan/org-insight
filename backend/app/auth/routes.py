@@ -50,6 +50,11 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
+    
+    # 3. Record session and login audit activity via activity hook
+    from app.activity_log.hooks import log_auth_login
+    await log_auth_login(user=user, request=request, db=db)
+
     access, refresh, expires_in, force_reset = create_tokens_for_user(user)
     return TokenResponse(
         access_token=access,
@@ -57,6 +62,18 @@ async def login(
         expires_in=expires_in,
         force_password_reset=force_reset,
     )
+
+
+@router.post("/logout")
+async def logout(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Logs out current user and records activity via activity hook."""
+    from app.activity_log.hooks import log_auth_logout
+    await log_auth_logout(user=current_user, db=db)
+    return {"status": "success", "message": "Logged out successfully"}
 
 
 
@@ -82,8 +99,14 @@ async def refresh(
 
 
 @router.get("/me", response_model=UserInResponse)
-async def me(current_user: User = Depends(get_current_user)):
+async def me(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Return current authenticated user."""
+    default_d_id = current_user.default_dashboard_id
+    if default_d_id:
+        from app.dashboards.service import user_can_access_dashboard
+        can_access = await user_can_access_dashboard(db, current_user.id, default_d_id, "view")
+        if not can_access:
+            default_d_id = None
     return UserInResponse(
         id=current_user.id,
         username=current_user.username,
@@ -93,6 +116,7 @@ async def me(current_user: User = Depends(get_current_user)):
         organization_id=current_user.organization_id,
         is_active=current_user.is_active,
         force_password_reset=bool(current_user.force_password_reset),
+        default_dashboard_id=default_d_id,
     )
 
 

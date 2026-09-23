@@ -94,7 +94,13 @@ from app.kpis.service import sync_kpi_entry_from_api
 from app.entries.multi_item_filters import row_passes_filters
 from app.entries.multi_line_load import load_multi_line_row_dicts as _load_multi_line_row_dicts
 from app.widget_data.service import invalidate_all_widget_caches
+from app.access_management import invalidate_all_access_and_report_caches
 from app.entries.reference_filter_resolve import build_reference_resolution_map
+from app.activity_log.hooks import (
+    log_kpi_entry_saved,
+    log_kpi_entry_submitted,
+    log_kpi_row_deleted,
+)
 
 router = APIRouter(prefix="/entries", tags=["entries"])
 
@@ -284,8 +290,15 @@ async def _replace_multi_line_rows_from_dicts(
     from sqlalchemy import text
 
     settings = get_settings()
+    is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
     # SQLite default max host parameters per statement is often 999 — keep chunks small.
-    cell_chunk = 60 if "sqlite" in settings.DATABASE_URL.lower() else 8000
+    cell_chunk = 60 if is_sqlite else 8000
+
+    if not is_sqlite:
+        # Lock the entry row to serialize concurrent syncs/imports for the same entry
+        await db.execute(
+            select(KPIEntry.id).where(KPIEntry.id == entry_id).with_for_update()
+        )
 
     await db.execute(
         delete(KpiMultiLineRow).where(
@@ -2914,7 +2927,7 @@ async def add_multi_items_row(
     await mark_entry_modified(db, entry, current_user.id)
     await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
-    invalidate_all_widget_caches()
+    invalidate_all_access_and_report_caches(db)
     return MultiItemsRow(index=new_index, data=normalized_row)
 
 
@@ -3071,7 +3084,7 @@ async def update_multi_items_row(
     await mark_entry_modified(db, entry, current_user.id)
     await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
-    invalidate_all_widget_caches()
+    invalidate_all_access_and_report_caches(db)
     # Return row in legacy dict shape
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
     data = rows[0][1] if rows else {}
@@ -3186,6 +3199,7 @@ async def update_multi_items_row_cell(
     await mark_entry_modified(db, entry, current_user.id)
     await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
+    invalidate_all_access_and_report_caches(db)
     rows = await _load_multi_line_row_dicts(db, entry_id=entry.id, field=field, row_indices=[row_index])
     data = rows[0][1] if rows else {}
     return MultiItemsRow(index=row_index, data=data)
@@ -3213,6 +3227,10 @@ async def preview_row_formulas(
     field = await _load_multi_items_field(db, org_id, req.field_id)
     if not field or field.kpi_id != entry.kpi_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field not found")
+
+    kpi_joined_res = await db.execute(select(KPI.is_joined).where(KPI.id == entry.kpi_id))
+    if kpi_joined_res.scalar_one_or_none():
+        return {}
 
     # Load scalar values of this entry for formula variables namespace
     fv_res = await db.execute(
@@ -3327,7 +3345,7 @@ async def preview_row_formulas(
             cfg = sf.config or {}
             expr = cfg.get("formula_expression") if isinstance(cfg, dict) else None
             if not expr:
-                computed = None
+                continue
             else:
                 from app.formula_engine.evaluator import evaluate_formula, apply_conditional_logic
                 computed = evaluate_formula(
@@ -3466,6 +3484,17 @@ async def delete_multi_items_row(
     await mark_entry_modified(db, entry, current_user.id)
     await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
     await db.commit()
+    invalidate_all_access_and_report_caches(db)
+    log_kpi_row_deleted(
+        user=current_user,
+        org_id=org_id,
+        entry_id=entry.id,
+        kpi_id=entry.kpi_id,
+        field_id=field.id,
+        row_index=row_index,
+        year=entry.year,
+        period_key=entry.period_key,
+    )
     return {"warning": warning_msg}
 
 
@@ -4733,6 +4762,20 @@ async def get_multi_items_page_context(
     f = field_res.scalar_one_or_none()
     if not f or getattr(f, "field_type", None) != FieldType.multi_line_items:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Multi-item field not found")
+
+    # When auto_compute_formulas is ON, auto-compute formulas on page open.
+    # When OFF, do NOT recompute; treat stored MLI data as normal/final data.
+    if auto_compute_formulas:
+        has_formula_sub = any(
+            getattr(getattr(s, "field_type", None), "value", getattr(s, "field_type", None)) in ("formula", FieldType.formula)
+            or (isinstance(getattr(s, "config", None), dict) and (s.config.get("is_formula") or s.config.get("formula_expression")))
+            for s in (getattr(f, "sub_fields", None) or [])
+        )
+        if has_formula_sub:
+            from app.entries.service import recompute_mli_formula_subfields, propagate_formula_recalculations
+            await recompute_mli_formula_subfields(db, entry_id=entry.id, org_id=org_id, field_id=int(f.id))
+            await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)
+            await db.commit()
 
     field_access = await get_user_field_access_for_kpi(db, current_user.id, kpi_id)
     if field_access is None:
@@ -6055,8 +6098,17 @@ async def create_or_update_entry(
     except EntryValidationError:
         raise  # Handled by app exception_handler; returns 400 with errors list
     await db.commit()
-    invalidate_all_widget_caches()
+    invalidate_all_access_and_report_caches(db)
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
+    log_kpi_entry_saved(
+        user=current_user,
+        org_id=org_id,
+        kpi_id=body.kpi_id,
+        kpi_name=kpi.name if kpi else None,
+        year=body.year,
+        period_key=body.period_key,
+        fields_count=len(allowed_values),
+    )
     return await _entry_to_response(db, entry, current_user.id)
 
 
@@ -6083,6 +6135,14 @@ async def submit_entry_route(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found or locked")
     await db.commit()
     await db.refresh(entry, attribute_names=["field_values", "user", "updated_at"])
+    log_kpi_entry_submitted(
+        user=current_user,
+        org_id=org_id,
+        entry_id=entry.id,
+        kpi_id=entry_row.kpi_id,
+        year=entry_row.year,
+        period_key=entry_row.period_key,
+    )
     return await _entry_to_response(db, entry, current_user.id)
 
 

@@ -80,6 +80,7 @@ async def list_org_users(
                 password_reset_requested_at=u.password_reset_requested_at,
                 password_reset_completed_at=u.password_reset_completed_at,
                 reset_status=status_str,
+                default_dashboard_id=u.default_dashboard_id,
             )
         )
     return out
@@ -297,24 +298,23 @@ async def download_standard_users_template(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_org_admin),
 ):
-    """Download an Excel template for bulk importing standard database users or external Odoo users."""
+    """Download an Excel template for bulk importing standard system database users."""
     from openpyxl import Workbook
     from io import BytesIO
 
     org_id = _org_id(current_user, organization_id)
     wb = Workbook()
     ws = wb.active
-    ws.title = "Users Import"
-    ws.append(["user_name", "password", "unique_user_key", "full_name", "email", "role", "is_external"])
-    # Example rows
-    ws.append(["user1", "Password123", "CS-001", "John Doe", "john@example.com", "USER", False])
-    ws.append(["user2", "", "CS-002", "External User", "user2@example.com", "USER", True])
+    ws.title = "System Users Import"
+    ws.append(["user_name", "password", "unique_user_key", "full_name", "email", "role"])
+    # Example row for system users
+    ws.append(["user1", "Password123", "CS-001", "John Doe", "john@example.com", "USER"])
 
     import uuid
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
-    filename = f"users_template_{org_id}_{uuid.uuid4().hex[:6]}.xlsx"
+    filename = f"system_users_template_{org_id}_{uuid.uuid4().hex[:6]}.xlsx"
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -497,6 +497,38 @@ async def upload_standard_users_excel(
     return {"ok": True, "rows_added": len(parsed_users)}
 
 
+@router.get("/me", response_model=UserResponse)
+async def get_current_user_profile(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return current authenticated user profile."""
+    ext_res = await db.execute(select(ExternalUser).where(ExternalUser.user_id == current_user.id))
+    eu = ext_res.scalar_one_or_none()
+    if current_user.force_password_reset:
+        status_str = "Pending"
+    elif current_user.password_reset_completed_at:
+        status_str = "Completed"
+    else:
+        status_str = "Not Required"
+    return UserResponse(
+        id=current_user.id,
+        username=current_user.username,
+        email=current_user.email,
+        full_name=current_user.full_name,
+        role=current_user.role,
+        organization_id=current_user.organization_id,
+        is_active=current_user.is_active,
+        unique_user_key=current_user.unique_user_key,
+        description=eu.description if eu else None,
+        is_external=eu is not None,
+        force_password_reset=bool(current_user.force_password_reset),
+        password_reset_requested_at=current_user.password_reset_requested_at,
+        password_reset_completed_at=current_user.password_reset_completed_at,
+        reset_status=status_str,
+    )
+
+
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_org_user(
     user_id: int,
@@ -532,6 +564,7 @@ async def get_org_user(
         password_reset_requested_at=user.password_reset_requested_at,
         password_reset_completed_at=user.password_reset_completed_at,
         reset_status=status_str,
+        default_dashboard_id=user.default_dashboard_id,
     )
 
 
@@ -561,6 +594,20 @@ async def update_org_user(
     user = await update_user(db, user_id, org_id, body)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    ext_res = await db.execute(select(ExternalUser).where(ExternalUser.user_id == user.id))
+    eu = ext_res.scalar_one_or_none()
+
+    if body.is_external is not None:
+        if body.is_external and eu is None:
+            eu = ExternalUser(user_id=user.id, description=body.description)
+            db.add(eu)
+        elif not body.is_external and eu is not None:
+            await db.delete(eu)
+            eu = None
+
+    if body.description is not None and eu:
+        eu.description = body.description
+
     await db.commit()
     await db.refresh(user)
 
@@ -568,7 +615,29 @@ async def update_org_user(
     from app.reports.custom_service import CUSTOM_REPORT_CACHE
     CUSTOM_REPORT_CACHE.invalidate_user(user_id)
 
-    return UserResponse.model_validate(user)
+    if user.force_password_reset:
+        status_str = "Pending"
+    elif user.password_reset_completed_at:
+        status_str = "Completed"
+    else:
+        status_str = "Not Required"
+    return UserResponse(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role,
+        organization_id=user.organization_id,
+        is_active=user.is_active,
+        unique_user_key=user.unique_user_key,
+        description=eu.description if eu else None,
+        is_external=eu is not None,
+        force_password_reset=bool(user.force_password_reset),
+        password_reset_requested_at=user.password_reset_requested_at,
+        password_reset_completed_at=user.password_reset_completed_at,
+        reset_status=status_str,
+        default_dashboard_id=user.default_dashboard_id,
+    )
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -82,10 +82,12 @@ export default function LoginPage() {
         }
       );
       setTokens(res.access_token, res.refresh_token);
-      const me = await api<{ role: string; organization_id: number | null; force_password_reset?: boolean }>(
-        "/auth/me",
-        { token: res.access_token }
-      );
+      const me = await api<{
+        role: string;
+        organization_id: number | null;
+        force_password_reset?: boolean;
+        default_dashboard_id?: number | null;
+      }>("/auth/me", { token: res.access_token });
 
       if (res.force_password_reset || me.force_password_reset) {
         toast("Password reset required before continuing.", { icon: "🔒" });
@@ -117,7 +119,14 @@ export default function LoginPage() {
         return;
       }
 
-      // Default home:
+      // If a default dashboard is configured for this user, automatically open it
+      if (me.default_dashboard_id) {
+        router.push(`/dashboard/dashboards/${me.default_dashboard_id}?organization_id=${orgId}`);
+        router.refresh();
+        return;
+      }
+
+      // Default home (fallback):
       // - If user has KPI rights, land on KPIs/Entries page.
       // - Otherwise, land on the dashboard home (not a specific dashboard).
       const available = await api<Array<{ id: number }>>(

@@ -67,13 +67,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   // ── Inactivity auto-logout ───────────────────────────────────────────────────
   /** Total inactivity timeout: 15 minutes (900 000 ms). */
   const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
-  /** Show warning 60 seconds before forced logout. */
+  /** Show warning 60 seconds before forced logout (at 14 minutes). */
   const WARN_BEFORE_MS = 60 * 1000;
   const [showIdleWarning, setShowIdleWarning] = useState(false);
   const [idleCountdown, setIdleCountdown] = useState(60);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isWarningActiveRef = useRef(false);
+  const lastActivityRef = useRef<number>(Date.now());
   // ────────────────────────────────────────────────────────────────────────────
 
   const currentPath = pathname || "";
@@ -182,38 +184,57 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, [router, pathname, searchParams]);
 
   // ── Inactivity logout logic ──────────────────────────────────────────────────
+  const clearIdleTimers = useCallback(() => {
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+    if (warnTimerRef.current) {
+      clearTimeout(warnTimerRef.current);
+      warnTimerRef.current = null;
+    }
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+  }, []);
+
   const doLogout = useCallback(() => {
+    isWarningActiveRef.current = false;
+    clearIdleTimers();
     clearTokens();
     router.push("/login?reason=idle");
-  }, [router]);
-
-  const clearIdleTimers = useCallback(() => {
-    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-    if (warnTimerRef.current) clearTimeout(warnTimerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-  }, []);
+  }, [router, clearIdleTimers]);
 
   const resetIdleTimer = useCallback(() => {
     // Only run when a user is authenticated.
     if (!getAccessToken()) return;
     clearIdleTimers();
+    isWarningActiveRef.current = false;
     setShowIdleWarning(false);
     setIdleCountdown(60);
-    // Show warning 60 s before the full 15 min timeout.
+
+    // Show warning 60 s before the full 15 min timeout (at 14 minutes of inactivity).
     warnTimerRef.current = setTimeout(() => {
+      isWarningActiveRef.current = true;
       setShowIdleWarning(true);
       setIdleCountdown(60);
+
       // Tick countdown every second.
       countdownRef.current = setInterval(() => {
         setIdleCountdown((c) => {
           if (c <= 1) {
-            if (countdownRef.current) clearInterval(countdownRef.current);
+            if (countdownRef.current) {
+              clearInterval(countdownRef.current);
+              countdownRef.current = null;
+            }
             return 0;
           }
           return c - 1;
         });
       }, 1000);
-      // Logout after the remaining 60 s.
+
+      // Logout after the remaining 60 s (1 minute) if user does not take action.
       idleTimerRef.current = setTimeout(() => {
         doLogout();
       }, WARN_BEFORE_MS);
@@ -222,8 +243,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     // Attach activity listeners to reset the idle timer on any interaction.
+    // Crucial: When warning is active, mouse movements or keystrokes do NOT dismiss the dialog!
     const events: (keyof WindowEventMap)[] = ["mousemove", "mousedown", "keydown", "touchstart", "scroll", "click"];
-    const handleActivity = () => resetIdleTimer();
+    const handleActivity = () => {
+      if (isWarningActiveRef.current) {
+        return; // Modal is visible: do not dismiss on cursor move or background click
+      }
+      const now = Date.now();
+      if (now - lastActivityRef.current > 1000) {
+        lastActivityRef.current = now;
+        resetIdleTimer();
+      }
+    };
+
     events.forEach((e) => window.addEventListener(e, handleActivity, { passive: true }));
     // Start the timer on mount.
     resetIdleTimer();
@@ -446,11 +478,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       api<{ id: number; name: string; organization_id: number }>(`/dashboards/${dashboardId}`, { token })
         .then((d) => {
           const oid = d.organization_id;
+          const isSuper = user?.role === "SUPER_ADMIN";
           const segments: { label: string; href: string }[] = [
             { label: "Dashboards", href: `/dashboard/dashboards?${qs({ organization_id: oid })}` },
-            { label: d.name, href: `/dashboard/dashboards/${dashboardId}?organization_id=${oid}` },
+            {
+              label: d.name,
+              href: isSuper
+                ? `/dashboard/dashboards/${dashboardId}/design?organization_id=${oid}`
+                : `/dashboard/dashboards/${dashboardId}?organization_id=${oid}`,
+            },
           ];
-          if (designMatch) {
+          if (designMatch && !isSuper) {
             segments.push({ label: "Design", href: `/dashboard/dashboards/${dashboardId}/design?organization_id=${oid}` });
           } else if (assignMatch) {
             segments.push({ label: "Assign", href: `/dashboard/dashboards/${dashboardId}/assign?organization_id=${oid}` });
@@ -674,6 +712,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       active: pathname.startsWith("/dashboard/reports") || pathname.includes("/report-builder"),
       show: isSuperAdmin ? false : canViewReports(role),
     },
+    {
+      href: "/dashboard/access",
+      label: "Access",
+      active: pathname.startsWith("/dashboard/access"),
+      show: isSuperAdmin ? false : canManageUsers(role),
+    },
+    {
+      href: "/dashboard/activity-logs",
+      label: "Activity Logs",
+      active: pathname.startsWith("/dashboard/activity-logs"),
+      show: isSuperAdmin ? false : role === "ORG_ADMIN",
+    },
   ].filter((x) => x.show);
 
   const hamburgerItems: { href: string; label: string; show: boolean }[] = [
@@ -682,6 +732,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     { href: reportsHref, label: "Reports", show: !isSuperAdmin && canViewReports(role) },
     { href: customReportsHref, label: "Custom Reports", show: isSuperAdmin && selectedOrgId != null },
     { href: "/dashboard/access", label: "Access", show: canManageUsers(role) || isSuperAdmin },
+    { href: "/dashboard/activity-logs", label: "User Activity", show: role === "ORG_ADMIN" || role === "SUPER_ADMIN" },
   ].filter((x) => x.show);
 
   const tabLabel: Record<string, string> = {
@@ -733,8 +784,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     if (hasKpiRights) {
       breadcrumbs.push({ label: "Home", href: "/dashboard/entries" });
     }
-    if (pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users") {
+    if (pathname.startsWith("/dashboard/access/rights")) {
       breadcrumbs.push({ label: "Access", href: "/dashboard/access" });
+      breadcrumbs.push({ label: "Dashboard & Report Rights", href: "/dashboard/access/rights" });
+    } else if (pathname.startsWith("/dashboard/users/") && pathname !== "/dashboard/users") {
+      breadcrumbs.push({ label: "Access", href: "/dashboard/access?tab=users" });
     }
     if (pathname === "/dashboard/dashboards") {
       if (hasKpiRights) {
@@ -743,6 +797,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     } else if (pathname.startsWith("/dashboard/dashboards/")) {
       // Tail should normally handle this; keep a safe fallback.
       breadcrumbs.push({ label: "Dashboards", href: dashboardsHref });
+    }
+    if (pathname.startsWith("/dashboard/access")) {
+      breadcrumbs.push({ label: "Access & Rights", href: "/dashboard/access" });
+    }
+    if (pathname.startsWith("/dashboard/activity-logs")) {
+      breadcrumbs.push({ label: "User Activity & Audit", href: "/dashboard/activity-logs" });
     }
   }
 
@@ -824,20 +884,26 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <button
               type="button"
               onClick={() => setMenuOpen((o) => !o)}
-              style={{
-                padding: "0.35rem 0.55rem",
-                border: "1px solid var(--border)",
-                borderRadius: 6,
-                background: "var(--surface)",
-                cursor: "pointer",
-                fontSize: "1rem",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center"
-              }}
+              className={`nav-menu-toggle-btn ${menuOpen ? "open" : ""}`}
               aria-label="Menu"
+              title="Menu"
             >
-              ☰
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 20 20"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                style={{ display: "block" }}
+              >
+                <path
+                  d="M3.5 5.5H16.5M3.5 10H16.5M3.5 14.5H16.5"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </button>
             {menuOpen && (
               <div
@@ -1171,6 +1237,32 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           flex-shrink: 0;
         }
 
+        .nav-menu-toggle-btn {
+          padding: 0.35rem 0.55rem;
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          background: var(--surface);
+          color: var(--text);
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+          outline: none;
+        }
+        .nav-menu-toggle-btn:hover {
+          background: var(--surface-hover, #f1f5f9);
+          border-color: var(--accent, #3b82f6);
+          color: var(--accent, #3b82f6);
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        }
+        .nav-menu-toggle-btn:active,
+        .nav-menu-toggle-btn.open {
+          background: rgba(59, 130, 246, 0.08);
+          border-color: var(--accent, #3b82f6);
+          color: var(--accent, #3b82f6);
+        }
+
         .desktop-nav {
           position: absolute;
           left: 50%;
@@ -1284,7 +1376,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 lineHeight: 1.5,
               }}
             >
-              your session will expire after 1 minute
+              Your session will expire after {idleCountdown}s
             </p>
 
             <div style={{ display: "flex", gap: "0.75rem", justifyContent: "center" }}>

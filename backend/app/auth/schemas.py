@@ -42,6 +42,7 @@ class UserInResponse(BaseModel):
     organization_id: int | None
     is_active: bool
     force_password_reset: bool = False
+    default_dashboard_id: int | None = None
 
     class Config:
         from_attributes = True

@@ -46,9 +46,11 @@ class ReportAccessAssign(BaseModel):
 
     user_id: int = Field(...)
     can_view: bool = True
-    can_print: bool = True
-    can_export: bool = True
-    can_change_period: bool = True
+    can_print: bool = False
+    can_export: bool = False
+    can_download_word: bool = False
+    can_change_period: bool = False
+    can_load_lms: bool = False
 
 
 class ReportAssignmentResponse(BaseModel):
@@ -60,7 +62,9 @@ class ReportAssignmentResponse(BaseModel):
     can_view: bool
     can_print: bool
     can_export: bool
+    can_download_word: bool
     can_change_period: bool
+    can_load_lms: bool
 
 
 class ReportTemplateResponse(BaseModel):
@@ -73,9 +77,11 @@ class ReportTemplateResponse(BaseModel):
     fetch_data_with_date: bool = False
     date_fetching_config: dict | None = None
     can_view: bool = True
-    can_print: bool = True
-    can_export: bool = True
-    can_change_period: bool = True
+    can_print: bool = False
+    can_export: bool = False
+    can_download_word: bool = False
+    can_change_period: bool = False
+    can_load_lms: bool = False
 
     class Config:
         from_attributes = True

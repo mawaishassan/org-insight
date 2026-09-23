@@ -99,9 +99,9 @@ async def sync_joined_kpi_physical_data(
                 KPIEntry.organization_id == kpi_obj.organization_id,
                 KPIEntry.year == yr,
                 KPIEntry.period_key == pk,
-            )
+            ).order_by(KPIEntry.is_draft.asc(), KPIEntry.id.desc()).limit(1)
         )
-        entry = entry_res.scalar_one_or_none()
+        entry = entry_res.scalars().first()
         if not entry:
             try:
                 async with db.begin_nested():
@@ -121,20 +121,24 @@ async def sync_joined_kpi_physical_data(
                         KPIEntry.organization_id == kpi_obj.organization_id,
                         KPIEntry.year == yr,
                         KPIEntry.period_key == pk,
-                    )
+                    ).order_by(KPIEntry.is_draft.asc(), KPIEntry.id.desc()).limit(1)
                 )
-                entry = entry_res.scalar_one_or_none()
+                entry = entry_res.scalars().first()
 
         if not entry:
             continue
 
         # 1. Synchronize Multi-Line Fields
+        synced_field_keys: set[str] = set()
         for m in mappings:
             f_key = m.get("joined_field_key")
+            if not f_key or f_key in synced_field_keys:
+                continue
             field_obj = fields_by_key.get(f_key)
             if not field_obj:
                 continue
 
+            synced_field_keys.add(f_key)
             field_obj.kpi = kpi_obj
 
             if field_obj.field_type == FieldType.multi_line_items:

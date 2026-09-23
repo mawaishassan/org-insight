@@ -65,16 +65,22 @@ async def _org_id_for_template(
     db: AsyncSession, user: User, template_id: int, org_id_param: int | None
 ) -> int:
     """
-    Resolve organization id for template-scoped routes.
-    - SUPER_ADMIN: if organization_id is not provided, resolve from the template itself.
-    - Others: fall back to normal tenant resolution.
+    Resolve organization id for template-scoped routes with strict organization boundary checks.
     """
-    if user.role.value == "SUPER_ADMIN" and org_id_param is None:
-        rt = (await db.execute(select(ReportTemplate).where(ReportTemplate.id == template_id))).scalar_one_or_none()
-        if not rt:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+    rt = (await db.execute(select(ReportTemplate).where(ReportTemplate.id == template_id))).scalar_one_or_none()
+    if not rt:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+
+    if user.role.value == "SUPER_ADMIN":
+        if org_id_param is not None:
+            if rt.organization_id != org_id_param:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found in this organization")
+            return org_id_param
         return rt.organization_id
-    return _org_id(user, org_id_param)
+    else:
+        if user.organization_id is None or rt.organization_id != user.organization_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found in this organization")
+        return user.organization_id
 
 
 @router.get("/templates", response_model=list[ReportTemplateResponse])
@@ -99,7 +105,9 @@ async def list_templates(
             t.can_view = True
             t.can_print = True
             t.can_export = True
+            t.can_download_word = True
             t.can_change_period = True
+            t.can_load_lms = True
             result_templates.append(t)
         else:
             perm = (await db.execute(
@@ -108,11 +116,13 @@ async def list_templates(
                     ReportAccessPermission.user_id == current_user.id
                 )
             )).scalar_one_or_none()
-            if perm and perm.can_view:
-                t.can_view = perm.can_view
-                t.can_print = perm.can_print
-                t.can_export = perm.can_export
-                t.can_change_period = perm.can_change_period
+            if perm and getattr(perm, "is_active", True) and (perm.can_view or getattr(perm, "can_print", False) or getattr(perm, "can_export", False)):
+                t.can_view = bool(perm.can_view)
+                t.can_print = bool(getattr(perm, "can_print", False))
+                t.can_export = bool(getattr(perm, "can_export", False))
+                t.can_download_word = bool(getattr(perm, "can_download_word", False))
+                t.can_change_period = bool(getattr(perm, "can_change_period", False))
+                t.can_load_lms = bool(getattr(perm, "can_load_lms", False))
                 result_templates.append(t)
     return result_templates
 
@@ -151,7 +161,9 @@ async def get_template(
         rt.can_view = True
         rt.can_print = True
         rt.can_export = True
+        rt.can_download_word = True
         rt.can_change_period = True
+        rt.can_load_lms = True
     else:
         from sqlalchemy import select
         from app.core.models import ReportAccessPermission
@@ -161,12 +173,14 @@ async def get_template(
                 ReportAccessPermission.user_id == current_user.id
             )
         )).scalar_one_or_none()
-        if not perm or not perm.can_view:
+        if not perm or not getattr(perm, "is_active", True) or not (perm.can_view or getattr(perm, "can_print", False) or getattr(perm, "can_export", False)):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
         rt.can_view = perm.can_view
-        rt.can_print = perm.can_print
-        rt.can_export = perm.can_export
-        rt.can_change_period = perm.can_change_period
+        rt.can_print = getattr(perm, "can_print", False)
+        rt.can_export = getattr(perm, "can_export", False)
+        rt.can_download_word = getattr(perm, "can_download_word", False)
+        rt.can_change_period = getattr(perm, "can_change_period", False)
+        rt.can_load_lms = getattr(perm, "can_load_lms", False)
 
     return ReportTemplateResponse.model_validate(rt)
 
@@ -180,7 +194,7 @@ async def get_template_detail(
 ):
     """Get template with text_blocks and kpis for design/builder (Super Admin or allowed)."""
     org_id = await _org_id_for_template(db, current_user, template_id, organization_id)
-    can = await user_can_access_report(db, current_user.id, template_id, "view")
+    can = await user_can_access_report(db, current_user.id, template_id, "view", org_id=org_id)
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
     detail = await get_report_template_detail(db, template_id, org_id)
@@ -366,7 +380,7 @@ async def generate_report(
 ):
     """Generate report data (JSON or CSV). User must have view/export access."""
     org_id = await _org_id_for_template(db, current_user, template_id, organization_id)
-    can = await user_can_access_report(db, current_user.id, template_id, "export" if format == "csv" else "view")
+    can = await user_can_access_report(db, current_user.id, template_id, "export" if format == "csv" else "view", org_id=org_id)
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
 
@@ -376,7 +390,7 @@ async def generate_report(
 
     # Enforce period shifting permission for non-admins
     if current_user.role.value not in ("SUPER_ADMIN", "ORG_ADMIN"):
-        can_shift = await user_can_access_report(db, current_user.id, template_id, "change_period")
+        can_shift = await user_can_access_report(db, current_user.id, template_id, "change_period", org_id=org_id)
         if not can_shift:
             config = getattr(rt, "date_fetching_config", None) or {}
             admin_period_type = (config.get("default_period_type") or config.get("period_type") or "").strip() or None
@@ -391,13 +405,32 @@ async def generate_report(
                 by_default = True
 
     bypass = (_t is not None)
-    data = await generate_report_data(db, template_id, rt.organization_id, year=year, include_drafts=False, by_default=by_default, period_type=period_type, bypass_cache=bypass)
+    data = await generate_report_data(
+        db,
+        template_id,
+        rt.organization_id,
+        year=year,
+        include_drafts=False,
+        by_default=by_default,
+        period_type=period_type,
+        bypass_cache=bypass,
+        current_user=current_user,
+    )
     # If the template has a body_template or body_blocks (visual builder), render HTML
     # so the report view shows the same content as the design live preview.
     can_render = bool(rt.body_template or getattr(rt, "body_blocks", None))
     if format == "json" and can_render:
         html = await render_report_html(
-            db, template_id, rt.organization_id, year=year, include_drafts=False, report_data=data, by_default=by_default, period_type=period_type, bypass_cache=bypass
+            db,
+            template_id,
+            rt.organization_id,
+            year=year,
+            include_drafts=False,
+            report_data=data,
+            by_default=by_default,
+            period_type=period_type,
+            bypass_cache=bypass,
+            current_user=current_user,
         )
         if html is not None:
             data["rendered_html"] = html
@@ -433,7 +466,7 @@ async def evaluate_snippet(
 ):
     """Evaluate a KPI value or formula snippet in report context; returns the value for preview."""
     org_id = await _org_id_for_template(db, current_user, template_id, body.organization_id or organization_id)
-    can = await user_can_access_report(db, current_user.id, template_id, "view")
+    can = await user_can_access_report(db, current_user.id, template_id, "view", org_id=org_id)
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
     rt = await get_report_template(db, template_id, org_id)
@@ -467,7 +500,7 @@ async def preview_report(
 ):
     """Render report HTML with the given template string (for live preview in designer)."""
     org_id = await _org_id_for_template(db, current_user, template_id, organization_id)
-    can = await user_can_access_report(db, current_user.id, template_id, "view")
+    can = await user_can_access_report(db, current_user.id, template_id, "view", org_id=org_id)
     if not can:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
     include_drafts = False

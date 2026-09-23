@@ -858,7 +858,7 @@ export default function MultiItemRowDetail() {
   }, [editData, subFields]);
 
   useEffect(() => {
-    if (!entryId || !fieldId || !token) return;
+    if (!entryId || !fieldId || !token || isJoinedKpi || !isRowEditable) return;
 
     const hasFormulaOrLink = subFields.some((sf) => {
       const isMappedAsLinked = subFields.some(otherSf => {
@@ -892,7 +892,9 @@ export default function MultiItemRowDetail() {
         setEditData((prev) => {
           const next = { ...prev };
           Object.entries(computed).forEach(([k, v]) => {
-            next[k] = v;
+            if (v !== undefined && v !== null) {
+              next[k] = v;
+            }
           });
           return next;
         });
@@ -905,7 +907,7 @@ export default function MultiItemRowDetail() {
       clearTimeout(timeout);
       controller.abort();
     };
-  }, [nonFormulaSerialized, entryId, fieldId, token, effectiveOrgId, subFields]);
+  }, [nonFormulaSerialized, entryId, fieldId, token, effectiveOrgId, subFields, isJoinedKpi, isRowEditable]);
 
 
   const Toggle = ({

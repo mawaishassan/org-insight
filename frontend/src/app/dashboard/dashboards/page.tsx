@@ -50,6 +50,7 @@ export default function DashboardsPage() {
   const [renameSaving, setRenameSaving] = useState(false);
 
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [duplicatingId, setDuplicatingId] = useState<number | null>(null);
 
   const canManageAssignments = userRole === "ORG_ADMIN";
   const canAddDashboard = userRole === "SUPER_ADMIN";
@@ -197,6 +198,32 @@ export default function DashboardsPage() {
     }
   };
 
+  const handleDuplicate = async (d: DashboardRow) => {
+    const token = getAccessToken();
+    if (!token || userRole !== "SUPER_ADMIN") return;
+    setDuplicatingId(d.id);
+    setError(null);
+    try {
+      const duplicated = await api<DashboardRow>(`/dashboards/${d.id}/duplicate?${qs({ organization_id: d.organization_id })}`, {
+        method: "POST",
+        token,
+      });
+      setList((prev) => {
+        const next = [duplicated, ...prev];
+        const key = d.organization_id ? String(d.organization_id) : "all";
+        cachedDashboards[key] = next;
+        return next;
+      });
+      toast.success("Dashboard duplicated successfully");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to duplicate dashboard";
+      setError(msg);
+      toast.error(msg);
+    } finally {
+      setDuplicatingId(null);
+    }
+  };
+
   if (loading && list.length === 0) {
     return (
       <div>
@@ -221,8 +248,8 @@ export default function DashboardsPage() {
           </p>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
             {canManageAssignments && (
-              <Link className="btn btn-secondary" href="/dashboard/dashboards/assign" style={{ fontSize: "0.875rem" }}>
-                👥 Bulk Assign Dashboards
+              <Link className="btn btn-secondary" href="/dashboard/access/rights?tab=assign&resource_type=dashboard" style={{ fontSize: "0.875rem" }}>
+                Manage & Assign Rights
               </Link>
             )}
             {canAddDashboard && (
@@ -241,21 +268,41 @@ export default function DashboardsPage() {
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {list.map((d) => (
               <li key={d.id} style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                <Link href={`/dashboard/dashboards/${d.id}?organization_id=${d.organization_id}`} style={{ fontWeight: 500, flex: "1 1 auto" }}>
+                <Link
+                  href={
+                    userRole === "SUPER_ADMIN"
+                      ? `/dashboard/dashboards/${d.id}/design?organization_id=${d.organization_id}`
+                      : `/dashboard/dashboards/${d.id}?organization_id=${d.organization_id}`
+                  }
+                  style={{ fontWeight: 500, flex: "1 1 auto" }}
+                >
                   {d.name}
                 </Link>
-                <Link className="btn btn-primary" href={`/dashboard/dashboards/${d.id}?organization_id=${d.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                  Open
-                </Link>
+                {userRole !== "SUPER_ADMIN" && (
+                  <Link className="btn btn-primary" href={`/dashboard/dashboards/${d.id}?organization_id=${d.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                    Open
+                  </Link>
+                )}
                 {canManageAssignments && (
-                  <Link className="btn" href={`/dashboard/dashboards/assign?dashboard_id=${d.id}&organization_id=${d.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                    Assign users
+                  <Link className="btn" href={`/dashboard/access/rights?tab=resource&resource_type=dashboard&resource_id=${d.id}&organization_id=${d.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                    Access Rights
                   </Link>
                 )}
                 {userRole === "SUPER_ADMIN" && (
-                  <Link className="btn" href={`/dashboard/dashboards/${d.id}/design?organization_id=${d.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                  <Link className="btn btn-primary" href={`/dashboard/dashboards/${d.id}/design?organization_id=${d.organization_id}`} style={{ fontSize: "0.85rem" }}>
                     Design
                   </Link>
+                )}
+                {userRole === "SUPER_ADMIN" && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => handleDuplicate(d)}
+                    disabled={duplicatingId === d.id}
+                    style={{ fontSize: "0.85rem" }}
+                  >
+                    {duplicatingId === d.id ? "Copying…" : "Copy"}
+                  </button>
                 )}
                 {userRole === "SUPER_ADMIN" && (
                   <button type="button" className="btn" onClick={() => openRenameModal(d)} style={{ fontSize: "0.85rem" }}>

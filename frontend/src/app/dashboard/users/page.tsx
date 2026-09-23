@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -31,6 +32,9 @@ const createSchema = z.object({
 type CreateFormData = z.infer<typeof createSchema>;
 
 export default function UsersPage() {
+  const searchParams = useSearchParams();
+  const orgIdFromQuery = searchParams?.get("organization_id");
+
   const [list, setList] = useState<UserRow[]>([]);
   const [kpis, setKpis] = useState<KpiOption[]>([]);
   const [domains, setDomains] = useState<DomainOption[]>([]);
@@ -40,13 +44,15 @@ export default function UsersPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [kpiFilterDomainId, setKpiFilterDomainId] = useState<number | "">("");
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const token = getAccessToken();
 
   const loadList = () => {
     if (!token) return;
     setError(null);
-    api<UserRow[]>("/users", { token })
+    const query = orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : "";
+    api<UserRow[]>(`/users${query}`, { token })
       .then(setList)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
@@ -61,21 +67,23 @@ export default function UsersPage() {
 
   useEffect(() => {
     loadList();
-  }, []);
+  }, [token, orgIdFromQuery]);
 
   useEffect(() => {
     if (!token) return;
-    api<DomainOption[]>("/domains", { token }).then(setDomains).catch(() => setDomains([]));
-    api<ReportTemplateOption[]>("/reports/templates", { token }).then(setTemplates).catch(() => setTemplates([]));
-  }, [token]);
+    const query = orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : "";
+    api<DomainOption[]>(`/domains${query}`, { token }).then(setDomains).catch(() => setDomains([]));
+    api<ReportTemplateOption[]>(`/reports/templates${query}`, { token }).then(setTemplates).catch(() => setTemplates([]));
+  }, [token, orgIdFromQuery]);
 
   useEffect(() => {
     if (!token) return;
     const params: Record<string, string | number> = {};
     if (kpiFilterDomainId !== "") params.domain_id = kpiFilterDomainId;
+    if (orgIdFromQuery) params.organization_id = orgIdFromQuery;
     const query = qs(params);
     api<KpiOption[]>(`/kpis${query ? `?${query}` : ""}`, { token }).then(setKpis).catch(() => setKpis([]));
-  }, [token, kpiFilterDomainId]);
+  }, [token, kpiFilterDomainId, orgIdFromQuery]);
 
   const createForm = useForm<CreateFormData>({
     resolver: zodResolver(createSchema),
@@ -104,6 +112,7 @@ export default function UsersPage() {
           email: data.email || null,
           full_name: data.full_name || null,
           role: data.role,
+          ...(orgIdFromQuery ? { organization_id: Number(orgIdFromQuery) } : {}),
           ...(kpi_assignments.length > 0 ? { kpi_assignments } : {}),
           report_template_ids: createReportIds,
         }),
@@ -226,16 +235,68 @@ export default function UsersPage() {
         </div>
       )}
 
+      {list.length > 0 && (
+        <div style={{ marginBottom: "1rem", position: "relative", maxWidth: "360px" }}>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search users by name, username, email..."
+            style={{
+              width: "100%",
+              padding: "0.4rem 0.65rem",
+              fontSize: "0.85rem",
+              borderRadius: "6px",
+              border: "1px solid var(--border, #cbd5e1)",
+              background: "var(--surface, #ffffff)",
+              outline: "none",
+            }}
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              style={{
+                position: "absolute",
+                right: "0.4rem",
+                top: "50%",
+                transform: "translateY(-50%)",
+                background: "none",
+                border: "none",
+                color: "var(--muted, #94a3b8)",
+                fontSize: "0.85rem",
+                cursor: "pointer",
+                padding: "0 0.2rem",
+              }}
+              title="Clear search"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
+
       {list.length === 0 ? (
         <div className="card">
           <p style={{ color: "var(--muted)" }}>No users yet. Add one above to get started.</p>
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
-          {list.map((u) => (
+          {list
+            .filter((u) => {
+              if (!searchQuery.trim()) return true;
+              const q = searchQuery.trim().toLowerCase();
+              return (
+                (u.username || "").toLowerCase().includes(q) ||
+                (u.full_name || "").toLowerCase().includes(q) ||
+                (u.email || "").toLowerCase().includes(q) ||
+                (u.role || "").toLowerCase().includes(q)
+              );
+            })
+            .map((u) => (
             <Link
               key={u.id}
-              href={`/dashboard/users/${u.id}`}
+              href={`/dashboard/users/${u.id}${orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : ""}`}
               style={{ textDecoration: "none", color: "inherit" }}
               className="card"
             >
@@ -263,10 +324,39 @@ export default function UsersPage() {
                     {u.email}
                   </p>
                 )}
-                <div style={{ marginTop: "0.5rem" }}>
+                <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
                   <span style={{ fontSize: "0.8rem", padding: "0.15rem 0.4rem", background: "var(--border)", borderRadius: "4px" }}>
                     {u.role}
                   </span>
+                  {u.is_external ? (
+                    <span
+                      style={{
+                        fontSize: "0.72rem",
+                        padding: "0.15rem 0.45rem",
+                        borderRadius: "4px",
+                        background: "rgba(139, 92, 246, 0.12)",
+                        color: "#7c3aed",
+                        fontWeight: 600,
+                        border: "1px solid rgba(139, 92, 246, 0.25)",
+                      }}
+                    >
+                      External (LMS)
+                    </span>
+                  ) : (
+                    <span
+                      style={{
+                        fontSize: "0.72rem",
+                        padding: "0.15rem 0.45rem",
+                        borderRadius: "4px",
+                        background: "rgba(59, 130, 246, 0.1)",
+                        color: "#2563eb",
+                        fontWeight: 600,
+                        border: "1px solid rgba(59, 130, 246, 0.2)",
+                      }}
+                    >
+                      System
+                    </span>
+                  )}
                 </div>
                 <p style={{ margin: "0.5rem 0 0", fontSize: "0.8rem", color: "var(--muted)" }}>Click to view details & manage KPI rights</p>
               </div>

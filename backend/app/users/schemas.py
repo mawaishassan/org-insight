@@ -59,8 +59,11 @@ class UserUpdate(BaseModel):
     password: str | None = None
     role: UserRole | None = None
     is_active: bool | None = None
+    is_external: bool | None = None
     unique_user_key: str | None = None
     force_password_reset: bool | None = None
+    description: str | None = None
+    default_dashboard_id: int | None = None
     kpi_ids: list[int] | None = Field(None, description="Legacy: replace with data_entry")
     kpi_assignments: list[UserKpiAssignment] | None = Field(
         None,
@@ -86,6 +89,7 @@ class UserResponse(BaseModel):
     password_reset_requested_at: datetime | None = None
     password_reset_completed_at: datetime | None = None
     reset_status: str | None = None
+    default_dashboard_id: int | None = None
 
     class Config:
         from_attributes = True

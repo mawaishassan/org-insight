@@ -177,6 +177,13 @@ def invalidate_all_widget_caches() -> int:
     return _widget_cache.invalidate_all()
 
 
+def invalidate_auth_cache() -> int:
+    """Clear the process-level auth LRU cache. Must be called after any permission change."""
+    cnt = len(_auth_cache._cache)
+    _auth_cache._cache.clear()
+    return cnt
+
+
 async def _get_org(db: AsyncSession, org_id: int) -> Organization | None:
     cache_key = ("org", int(org_id))
     if cache_key in db.info:
@@ -853,9 +860,22 @@ async def resolve_dashboard_chart_widget_data_batch(
                     if sk:
                         formula_sub_keys.add(str(sk))
         has_runtime_filter = bool(col_filter or norm_filters)
-        # Only fall back to Python when the formula field IS the aggregation/grouping target.
-        # KPIs that have formula subfields but aren't grouping on them can use SQL path safely.
-        needs_dynamic_recalc = has_runtime_filter and bool(formula_sub_keys) and (
+        kpi_auto_compute = True
+        target_kpi_id = kpi_id or getattr(f_full, "kpi_id", None)
+        if target_kpi_id:
+            cache_key = f"kpi_auto_compute_{target_kpi_id}"
+            if hasattr(db, "info") and cache_key in db.info:
+                kpi_auto_compute = db.info[cache_key]
+            else:
+                k_row = (await db.execute(select(KPI.auto_compute_formulas).where(KPI.id == int(target_kpi_id)))).first()
+                if k_row is not None:
+                    kpi_auto_compute = bool(k_row[0])
+                if hasattr(db, "info"):
+                    db.info[cache_key] = kpi_auto_compute
+
+        # Only fall back to Python when the formula field IS the aggregation/grouping target and auto_compute is enabled.
+        # KPIs that have formula subfields but aren't grouping on them (or have auto_compute disabled) can use SQL path safely.
+        needs_dynamic_recalc = kpi_auto_compute and has_runtime_filter and bool(formula_sub_keys) and (
             group_key in formula_sub_keys or val_key in formula_sub_keys
         )
 
@@ -1856,6 +1876,23 @@ async def recalculate_multi_line_rows_formulas(
     if not rows:
         return rows
 
+    # If the KPI has auto_compute_formulas disabled, treat stored MLI data as normal/final data without recalculating.
+    auto_compute = True
+    target_kpi_id = getattr(field, "kpi_id", None)
+    if target_kpi_id:
+        cache_key = f"kpi_auto_compute_{target_kpi_id}"
+        if hasattr(db, "info") and cache_key in db.info:
+            auto_compute = db.info[cache_key]
+        else:
+            k_row = (await db.execute(select(KPI.auto_compute_formulas).where(KPI.id == int(target_kpi_id)))).first()
+            if k_row is not None:
+                auto_compute = bool(k_row[0])
+            if hasattr(db, "info"):
+                db.info[cache_key] = auto_compute
+
+    if not auto_compute:
+        return rows
+
     sub_fields = list(getattr(field, "sub_fields", None) or [])
     if not sub_fields:
         sres = await db.execute(select(KPIFieldSubField).where(KPIFieldSubField.field_id == field.id))
@@ -2142,7 +2179,15 @@ async def _kpi_bar_chart_payload(
                         logger.error("Failed to sync joined KPI in _kpi_bar_chart_payload: %s", ex)
             e_rev = revision_for_parts(eid, e_ts)
         is_admin_user = user and user.role.value in ("ORG_ADMIN", "SUPER_ADMIN") if user and getattr(user, "role", None) else False
-        u_key = (getattr(user, "unique_user_key", None) or "").strip() if not is_admin_user and user else None
+        can_use_unique_val = True
+        d_id_val = w.get("dashboard_id") or w.get("__dashboard_id")
+        if d_id_val and user and not is_admin_user:
+            try:
+                _, u_perms = await _get_dashboard_user_filter_and_permissions(db, user, int(d_id_val))
+                can_use_unique_val = u_perms.get("can_use_unique_value", False)
+            except Exception:
+                can_use_unique_val = False
+        u_key = (getattr(user, "unique_user_key", None) or "").strip() if not is_admin_user and user and can_use_unique_val else None
         source_key = (w.get("source_field_key") or "").strip()
         f_obj = next((f for f in fields if f.key == source_key and f.field_type == FieldType.multi_line_items), None)
         if not f_obj or not eid:
@@ -2195,10 +2240,23 @@ async def _kpi_bar_chart_payload(
                     if sk:
                         formula_sub_keys.add(str(sk))
             has_runtime_filter = bool(col_filter or norm_filters)
-            # Only fall back to Python when the formula field IS the aggregation target.
-            # If formula subfields exist but are not being grouped/valued on,
+            kpi_auto_compute = True
+            target_kpi_id = kpi_id or getattr(f_full, "kpi_id", None)
+            if target_kpi_id:
+                cache_key = f"kpi_auto_compute_{target_kpi_id}"
+                if hasattr(db, "info") and cache_key in db.info:
+                    kpi_auto_compute = db.info[cache_key]
+                else:
+                    k_row = (await db.execute(select(KPI.auto_compute_formulas).where(KPI.id == int(target_kpi_id)))).first()
+                    if k_row is not None:
+                        kpi_auto_compute = bool(k_row[0])
+                    if hasattr(db, "info"):
+                        db.info[cache_key] = kpi_auto_compute
+
+            # Only fall back to Python when the formula field IS the aggregation target and auto_compute is enabled.
+            # If formula subfields exist but are not being grouped/valued on (or auto_compute is disabled),
             # SQL aggregation works fine on the stored (already-computed) values.
-            needs_dynamic_recalc = has_runtime_filter and bool(formula_sub_keys) and (
+            needs_dynamic_recalc = kpi_auto_compute and has_runtime_filter and bool(formula_sub_keys) and (
                 group_key in formula_sub_keys or val_key in formula_sub_keys
             )
             if needs_dynamic_recalc:
@@ -3076,10 +3134,27 @@ async def evaluate_kpi_scalar_formula_field(
         isinstance(f.config, dict) and (f.config.get("is_formula") or f.config.get("formula_expression"))
     )
 
-    if not is_formula:
-        if eid and not isinstance(eid, list):
+    # If the KPI has auto_compute_formulas disabled, return the stored DB cell value directly without recalculating.
+    auto_compute = True
+    target_kpi_id = kpi_id or getattr(f, "kpi_id", None)
+    if hasattr(f, "__dict__") and "kpi" in f.__dict__ and f.__dict__["kpi"] is not None:
+        auto_compute = bool(getattr(f.__dict__["kpi"], "auto_compute_formulas", True))
+    elif target_kpi_id:
+        cache_key = f"kpi_auto_compute_{target_kpi_id}"
+        if hasattr(db, "info") and cache_key in db.info:
+            auto_compute = db.info[cache_key]
+        else:
+            k_row = (await db.execute(select(KPI.auto_compute_formulas).where(KPI.id == int(target_kpi_id)))).first()
+            if k_row is not None:
+                auto_compute = bool(k_row[0])
+            if hasattr(db, "info"):
+                db.info[cache_key] = auto_compute
+
+    if not is_formula or not auto_compute:
+        target_eid = eid[0] if isinstance(eid, list) and eid else eid
+        if target_eid and not isinstance(target_eid, list):
             fvm = await get_field_values_for_field_ids(
-                db, entry_id=int(eid), field_ids=[int(f.id)], current_user_id=user.id if user else None
+                db, entry_id=int(target_eid), field_ids=[int(f.id)], current_user_id=user.id if user else None
             )
             return raw_field_from_fv_map(fvm, int(f.id))
         return None
@@ -3258,7 +3333,7 @@ async def evaluate_kpi_scalar_formula_field(
                 )
                 rows = [d for _i, d in pairs if isinstance(d, dict)]
             else:
-                kpi_for_fld = getattr(fld, "kpi", None)
+                kpi_for_fld = fld.__dict__.get("kpi") if hasattr(fld, "__dict__") and "kpi" in fld.__dict__ else None
                 if kpi_for_fld is None and getattr(fld, "kpi_id", None):
                     kpi_res = await db.execute(select(KPI).where(KPI.id == fld.kpi_id))
                     kpi_for_fld = kpi_res.scalar_one_or_none()
@@ -4808,8 +4883,10 @@ async def resolve_dashboard_widget_drill_down(
         "header_font_size": getattr(header_obj, "font_size", 18) if header_obj else 18,
         "header_text_color": (getattr(header_obj, "text_color", None) or "#1e3a8a") if header_obj else "#1e3a8a",
         "header_text_align": (getattr(header_obj, "text_align", None) or "center") if header_obj else "center",
+        "header_sub_font_family": getattr(header_obj, "sub_font_family", None) if header_obj else None,
         "header_sub_font_size": getattr(header_obj, "sub_font_size", 11) if header_obj else 11,
         "header_sub_text_color": (getattr(header_obj, "sub_text_color", None) or "#4b5563") if header_obj else "#4b5563",
+        "header_sub_text_align": (getattr(header_obj, "sub_text_align", None) or getattr(header_obj, "text_align", None) or "center") if header_obj else "center",
         "header_kpi_name_color": (getattr(header_obj, "kpi_name_color", None) or "#1e3a8a") if header_obj else "#1e3a8a",
         "logo_url": f"/reports/headers/{header_id}/logo" if (header_obj and header_obj.logo_path) else None,
         "logo2_url": f"/reports/headers/{header_id}/logo2" if (header_obj and getattr(header_obj, "logo_path_2", None)) else None,
@@ -4859,6 +4936,9 @@ async def resolve_dashboard_widget_drill_down(
                 entry_ids = [latest_eid]
 
     configured_cols = [str(x) for x in (merged.get("linked_table_columns") or []) if str(x).strip()]
+    custom_labels = merged.get("linked_table_column_labels") or {}
+    if not isinstance(custom_labels, dict):
+        custom_labels = {}
     sub_fields = f_obj.sub_fields or []
     sf_by_key = {str(getattr(sf, "key", "")): sf for sf in sub_fields if getattr(sf, "key", None)}
     if not configured_cols:
@@ -4871,7 +4951,7 @@ async def resolve_dashboard_widget_drill_down(
     columns = [
         {
             "key": k,
-            "name": sf_by_key[k].name or k,
+            "name": str(custom_labels.get(k) or sf_by_key[k].name or k).strip(),
             "field_type": str(getattr(getattr(sf_by_key[k], "field_type", None), "value", getattr(sf_by_key[k], "field_type", "")) or "text"),
         }
         for k in visible_keys
@@ -4931,11 +5011,13 @@ async def resolve_dashboard_widget_drill_down(
 
     # 1. Fetch user-scoped dashboard filters and permissions
     user_filters: dict[str, list[str]] = {}
+    user_perms: dict[str, bool] = {}
     if dashboard_id and user:
         try:
-            user_filters, _ = await _get_dashboard_user_filter_and_permissions(db, user, int(dashboard_id))
+            user_filters, user_perms = await _get_dashboard_user_filter_and_permissions(db, user, int(dashboard_id))
         except Exception:
             user_filters = {}
+            user_perms = {}
 
     normal_filters = dict((overrides or {}).get("normal_filters") or (overrides or {}).get("dashboard_filters") or {})
 
@@ -4962,10 +5044,11 @@ async def resolve_dashboard_widget_drill_down(
             if target_k not in normal_filters:
                 normal_filters[target_k] = fvals
 
-    # Also check if user is not admin and has unique_user_key (e.g. department)
+    # Also check if user is not admin and unique_key restriction is active for this user on this dashboard
     role_val = str(getattr(user.role, "value", user.role) or "").upper() if user and getattr(user, "role", None) else ""
     is_admin = role_val in ("ORG_ADMIN", "SUPER_ADMIN")
-    u_key = (getattr(user, "unique_user_key", None) or "").strip() if not is_admin and user else None
+    can_use_unique_val = user_perms.get("can_use_unique_value", False) if user_perms else False
+    u_key = (getattr(user, "unique_user_key", None) or "").strip() if not is_admin and user and can_use_unique_val else None
     if u_key:
         dept_sf = _find_dept_or_user_key_subfield(sub_fields)
         if dept_sf and dept_sf.key not in normal_filters:
@@ -5875,48 +5958,64 @@ async def _get_dashboard_user_filter_and_permissions(
         if role_str in ("SUPER_ADMIN", "ORG_ADMIN"):
             return {}, {"can_load_lms": True, "can_change_period": True, "can_use_unique_value": True}
 
-        cache_key = ("dashboard_perm_user_filter", int(dashboard_id), int(user.id))
+        u_key = str(getattr(user, "unique_user_key", "") or "").strip()
+        cache_key = ("dashboard_perm_user_filter", int(dashboard_id), int(user.id), u_key)
         if cache_key in db.info:
             return db.info[cache_key]
 
-        res = await db.execute(
-            select(DashboardAccessPermission).where(
-                DashboardAccessPermission.dashboard_id == dashboard_id,
-                DashboardAccessPermission.user_id == user.id,
-            )
-        )
-        perm = res.scalar_one_or_none()
-        if not perm:
-            res_tuple = ({}, {"can_load_lms": True, "can_change_period": True, "can_use_unique_value": False})
+        from app.core.access_resolver import resolve_effective_user_access
+        eff = await resolve_effective_user_access(db, user, "dashboard", dashboard_id)
+
+        if not eff.is_active or not eff.can_view:
+            res_tuple = ({"__IMPOSSIBLE_KEY__": ["__DENIED__"]}, {"can_load_lms": False, "can_change_period": False, "can_use_unique_value": False})
             db.info[cache_key] = res_tuple
             return res_tuple
 
         permissions = {
-            "can_load_lms": getattr(perm, "can_load_lms", True),
-            "can_change_period": getattr(perm, "can_change_period", True),
-            "can_use_unique_value": getattr(perm, "can_use_unique_value", False),
+            "can_load_lms": eff.can_load_lms,
+            "can_change_period": eff.can_change_period,
+            "can_use_unique_value": eff.access_type == "unique_key",
         }
 
         user_filters: dict[str, list[str]] = {}
-        if getattr(perm, "can_use_unique_value", False) and getattr(user, "unique_user_key", None):
-            val = str(user.unique_user_key).strip()
-            if val:
-                cfg = getattr(perm, "filter_column_configs", None)
+        if eff.access_type == "unique_key":
+            val = eff.user_unique_key
+            if not val or not eff.is_satisfiable:
+                # FAIL CLOSED: User is configured for Unique Key access but has no key assigned
+                user_filters = {"__IMPOSSIBLE_KEY__": ["__DENIED__"]}
+            else:
+                cfg = eff.filter_column_configs
                 if cfg and isinstance(cfg, dict):
                     for _k, sub_k in cfg.items():
                         if sub_k and str(sub_k).strip():
                             user_filters[str(sub_k).strip()] = [val]
 
-                if getattr(perm, "filter_sub_field_key", None):
-                    k = str(perm.filter_sub_field_key).strip()
+                if eff.filter_sub_field_key:
+                    k = str(eff.filter_sub_field_key).strip()
                     if k and k not in user_filters:
                         user_filters[k] = [val]
+
+                if not user_filters:
+                    try:
+                        from app.access_management import get_dashboard_filterable_columns
+                        cols = await get_dashboard_filterable_columns(db, dashboard_id, user.organization_id)
+                        for col in cols:
+                            sub_k = col.get("sub_field_key")
+                            if sub_k and str(sub_k).strip():
+                                user_filters[str(sub_k).strip()] = [val]
+                    except Exception as err:
+                        logger.warning(f"Auto-discovery fallback for dashboard_id={dashboard_id} filterable columns failed: {err}")
+
+                if not user_filters:
+                    # FAIL CLOSED: No filterable column could be mapped for Unique Key access mode
+                    user_filters = {"__IMPOSSIBLE_KEY__": ["__DENIED__"]}
 
         res_tuple = (user_filters, permissions)
         db.info[cache_key] = res_tuple
         return res_tuple
-    except Exception:
-        return {}, {"can_load_lms": True, "can_change_period": True, "can_use_unique_value": False}
+    except Exception as err:
+        logger.warning(f"_get_dashboard_user_filter_and_permissions error: {err}")
+        return {"__IMPOSSIBLE_KEY__": ["__DENIED__"]}, {"can_load_lms": False, "can_change_period": False, "can_use_unique_value": False}
 
 
 async def resolve_dashboard_universal_batch(

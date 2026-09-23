@@ -17,6 +17,7 @@ export interface UserRow {
   password_reset_requested_at?: string | null;
   password_reset_completed_at?: string | null;
   reset_status?: string | null;
+  default_dashboard_id?: number | null;
 }
 
 export interface KpiOption {

@@ -28,6 +28,9 @@ from app.widget_data.routes import router as widget_data_router
 from app.entries.mli_extraction_routes import router as mli_extraction_router
 from app.users.password_reset_routes import router as password_reset_router
 
+from app.access_management import access_management_router
+from app.activity_log import activity_log_router
+
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,8 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(org_router, prefix="/api")
 app.include_router(password_reset_router, prefix="/api")
 app.include_router(users_router, prefix="/api")
+app.include_router(access_management_router, prefix="/api")
+app.include_router(activity_log_router, prefix="/api")
 app.include_router(domains_router, prefix="/api")
 app.include_router(categories_router, prefix="/api")
 app.include_router(kpis_router, prefix="/api")

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api, getApiUrl } from "@/lib/api";
 import toast from "react-hot-toast";
@@ -9,7 +10,7 @@ import { generatePeriodOptions } from "@/lib/periodHelpers";
 import { downloadBlob } from "@/lib/download";
 import {
   buildReportPrintDocument,
-  openReportPrintWindow,
+  printReportDocument,
   type ReportData,
 } from "@/app/dashboard/reports/reportPrint";
 
@@ -19,22 +20,23 @@ interface TemplateRow {
   group_id?: number | null;
   name: string;
   description: string | null;
-  fetch_data_with_date?: boolean;
+  can_view?: boolean;
+  can_print?: boolean;
+  can_export?: boolean;
+  can_download_word?: boolean;
   can_change_period?: boolean;
-  date_fetching_config?: {
-    default_period_type?: string;
-    default_period?: string;
-    period_type?: string;
-    period?: string;
-    [key: string]: any;
-  } | null;
+  can_load_lms?: boolean;
+  fetch_data_with_date?: boolean;
+  date_fetching_config?: any;
+  show_odoo_button?: boolean;
+  is_active?: boolean;
 }
 
 interface CustomReportGroup {
   id: number;
   organization_id: number;
   name: string;
-  sort_order: number;
+  display_order: number;
 }
 
 function qs(params: Record<string, string | number | undefined>) {
@@ -45,6 +47,10 @@ function qs(params: Record<string, string | number | undefined>) {
 }
 
 export default function ReportsPage() {
+  const searchParams = useSearchParams();
+  const orgIdParam = searchParams?.get("organization_id");
+  const queryOrgId = orgIdParam ? Number(orgIdParam) : null;
+
   const [list, setList] = useState<TemplateRow[]>([]);
   const [customList, setCustomList] = useState<TemplateRow[]>([]);
   const [groups, setGroups] = useState<CustomReportGroup[]>([]);
@@ -75,6 +81,8 @@ export default function ReportsPage() {
   const [selectedPeriod, setSelectedPeriod] = useState<string>("by_default");
   const [generateLoading, setGenerateLoading] = useState(false);
   const [generateStep, setGenerateStep] = useState<string>("");
+  const [syncingReportId, setSyncingReportId] = useState<number | null>(null);
+  const [printingReportId, setPrintingReportId] = useState<number | null>(null);
 
   const isSuperAdmin = userRole === "SUPER_ADMIN";
   const isOrgAdmin = userRole === "ORG_ADMIN";
@@ -124,7 +132,7 @@ export default function ReportsPage() {
         token: authToken,
       });
       setList((prev) => prev.filter((x) => x.id !== t.id));
-      toast.success("Template deleted successfully");
+      toast.success("Report template deleted");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete report");
       toast.error(err instanceof Error ? err.message : "Failed to delete report");
@@ -137,10 +145,13 @@ export default function ReportsPage() {
     if (!token) return;
 
     setLoading(true);
+    const effectiveOrgId = queryOrgId ?? organizationId;
+    const orgQuery = effectiveOrgId ? `?organization_id=${effectiveOrgId}` : "";
+
     Promise.all([
-      api<TemplateRow[]>("/reports/templates", { token }).catch(() => []),
-      api<TemplateRow[]>("/custom-reports", { token }).catch(() => []),
-      api<CustomReportGroup[]>("/custom-report-groups", { token }).catch(() => []),
+      api<TemplateRow[]>(`/reports/templates${orgQuery}`, { token }).catch(() => []),
+      api<TemplateRow[]>(`/custom-reports${orgQuery}`, { token }).catch(() => []),
+      api<CustomReportGroup[]>(`/custom-report-groups${orgQuery}`, { token }).catch(() => []),
       api<{ role: string; organization_id: number | null }>("/auth/me", { token }).catch(() => null),
     ])
       .then(([templates, customs, reportGroups, me]) => {
@@ -154,7 +165,7 @@ export default function ReportsPage() {
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load reports"))
       .finally(() => setLoading(false));
-  }, []);
+  }, [queryOrgId, organizationId]);
 
   const openAddModal = () => {
     setAddName("");
@@ -290,26 +301,9 @@ export default function ReportsPage() {
       return;
     }
 
-    // Pre-open pop-up window synchronously to bypass browser pop-up blocker
-    const printWin = typeof window !== "undefined" ? window.open("", "_blank") : null;
-    if (printWin) {
-      printWin.document.write(`
-        <!DOCTYPE html>
-        <html>
-          <head><title>Generating Report...</title></head>
-          <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f8fafc; color: #475569;">
-            <div style="text-align: center;">
-              <h3 style="font-size: 1.25rem; margin-bottom: 0.5rem; color: #1e293b;">Generating PDF Report...</h3>
-              <p style="font-size: 0.9rem; margin: 0; color: #64748b;">Please wait while the report data is fetched and formatted.</p>
-            </div>
-          </body>
-        </html>
-      `);
-    }
+    setPrintingReportId(active.id);
+    const toastId = toast.loading("Preparing print layout...");
 
-    setGenerateLoading(true);
-    setGenerateStep("Accessing report database...");
-    
     const pType = periodTypeOverride || selectedPeriodType || "by_default";
     const yr = periodOverride || selectedPeriod || String(new Date().getFullYear());
     const isByDefault = pType === "by_default";
@@ -319,41 +313,16 @@ export default function ReportsPage() {
     }
 
     try {
-      setGenerateStep("Compiling formulas...");
       const res = await api<ReportData>(url, { token, cache: "no-store" });
-      setGenerateStep("Finalizing print layout...");
       const doc = buildReportPrintDocument(res);
-
-      if (printWin && !printWin.closed) {
-        printWin.document.open();
-        printWin.document.write(doc);
-        printWin.document.close();
-        setTimeout(() => {
-          try {
-            printWin.focus();
-            printWin.print();
-          } catch (err) {
-            console.error("Print error", err);
-          }
-        }, 250);
-        toast.success("PDF/Print layout generated successfully");
-      } else {
-        const opened = openReportPrintWindow(doc, true);
-        if (!opened) {
-          toast.error("Pop-up was blocked. Allow pop-ups for this site to view the PDF/Print layout.");
-        } else {
-          toast.success("PDF/Print layout generated successfully");
-        }
-      }
+      await printReportDocument(doc);
+      toast.success("Ready to print", { id: toastId });
       setGenModalOpen(false);
     } catch (e) {
-      if (printWin && !printWin.closed) {
-        printWin.close();
-      }
-      toast.error(e instanceof Error ? e.message : "Failed to generate report");
+      toast.error(e instanceof Error ? e.message : "Failed to generate report", { id: toastId });
       setGenModalOpen(false);
     } finally {
-      setGenerateLoading(false);
+      setPrintingReportId(null);
     }
   };
 
@@ -409,11 +378,98 @@ export default function ReportsPage() {
     }
   };
 
+  const handlePrintCustomReport = async (
+    reportOverride?: TemplateRow,
+    periodTypeOverride?: string,
+    periodOverride?: string
+  ) => {
+    const token = getAccessToken();
+    const active = reportOverride || activeReport;
+    if (!token || !active) {
+      toast.error("Unable to print report: Missing session or active report configuration");
+      return;
+    }
+
+    setPrintingReportId(active.id);
+    const toastId = toast.loading("Preparing print layout...");
+
+    const pType = periodTypeOverride || selectedPeriodType || "by_default";
+    const isByDefault = pType === "by_default" || !active.fetch_data_with_date;
+    const yr = isByDefault
+      ? (periodOverride || (selectedPeriod && selectedPeriod !== "by_default" ? selectedPeriod : String(new Date().getFullYear())))
+      : (periodOverride || selectedPeriod || String(new Date().getFullYear()));
+    const targetOrgId = active.organization_id || organizationId;
+
+    let url = `/custom-reports/${active.id}/generate?preview=false&year=${encodeURIComponent(yr)}${
+      isByDefault ? "&by_default=true" : `&period_type=${encodeURIComponent(pType)}`
+    }&_t=${Date.now()}`;
+    if (targetOrgId) {
+      url += `&organization_id=${targetOrgId}`;
+    }
+
+    try {
+      const res = await api<any>(url, { token, cache: "no-store" });
+      const reportData: ReportData = {
+        template_name: res.custom_report_name || res.name || active.name || "Custom Report",
+        template_id: res.custom_report_id || active.id,
+        year: Number(res.year) || Number(yr) || new Date().getFullYear(),
+        rendered_html: res.rendered_html,
+        kpis: [],
+      };
+      const doc = buildReportPrintDocument(reportData);
+      await printReportDocument(doc);
+      toast.success("Ready to print", { id: toastId });
+      setGenModalOpen(false);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to generate custom report print layout", { id: toastId });
+      setGenModalOpen(false);
+    } finally {
+      setPrintingReportId(null);
+    }
+  };
+
   const handleGenerateClick = () => {
     if (activeReportType === "custom") {
       void handleDownloadCustomReport();
     } else {
       void handleGenerateReport();
+    }
+  };
+
+  const hasReportDialogPermissions = (t: TemplateRow | null, adminCheck: boolean) => {
+    if (!t) return false;
+    const isCustom = activeReportType === "custom";
+    const dateEnabled = !isCustom || Boolean(t.fetch_data_with_date);
+    const canPeriod = (adminCheck || Boolean(t.can_change_period)) && dateEnabled;
+    const canExcel = adminCheck || Boolean(t.can_export);
+    const canWord = adminCheck || Boolean(t.can_download_word);
+    return Boolean(canPeriod || canExcel || canWord);
+  };
+
+  const handleLmsSync = async (t: TemplateRow, type: "standard" | "custom") => {
+    const token = getAccessToken();
+    if (!token) return;
+    setSyncingReportId(t.id);
+    try {
+      const yr = String(new Date().getFullYear());
+      const targetOrgId = t.organization_id || organizationId;
+      if (type === "custom") {
+        const res = await api<any>(`/custom-reports/${t.id}/sync-odoo?year=${yr}&organization_id=${targetOrgId}`, {
+          method: "POST",
+          token,
+        });
+        toast.success(res.message || "LMS synchronization completed successfully!");
+      } else {
+        const res = await api<any>(`/reports/templates/${t.id}/sync-odoo?year=${yr}&organization_id=${targetOrgId}`, {
+          method: "POST",
+          token,
+        });
+        toast.success(res.message || "LMS synchronization completed successfully!");
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "LMS synchronization failed");
+    } finally {
+      setSyncingReportId(null);
     }
   };
 
@@ -443,14 +499,15 @@ export default function ReportsPage() {
 
     setSelectedPeriodType(resolvedPeriodType);
     setSelectedPeriod(resolvedPeriod);
-    setGenerateLoading(false);
-    setGenerateStep("");
 
-    // For end-users, if the report does not require selecting a date period, immediately start downloading PDF
-    if (!isAdmin && (!t.fetch_data_with_date || t.can_change_period === false)) {
+    const needsDialog = hasReportDialogPermissions(t, isAdmin);
+    if (!needsDialog) {
       setGenModalOpen(true);
+      setGenerateLoading(true);
       void handleDownloadCustomReport(t, "pdf", resolvedPeriodType, resolvedPeriod);
     } else {
+      setGenerateLoading(false);
+      setGenerateStep("");
       setGenModalOpen(true);
     }
   };
@@ -463,6 +520,7 @@ export default function ReportsPage() {
 
     setActiveReport(t);
     setActiveReportType(type);
+    setSelectedFormat("pdf");
 
     const config = t.date_fetching_config;
     const adminPeriodType = config?.default_period_type || config?.period_type;
@@ -477,13 +535,15 @@ export default function ReportsPage() {
 
     setSelectedPeriodType(resolvedPeriodType);
     setSelectedPeriod(resolvedPeriod);
-    setGenerateLoading(false);
-    setGenerateStep("");
 
-    if (t.can_change_period === false) {
+    const needsDialog = hasReportDialogPermissions(t, isAdmin);
+    if (!needsDialog) {
       setGenModalOpen(true);
+      setGenerateLoading(true);
       void handleGenerateReport(t, resolvedPeriodType, resolvedPeriod);
     } else {
+      setGenerateLoading(false);
+      setGenerateStep("");
       setGenModalOpen(true);
     }
   };
@@ -509,7 +569,12 @@ export default function ReportsPage() {
     if (!genModalOpen || !activeReport) return null;
 
     const isCustom = activeReportType === "custom";
-    const dateFetchingEnabled = isCustom && !!activeReport.fetch_data_with_date;
+    const dateFetchingEnabled = !isCustom || Boolean(activeReport.fetch_data_with_date);
+    const canChangePeriod = (isAdmin || Boolean(activeReport.can_change_period)) && dateFetchingEnabled;
+    const canExcel = isAdmin || Boolean(activeReport.can_export);
+    const canWord = isAdmin || Boolean(activeReport.can_download_word);
+    const canPrint = isAdmin || Boolean(activeReport.can_print);
+    const showFormatOptions = canExcel || canWord;
 
     return (
       <div
@@ -547,12 +612,12 @@ export default function ReportsPage() {
           onClick={(e) => e.stopPropagation()}
         >
           {generateLoading ? (
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "2.5rem 0", textAlign: "center" }}>
-              <div style={{ position: "relative", width: "64px", height: "64px", marginBottom: "1.25rem" }}>
-                <div style={{ position: "absolute", width: "100%", height: "100%", border: "4px solid var(--border)", borderRadius: "50%" }}></div>
-                <div style={{ position: "absolute", width: "100%", height: "100%", border: "4px solid transparent", borderTopColor: "var(--primary)", borderRadius: "50%", animation: "spin 1s linear infinite" }}></div>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "3rem 1.5rem", textAlign: "center" }}>
+              <div style={{ position: "relative", width: "64px", height: "64px", marginBottom: "1.5rem" }}>
+                <div style={{ position: "absolute", inset: 0, border: "4px solid #e2e8f0", borderRadius: "50%" }}></div>
+                <div style={{ position: "absolute", inset: 0, border: "4px solid transparent", borderTopColor: "#2563eb", borderRadius: "50%", animation: "spin 1s linear infinite" }}></div>
               </div>
-              <h4 style={{ margin: 0, fontSize: "1.3rem", fontWeight: 700, color: "#0f172a" }}>
+              <h4 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 700, color: "#0f172a", letterSpacing: "-0.01em" }}>
                 {isCustom ? `Downloading ${selectedFormat.toUpperCase()} Report` : "Generating Report"}
               </h4>
               <style>{`
@@ -566,140 +631,121 @@ export default function ReportsPage() {
             <>
               <div>
                 <h3 style={{ margin: "0 0 0.4rem 0", fontSize: "1.35rem", fontWeight: 700, color: "#0f172a" }}>
-                  Generate PDF Report
+                  Download Report
                 </h3>
                 <p style={{ color: "#475569", fontSize: "0.95rem", margin: "0 0 1.5rem 0", lineHeight: "1.5" }}>
-                  Select reporting period parameters for{" "}
+                  Select reporting options for{" "}
                   <strong style={{ color: "#1e3a8a", fontWeight: 700 }}>{activeReport.name}</strong>.
                 </p>
               </div>
 
-              {/* Reporting Period */}
-              <div style={{ marginBottom: "1.25rem" }}>
-                <label style={{ display: "block", marginBottom: "0.45rem", fontWeight: 600, fontSize: "0.95rem", color: "#0f172a" }}>
-                  Reporting Period *
-                </label>
-                <select
-                  value={selectedPeriodType}
-                  onChange={(e) => setSelectedPeriodType(e.target.value)}
-                  style={{
-                    width: "100%",
-                    padding: "0.65rem 0.85rem",
-                    background: "#ffffff",
-                    border: "1.5px solid #cbd5e1",
-                    borderRadius: "8px",
-                    fontSize: "0.95rem",
-                    color: "#0f172a",
-                    outline: "none",
-                    boxSizing: "border-box",
-                  }}
-                >
-                  <option value="by_default">Fiscal Year</option>
-                  {customPeriods.map((cp: any) => (
-                    <option key={cp.custom_period_name} value={cp.custom_period_name}>
-                      {cp.custom_period_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Period Controls (Only shown if Can Change Period or Admin) */}
+              {canChangePeriod && (
+                <>
+                  <div style={{ marginBottom: "1.25rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.45rem", fontWeight: 600, fontSize: "0.95rem", color: "#0f172a" }}>
+                      Period Type
+                    </label>
+                    <select
+                      value={selectedPeriodType}
+                      onChange={(e) => setSelectedPeriodType(e.target.value)}
+                      style={{
+                        width: "100%",
+                        padding: "0.65rem 0.85rem",
+                        background: "#ffffff",
+                        border: "1.5px solid #cbd5e1",
+                        borderRadius: "8px",
+                        fontSize: "0.95rem",
+                        color: "#0f172a",
+                        outline: "none",
+                        boxSizing: "border-box",
+                      }}
+                    >
+                      <option value="by_default">Data Entry</option>
+                      {customPeriods.map((cp: any) => (
+                        <option key={cp.custom_period_name} value={cp.custom_period_name}>
+                          {cp.custom_period_name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-              {/* Reporting Time */}
-              <div style={{ marginBottom: "1.5rem" }}>
-                <label style={{ display: "block", marginBottom: "0.45rem", fontWeight: 600, fontSize: "0.95rem", color: "#0f172a" }}>
-                  Reporting Time *
-                </label>
-                <select
-                  value={selectedPeriod}
-                  onChange={(e) => setSelectedPeriod(e.target.value)}
-                  style={{
-                    width: "100%",
-                    padding: "0.65rem 0.85rem",
-                    background: "#ffffff",
-                    border: "1.5px solid #cbd5e1",
-                    borderRadius: "8px",
-                    fontSize: "0.95rem",
-                    color: "#0f172a",
-                    outline: "none",
-                    boxSizing: "border-box",
-                  }}
-                >
-                  {activePeriodOptions.length > 0 ? (
-                    activePeriodOptions.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))
-                  ) : (
-                    <option value={String(new Date().getFullYear())}>
-                      {new Date().getFullYear()}/{String(new Date().getFullYear() + 1).slice(-2)}
-                    </option>
-                  )}
-                </select>
-              </div>
+                  <div style={{ marginBottom: "1.5rem" }}>
+                    <label style={{ display: "block", marginBottom: "0.45rem", fontWeight: 600, fontSize: "0.95rem", color: "#0f172a" }}>
+                      Reporting Period
+                    </label>
+                    <select
+                      value={selectedPeriod}
+                      onChange={(e) => setSelectedPeriod(e.target.value)}
+                      style={{
+                        width: "100%",
+                        padding: "0.65rem 0.85rem",
+                        background: "#ffffff",
+                        border: "1.5px solid #cbd5e1",
+                        borderRadius: "8px",
+                        fontSize: "0.95rem",
+                        color: "#0f172a",
+                        outline: "none",
+                        boxSizing: "border-box",
+                      }}
+                    >
+                      {activePeriodOptions.length > 0 ? (
+                        activePeriodOptions.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))
+                      ) : (
+                        <option value={String(new Date().getFullYear())}>
+                          {new Date().getFullYear()}/{String(new Date().getFullYear() + 1).slice(-2)}
+                        </option>
+                      )}
+                    </select>
+                  </div>
+                </>
+              )}
 
-              {/* Format Selection for Custom Reports: PDF, Excel, Word - Org Admin and Super Admin ONLY */}
-              {isCustom && canManageAssignments && (
+              {/* Format Selection (Clean Radio Options, NO ICONS) */}
+              {showFormatOptions && (
                 <div style={{ marginBottom: "1.5rem" }}>
-                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, fontSize: "0.9rem", color: "#1e293b" }}>
-                    Choose Format (PDF, Excel, Word) *
+                  <label style={{ display: "block", marginBottom: "0.5rem", fontWeight: 600, fontSize: "0.95rem", color: "#0f172a" }}>
+                    Download Format
                   </label>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0.65rem" }}>
-                    {/* PDF Card */}
-                    <div
-                      onClick={() => setSelectedFormat("pdf")}
-                      style={{
-                        padding: "0.85rem 0.5rem",
-                        borderRadius: "10px",
-                        border: selectedFormat === "pdf" ? "2px solid #ef4444" : "1px solid #e2e8f0",
-                        background: selectedFormat === "pdf" ? "rgba(239, 68, 68, 0.05)" : "#ffffff",
-                        cursor: "pointer",
-                        textAlign: "center",
-                        transition: "all 0.15s ease",
-                        boxShadow: selectedFormat === "pdf" ? "0 2px 8px rgba(239, 68, 68, 0.15)" : "none",
-                      }}
-                    >
-                      <div style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>📄</div>
-                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "pdf" ? "#b91c1c" : "#1e293b" }}>PDF</div>
-                      <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Document</div>
-                    </div>
-
-                    {/* Excel Card */}
-                    <div
-                      onClick={() => setSelectedFormat("xlsx")}
-                      style={{
-                        padding: "0.85rem 0.5rem",
-                        borderRadius: "10px",
-                        border: selectedFormat === "xlsx" ? "2px solid #10b981" : "1px solid #e2e8f0",
-                        background: selectedFormat === "xlsx" ? "rgba(16, 185, 129, 0.05)" : "#ffffff",
-                        cursor: "pointer",
-                        textAlign: "center",
-                        transition: "all 0.15s ease",
-                        boxShadow: selectedFormat === "xlsx" ? "0 2px 8px rgba(16, 185, 129, 0.15)" : "none",
-                      }}
-                    >
-                      <div style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>📊</div>
-                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "xlsx" ? "#047857" : "#1e293b" }}>Excel</div>
-                      <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Spreadsheet</div>
-                    </div>
-
-                    {/* Word Card */}
-                    <div
-                      onClick={() => setSelectedFormat("docx")}
-                      style={{
-                        padding: "0.85rem 0.5rem",
-                        borderRadius: "10px",
-                        border: selectedFormat === "docx" ? "2px solid #2563eb" : "1px solid #e2e8f0",
-                        background: selectedFormat === "docx" ? "rgba(37, 99, 235, 0.05)" : "#ffffff",
-                        cursor: "pointer",
-                        textAlign: "center",
-                        transition: "all 0.15s ease",
-                        boxShadow: selectedFormat === "docx" ? "0 2px 8px rgba(37, 99, 235, 0.15)" : "none",
-                      }}
-                    >
-                      <div style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>📝</div>
-                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "docx" ? "#1d4ed8" : "#1e293b" }}>Word</div>
-                      <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Document</div>
-                    </div>
+                  <div style={{ display: "flex", gap: "1.5rem", alignItems: "center" }}>
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: "0.45rem", cursor: "pointer", fontSize: "0.95rem", color: "#0f172a", fontWeight: 500 }}>
+                      <input
+                        type="radio"
+                        name="reportDownloadFormat"
+                        value="pdf"
+                        checked={selectedFormat === "pdf"}
+                        onChange={() => setSelectedFormat("pdf")}
+                      />
+                      PDF
+                    </label>
+                    {canExcel && (
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: "0.45rem", cursor: "pointer", fontSize: "0.95rem", color: "#0f172a", fontWeight: 500 }}>
+                        <input
+                          type="radio"
+                          name="reportDownloadFormat"
+                          value="xlsx"
+                          checked={selectedFormat === "xlsx"}
+                          onChange={() => setSelectedFormat("xlsx")}
+                        />
+                        Excel
+                      </label>
+                    )}
+                    {canWord && (
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: "0.45rem", cursor: "pointer", fontSize: "0.95rem", color: "#0f172a", fontWeight: 500 }}>
+                        <input
+                          type="radio"
+                          name="reportDownloadFormat"
+                          value="docx"
+                          checked={selectedFormat === "docx"}
+                          onChange={() => setSelectedFormat("docx")}
+                        />
+                        Word
+                      </label>
+                    )}
                   </div>
                 </div>
               )}
@@ -708,7 +754,7 @@ export default function ReportsPage() {
               <div style={{ display: "flex", gap: "0.75rem", justifyContent: "flex-end", marginTop: "1.75rem" }}>
                 <button
                   type="button"
-                  className="modal-btn-cancel"
+                  className="btn"
                   onClick={() => {
                     setGenModalOpen(false);
                     setGenerateLoading(false);
@@ -716,23 +762,22 @@ export default function ReportsPage() {
                 >
                   Cancel
                 </button>
-                <button
-                  type="button"
-                  className="modal-btn-confirm"
-                  disabled={
-                    isCustom &&
-                    dateFetchingEnabled &&
-                    selectedPeriodType !== "by_default" &&
-                    !selectedPeriod
-                  }
-                  onClick={handleGenerateClick}
-                >
-                  {isCustom
-                    ? isAdmin
-                      ? `Download ${selectedFormat === "xlsx" ? "Excel" : selectedFormat === "docx" ? "Word" : "PDF"}`
-                      : "Generate PDF"
-                    : "Generate PDF"}
-                </button>
+                {showFormatOptions && (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={
+                      isCustom &&
+                      dateFetchingEnabled &&
+                      canChangePeriod &&
+                      selectedPeriodType !== "by_default" &&
+                      !selectedPeriod
+                    }
+                    onClick={handleGenerateClick}
+                  >
+                    Download
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -773,15 +818,39 @@ export default function ReportsPage() {
                     <h3 style={{ fontSize: "1.1rem", fontWeight: 600, color: "var(--text)", margin: "0 0 0.5rem 0" }}>{t.name}</h3>
                     {t.description && <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: 0 }}>{t.description}</p>}
                   </div>
-                  <div style={{ marginTop: "1.25rem" }}>
+                  <div style={{ marginTop: "1.25rem", display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
                     <button
                       type="button"
                       className="btn btn-primary"
                       onClick={() => openGenModal(t, "standard")}
-                      style={{ width: "100%", padding: "0.5rem", fontSize: "0.9rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.35rem" }}
+                      style={{ flex: 1, padding: "0.5rem", fontSize: "0.9rem", textAlign: "center" }}
                     >
-                      Generate Report
+                      Download
                     </button>
+                    {(isAdmin || Boolean(t.can_print)) && (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={printingReportId === t.id}
+                        onClick={() => {
+                          void handleGenerateReport(t, "by_default", String(new Date().getFullYear()));
+                        }}
+                        style={{ padding: "0.5rem 0.85rem", fontSize: "0.9rem" }}
+                      >
+                        {printingReportId === t.id ? "Preparing..." : "Print"}
+                      </button>
+                    )}
+                    {t.can_load_lms && (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={syncingReportId === t.id}
+                        onClick={() => void handleLmsSync(t, "standard")}
+                        style={{ padding: "0.5rem 0.85rem", fontSize: "0.9rem" }}
+                      >
+                        {syncingReportId === t.id ? "Syncing..." : "LMS Sync"}
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -805,20 +874,39 @@ export default function ReportsPage() {
                       <h3 style={{ fontSize: "1.1rem", fontWeight: 600, color: "var(--text)", margin: "0 0 0.5rem 0" }}>{t.name}</h3>
                       {t.description && <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: 0 }}>{t.description}</p>}
                     </div>
-                    <div style={{ marginTop: "1.25rem" }}>
+                    <div style={{ marginTop: "1.25rem", display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
                       <button
                         type="button"
                         className="btn btn-primary"
                         onClick={() => openCustomReportDownload(t)}
-                        style={{ width: "100%", padding: "0.5rem", fontSize: "0.9rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
+                        style={{ flex: 1, padding: "0.5rem", fontSize: "0.9rem", textAlign: "center" }}
                       >
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                          <polyline points="7 10 12 15 17 10" />
-                          <line x1="12" y1="15" x2="12" y2="3" />
-                        </svg>
-                        Download Report
+                        Download
                       </button>
+                      {(isAdmin || Boolean(t.can_print)) && (
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={printingReportId === t.id}
+                          onClick={() => {
+                            void handlePrintCustomReport(t, "by_default", String(new Date().getFullYear()));
+                          }}
+                          style={{ padding: "0.5rem 0.85rem", fontSize: "0.9rem" }}
+                        >
+                          {printingReportId === t.id ? "Preparing..." : "Print"}
+                        </button>
+                      )}
+                      {t.can_load_lms && (
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={syncingReportId === t.id}
+                          onClick={() => void handleLmsSync(t, "custom")}
+                          style={{ padding: "0.5rem 0.85rem", fontSize: "0.9rem" }}
+                        >
+                          {syncingReportId === t.id ? "Syncing..." : "LMS Sync"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -840,20 +928,39 @@ export default function ReportsPage() {
                     <h3 style={{ fontSize: "1.1rem", fontWeight: 600, color: "var(--text)", margin: "0 0 0.5rem 0" }}>{t.name}</h3>
                     {t.description && <p style={{ fontSize: "0.85rem", color: "var(--muted)", margin: 0 }}>{t.description}</p>}
                   </div>
-                  <div style={{ marginTop: "1.25rem" }}>
+                  <div style={{ marginTop: "1.25rem", display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
                     <button
                       type="button"
                       className="btn btn-primary"
                       onClick={() => openCustomReportDownload(t)}
-                      style={{ width: "100%", padding: "0.5rem", fontSize: "0.9rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.4rem" }}
+                      style={{ flex: 1, padding: "0.5rem", fontSize: "0.9rem", textAlign: "center" }}
                     >
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                        <polyline points="7 10 12 15 17 10" />
-                        <line x1="12" y1="15" x2="12" y2="3" />
-                      </svg>
-                      Download Report
+                      Download
                     </button>
+                    {(isAdmin || Boolean(t.can_print)) && (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={printingReportId === t.id}
+                        onClick={() => {
+                          void handlePrintCustomReport(t, "by_default", String(new Date().getFullYear()));
+                        }}
+                        style={{ padding: "0.5rem 0.85rem", fontSize: "0.9rem" }}
+                      >
+                        {printingReportId === t.id ? "Preparing..." : "Print"}
+                      </button>
+                    )}
+                    {t.can_load_lms && (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={syncingReportId === t.id}
+                        onClick={() => void handleLmsSync(t, "custom")}
+                        style={{ padding: "0.5rem 0.85rem", fontSize: "0.9rem" }}
+                      >
+                        {syncingReportId === t.id ? "Syncing..." : "LMS Sync"}
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -909,8 +1016,8 @@ export default function ReportsPage() {
                 View print report
               </Link>
               {canManageAssignments && (
-                <Link className="btn" href={`/dashboard/reports/${t.id}/assign`} style={{ fontSize: "0.85rem" }}>
-                  Assign users
+                <Link className="btn" href={`/dashboard/access/rights?tab=resource&resource_type=report&resource_id=${t.id}`} style={{ fontSize: "0.85rem" }}>
+                  Access Rights
                 </Link>
               )}
               {userRole === "SUPER_ADMIN" && (
@@ -979,21 +1086,16 @@ export default function ReportsPage() {
                             type="button"
                             className="btn btn-primary"
                             onClick={() => openCustomReportDownload(t)}
-                            style={{ fontSize: "0.85rem", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+                            style={{ fontSize: "0.85rem" }}
                           >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                              <polyline points="7 10 12 15 17 10" />
-                              <line x1="12" y1="15" x2="12" y2="3" />
-                            </svg>
                             Download
                           </button>
                           <Link className="btn" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
                             View print report
                           </Link>
                           {canManageAssignments && (
-                            <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                              Assign users
+                            <Link className="btn" href={`/dashboard/access/rights?tab=resource&resource_type=custom_report&resource_id=${t.id}&organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                              Access Rights
                             </Link>
                           )}
                         </div>
@@ -1024,21 +1126,16 @@ export default function ReportsPage() {
                           type="button"
                           className="btn btn-primary"
                           onClick={() => openCustomReportDownload(t)}
-                          style={{ fontSize: "0.85rem", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+                          style={{ fontSize: "0.85rem" }}
                         >
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                            <polyline points="7 10 12 15 17 10" />
-                            <line x1="12" y1="15" x2="12" y2="3" />
-                          </svg>
                           Download
                         </button>
                         <Link className="btn" href={`/dashboard/custom-reports/${t.id}?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
                           View print report
                         </Link>
                         {canManageAssignments && (
-                          <Link className="btn" href={`/dashboard/custom-reports/${t.id}/assign?organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
-                            Assign users
+                          <Link className="btn" href={`/dashboard/access/rights?tab=resource&resource_type=custom_report&resource_id=${t.id}&organization_id=${t.organization_id}`} style={{ fontSize: "0.85rem" }}>
+                            Access Rights
                           </Link>
                         )}
                       </div>

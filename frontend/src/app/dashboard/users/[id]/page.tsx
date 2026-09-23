@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -9,6 +9,7 @@ import { z } from "zod";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { AccessDenied } from "@/components/AccessDenied";
 import {
   type UserRow,
 } from "../shared";
@@ -25,15 +26,23 @@ interface OrgTagOption {
   name: string;
 }
 
+interface AccessibleDashboardOption {
+  id: number;
+  name: string;
+}
+
 const updateSchema = z.object({
   username: z.string().min(1, "Username required"),
   email: z.string().email("Invalid email").optional().or(z.literal("")),
   full_name: z.string().optional(),
-  password: z.string().min(8, "Min 8 characters").optional().or(z.literal("")),
+  password: z.string().optional().or(z.literal("")),
   role: z.enum(["USER", "REPORT_VIEWER"]),
   is_active: z.boolean(),
+  is_external: z.boolean(),
   unique_user_key: z.string().optional().or(z.literal("")),
   force_password_reset: z.boolean().optional(),
+  description: z.string().optional().or(z.literal("")),
+  default_dashboard_id: z.number().nullable().optional(),
 });
 
 type UpdateFormData = z.infer<typeof updateSchema>;
@@ -41,13 +50,16 @@ type UpdateFormData = z.infer<typeof updateSchema>;
 export default function UserDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const userId = params?.id ? Number(params.id) : NaN;
+  const orgIdFromQuery = searchParams?.get("organization_id");
   const token = getAccessToken();
 
   const [user, setUser] = useState<UserRow | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [accessibleDashboards, setAccessibleDashboards] = useState<AccessibleDashboardOption[]>([]);
 
   const form = useForm<UpdateFormData>({
     resolver: zodResolver(updateSchema),
@@ -58,8 +70,11 @@ export default function UserDetailPage() {
       password: "",
       role: "USER",
       is_active: true,
+      is_external: false,
       unique_user_key: "",
       force_password_reset: false,
+      description: "",
+      default_dashboard_id: null,
     },
   });
 
@@ -77,8 +92,19 @@ export default function UserDetailPage() {
     }
     setError(null);
     setLoading(true);
-    api<UserRow>(`/users/${userId}`, { token })
+    const query = orgIdFromQuery ? `?organization_id=${orgIdFromQuery}` : "";
+    api<UserRow>(`/users/${userId}${query}`, { token })
       .then((u) => {
+        if (!u) {
+          setError("User not found or inaccessible in this organization.");
+          setUser(null);
+          return;
+        }
+        if (orgIdFromQuery && u.organization_id !== Number(orgIdFromQuery)) {
+          setError("Access denied. This user belongs to another organization.");
+          setUser(null);
+          return;
+        }
         setUser(u);
         form.reset({
           username: u.username ?? "",
@@ -87,8 +113,11 @@ export default function UserDetailPage() {
           password: "",
           role: (u.role === "USER" || u.role === "REPORT_VIEWER" ? u.role : "USER") as "USER" | "REPORT_VIEWER",
           is_active: u.is_active,
+          is_external: Boolean(u.is_external),
           unique_user_key: u.unique_user_key ?? "",
           force_password_reset: !!u.force_password_reset,
+          description: u.description ?? "",
+          default_dashboard_id: u.default_dashboard_id ?? null,
         });
       })
       .catch((e) => {
@@ -96,13 +125,38 @@ export default function UserDetailPage() {
         setUser(null);
       })
       .finally(() => setLoading(false));
-  }, [token, userId]);
+
+    api<{ dashboards?: Array<{ resource_id: number; resource_name: string; is_active: boolean; can_view: boolean }> }>(
+      `/access-management/users/${userId}/rights${query}`,
+      { token }
+    )
+      .then((res) => {
+        const viewable = (res.dashboards || [])
+          .filter((d) => d.is_active && d.can_view)
+          .map((d) => ({ id: d.resource_id, name: d.resource_name }));
+        setAccessibleDashboards(viewable);
+      })
+      .catch(() => {
+        setAccessibleDashboards([]);
+      });
+  }, [token, userId, orgIdFromQuery]);
 
   const orgId = user?.organization_id ?? null;
+
+  const isExternal = form.watch("is_external");
 
   const onSaveGeneral = async (data: UpdateFormData) => {
     if (!token || !user) return;
     setError(null);
+
+    // Validation: when converting to System User (Internal), a password (min 8 chars) MUST be provided if converting from external or if user has no password
+    if (!data.is_external && user.is_external && (!data.password || data.password.length < 8)) {
+      const msg = "Password (min 8 characters) is required when converting to System User (Internal).";
+      setError(msg);
+      toast.error(msg);
+      return;
+    }
+
     try {
       const body: Record<string, unknown> = {
         username: data.username,
@@ -110,8 +164,11 @@ export default function UserDetailPage() {
         full_name: data.full_name || null,
         role: data.role,
         is_active: data.is_active,
+        is_external: data.is_external,
         unique_user_key: data.unique_user_key || null,
         force_password_reset: data.force_password_reset ?? false,
+        description: data.description || null,
+        default_dashboard_id: data.default_dashboard_id ? Number(data.default_dashboard_id) : null,
       };
       if (data.password && data.password.length >= 8) body.password = data.password;
       const updated = await api<UserRow>(`/users/${user.id}`, {
@@ -121,6 +178,7 @@ export default function UserDetailPage() {
       });
       setUser(updated);
       toast.success("User updated successfully");
+      router.push("/dashboard/access?tab=users");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Update failed");
       toast.error(e instanceof Error ? e.message : "Update failed");
@@ -133,28 +191,62 @@ export default function UserDetailPage() {
     try {
       await api(`/users/${user.id}`, { method: "DELETE", token });
       toast.success("User deleted successfully");
-      router.push("/dashboard/access");
+      router.push("/dashboard/access?tab=users");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
       toast.error(e instanceof Error ? e.message : "Delete failed");
     }
   };
 
-  if (loading && !user) return <p>Loading...</p>;
-  if (!user) return <div><p className="form-error">{error ?? "User not found"}</p><Link href="/dashboard/access">Back to Access</Link></div>;
+  if (loading && !user) return <p style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>Loading user details...</p>;
+  if (error) {
+    return (
+      <AccessDenied
+        title="Access Denied"
+        message={error}
+        returnUrl={orgIdFromQuery ? `/dashboard/access?tab=users&organization_id=${orgIdFromQuery}` : "/dashboard/access?tab=users"}
+        returnLabel="Return to Access"
+      />
+    );
+  }
+  if (!user) {
+    return (
+      <AccessDenied
+        title="User Not Found"
+        message="This user does not exist or is not accessible in this organization."
+        returnUrl={orgIdFromQuery ? `/dashboard/access?tab=users&organization_id=${orgIdFromQuery}` : "/dashboard/access?tab=users"}
+        returnLabel="Return to Access"
+      />
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.01rem" }}>
       {error && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{error}</p>}
       
       {/* Section 1: General user information — compact, all fields including username/role/active */}
-      <section className="card" style={{ padding: "1rem", marginBottom: "1rem" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem", marginBottom: "0.75rem" }}>
-          <h2 style={{ fontSize: "1rem", margin: 0, fontWeight: 600 }}>General information</h2>
+      <section className="card" style={{ padding: "1.25rem", marginBottom: "1rem" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.5rem", marginBottom: "1rem" }}>
+          <div>
+            <h2 style={{ fontSize: "1.05rem", margin: 0, fontWeight: 600 }}>General information</h2>
+          </div>
           <button type="button" className="btn" onClick={onDelete} style={{ color: "var(--error)", fontSize: "0.85rem", padding: "0.35rem 0.6rem" }}>Delete user</button>
         </div>
         <form onSubmit={form.handleSubmit(onSaveGeneral)} autoComplete="off">
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "0.5rem 1.25rem", maxWidth: "560px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "0.6rem 1.25rem", maxWidth: "680px" }}>
+            {/* User Type Field */}
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label style={{ fontSize: "0.85rem", fontWeight: 500 }}>User Type</label>
+              <select
+                value={isExternal ? "external" : "internal"}
+                onChange={(e) => form.setValue("is_external", e.target.value === "external")}
+                style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem", width: "100%" }}
+              >
+                <option value="internal">System User (Internal)</option>
+                <option value="external">External User (LMS)</option>
+              </select>
+            </div>
+
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label style={{ fontSize: "0.85rem" }}>Username *</label>
               <input {...form.register("username")} autoComplete="username-off" style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
@@ -180,11 +272,100 @@ export default function UserDetailPage() {
               <label style={{ fontSize: "0.85rem" }}>Unique user key</label>
               <input {...form.register("unique_user_key")} style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} placeholder="e.g. CS-001" />
             </div>
+
+            {/* Default Dashboard Field */}
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label style={{ fontSize: "0.85rem" }}>New password (leave blank to keep)</label>
-              <input type="password" {...form.register("password")} autoComplete="new-password" style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
-              {form.formState.errors.password && <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>{form.formState.errors.password.message}</p>}
+              <label style={{ fontSize: "0.85rem", fontWeight: 500 }}>Default Dashboard</label>
+              <select
+                value={form.watch("default_dashboard_id") ?? ""}
+                onChange={(e) => {
+                  const val = e.target.value ? Number(e.target.value) : null;
+                  form.setValue("default_dashboard_id", val, { shouldDirty: true });
+                }}
+                disabled={accessibleDashboards.length === 0}
+                style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem", width: "100%" }}
+              >
+                <option value="">
+                  {accessibleDashboards.length === 0 ? "No dashboards assigned" : "None (Default system behavior)"}
+                </option>
+                {accessibleDashboards.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+                {form.watch("default_dashboard_id") && !accessibleDashboards.some((d) => d.id === form.watch("default_dashboard_id")) && (
+                  <option value={form.watch("default_dashboard_id")!}>
+                    Current: #{form.watch("default_dashboard_id")}
+                  </option>
+                )}
+              </select>
+              <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: "0.2rem" }}>
+                {accessibleDashboards.length === 0
+                  ? "Assign dashboard access under Rights Management to enable."
+                  : "Automatically opens when user logs into the portal."}
+              </p>
             </div>
+
+            {isExternal && (
+              <div className="form-group" style={{ marginBottom: 0, gridColumn: "1 / -1" }}>
+                <label style={{ fontSize: "0.85rem" }}>Department / Notes (LMS)</label>
+                <input
+                  {...form.register("description")}
+                  placeholder="e.g. Department name, LMS metadata"
+                  style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem", width: "100%" }}
+                />
+              </div>
+            )}
+
+            {!isExternal && (
+              <>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label style={{ fontSize: "0.85rem" }}>
+                    {user?.is_external ? "Password * (min 8 chars)" : "New password (leave blank to keep)"}
+                  </label>
+                  <input type="password" {...form.register("password")} autoComplete="new-password" style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }} />
+                  {form.formState.errors.password && <p className="form-error" style={{ marginTop: "0.2rem", fontSize: "0.8rem" }}>{form.formState.errors.password.message}</p>}
+                </div>
+                {/* Force Password Reset Field */}
+                <div className="form-group" style={{ marginBottom: 0, display: "flex", alignItems: "flex-end", gap: "0.5rem" }}>
+                  <label style={{ fontSize: "0.85rem", flex: "0 0 auto" }}>Force Password Reset</label>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={form.watch("force_password_reset")}
+                    onClick={() => form.setValue("force_password_reset", !form.getValues("force_password_reset"))}
+                    style={{
+                      width: 40,
+                      height: 22,
+                      borderRadius: 11,
+                      border: "1px solid var(--border)",
+                      background: form.watch("force_password_reset") ? "#f59e0b" : "var(--border)",
+                      cursor: "pointer",
+                      position: "relative",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: 2,
+                        left: form.watch("force_password_reset") ? 20 : 2,
+                        width: 16,
+                        height: 16,
+                        borderRadius: "50%",
+                        background: "white",
+                        boxShadow: "var(--shadow-sm)",
+                        transition: "left 0.15s ease",
+                      }}
+                    />
+                  </button>
+                  <span style={{ fontSize: "0.85rem", fontWeight: 600, color: form.watch("force_password_reset") ? "#f59e0b" : "var(--muted)" }}>
+                    {form.watch("force_password_reset") ? "Yes (Required)" : "No"}
+                  </span>
+                </div>
+              </>
+            )}
+
             <div className="form-group" style={{ marginBottom: 0, display: "flex", alignItems: "flex-end", gap: "0.5rem" }}>
               <label style={{ fontSize: "0.85rem", flex: "0 0 auto" }}>Active</label>
               <button
@@ -218,44 +399,6 @@ export default function UserDetailPage() {
                 />
               </button>
               <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>{form.watch("is_active") ? "On" : "Off"}</span>
-            </div>
-
-            {/* Force Password Reset Field */}
-            <div className="form-group" style={{ marginBottom: 0, display: "flex", alignItems: "flex-end", gap: "0.5rem" }}>
-              <label style={{ fontSize: "0.85rem", flex: "0 0 auto" }}>Force Password Reset</label>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={form.watch("force_password_reset")}
-                onClick={() => form.setValue("force_password_reset", !form.getValues("force_password_reset"))}
-                style={{
-                  width: 40,
-                  height: 22,
-                  borderRadius: 11,
-                  border: "1px solid var(--border)",
-                  background: form.watch("force_password_reset") ? "#f59e0b" : "var(--border)",
-                  cursor: "pointer",
-                  position: "relative",
-                  flexShrink: 0,
-                }}
-              >
-                <span
-                  style={{
-                    position: "absolute",
-                    top: 2,
-                    left: form.watch("force_password_reset") ? 20 : 2,
-                    width: 16,
-                    height: 16,
-                    borderRadius: "50%",
-                    background: "white",
-                    boxShadow: "var(--shadow-sm)",
-                    transition: "left 0.15s ease",
-                  }}
-                />
-              </button>
-              <span style={{ fontSize: "0.85rem", fontWeight: 600, color: form.watch("force_password_reset") ? "#f59e0b" : "var(--muted)" }}>
-                {form.watch("force_password_reset") ? "Yes (Required)" : "No"}
-              </span>
             </div>
           </div>
 
@@ -318,7 +461,7 @@ export default function UserDetailPage() {
               type="button"
               className="btn"
               style={{ fontSize: "0.9rem", padding: "0.4rem 0.75rem" }}
-              onClick={() => router.push("/dashboard/access")}
+              onClick={() => router.push("/dashboard/access?tab=users")}
             >
               Cancel
             </button>

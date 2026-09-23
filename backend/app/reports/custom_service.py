@@ -390,6 +390,13 @@ async def save_custom_report_layout(
 async def assign_custom_report(
     db: AsyncSession, custom_report_id: int, user_id: int, can_view: bool, can_print: bool, can_export: bool, can_change_period: bool = True
 ) -> CustomReportAssignment:
+    report = (await db.execute(select(CustomReport).where(CustomReport.id == custom_report_id))).scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="Custom report not found")
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or user.organization_id != report.organization_id:
+        raise HTTPException(status_code=400, detail="User does not belong to this organization")
+
     # Check if assignment already exists
     result = await db.execute(
         select(CustomReportAssignment)
@@ -407,73 +414,19 @@ async def assign_custom_report(
     perm.can_print = can_print
     perm.can_export = can_export
     perm.can_change_period = can_change_period
+    perm.is_active = True
     await db.flush()
     CUSTOM_REPORT_CACHE.invalidate_report(custom_report_id)
     return perm
 
 
-async def bulk_assign_custom_report(
-    db: AsyncSession,
-    custom_report_id: int,
-    user_ids: list[int],
-    can_view: bool = True,
-    can_print: bool = True,
-    can_export: bool = True,
-    can_change_period: bool = True,
-) -> list[CustomReportAssignment]:
-    """Assign custom report to multiple users simultaneously inside a single transaction."""
-    result = await db.execute(
-        select(CustomReportAssignment)
-        .where(
-            CustomReportAssignment.custom_report_id == custom_report_id,
-            CustomReportAssignment.user_id.in_(user_ids),
-        )
-    )
-    existing_list = result.scalars().all()
-    existing_by_user_id = {a.user_id: a for a in existing_list}
+# Re-export centralized custom report rights functions for backward compatibility
+from app.access_management.service import (
+    bulk_assign_custom_report,
+    unassign_custom_report,
+    list_custom_report_assignments,
+)
 
-    out = []
-    for uid in user_ids:
-        perm = existing_by_user_id.get(uid)
-        if not perm:
-            perm = CustomReportAssignment(
-                custom_report_id=custom_report_id,
-                user_id=uid,
-                can_change_period=can_change_period,
-            )
-            db.add(perm)
-        perm.can_view = can_view
-        perm.can_print = can_print
-        perm.can_export = can_export
-        perm.can_change_period = can_change_period
-        out.append(perm)
-
-    await db.flush()
-    CUSTOM_REPORT_CACHE.invalidate_report(custom_report_id)
-    return out
-
-
-async def unassign_custom_report(db: AsyncSession, custom_report_id: int, user_id: int) -> bool:
-    result = await db.execute(
-        select(CustomReportAssignment)
-        .where(CustomReportAssignment.custom_report_id == custom_report_id, CustomReportAssignment.user_id == user_id)
-    )
-    perm = result.scalar_one_or_none()
-    if not perm:
-        return False
-    await db.delete(perm)
-    await db.flush()
-    CUSTOM_REPORT_CACHE.invalidate_report(custom_report_id)
-    return True
-
-
-async def list_custom_report_assignments(db: AsyncSession, custom_report_id: int) -> list[CustomReportAssignment]:
-    result = await db.execute(
-        select(CustomReportAssignment)
-        .where(CustomReportAssignment.custom_report_id == custom_report_id)
-        .options(selectinload(CustomReportAssignment.user))
-    )
-    return list(result.scalars().all())
 
 
 def _parse_kpi_formula_dependencies(formula_expression: str) -> list[int]:
@@ -773,10 +726,19 @@ async def generate_custom_report_data(
             if att.kpi_field_id:
                 attachment_kpi_field_ids.add(att.kpi_field_id)
 
+    # primary_section_kpi_ids: KPIs that are DIRECTLY part of a report section.
+    # The ReportUserFilterConfiguration should only apply to these KPIs, NOT to
+    # transitive formula-dependency KPIs (e.g. KPI 273/278 referenced via
+    # COUNT_KPI_ITEMS_WHERE from KPI 277 sub-field formulas).  Applying the
+    # user-scoping filter to dependency KPIs incorrectly drops survey rows for
+    # faculty who taught across departments, causing formula counts to be wrong.
+    primary_section_kpi_ids: set[int] = set()
     for sec in custom_report.sections:
         referenced_kpi_ids.add(sec.kpi_id)
+        primary_section_kpi_ids.add(sec.kpi_id)
         for f in sec.fields:
             referenced_kpi_ids.add(f.kpi_field.kpi_id)
+            primary_section_kpi_ids.add(f.kpi_field.kpi_id)
 
     unique_kpi_count = len(referenced_kpi_ids)
 
@@ -1031,19 +993,30 @@ async def generate_custom_report_data(
                     mf_date_range = (start_date, end_date, str(date_col_key))
 
             target_entry_ids = [e.id for e in all_entries if e.id] if (date_range and mf_date_range) else entry_ids_sorted
+            # Only apply the ReportUserFilterConfiguration (user-scoping) to KPIs
+            # that are directly part of this report's sections.  Dependency KPIs
+            # (those pulled in only because a formula references them) must be
+            # loaded WITHOUT the user filter so that cross-KPI formula counts are
+            # computed against the full dataset, not the already-scoped subset.
+            _is_primary_kpi = kid in primary_section_kpi_ids
             batch_res = await _load_multi_line_items_rows_batch(
-                db, entry_ids=target_entry_ids, field=mf, limit=limit_val, date_range=mf_date_range, custom_report_id=id, current_user=current_user
+                db, entry_ids=target_entry_ids, field=mf, limit=limit_val,
+                date_range=mf_date_range,
+                custom_report_id=id if _is_primary_kpi else None,
+                current_user=current_user if _is_primary_kpi else None,
             )
             # Re-evaluate any formula subfields on MLI rows
+            auto_compute = getattr(kpi, "auto_compute_formulas", True)
             sub_fields_orm = getattr(mf, "sub_fields", []) or []
             formula_sfs = []
-            for sf in sub_fields_orm:
-                cfg = getattr(sf, "config", None) or {}
-                expr = cfg.get("formula_expression")
-                cond_logic = cfg.get("conditional_logic")
-                sft = getattr(sf.field_type, "value", str(sf.field_type))
-                if sft == "formula" or expr:
-                    formula_sfs.append((sf.key, expr, cond_logic, cfg))
+            if auto_compute:
+                for sf in sub_fields_orm:
+                    cfg = getattr(sf, "config", None) or {}
+                    expr = cfg.get("formula_expression")
+                    cond_logic = cfg.get("conditional_logic")
+                    sft = getattr(sf.field_type, "value", str(sf.field_type))
+                    if sft == "formula" or expr:
+                        formula_sfs.append((sf.key, expr, cond_logic, cfg))
 
             recalculated_batch = {}
             for eid, rows_list in batch_res.items():
@@ -1235,19 +1208,24 @@ async def generate_custom_report_data(
                     continue
 
             # Evaluate formula fields
+            kpi_auto_compute = getattr(kpi, "auto_compute_formulas", True)
             for f in fields_to_include:
                 if f.field_type == FieldType.formula and f.formula_expression:
-                    computed = evaluate_formula(
-                        f.formula_expression,
-                        value_by_key,
-                        multi_line_items_data,
-                        other_kpi_values,
-                        other_kpi_multi_line_data=recalculated_kpi_mli_data,
-                    )
-                    if computed is None:
+                    if not kpi_auto_compute:
                         fv_formula = fv_by_field.get(f.id)
-                        if fv_formula and fv_formula.value_number is not None:
-                            computed = fv_formula.value_number
+                        computed = fv_formula.value_number if (fv_formula and fv_formula.value_number is not None) else None
+                    else:
+                        computed = evaluate_formula(
+                            f.formula_expression,
+                            value_by_key,
+                            multi_line_items_data,
+                            other_kpi_values,
+                            other_kpi_multi_line_data=recalculated_kpi_mli_data,
+                        )
+                        if computed is None:
+                            fv_formula = fv_by_field.get(f.id)
+                            if fv_formula and fv_formula.value_number is not None:
+                                computed = fv_formula.value_number
                     field_payload = {
                         "field_key": f.key,
                         "field_name": f.name,
@@ -1521,7 +1499,7 @@ async def render_custom_report_html(
             except Exception:
                 logo2_src = f"/api/reports/headers/{custom_header_model.id}/logo2"
 
-        out.append('<div class="report-header-container" style="display: flex; justify-content: space-between; align-items: center; width: 100%; margin-bottom: 2.25rem; border-bottom: 2px solid #e5e7eb; padding-bottom: 1rem; position: relative;">')
+        out.append('<div class="report-header-container" style="display: flex; justify-content: space-between; align-items: center; width: 100%; margin-bottom: 1rem; padding-bottom: 0.25rem; position: relative;">')
         
         # Left Logo Slot (Pinned Left)
         out.append('<div style="flex: 0 0 auto; display: flex; justify-content: flex-start; align-items: center;">')
@@ -1583,7 +1561,7 @@ async def render_custom_report_html(
             h2_color = "#374151"
             if f["field_type"] != "multi_line_items":
                 val = clean_numeric_value_string(f["value"])
-                out.append('<div class="report-field-block" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #e5e7eb; padding-bottom: 0.25rem; margin-bottom: 0.75rem; margin-right: 2rem;">')
+                out.append('<div class="report-field-scalar" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #e5e7eb; padding-bottom: 0.25rem; margin-bottom: 0.75rem; margin-right: 2rem;">')
                 out.append(
                     f'<h3 style="font-size: 1.0rem; margin: 0; color: {h2_color}; font-weight: 600;">'
                     f'{f["number"]}. {f["field_name"]}'
@@ -1593,7 +1571,7 @@ async def render_custom_report_html(
                 out.append(f'<span style="color: #111827; {bold_style} font-size: {scalar_font_size}pt;">{val}</span>')
                 out.append('</div>')
             else:
-                out.append('<div class="report-field-block" style="margin-bottom: 1.25rem;">')
+                out.append('<div class="report-field-mli" style="margin-bottom: 1.25rem;">')
                 out.append(
                     f'<h3 style="font-size: 1.0rem; margin-top: 0.75rem; margin-bottom: 0.35rem; color: {h2_color}; font-weight: 600;">'
                     f'{f["number"]}. {f["field_name"]}'
@@ -1607,13 +1585,13 @@ async def render_custom_report_html(
                     out.append('<table style="border-collapse: collapse; width: 100%; border: 1px solid #d1d5db; margin-top: 0.25rem; margin-bottom: 0.5rem;">')
                     out.append('<thead>')
                     out.append(f'<tr style="background-color: {h1_color}; color: #ffffff; border-bottom: 2px solid {h1_color}; font-size: {mli_font_size}pt;">')
-                    out.append(f'<th style="border: 1px solid #d1d5db; padding: 6px 5px; text-align: center; font-weight: 600; color: #ffffff; word-break: normal; overflow-wrap: normal; white-space: normal; hyphens: none; vertical-align: middle;">S.No</th>')
+                    out.append(f'<th style="background-color: {h1_color} !important; border: 1px solid #d1d5db; padding: 6px 5px; text-align: center; font-weight: 600; color: #ffffff !important; word-break: normal; overflow-wrap: normal; white-space: normal; hyphens: none; vertical-align: middle; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important;">S.No</th>')
                     col_alignments = (f.get("config") or {}).get("column_alignments") or {}
                     for s_idx, sub in enumerate(f["sub_fields"]):
                         align_css = col_alignments.get(sub["key"])
                         if not align_css:
                             align_css = "left" if s_idx == 0 else "center"
-                        out.append(f'<th style="border: 1px solid #d1d5db; padding: 6px 5px; text-align: {align_css}; font-weight: 600; color: #ffffff; word-break: normal; overflow-wrap: normal; white-space: normal; hyphens: none; vertical-align: middle;">{sub["name"]}</th>')
+                        out.append(f'<th style="background-color: {h1_color} !important; border: 1px solid #d1d5db; padding: 6px 5px; text-align: {align_css}; font-weight: 600; color: #ffffff !important; word-break: normal; overflow-wrap: normal; white-space: normal; hyphens: none; vertical-align: middle; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important;">{sub["name"]}</th>')
                     out.append('</tr>')
                     out.append('</thead>')
                     out.append('<tbody>')
@@ -1628,11 +1606,9 @@ async def render_custom_report_html(
                                 align_css = "left" if s_idx == 0 else "center"
                             out.append(f'<td style="border: 1px solid #d1d5db; padding: 8px; color: #111827; text-align: {align_css};">{rval}</td>')
                         out.append('</tr>')
-                    out.append('</tbody>')
                     if f.get("evaluated_footer_rows"):
-                        out.append('<tfoot>')
                         for f_row in f["evaluated_footer_rows"]:
-                            out.append(f'<tr style="font-size: {mli_font_size}pt; background-color: #f8fafc;">')
+                            out.append(f'<tr style="font-size: {mli_font_size}pt; background-color: #f8fafc; font-weight: bold; break-inside: avoid !important; page-break-inside: avoid !important;">')
                             cells = f_row.get("cells", [])
                             total_sub_cols = len(f["sub_fields"])
                             sum_colspan = sum(c.get("colspan", 1) for c in cells)
@@ -1645,7 +1621,7 @@ async def render_custom_report_html(
                                 c_bold = "font-weight: bold;" if cell.get("bold", True) else "font-weight: normal;"
                                 out.append(f'<td colspan="{c_span}" style="border: 1px solid #d1d5db; padding: 8px; color: #111827; text-align: {c_align}; {c_bold}">{c_val}</td>')
                             out.append('</tr>')
-                        out.append('</tfoot>')
+                    out.append('</tbody>')
                     out.append('</table>')
                 else:
                     out.append('<span style="color: #9ca3af; font-style: italic; font-size: 0.9rem;">No data entered</span>')
@@ -3306,18 +3282,23 @@ async def stream_custom_report_data(
                         except (TypeError, ValueError):
                             pass
 
+            kpi_auto_compute = getattr(kpi, "auto_compute_formulas", True)
             for f in fields_to_include:
                 if f.field_type == FieldType.formula and f.formula_expression:
-                    computed = evaluate_formula(
-                        f.formula_expression,
-                        value_by_key,
-                        multi_line_items_data,
-                        other_kpi_values,
-                    )
-                    if computed is None:
+                    if not kpi_auto_compute:
                         fv_formula = fv_by_field.get(f.id)
-                        if fv_formula and fv_formula.value_number is not None:
-                            computed = fv_formula.value_number
+                        computed = fv_formula.value_number if (fv_formula and fv_formula.value_number is not None) else None
+                    else:
+                        computed = evaluate_formula(
+                            f.formula_expression,
+                            value_by_key,
+                            multi_line_items_data,
+                            other_kpi_values,
+                        )
+                        if computed is None:
+                            fv_formula = fv_by_field.get(f.id)
+                            if fv_formula and fv_formula.value_number is not None:
+                                computed = fv_formula.value_number
                     evaluated_fields[f.key] = {
                         "field_key": f.key,
                         "field_name": f.name,
@@ -3585,7 +3566,7 @@ async def export_custom_report_attachments(
     import datetime
     import re
     from sqlalchemy import select
-    from app.core.models import CustomReport, KPI, KPIEntry, KpiMultiLineRow, KpiMultiLineCell, KPIFieldSubField, User
+    from app.core.models import CustomReport, CustomReportAssignment, KPI, KPIEntry, KpiMultiLineRow, KpiMultiLineCell, KPIFieldSubField, User
     from sqlalchemy.orm import selectinload, noload
 
     report = await get_custom_report(db, custom_report_id, org_id)
@@ -3636,28 +3617,151 @@ async def export_custom_report_attachments(
                 from app.core.models import User
                 u_key = (await db.execute(select(User.unique_user_key).where(User.id == current_user.id))).scalar_one_or_none()
 
+        target_field_id = None
         if current_user is not None and u_key is not None:
-            from app.core.models import ReportUserFilterConfiguration
-            from sqlalchemy import and_, or_
-            filter_config_res = await db.execute(
-                select(ReportUserFilterConfiguration)
-                .where(
-                    ReportUserFilterConfiguration.report_id == custom_report_id,
-                    ReportUserFilterConfiguration.enabled == True,
-                    ReportUserFilterConfiguration.mli_id == kfield.id
+            from app.core.models import ReportUserFilterConfiguration, KPIFieldSubField
+            from sqlalchemy import and_, or_, func
+
+            assign_res = await db.execute(
+                select(CustomReportAssignment).where(
+                    CustomReportAssignment.custom_report_id == custom_report_id,
+                    CustomReportAssignment.user_id == current_user.id,
                 )
             )
-            filter_config = filter_config_res.scalar_one_or_none()
-            if filter_config and filter_config.field_id is not None:
+            assignment = assign_res.scalar_one_or_none()
+
+            if assignment is not None:
+                if getattr(assignment, "can_use_unique_value", False):
+                    target_sf_key = None
+                    cfg = getattr(assignment, "filter_column_configs", None)
+                    if isinstance(cfg, dict):
+                        grp_key = f"{kfield.kpi_id}_{kfield.id}"
+                        target_sf_key = (
+                            cfg.get(grp_key)
+                            or cfg.get(str(kfield.id))
+                            or cfg.get(kfield.id)
+                            or cfg.get(str(kfield.kpi_id))
+                            or cfg.get(kfield.kpi_id)
+                        )
+                        if not target_sf_key:
+                            for k, v in cfg.items():
+                                if str(k).endswith(f"_{kfield.id}") or str(k) == str(kfield.id):
+                                    target_sf_key = v
+                                    break
+                    elif isinstance(cfg, list):
+                        for item in cfg:
+                            if isinstance(item, dict) and (item.get("mli_id") == kfield.id or item.get("kpi_id") == kfield.kpi_id):
+                                target_sf_key = item.get("sub_field_key")
+                                break
+
+                    if target_sf_key:
+                        sf_res = await db.execute(
+                            select(KPIFieldSubField.id).where(
+                                KPIFieldSubField.field_id == kfield.id,
+                                (KPIFieldSubField.key == target_sf_key) | (KPIFieldSubField.name == target_sf_key)
+                            )
+                        )
+                        target_field_id = sf_res.scalar_one_or_none()
+
+                    if target_field_id is None:
+                        perm_sub_k = getattr(assignment, "filter_sub_field_key", None)
+                        if perm_sub_k:
+                            sf_res = await db.execute(
+                                select(KPIFieldSubField.id).where(
+                                    KPIFieldSubField.field_id == kfield.id,
+                                    (KPIFieldSubField.key == perm_sub_k) | (KPIFieldSubField.name == perm_sub_k)
+                                )
+                            )
+                            target_field_id = sf_res.scalar_one_or_none()
+
+                    if target_field_id is None and custom_report_id is not None:
+                        filter_config_res = await db.execute(
+                            select(ReportUserFilterConfiguration)
+                            .where(
+                                ReportUserFilterConfiguration.report_id == custom_report_id,
+                                ReportUserFilterConfiguration.enabled == True,
+                            )
+                        )
+                        f_cfg = filter_config_res.scalar_one_or_none()
+                        if f_cfg and f_cfg.field_id:
+                            sf = await db.get(KPIFieldSubField, f_cfg.field_id)
+                            if sf:
+                                sf_match = (await db.execute(
+                                    select(KPIFieldSubField.id).where(
+                                        KPIFieldSubField.field_id == kfield.id,
+                                        (KPIFieldSubField.key == sf.key) | (KPIFieldSubField.name == sf.name)
+                                    )
+                                )).scalar_one_or_none()
+                                if sf_match:
+                                    target_field_id = sf_match
+
+                    if target_field_id is None:
+                        sf_res = await db.execute(
+                            select(KPIFieldSubField).where(KPIFieldSubField.field_id == kfield.id).order_by(KPIFieldSubField.id)
+                        )
+                        sfs = sf_res.scalars().all()
+                        for sf in sfs:
+                            k_norm = sf.key.lower()
+                            n_norm = (sf.name or "").lower()
+                            if any(dk in k_norm or dk in n_norm for dk in ("dept", "department", "user_key", "unique_key")):
+                                target_field_id = sf.id
+                                break
+                        if target_field_id is None and sfs:
+                            target_field_id = sfs[0].id
+            else:
+                filter_config_res = await db.execute(
+                    select(ReportUserFilterConfiguration)
+                    .where(
+                        ReportUserFilterConfiguration.report_id == custom_report_id,
+                        ReportUserFilterConfiguration.enabled == True,
+                        or_(
+                            ReportUserFilterConfiguration.mli_id == kfield.id,
+                            ReportUserFilterConfiguration.mli_id.is_(None)
+                        )
+                    )
+                )
+                filter_config = filter_config_res.scalar_one_or_none()
+                if filter_config:
+                    target_field_id = filter_config.field_id
+                    if target_field_id is None:
+                        sf_res = await db.execute(
+                            select(KPIFieldSubField).where(KPIFieldSubField.field_id == kfield.id).order_by(KPIFieldSubField.id)
+                        )
+                        sfs = sf_res.scalars().all()
+                        for sf in sfs:
+                            k_norm = sf.key.lower()
+                            n_norm = (sf.name or "").lower()
+                            if any(dk in k_norm or dk in n_norm for dk in ("dept", "department", "user_key", "unique_key")):
+                                target_field_id = sf.id
+                                break
+                        if target_field_id is None and sfs:
+                            target_field_id = sfs[0].id
+
+            if target_field_id is not None:
                 rows_stmt = rows_stmt.join(
                     KpiMultiLineCell,
                     and_(
                         KpiMultiLineCell.row_id == KpiMultiLineRow.id,
-                        KpiMultiLineCell.sub_field_id == filter_config.field_id
+                        KpiMultiLineCell.sub_field_id == target_field_id
                     )
                 )
-                val_str = u_key
-                conditions = [KpiMultiLineCell.value_text == val_str]
+                val_str = str(u_key).strip()
+                val_lower = val_str.lower()
+                variants = [val_str]
+                if val_lower.startswith("department of "):
+                    variants.append(val_str[len("department of "):].strip())
+                elif val_lower.endswith(" department"):
+                    variants.append(val_str[:-len(" department")].strip())
+                else:
+                    variants.append(f"Department of {val_str}")
+                    variants.append(f"{val_str} Department")
+                variants = list(dict.fromkeys(variants))
+
+                conditions = []
+                for v in variants:
+                    if v:
+                        conditions.append(KpiMultiLineCell.value_text == v)
+                        conditions.append(func.lower(KpiMultiLineCell.value_text) == v.lower())
                 try:
                     val_float = float(val_str)
                     conditions.append(KpiMultiLineCell.value_number == val_float)
@@ -3667,6 +3771,8 @@ async def export_custom_report_attachments(
                 if val_bool or val_str.lower() in ("false", "0", "no", "n"):
                     conditions.append(KpiMultiLineCell.value_boolean == val_bool)
                 rows_stmt = rows_stmt.where(or_(*conditions))
+            elif assignment and getattr(assignment, "can_use_unique_value", False):
+                rows_stmt = rows_stmt.where(KpiMultiLineRow.id == -1)
 
         rows_list = (await db.execute(rows_stmt)).all()
         
@@ -3869,3 +3975,20 @@ async def export_custom_report_attachments(
         return zip_io.getvalue(), "Attachments.zip", "application/zip"
     else:
         raise ValueError("No attachments could be generated")
+
+
+async def list_odoo_configured_kpis(
+    db: AsyncSession, organization_id: int | None = None
+) -> list[dict[str, Any]]:
+    """List all KPIs that have an Odoo integration configured (KpiOdooConfig entry present)."""
+    from app.core.models import KPI, KpiOdooConfig
+
+    stmt = select(KPI.id, KPI.name).join(KpiOdooConfig, KpiOdooConfig.kpi_id == KPI.id)
+    if organization_id is not None:
+        stmt = stmt.where(KPI.organization_id == organization_id)
+    stmt = stmt.order_by(KPI.name)
+
+    result = await db.execute(stmt)
+    rows = result.all()
+    return [{"id": row.id, "name": row.name} for row in rows]
+

@@ -426,9 +426,11 @@ export function SmartChartViewer({
                           fill={fill}
                           stroke="var(--surface)"
                           strokeWidth="1"
+                          className="chart-pie-animated"
                           style={{
                             transition: "opacity 0.15s ease",
                             cursor: isDrillDownEnabled && !item.isOther ? "pointer" : "default",
+                            animationDelay: `${Math.min(i * 0.035, 0.35)}s`,
                           }}
                           opacity={hoverKey === null || hoverKey === item.key ? 1.0 : 0.65}
                           onClick={() => {
@@ -550,7 +552,16 @@ export function SmartChartViewer({
                 const percentStr = totalValue > 0 ? ((item.value / totalValue) * 100).toFixed(1) : "0";
 
                 return (
-                  <div key={item.key} style={{ display: "flex", alignItems: "center", gap: isFullScreen ? "1.1rem" : "0.5rem" }}>
+                  <div
+                    key={item.key}
+                    className="chart-label-animated"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: isFullScreen ? "1.1rem" : "0.5rem",
+                      animationDelay: `${Math.min(i * 0.025, 0.3)}s`,
+                    }}
+                  >
                     <div style={{ width: isFullScreen ? 20 : 10, height: isFullScreen ? 20 : 10, borderRadius: isFullScreen ? "5px" : "3px", background: fill, flexShrink: 0 }} />
                     <div
                       style={{
@@ -611,12 +622,22 @@ export function SmartChartViewer({
   const startX = left;
   const barSpace = barW + gap;
 
-  const charPx = isFullScreen ? 10.5 : 8.5;
-  const maxLabelChars = Math.max(3, Math.floor((barW + gap * 0.4) / charPx));
+  const labelFontSizeNum = isFullScreen
+    ? (rotationAngle === 0 ? (barW >= 200 ? 18 : 16) : 15)
+    : (rotationAngle === 0 ? (barW >= 140 ? 14.5 : 13.5) : (n > 40 ? 10 : n > 20 ? 11.5 : 13));
 
-  let bottomPadding = 45;
+  const labelFontSize = String(labelFontSizeNum);
+
+  // Bold characters (weight 800) average ~0.66 to 0.70 of font size in px
+  const charPx = labelFontSizeNum * 0.68;
+  // Separation padding to guarantee text never crosses the bar boundary into adjacent bars
+  const labelMargin = isFullScreen ? 20 : 16;
+  const availableBarLabelWidth = Math.max(20, barW - labelMargin);
+  const maxLabelChars = Math.max(3, Math.floor(availableBarLabelWidth / charPx));
+
+  let bottomPadding = 48;
   if (rotationAngle === 0) {
-    bottomPadding = isFullScreen ? 60 : 50;
+    bottomPadding = isFullScreen ? 55 : 48;
   } else {
     bottomPadding = isFullScreen 
       ? Math.max(75, Math.round(Math.min(22, maxLabelLen) * 7.5 + 20)) 
@@ -668,19 +689,16 @@ export function SmartChartViewer({
             const displayLabel = getDisplayLabel(b.label, widgetId);
             const fill = getColorForValue(displayLabel, i, data.length, colorForIndex(i, data.length));
 
-            const angleRad = Math.abs(rotationAngle) * Math.PI / 180;
-            const cosA = Math.cos(angleRad) || 0.8;
-            const leftBoundaryLimit = Math.max(5, Math.floor(x / (charPx * cosA)));
-
-            let sliceTruncateLength = isFullScreen
-              ? (rotationAngle === 0 ? 40 : Math.min(22, leftBoundaryLimit))
-              : (rotationAngle === 0 ? maxLabelChars : Math.min(16, leftBoundaryLimit));
-
-            if (rotationAngle !== 0 && i === 0 && isFullScreen && displayLabel) {
-              const words = displayLabel.split(" ");
-              if (words.length > 1) {
-                sliceTruncateLength = words[0].length + 2;
-              }
+            let sliceTruncateLength: number;
+            if (rotationAngle === 0) {
+              sliceTruncateLength = maxLabelChars;
+            } else {
+              const angleRad = (Math.abs(rotationAngle) * Math.PI) / 180;
+              const cosA = Math.cos(angleRad) || 0.8;
+              const leftBoundaryLimit = Math.max(4, Math.floor((x + barW / 2 - 10) / (charPx * cosA)));
+              sliceTruncateLength = isFullScreen
+                ? Math.min(22, leftBoundaryLimit)
+                : Math.min(16, leftBoundaryLimit);
             }
 
             return (
@@ -693,9 +711,11 @@ export function SmartChartViewer({
                   fill={fill}
                   rx={n > 40 ? 0 : 2}
                   opacity={hoverKey === null || hoverKey === b.key ? 0.9 : 0.5}
+                  className="chart-bar-animated"
                   style={{
                     transition: "opacity 0.15s ease",
                     cursor: isDrillDownEnabled ? "pointer" : "default",
+                    animationDelay: `${Math.min(i * 0.02, 0.4)}s`,
                   }}
                   onClick={() => {
                     if (isDrillDownEnabled && onDrillDown) {
@@ -746,13 +766,21 @@ export function SmartChartViewer({
                     fontWeight="800"
                     fill="var(--text)"
                     textAnchor="middle"
-                    style={{ paintOrder: "stroke", stroke: "var(--surface)", strokeWidth: 4 }}
+                    className="chart-label-animated"
+                    style={{
+                      paintOrder: "stroke",
+                      stroke: "var(--surface)",
+                      strokeWidth: 4,
+                      animationDelay: `${Math.min(i * 0.02 + 0.15, 0.45)}s`,
+                    }}
                   >
                     {b.value.toLocaleString()}
                   </text>
                 ) : null}
 
-                <g transform={`translate(${x + barW / 2}, ${top + innerH + (rotationAngle === 0 ? (isFullScreen ? 16 : 8) : (isFullScreen ? 12 : 14))}) rotate(${rotationAngle})`}>
+                <g
+                  transform={`translate(${x + barW / 2}, ${top + innerH + (rotationAngle === 0 ? (isFullScreen ? 10 : 8) : (isFullScreen ? 12 : 14))}) rotate(${rotationAngle})`}
+                >
                   <CustomLabel
                     value={b.label}
                     widgetId={widgetId}
@@ -761,8 +789,8 @@ export function SmartChartViewer({
                     truncateLength={sliceTruncateLength}
                     svgProps={{
                       x: 0,
-                      y: rotationAngle === 0 ? (isFullScreen ? 12 : 6) : 0,
-                      fontSize: isFullScreen ? (rotationAngle === 0 ? "26" : "22") : n > 40 ? "10" : n > 20 ? "12" : "13",
+                      y: rotationAngle === 0 ? (isFullScreen ? 8 : 6) : 0,
+                      fontSize: labelFontSize,
                       fontWeight: "800",
                       fill: "var(--text)",
                       textAnchor: rotationAngle === 0 ? "middle" : "end",

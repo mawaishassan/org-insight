@@ -344,11 +344,26 @@ class User(Base):
     password_reset_requested_by_id = Column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    default_dashboard_id = Column(
+        Integer, ForeignKey("dashboards.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    last_login_at = Column(DateTime, nullable=True, index=True)
+    last_activity_at = Column(DateTime, nullable=True, index=True)
+    login_count = Column(Integer, default=0, nullable=False, server_default="0")
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
 
     organization = relationship("Organization", back_populates="users")
+    default_dashboard = relationship(
+        "Dashboard", foreign_keys=[default_dashboard_id], lazy="selectin"
+    )
+    sessions = relationship(
+        "UserSession", back_populates="user", lazy="selectin", cascade="all, delete-orphan", foreign_keys="[UserSession.user_id]"
+    )
+    activities = relationship(
+        "UserActivity", back_populates="user", lazy="selectin", cascade="all, delete-orphan", foreign_keys="[UserActivity.user_id]"
+    )
     password_reset_audits = relationship(
         "PasswordResetAudit", back_populates="user", lazy="selectin", cascade="all, delete-orphan", foreign_keys="[PasswordResetAudit.user_id]"
     )
@@ -1240,9 +1255,18 @@ class ReportAccessPermission(Base):
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     can_view = Column(Boolean, default=True, nullable=False)
-    can_print = Column(Boolean, default=True, nullable=False)
-    can_export = Column(Boolean, default=True, nullable=False)
-    can_change_period = Column(Boolean, default=True, nullable=False, server_default="true")
+    can_print = Column(Boolean, default=False, nullable=False, server_default="false")
+    can_export = Column(Boolean, default=False, nullable=False, server_default="false")
+    can_download_word = Column(Boolean, default=False, nullable=False, server_default="false")
+    can_change_period = Column(Boolean, default=False, nullable=False, server_default="false")
+    can_load_lms = Column(Boolean, default=False, nullable=False, server_default="false")
+    can_use_unique_value = Column(Boolean, default=False, nullable=False, server_default="false")
+    filter_kpi_id = Column(Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=True, index=True)
+    filter_mli_id = Column(Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=True, index=True)
+    filter_sub_field_key = Column(String(100), nullable=True)
+    filter_column_configs = Column(JSON, nullable=True)
+    filter_operator = Column(String(50), default="=", nullable=False, server_default="=")
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
     created_at = Column(DateTime, default=utc_now)
 
     __table_args__ = (
@@ -1301,12 +1325,15 @@ class DashboardAccessPermission(Base):
     can_edit = Column(Boolean, default=False, nullable=False)
     can_load_lms = Column(Boolean, default=True, nullable=False, server_default="true")
     can_change_period = Column(Boolean, default=True, nullable=False, server_default="true")
+    can_download_widget_pdf = Column(Boolean, default=True, nullable=False, server_default="true")
+    can_view_drilldown = Column(Boolean, default=True, nullable=False, server_default="true")
     can_use_unique_value = Column(Boolean, default=False, nullable=False, server_default="false")
     filter_kpi_id = Column(Integer, ForeignKey("kpis.id", ondelete="CASCADE"), nullable=True, index=True)
     filter_mli_id = Column(Integer, ForeignKey("kpi_fields.id", ondelete="CASCADE"), nullable=True, index=True)
     filter_sub_field_key = Column(String(100), nullable=True)
     filter_column_configs = Column(JSON, nullable=True)
     filter_operator = Column(String(50), default="=", nullable=False, server_default="=")
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
     created_at = Column(DateTime, default=utc_now)
 
     __table_args__ = (
@@ -1536,9 +1563,19 @@ class CustomReportAssignment(Base):
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     can_view = Column(Boolean, default=True, nullable=False)
-    can_print = Column(Boolean, default=True, nullable=False)
-    can_export = Column(Boolean, default=True, nullable=False)
-    can_change_period = Column(Boolean, default=True, nullable=False, server_default="true")
+    can_print = Column(Boolean, default=False, nullable=False, server_default="false")
+    can_export = Column(Boolean, default=False, nullable=False, server_default="false")
+    can_download_word = Column(Boolean, default=False, nullable=False, server_default="false")
+    can_change_period = Column(Boolean, default=False, nullable=False, server_default="false")
+    can_load_lms = Column(Boolean, default=False, nullable=False, server_default="false")
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
+    # Per-user access mode — mirrors DashboardAccessPermission and ReportAccessPermission
+    can_use_unique_value = Column(Boolean, default=False, nullable=False, server_default="false")
+    filter_kpi_id = Column(Integer, ForeignKey("kpis.id", ondelete="SET NULL"), nullable=True)
+    filter_mli_id = Column(Integer, ForeignKey("kpi_fields.id", ondelete="SET NULL"), nullable=True)
+    filter_sub_field_key = Column(String(255), nullable=True)
+    filter_column_configs = Column(JSON, nullable=True)
+    filter_operator = Column(String(50), default="=", nullable=False, server_default="=")
     created_at = Column(DateTime, default=utc_now)
 
     __table_args__ = (
@@ -1547,6 +1584,37 @@ class CustomReportAssignment(Base):
 
     custom_report = relationship("CustomReport", back_populates="assignments")
     user = relationship("User")
+
+
+
+class AccessManagementAudit(Base):
+    """Audit log tracking permissions assignment, modification, and revocation across Dashboards and Reports."""
+
+    __tablename__ = "access_management_audits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    resource_type = Column(String(30), nullable=False, index=True)  # dashboard, report, custom_report
+    resource_id = Column(Integer, nullable=False, index=True)
+    resource_name = Column(String(255), nullable=True)
+    action = Column(String(50), nullable=False, index=True)  # ASSIGNED, UPDATED, ACTIVATED, DEACTIVATED, REVOKED
+    previous_access = Column(JSON, nullable=True)
+    new_access = Column(JSON, nullable=True)
+    previous_config = Column(JSON, nullable=True)
+    new_config = Column(JSON, nullable=True)
+    changed_by_id = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at = Column(DateTime, default=utc_now, nullable=False, index=True)
+
+    organization = relationship("Organization")
+    user = relationship("User", foreign_keys=[user_id])
+    changed_by = relationship("User", foreign_keys=[changed_by_id])
 
 
 class ReportUserFilterConfiguration(Base):
@@ -1701,5 +1769,81 @@ class KpiBulkUploadTask(Base):
     user = relationship("User")
 
 
-import uuid
+class UserSession(Base):
+    """Tracks active and historical user sessions for login monitoring."""
+
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(128), unique=True, nullable=False, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(512), nullable=True)
+    login_time = Column(DateTime, default=utc_now, nullable=False, index=True)
+    last_activity_time = Column(DateTime, default=utc_now, nullable=False, index=True)
+    logout_time = Column(DateTime, nullable=True)
+    status = Column(String(30), default="ACTIVE", nullable=False, index=True)  # ACTIVE, LOGGED_OUT, EXPIRED
+
+    user = relationship("User", foreign_keys=[user_id], back_populates="sessions")
+    organization = relationship("Organization", foreign_keys=[organization_id])
+
+    __table_args__ = (
+        Index("ix_user_sessions_org_user", "organization_id", "user_id"),
+        Index("ix_user_sessions_org_login", "organization_id", "login_time"),
+    )
+
+
+class UserActivity(Base):
+    """Centralized activity and audit trail for all End User actions."""
+
+    __tablename__ = "user_activities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    session_id = Column(String(128), nullable=True, index=True)
+    unique_user_key = Column(String(100), nullable=True, index=True)
+    user_name = Column(String(255), nullable=True)
+    user_email = Column(String(255), nullable=True)
+    department = Column(String(255), nullable=True)
+    faculty = Column(String(255), nullable=True)
+    campus = Column(String(255), nullable=True)
+    module = Column(String(50), nullable=False, index=True)  # AUTH, REPORTS, DASHBOARDS, KPIS, SYSTEM
+    resource_type = Column(String(50), nullable=False, index=True)  # session, report, custom_report, dashboard, widget, kpi, mli, file
+    resource_id = Column(String(100), nullable=True, index=True)
+    resource_name = Column(String(255), nullable=True)
+    action_type = Column(String(60), nullable=False, index=True)  # LOGIN, LOGOUT, VIEW, OPEN, DOWNLOAD_PDF, DOWNLOAD_EXCEL, DOWNLOAD_WORD, DOWNLOAD_CSV, PRINT, FILTER_APPLY, PERIOD_CHANGE, DRILL_DOWN, SAVE, UPDATE, DELETE, SUBMIT, ATTACHMENT_UPLOAD, ATTACHMENT_DELETE
+    action_details = Column(Text, nullable=True)
+    reporting_period = Column(String(100), nullable=True)
+    kpi_id = Column(Integer, nullable=True, index=True)
+    dashboard_id = Column(Integer, nullable=True, index=True)
+    widget_id = Column(String(100), nullable=True)
+    status = Column(String(30), default="SUCCESS", nullable=False)  # SUCCESS, FAILED
+    error_message = Column(Text, nullable=True)
+    records_affected = Column(Integer, nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(512), nullable=True)
+    meta_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False, index=True)
+
+    user = relationship("User", foreign_keys=[user_id], back_populates="activities")
+    organization = relationship("Organization", foreign_keys=[organization_id])
+
+    __table_args__ = (
+        Index("ix_user_activities_org_created", "organization_id", "created_at"),
+        Index("ix_user_activities_org_user", "organization_id", "user_id", "created_at"),
+        Index("ix_user_activities_org_module", "organization_id", "module", "created_at"),
+        Index("ix_user_activities_org_action", "organization_id", "action_type", "created_at"),
+        Index("ix_user_activities_org_res", "organization_id", "resource_type", "resource_id"),
+    )
+
 
