@@ -3,6 +3,7 @@
 import { useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { PageLoader } from "@/components/PageLoader";
 
 function BulkDashboardAssignRedirect() {
   const router = useRouter();
@@ -23,7 +24,6 @@ function BulkDashboardAssignRedirect() {
 
   return (
     <div style={{ maxWidth: 600, margin: "4rem auto", textAlign: "center", padding: "2rem" }}>
-      <div style={{ fontSize: "2rem", marginBottom: "1rem" }}>🛡️</div>
       <h2 style={{ fontSize: "1.25rem", fontWeight: 700, marginBottom: "0.5rem" }}>
         Redirecting to Centralized Rights Management...
       </h2>
@@ -51,7 +51,7 @@ function BulkDashboardAssignRedirect() {
 
 export default function BulkDashboardAssignPage() {
   return (
-    <Suspense fallback={<div style={{ padding: "3rem", textAlign: "center" }}>Loading...</div>}>
+    <Suspense fallback={<PageLoader text="Loading…" />}>
       <BulkDashboardAssignRedirect />
     </Suspense>
   );

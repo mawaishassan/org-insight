@@ -139,7 +139,7 @@ export function ColumnWidthConfigModal({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "1.25rem 1.5rem", borderBottom: "1px solid var(--border)", background: "#f8fafc" }}>
           <div>
             <h3 style={{ margin: 0, fontSize: "1.2rem", fontWeight: 700, color: "#1e3a8a" }}>
-              📐 Configure Column Widths — {fieldName}
+              Configure Column Widths — {fieldName}
             </h3>
             <p style={{ margin: "0.2rem 0 0 0", fontSize: "0.85rem", color: "#64748b" }}>
               Set precise column widths. Tables are automatically scaled to fit within page borders without overflowing.
@@ -169,7 +169,7 @@ export function ColumnWidthConfigModal({
                 style={{ fontSize: "0.8rem", padding: "0.25rem 0.6rem", background: "#e0e7ff", color: "#3730a3", borderColor: "#c7d2fe", fontWeight: 600 }}
                 title="Proportionally scale column widths to fit standard page container width"
               >
-                ✨ Auto-Fit to Page Width ({TARGET_PAGE_WIDTH}px)
+                Auto-Fit to Page Width ({TARGET_PAGE_WIDTH}px)
               </button>
             </div>
 
@@ -214,7 +214,7 @@ export function ColumnWidthConfigModal({
           <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <h4 style={{ margin: 0, fontSize: "0.95rem", color: "#1e3a8a", fontWeight: 700, display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                <span>👁️ Live Report Preview</span>
+                <span>Live Report Preview</span>
                 <span style={{ fontSize: "0.75rem", fontWeight: 500, color: "#64748b", background: "#eff6ff", padding: "0.1rem 0.5rem", borderRadius: 4, border: "1px solid #bfdbfe" }}>
                   Drag column borders to resize
                 </span>
@@ -342,7 +342,7 @@ export function ColumnWidthConfigModal({
             onClick={handleResetToDefault}
             style={{ color: "#dc2626", border: "1px solid #fca5a5", background: "#fff5f5", fontWeight: 600, padding: "0.5rem 1rem" }}
           >
-            🔄 Reset to Default Widths
+            Reset to Default Widths
           </button>
           
           <div style={{ display: "flex", gap: "0.75rem" }}>

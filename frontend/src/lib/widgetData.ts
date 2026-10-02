@@ -246,3 +246,93 @@ export async function postDashboardUniversalBatch(
     ...init,
   });
 }
+
+const WIDGET_CACHE_PREFIX = "org_insight_widget_cache::";
+const WIDGET_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes session TTL
+const clientWidgetMemoryCache = new Map<string, { data: any; ts: number }>();
+
+export function computeWidgetCacheSignature(w: any): string {
+  if (!w || typeof w !== "object") return "";
+  const kpiId = w.kpi_id ?? "";
+  const type = w.type ?? "";
+  const srcKey = w.source_field_key ?? w.field_key ?? "";
+  const groupBy = w.group_by_sub_field_key ?? "";
+  const valKey = w.value_sub_field_key ?? "";
+  const agg = w.agg ?? "";
+  const fkeys = Array.isArray(w.field_keys) ? w.field_keys.join(",") : "";
+  const joins = Array.isArray(w.joins) ? JSON.stringify(w.joins) : "";
+  return `${kpiId}:${type}:${srcKey}:${groupBy}:${valKey}:${agg}:${fkeys}:${joins}`;
+}
+
+export function getPersistentWidgetCache<T = any>(cacheKey: string, maxAgeMs = WIDGET_CACHE_TTL_MS): T | null {
+  const now = Date.now();
+  // 1. Check in-memory cache
+  const mem = clientWidgetMemoryCache.get(cacheKey);
+  if (mem && now - mem.ts < maxAgeMs) {
+    return mem.data as T;
+  }
+  // 2. Check sessionStorage
+  if (typeof window !== "undefined") {
+    try {
+      const raw = sessionStorage.getItem(`${WIDGET_CACHE_PREFIX}${cacheKey}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.ts === "number" && now - parsed.ts < maxAgeMs) {
+          clientWidgetMemoryCache.set(cacheKey, { data: parsed.data, ts: parsed.ts });
+          return parsed.data as T;
+        } else {
+          sessionStorage.removeItem(`${WIDGET_CACHE_PREFIX}${cacheKey}`);
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
+
+export function setPersistentWidgetCache(cacheKey: string, data: any): void {
+  if (data === undefined) return;
+  const now = Date.now();
+  clientWidgetMemoryCache.set(cacheKey, { data, ts: now });
+  if (typeof window !== "undefined") {
+    try {
+      sessionStorage.setItem(`${WIDGET_CACHE_PREFIX}${cacheKey}`, JSON.stringify({ data, ts: now }));
+    } catch {
+      // Storage quota exceeded or disabled
+    }
+  }
+}
+
+export function clearClientWidgetCache(dashboardId?: number): void {
+  if (dashboardId != null) {
+    const prefix = `${dashboardId}::`;
+    for (const k of Array.from(clientWidgetMemoryCache.keys())) {
+      if (k.startsWith(prefix)) {
+        clientWidgetMemoryCache.delete(k);
+      }
+    }
+    if (typeof window !== "undefined") {
+      try {
+        const fullPrefix = `${WIDGET_CACHE_PREFIX}${prefix}`;
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const k = sessionStorage.key(i);
+          if (k && k.startsWith(fullPrefix)) keysToRemove.push(k);
+        }
+        keysToRemove.forEach((k) => sessionStorage.removeItem(k));
+      } catch {}
+    }
+  } else {
+    clientWidgetMemoryCache.clear();
+    if (typeof window !== "undefined") {
+      try {
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const k = sessionStorage.key(i);
+          if (k && k.startsWith(WIDGET_CACHE_PREFIX)) keysToRemove.push(k);
+        }
+        keysToRemove.forEach((k) => sessionStorage.removeItem(k));
+      } catch {}
+    }
+  }
+}
+

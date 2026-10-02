@@ -1896,9 +1896,19 @@ async def sync_joined_kpi_fields(db: AsyncSession, kpi: KPI):
                 primary_field = primary_field_res.scalar_one_or_none()
                 if primary_field:
                     psub_keys = m.get("primary_sub_field_keys")
+                    primary_col_aliases = m.get("primary_column_aliases") or {}
                     for ssf in primary_field.sub_fields:
                         if psub_keys is None or ssf.key in psub_keys:
-                            subfields_info[ssf.key] = (ssf.name or ssf.key, ssf.field_type.value if hasattr(ssf.field_type, "value") else ssf.field_type)
+                            alias_info = primary_col_aliases.get(ssf.key)
+                            if isinstance(alias_info, dict):
+                                sf_key = alias_info.get("key") or ssf.key
+                                sf_name = alias_info.get("name") or ssf.name or ssf.key
+                                sf_type = alias_info.get("field_type") or (ssf.field_type.value if hasattr(ssf.field_type, "value") else ssf.field_type)
+                            else:
+                                sf_key = ssf.key
+                                sf_name = ssf.name or ssf.key
+                                sf_type = ssf.field_type.value if hasattr(ssf.field_type, "value") else ssf.field_type
+                            subfields_info[sf_key] = (sf_name, sf_type)
             else:
                 for sf_info in m.get("sub_fields", []):
                     sf_key = sf_info.get("key")
@@ -1917,9 +1927,19 @@ async def sync_joined_kpi_fields(db: AsyncSession, kpi: KPI):
                     )
                     source_field = source_field_res.scalar_one_or_none()
                     if source_field:
+                        col_aliases = j.get("column_aliases") or {}
                         for ssf in source_field.sub_fields:
                             if ssf.key in jkeys:
-                                subfields_info[ssf.key] = (ssf.name or ssf.key, ssf.field_type.value if hasattr(ssf.field_type, "value") else ssf.field_type)
+                                alias_info = col_aliases.get(ssf.key)
+                                if isinstance(alias_info, dict):
+                                    sf_key = alias_info.get("key") or ssf.key
+                                    sf_name = alias_info.get("name") or ssf.name or ssf.key
+                                    sf_type = alias_info.get("field_type") or (ssf.field_type.value if hasattr(ssf.field_type, "value") else ssf.field_type)
+                                else:
+                                    sf_key = ssf.key
+                                    sf_name = ssf.name or ssf.key
+                                    sf_type = ssf.field_type.value if hasattr(ssf.field_type, "value") else ssf.field_type
+                                subfields_info[sf_key] = (sf_name, sf_type)
                 
             # Fetch existing subfields from DB
             sf_res = await db.execute(

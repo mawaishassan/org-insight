@@ -318,7 +318,7 @@ export function PasswordResetManagementTab({ token, orgId }: Props) {
           }}
         >
           <span style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--text)" }}>
-            ✓ {selectedUserIds.length} user{selectedUserIds.length > 1 ? "s" : ""} selected
+            {selectedUserIds.length} user{selectedUserIds.length > 1 ? "s" : ""} selected
           </span>
           <div style={{ display: "flex", gap: "0.5rem" }}>
             <button
@@ -327,7 +327,7 @@ export function PasswordResetManagementTab({ token, orgId }: Props) {
               style={{ fontSize: "0.85rem", padding: "0.35rem 0.75rem" }}
               onClick={() => initiateAction(selectedUserIds, "force")}
             >
-              🔒 Force Password Reset
+              Force Password Reset
             </button>
             <button
               type="button"
@@ -367,7 +367,7 @@ export function PasswordResetManagementTab({ token, orgId }: Props) {
           </div>
         ) : items.length === 0 ? (
           <div style={{ padding: "3rem 1rem", textAlign: "center", color: "var(--muted)" }}>
-            <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🔍</div>
+            
             <p style={{ margin: 0, fontSize: "0.95rem" }}>No users match the current criteria.</p>
           </div>
         ) : (

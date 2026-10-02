@@ -15,6 +15,7 @@ import { ActivityLogsTable } from "@/components/activity-logs/ActivityLogsTable"
 import { UserSessionsTable } from "@/components/activity-logs/UserSessionsTable";
 import { ActivityAnalyticsCharts } from "@/components/activity-logs/ActivityAnalyticsCharts";
 import { AlertCircle } from "@/components/activity-logs/Icons";
+import { PageLoader } from "@/components/PageLoader";
 import "@/components/activity-logs/activity-logs.css";
 
 
@@ -311,9 +312,7 @@ export default function ActivityLogsPage() {
 
   if (!authChecked) {
     return (
-      <div className="p-12 text-center text-sm text-gray-500">
-        Loading activity monitor...
-      </div>
+      <PageLoader text="Loading activity monitor…" size="large" minHeight={300} />
     );
   }
 

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { getApiUrl } from "@/lib/api";
+import { PageLoader } from "@/components/PageLoader";
 
 export default function AttachmentDownloadPage() {
   const params = useParams();
@@ -110,14 +111,7 @@ export default function AttachmentDownloadPage() {
   if (loading) {
     return (
       <div style={containerStyle}>
-        <div className="card" style={cardStyle}>
-          <div className="spinner-border text-primary" role="status" style={{ margin: "0 auto" }}>
-            <span className="visually-hidden">Loading...</span>
-          </div>
-          <p style={{ marginTop: "1rem", color: "var(--muted, #6b7280)" }}>
-            Verifying your security credentials...
-          </p>
-        </div>
+        <PageLoader text="Verifying your security credentials…" size="large" minHeight={200} />
       </div>
     );
   }

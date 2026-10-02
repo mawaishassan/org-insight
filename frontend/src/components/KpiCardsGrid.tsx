@@ -3,9 +3,9 @@
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
-
-import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
+import { api, getCachedApiResponse } from "@/lib/api";
+import { PageLoader } from "@/components/PageLoader";
+import { ContentLoader } from "@/components/ContentLoader";
 
 const TIME_DIMENSION_ORDER = ["yearly", "half_yearly", "quarterly", "monthly"] as const;
 const TIME_DIMENSION_LABELS: Record<string, string> = {
@@ -135,13 +135,17 @@ export function KpiCardsGrid({
   cardLayout = "default",
 }: KpiCardsGridProps) {
   const token = getAccessToken();
-  const [overview, setOverview] = useState<OverviewItem[]>([]);
+  const overviewQuery = organizationId ? `/entries/overview?${qs({ year, organization_id: organizationId })}` : null;
+  const cachedOverview = overviewQuery ? getCachedApiResponse<OverviewItem[]>(overviewQuery) : null;
+  const [overview, setOverview] = useState<OverviewItem[]>(() => cachedOverview ?? []);
   const [kpis, setKpis] = useState<KpiRow[]>([]);
-  const [loadingOverview, setLoadingOverview] = useState(true);
+  const [loadingOverview, setLoadingOverview] = useState(() => !cachedOverview || cachedOverview.length === 0);
   const [loadingKpis, setLoadingKpis] = useState(!!domainId && !kpisOverride);
   /** When overview is empty on org_admin entries page, fallback list from GET /entries/available-kpis so org admin still sees all KPIs. */
-  const [availableKpisFallback, setAvailableKpisFallback] = useState<KpiRow[]>([]);
-  const [loadingFallback, setLoadingFallback] = useState(false);
+  const fallbackQuery = organizationId ? `/entries/available-kpis?${qs({ organization_id: organizationId })}` : null;
+  const cachedFallback = fallbackQuery ? getCachedApiResponse<KpiRow[]>(fallbackQuery) : null;
+  const [availableKpisFallback, setAvailableKpisFallback] = useState<KpiRow[]>(() => cachedFallback ?? []);
+  const [loadingFallback, setLoadingFallback] = useState(() => !cachedFallback && cardLayout === "org_admin" && (!cachedOverview || cachedOverview.length === 0));
 
   // Org admin entries page: fetch available-kpis immediately so cards render fast,
   // then enrich with /entries/overview when it arrives.
@@ -149,7 +153,7 @@ export function KpiCardsGrid({
     if (!token || !organizationId) return;
     if (cardLayout !== "org_admin") return;
     if (domainId != null || kpisOverride !== undefined) return;
-    setLoadingFallback(true);
+    if (availableKpisFallback.length === 0) setLoadingFallback(true);
     api<KpiRow[]>(`/entries/available-kpis?${qs({ organization_id: organizationId })}`, { token })
       .then((list) => setAvailableKpisFallback(Array.isArray(list) ? list : []))
       .catch(() => setAvailableKpisFallback([]))
@@ -158,7 +162,7 @@ export function KpiCardsGrid({
 
   const loadOverview = () => {
     if (!token || !organizationId) return;
-    setLoadingOverview(true);
+    if (overview.length === 0 && availableKpisFallback.length === 0) setLoadingOverview(true);
     const query = `?${qs({ year, organization_id: organizationId })}`;
     api<OverviewItem[]>(`/entries/overview${query}`, { token })
       .then(setOverview)
@@ -283,7 +287,9 @@ export function KpiCardsGrid({
       : `/dashboard/entries/kpi/${kpiId}?year=${year}&organization_id=${organizationId}`;
 
   if (loading && overview.length === 0 && filteredKpis.length === 0) {
-    return <WidgetSpinnerLoader size="large" text="Loading KPIs..." minHeight={200} />;
+    return (
+      <PageLoader text="Loading KPIs…" size="large" minHeight={240} />
+    );
   }
 
   if (error) {
@@ -291,7 +297,9 @@ export function KpiCardsGrid({
   }
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
+    <div style={{ position: "relative" }}>
+      <ContentLoader show={Boolean(parentLoading) || (loadingOverview && overview.length > 0)} text="Updating KPIs…" size="large" />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
       {filteredKpis.map((kpi) => {
         const item = overviewByKpiId.get(kpi.id);
         const entry = item?.entry ?? null;
@@ -701,6 +709,7 @@ export function KpiCardsGrid({
           {emptyMessage ?? (domainId != null ? "No KPIs in this domain." : "No KPIs in this organization.")}
         </p>
       )}
+      </div>
     </div>
   );
 }

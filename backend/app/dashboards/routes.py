@@ -495,11 +495,23 @@ async def get_dashboard_odoo_sync_info(
             start_year = w.get("start_year")
             end_year = w.get("end_year")
             if start_year and end_year:
-                years = list(range(int(start_year), int(end_year) + 1))
+                try:
+                    years = list(range(int(start_year), int(end_year) + 1))
+                except (ValueError, TypeError):
+                    pass
         else:
             year = w.get("year")
             if year:
-                years = [int(year)]
+                try:
+                    from app.widget_data.service import parse_fiscal_year_to_int
+                    py = parse_fiscal_year_to_int(year)
+                    if py:
+                        years = [py]
+                except Exception:
+                    try:
+                        years = [int(year)]
+                    except (ValueError, TypeError):
+                        pass
 
         if not years:
             continue
@@ -619,7 +631,12 @@ async def sync_dashboard_odoo_data(
                 pass
         elif w.get("year"):
             try:
-                years = [int(w["year"])]
+                from app.widget_data.service import parse_fiscal_year_to_int
+                py = parse_fiscal_year_to_int(w["year"])
+                if py:
+                    years = [py]
+                else:
+                    years = [int(w["year"])]
             except (ValueError, TypeError):
                 pass
         if not years:

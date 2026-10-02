@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useRef, useCallback } from "react";
-import { api } from "@/lib/api";
+import { api, getCachedApiResponse } from "@/lib/api";
 import { KpiSearchInput } from "@/components/KpiSearchInput";
 import {
   getAccessToken,
@@ -17,7 +17,15 @@ import {
   canEnterData,
   canViewReports,
   canUseChat,
+  formatUserRole,
 } from "@/lib/auth";
+import { AccessDiscoveryModal } from "@/components/AccessDiscoveryModal";
+import {
+  detectNewAccess,
+  acknowledgeAllAccess,
+  type AccessibleItem,
+} from "@/lib/accessTracker";
+import PageLoader from "@/components/PageLoader";
 
 const currentYear = new Date().getFullYear();
 const yearOptions = Array.from({ length: 11 }, (_, i) => currentYear - 5 + i);
@@ -49,6 +57,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const rawSearchParams = useSearchParams();
   const searchParams = rawSearchParams ?? new URLSearchParams();
+  // Always start null/true so SSR and client first-render match (no sessionStorage on server).
+  // The useEffect below hydrates from cache immediately after mount.
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -59,6 +69,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [selectedOrgName, setSelectedOrgName] = useState<string | null>(null);
   const [hasKpiRights, setHasKpiRights] = useState<boolean>(false);
   const [hasDashboards, setHasDashboards] = useState<boolean>(false);
+  const [allDashboards, setAllDashboards] = useState<AccessibleItem[]>([]);
+  const [newDashboards, setNewDashboards] = useState<AccessibleItem[]>([]);
+  const [allReports, setAllReports] = useState<AccessibleItem[]>([]);
+  const [newReports, setNewReports] = useState<AccessibleItem[]>([]);
+  const [accessModalOpen, setAccessModalOpen] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   /** For routes outside /dashboard/organizations/[id] that still have org context (e.g. kpis/[id]/fields?organization_id=3). */
   const [breadcrumbTail, setBreadcrumbTail] = useState<{ orgId: number; orgName: string | null; segments: { label: string; href: string }[] } | null>(null);
   /** Ignore stale breadcrumb API responses when pathname/query changes quickly (avoids clearing tail or showing wrong year). */
@@ -167,6 +183,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       router.push(`/login?redirect=${encodeURIComponent(currentPath)}`);
       return;
     }
+    // Hydrate from cache immediately after mount (client-only, safe from SSR mismatch).
+    const cached = getCachedApiResponse<CurrentUser>("/auth/me");
+    if (cached) {
+      setUser(cached);
+      setLoading(false);
+    }
     api<CurrentUser>("/auth/me", { token })
       .then((u) => {
         if (u.force_password_reset) {
@@ -175,13 +197,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         }
         setUser(u);
       })
-      .catch(() => {
-        clearTokens();
-        const currentPath = pathname + (searchParams.toString() ? `?${searchParams.toString()}` : "");
-        router.push(`/login?redirect=${encodeURIComponent(currentPath)}`);
+      .catch((err) => {
+        if (err?.message?.includes?.("401") || err?.name === "Unauthorized") {
+          clearTokens();
+          const currentPath = pathname + (searchParams.toString() ? `?${searchParams.toString()}` : "");
+          router.push(`/login?redirect=${encodeURIComponent(currentPath)}`);
+        }
       })
       .finally(() => setLoading(false));
-  }, [router, pathname, searchParams]);
+  }, [router]);
 
   // ── Inactivity logout logic ──────────────────────────────────────────────────
   const clearIdleTimers = useCallback(() => {
@@ -291,21 +315,54 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const token = getAccessToken();
     if (!token || !orgId || !user) return;
     const role = user.role as UserRole;
-    if (role === "SUPER_ADMIN" || role === "ORG_ADMIN") {
+    if (role === "SUPER_ADMIN") {
       setHasDashboards(true);
       return;
     }
-    api<Array<{ id: number }>>(
-      `/dashboards?organization_id=${orgId}`,
+    const effectiveOrgId = selectedOrgId ?? orgId;
+    const fetchDashboards = api<Array<{ id: number; name: string }>>(
+      `/dashboards?organization_id=${effectiveOrgId}`,
       { token }
-    )
-      .then((dashboards) => {
-        setHasDashboards(Array.isArray(dashboards) && dashboards.length > 0);
-      })
-      .catch(() => {
-        setHasDashboards(false);
-      });
-  }, [orgId, user]);
+    ).catch(() => []);
+
+    const fetchTemplates = canViewReports(role)
+      ? api<Array<{ id: number; name: string }>>(
+          `/reports/templates?organization_id=${effectiveOrgId}`,
+          { token }
+        ).catch(() => [])
+      : Promise.resolve([]);
+
+    const fetchCustomReports = canViewReports(role)
+      ? api<Array<{ id: number; name: string }>>(
+          `/custom-reports?organization_id=${effectiveOrgId}`,
+          { token }
+        ).catch(() => [])
+      : Promise.resolve([]);
+
+    Promise.all([fetchDashboards, fetchTemplates, fetchCustomReports]).then(([dashboards, templates, customs]) => {
+      const dashList = Array.isArray(dashboards) ? dashboards : [];
+      const templateList = Array.isArray(templates) ? templates : [];
+      const customList = Array.isArray(customs) ? customs.map((c) => ({ id: 1000000 + c.id, name: c.name })) : [];
+      const repList = [...templateList, ...customList];
+
+      setHasDashboards(dashList.length > 0);
+      setAllDashboards(dashList);
+      setAllReports(repList);
+
+      const result = detectNewAccess(user.id, effectiveOrgId, dashList, repList);
+      setNewDashboards(result.newDashboards);
+      setNewReports(result.newReports);
+    });
+  }, [orgId, selectedOrgId, user]);
+
+  const handleAcknowledgeAll = () => {
+    if (!user) return;
+    const effectiveOrgId = selectedOrgId ?? orgId;
+    acknowledgeAllAccess(user.id, effectiveOrgId, allDashboards, allReports);
+    setNewDashboards([]);
+    setNewReports([]);
+    setBannerDismissed(true);
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -646,10 +703,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
 
 
-  if (loading) {
+  if (loading && !user) {
     return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        Loading…
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg, #f8fafc)" }}>
+        <PageLoader size="large" text="Loading workspace…" />
       </div>
     );
   }
@@ -657,6 +714,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   if (!user) return null;
 
   const role = user.role as UserRole;
+  const displayName = user.full_name?.trim() || user.username;
+  const initials = (user.full_name?.trim() || user.username)
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p[0].toUpperCase())
+    .join("");
+  const formattedRole = formatUserRole(role);
   const isSuperAdmin = role === "SUPER_ADMIN";
   /** Data-entry-only user (USER role): no Year/filters in header, only Home + hamburger */
   const isDataEntryOnlyUser = role === "USER";
@@ -703,12 +768,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     {
       href: dashboardsHref,
       label: "Dashboards",
+      badge: newDashboards.length > 0 ? `${newDashboards.length} New` : null,
       active: pathname.startsWith("/dashboard/dashboards"),
       show: isSuperAdmin ? false : hasDashboards,
     },
     {
       href: reportsHref,
       label: "Reports",
+      badge: newReports.length > 0 ? `${newReports.length} New` : null,
       active: pathname.startsWith("/dashboard/reports") || pathname.includes("/report-builder"),
       show: isSuperAdmin ? false : canViewReports(role),
     },
@@ -841,7 +908,20 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               href={item.href}
               className={`nav-item-link ${item.active ? "active" : ""}`}
             >
-              {item.label}
+              <span>{item.label}</span>
+              {item.badge && (
+                <span
+                  className="nav-new-badge"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setAccessModalOpen(true);
+                  }}
+                  title="New workspace access available. Click to view."
+                >
+                  {item.badge}
+                </span>
+              )}
             </Link>
           ))}
         </nav>
@@ -884,22 +964,30 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <button
               type="button"
               onClick={() => setMenuOpen((o) => !o)}
-              className={`nav-menu-toggle-btn ${menuOpen ? "open" : ""}`}
-              aria-label="Menu"
-              title="Menu"
+              className={`nav-user-pill-btn ${menuOpen ? "open" : ""}`}
+              aria-label="User Account Menu"
+              title={`${displayName} (${formattedRole})`}
             >
+              <span className="user-avatar-circle">
+                {initials}
+              </span>
+              <span className="user-pill-info">
+                <span className="user-pill-name">{displayName}</span>
+                <span className="user-pill-role">{formattedRole}</span>
+              </span>
               <svg
-                width="18"
-                height="18"
+                width="14"
+                height="14"
                 viewBox="0 0 20 20"
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
-                style={{ display: "block" }}
+                className={`user-pill-caret ${menuOpen ? "open" : ""}`}
+                style={{ flexShrink: 0 }}
               >
                 <path
-                  d="M3.5 5.5H16.5M3.5 10H16.5M3.5 14.5H16.5"
+                  d="M5 7.5L10 12.5L15 7.5"
                   stroke="currentColor"
-                  strokeWidth="2.2"
+                  strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                 />
@@ -911,16 +999,74 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   position: "absolute",
                   top: "100%",
                   right: 0,
-                  marginTop: 4,
-                  minWidth: 200,
+                  marginTop: 6,
+                  minWidth: 240,
+                  maxWidth: 320,
                   padding: "0.5rem 0",
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  boxShadow: "var(--shadow-md)",
+                  borderRadius: 10,
+                  boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)",
                   zIndex: 100,
                 }}
               >
+                {/* Account Summary Header Card */}
+                <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid var(--border)", background: "rgba(0, 0, 0, 0.02)" }}>
+                  <div style={{ fontWeight: 600, color: "var(--text)", fontSize: "0.95rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {displayName}
+                  </div>
+                  {user.email && (
+                    <div style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {user.email}
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", marginTop: "0.45rem", alignItems: "center" }}>
+                    <span style={{ fontSize: "0.7rem", padding: "2px 7px", borderRadius: 4, background: "var(--border)", fontWeight: 600, color: "var(--text)" }}>
+                      {formattedRole}
+                    </span>
+                    {(user.organization_name || (selectedOrgName && isSuperAdmin)) && (
+                      <span style={{ fontSize: "0.7rem", padding: "2px 7px", borderRadius: 4, background: "rgba(59, 130, 246, 0.1)", color: "var(--accent, #2563eb)", fontWeight: 500 }}>
+                        {user.organization_name || selectedOrgName}
+                      </span>
+                    )}
+                  </div>
+                  {user.unique_user_key && (
+                    <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: "0.4rem" }}>
+                      Scope / Key: <span style={{ fontWeight: 600, color: "var(--text)" }}>{user.unique_user_key}</span>
+                    </div>
+                  )}
+                </div>
+
+                {(newDashboards.length > 0 || newReports.length > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setAccessModalOpen(true);
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      width: "100%",
+                      padding: "0.55rem 1rem",
+                      textAlign: "left",
+                      border: "none",
+                      background: "rgba(37, 99, 235, 0.08)",
+                      borderBottom: "1px solid var(--border)",
+                      color: "var(--accent, #2563eb)",
+                      cursor: "pointer",
+                      fontSize: "0.84rem",
+                      fontWeight: 600,
+                    }}
+                  >
+                    <span>Workspace Access Updates</span>
+                    <span style={{ fontSize: "0.7rem", background: "var(--accent, #2563eb)", color: "#ffffff", padding: "1px 6px", borderRadius: 9999 }}>
+                      {newDashboards.length + newReports.length} New
+                    </span>
+                  </button>
+                )}
+
                 {isSuperAdmin && selectedOrgId ? (
                   <>
                     <Link
@@ -983,34 +1129,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     >
                       Settings
                     </Link>
-                    <div style={{ borderTop: "1px solid var(--border)", margin: "0.35rem 0" }} />
-                    <div style={{ padding: "0.35rem 1rem", fontSize: "0.75rem", fontWeight: 600, color: "var(--muted)", textTransform: "uppercase" }}>
-                      Account
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMenuOpen(false);
-                        clearTokens();
-                        router.push("/login");
-                        router.refresh();
-                      }}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        padding: "0.5rem 1rem",
-                        paddingLeft: "1.5rem",
-                        textAlign: "left",
-                        border: "none",
-                        background: "none",
-                        font: "inherit",
-                        color: "var(--text)",
-                        cursor: "pointer",
-                        fontSize: "0.9rem",
-                      }}
-                    >
-                      Logout
-                    </button>
                   </>
                 ) : (
                   <>
@@ -1042,31 +1160,41 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         Domains
                       </Link>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMenuOpen(false);
-                        clearTokens();
-                        router.push("/login");
-                        router.refresh();
-                      }}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        padding: "0.5rem 1rem",
-                        textAlign: "left",
-                        border: "none",
-                        background: "none",
-                        font: "inherit",
-                        color: "var(--text)",
-                        cursor: "pointer",
-                        fontSize: "0.9rem",
-                      }}
-                    >
-                      Logout
-                    </button>
                   </>
                 )}
+
+                <div style={{ borderTop: "1px solid var(--border)", margin: "0.35rem 0" }} />
+                <Link
+                  href="/reset-password"
+                  style={{ display: "block", padding: "0.45rem 1rem", color: "var(--muted)", textDecoration: "none", fontSize: "0.85rem" }}
+                  onClick={() => setMenuOpen(false)}
+                >
+                  Change Password
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    clearTokens();
+                    router.push("/login");
+                    router.refresh();
+                  }}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    padding: "0.5rem 1rem",
+                    textAlign: "left",
+                    border: "none",
+                    background: "none",
+                    font: "inherit",
+                    color: "var(--danger, #ef4444)",
+                    cursor: "pointer",
+                    fontSize: "0.88rem",
+                    fontWeight: 500,
+                  }}
+                >
+                  Logout
+                </button>
               </div>
             )}
           </div>
@@ -1078,9 +1206,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <div className="sub-header">
           {/* Breadcrumbs (Left) */}
           <nav aria-label="Breadcrumb" style={{ display: "flex", alignItems: "center", fontSize: "0.825rem", minWidth: 0 }}>
-            {breadcrumbs.map((crumb, i) => {
-              const isLast = i === breadcrumbs.length - 1;
-              const isHome = crumb.label.toLowerCase() === "home";
+            {breadcrumbs.filter((crumb) => Boolean(crumb && crumb.label)).map((crumb, i, arr) => {
+              const isLast = i === arr.length - 1;
+              const label = typeof crumb.label === "string" ? crumb.label : String(crumb.label || "");
               return (
                 <span key={i} style={{ display: "inline-flex", alignItems: "center", minWidth: 0 }}>
                   {i > 0 && (
@@ -1089,7 +1217,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     </span>
                   )}
                   <Link
-                    href={crumb.href}
+                    href={crumb.href || "#"}
                     style={{
                       color: isLast ? "var(--text)" : "var(--muted)",
                       textDecoration: "none",
@@ -1104,7 +1232,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     }}
                     className="breadcrumb-item-link"
                   >
-                    {crumb.label}
+                    {label}
                   </Link>
                 </span>
               );
@@ -1193,7 +1321,86 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </div>
       )}
 
+      {/* Discovery Banner for Newly Granted Access */}
+      {(newDashboards.length > 0 || newReports.length > 0) && !bannerDismissed && (
+        <div className="access-discovery-banner">
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+            <span style={{ fontWeight: 600, color: "var(--text)" }}>
+              New access granted:
+            </span>
+            <span style={{ color: "var(--muted)" }}>
+              {newDashboards.length > 0 && newReports.length > 0 ? (
+                <>
+                  You now have access to{" "}
+                  <strong style={{ color: "var(--text)" }}>
+                    {newDashboards.length === 1 ? `Dashboard "${newDashboards[0].name}"` : `${newDashboards.length} Dashboards`}
+                  </strong>
+                  {" and "}
+                  <strong style={{ color: "var(--text)" }}>
+                    {newReports.length === 1 ? `Report "${newReports[0].name}"` : `${newReports.length} Reports`}
+                  </strong>
+                </>
+              ) : newDashboards.length > 0 ? (
+                <>
+                  You now have access to Dashboard:{" "}
+                  <strong style={{ color: "var(--text)" }}>
+                    {newDashboards[0].name}
+                  </strong>
+                  {newDashboards.length > 1 ? ` and ${newDashboards.length - 1} other dashboard(s)` : ""}
+                </>
+              ) : (
+                <>
+                  You now have access to Report:{" "}
+                  <strong style={{ color: "var(--text)" }}>
+                    {newReports[0].name}
+                  </strong>
+                  {newReports.length > 1 ? ` and ${newReports.length - 1} other report(s)` : ""}
+                </>
+              )}
+            </span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={() => setAccessModalOpen(true)}
+              style={{ fontSize: "0.78rem", padding: "0.25rem 0.75rem", borderRadius: "6px" }}
+            >
+              View Access ({newDashboards.length + newReports.length})
+            </button>
+            <button
+              type="button"
+              onClick={handleAcknowledgeAll}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                padding: "0.25rem 0.5rem",
+                color: "var(--muted)",
+                fontSize: "1.1rem",
+                lineHeight: 1,
+              }}
+              title="Dismiss"
+              aria-label="Dismiss notification"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
       <main style={{ flex: 1, padding: "1.5rem" }}>{children}</main>
+
+      <AccessDiscoveryModal
+        isOpen={accessModalOpen}
+        onClose={() => setAccessModalOpen(false)}
+        onAcknowledgeAll={handleAcknowledgeAll}
+        allDashboards={allDashboards}
+        newDashboards={newDashboards}
+        allReports={allReports}
+        newReports={newReports}
+        orgId={selectedOrgId ?? orgId}
+      />
 
       <style jsx global>{`
         .main-header {
@@ -1237,30 +1444,84 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           flex-shrink: 0;
         }
 
-        .nav-menu-toggle-btn {
-          padding: 0.35rem 0.55rem;
+        .nav-user-pill-btn {
+          padding: 0.25rem 0.6rem 0.25rem 0.3rem;
           border: 1px solid var(--border);
-          border-radius: 6px;
+          border-radius: 9999px;
           background: var(--surface);
           color: var(--text);
           cursor: pointer;
           display: flex;
           align-items: center;
-          justify-content: center;
-          transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+          gap: 0.5rem;
+          transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
           outline: none;
         }
-        .nav-menu-toggle-btn:hover {
+        .nav-user-pill-btn:hover {
           background: var(--surface-hover, #f1f5f9);
           border-color: var(--accent, #3b82f6);
-          color: var(--accent, #3b82f6);
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+          box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
         }
-        .nav-menu-toggle-btn:active,
-        .nav-menu-toggle-btn.open {
-          background: rgba(59, 130, 246, 0.08);
+        .nav-user-pill-btn:active,
+        .nav-user-pill-btn.open {
+          background: rgba(59, 130, 246, 0.06);
           border-color: var(--accent, #3b82f6);
-          color: var(--accent, #3b82f6);
+        }
+
+        .user-avatar-circle {
+          width: 28px;
+          height: 28px;
+          border-radius: 50%;
+          background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+          color: #ffffff;
+          font-size: 0.72rem;
+          font-weight: 700;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+          letter-spacing: -0.02em;
+        }
+
+        .user-pill-info {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          line-height: 1.15;
+          text-align: left;
+        }
+
+        .user-pill-name {
+          font-size: 0.82rem;
+          font-weight: 600;
+          color: var(--text);
+          max-width: 120px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .user-pill-role {
+          font-size: 0.68rem;
+          font-weight: 500;
+          color: var(--muted);
+        }
+
+        .user-pill-caret {
+          color: var(--muted);
+          transition: transform 0.2s ease;
+        }
+        .user-pill-caret.open {
+          transform: rotate(180deg);
+        }
+
+        @media (max-width: 640px) {
+          .user-pill-info {
+            display: none;
+          }
+          .nav-user-pill-btn {
+            padding: 0.25rem;
+          }
         }
 
         .desktop-nav {
@@ -1289,6 +1550,57 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           color: var(--accent);
           font-weight: 600;
           border-bottom: 2px solid var(--accent);
+        }
+
+        .nav-new-badge {
+          display: inline-flex;
+          align-items: center;
+          margin-left: 0.35rem;
+          padding: 1px 6px;
+          border-radius: 9999px;
+          font-size: 0.68rem;
+          font-weight: 700;
+          line-height: 1.2;
+          background: linear-gradient(135deg, #2563eb, #3b82f6);
+          color: #ffffff;
+          box-shadow: 0 1px 4px rgba(37, 99, 235, 0.35);
+          letter-spacing: 0.01em;
+          transition: transform 0.15s ease;
+          animation: badgePulse 2s infinite ease-in-out;
+        }
+        .nav-new-badge:hover {
+          transform: scale(1.08);
+        }
+        @keyframes badgePulse {
+          0%, 100% {
+            transform: scale(1);
+          }
+          50% {
+            transform: scale(1.05);
+          }
+        }
+
+        .access-discovery-banner {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0.65rem 1.25rem;
+          background: linear-gradient(90deg, rgba(37, 99, 235, 0.08) 0%, rgba(99, 102, 241, 0.04) 100%);
+          border-bottom: 1px solid rgba(37, 99, 235, 0.2);
+          font-size: 0.85rem;
+          flex-wrap: wrap;
+          gap: 0.75rem;
+          animation: bannerSlideDown 0.25s ease-out;
+        }
+        @keyframes bannerSlideDown {
+          from {
+            opacity: 0;
+            transform: translateY(-8px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
         }
 
         .sub-header {

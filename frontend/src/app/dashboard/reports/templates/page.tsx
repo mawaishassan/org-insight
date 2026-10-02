@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { PageLoader } from "@/components/PageLoader";
 
 interface TemplateRow {
   id: number;
@@ -27,7 +28,7 @@ export default function ReportTemplatesPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <p>Loading…</p>;
+  if (loading) return <PageLoader text="Loading templates…" />;
   if (error) return <p className="form-error">{error}</p>;
 
   return (

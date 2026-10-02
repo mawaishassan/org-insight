@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 // ─────────────────────────────────────────────
 // Types
@@ -422,7 +423,7 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
     f.target_action === "append" ? testTargetVal : ""
   );
 
-  if (loading) return <div style={{ color: "var(--muted)", padding: "0.75rem 0" }}>Loading extraction rules…</div>;
+  if (loading) return <WidgetSpinnerLoader text="Loading extraction rules…" size="medium" minHeight={160} />;
 
   return (
     <div>
@@ -697,7 +698,7 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
           {f.extraction_method !== "remove_only" && (
             <div style={{ marginTop: "1rem", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8, padding: "0.85rem 1rem" }}>
               <div style={{ fontWeight: 700, fontSize: "0.85rem", color: "#0369a1", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                <span>⚡ Real-Time Live Preview</span>
+                <span>Real-Time Live Preview</span>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0.6rem 1rem" }}>
                 <div>
@@ -723,7 +724,7 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
           {/* Boolean flags */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem", marginTop: "0.9rem" }}>
             <span style={{ fontSize: "0.85rem", color: "#166534", background: "#f0fdf4", border: "1px solid #bbf7d0", padding: "0.2rem 0.55rem", borderRadius: 6, fontWeight: 600 }}>
-              ✓ Source cell value is preserved intact (never erased)
+              Source cell value is preserved intact (never erased)
             </span>
 
             {f.extraction_method !== "full_cell_format" && (
@@ -754,8 +755,9 @@ export function MLIExtractionRulesPanel({ token, fieldId, subFields, sampleRows 
               className="btn"
               onClick={runPreview}
               disabled={previewLoading}
-              style={{ marginRight: "0.5rem" }}
+              style={{ marginRight: "0.5rem", display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
             >
+              {previewLoading && <span className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />}
               {previewLoading ? "Running preview…" : "▶ Preview on entry rows"}
             </button>
             {previewError && <span style={{ color: "var(--error)", fontSize: "0.85rem" }}>{previewError}</span>}

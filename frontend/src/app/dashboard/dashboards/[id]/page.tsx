@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import toast from "react-hot-toast";
-import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { getAccessToken, type CurrentUser, formatUserRole } from "@/lib/auth";
+import { api, getCachedApiResponse } from "@/lib/api";
 import { WidgetRenderer, type Widget, type DrillDownRequestPayload } from "./widgets";
 import { WidgetDrillDownModal } from "@/components/WidgetDrillDownModal";
 import { generatePeriodOptions } from "@/lib/periodHelpers";
@@ -13,6 +13,9 @@ import { DashboardCustomizationProvider, useDashboardCustomization } from "./Das
 import { WidgetFullScreenNavigationProvider } from "./WidgetFullScreenContext";
 import { logDashboardView } from "@/lib/activityLogger";
 import { AccessDenied } from "@/components/AccessDenied";
+import { PageLoader } from "@/components/PageLoader";
+import { ContentLoader } from "@/components/ContentLoader";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 interface DashboardDetail {
   id: number;
@@ -96,18 +99,25 @@ export default function DashboardViewPage() {
   const organizationId = orgIdFromQuery ? Number(orgIdFromQuery) : undefined;
 
   const token = getAccessToken();
-  const [dashboard, setDashboard] = useState<DashboardDetail | null>(null);
-  const [loading, setLoading] = useState(true);
+  const query = organizationId ? `?organization_id=${organizationId}` : "";
+  const cachedDashboard = id ? getCachedApiResponse<DashboardDetail>(`/dashboards/${id}${query}`) : null;
+  const [dashboard, setDashboard] = useState<DashboardDetail | null>(() => cachedDashboard);
+  const [loading, setLoading] = useState(() => !cachedDashboard);
   const [error, setError] = useState<string | null>(null);
 
-  // Check user role: if SUPER_ADMIN, redirect to Design mode
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(() => getCachedApiResponse<CurrentUser>("/auth/me"));
+
+  // Check user role: if SUPER_ADMIN, redirect to Design mode; also store currentUser
   useEffect(() => {
     if (!token || !id) return;
-    api<{ role: string }>("/auth/me", { token })
+    api<CurrentUser>("/auth/me", { token })
       .then((me) => {
-        if (me?.role === "SUPER_ADMIN") {
-          const q = organizationId ? `?organization_id=${organizationId}` : "";
-          router.replace(`/dashboard/dashboards/${id}/design${q}`);
+        if (me) {
+          setCurrentUser(me);
+          if (me.role === "SUPER_ADMIN") {
+            const q = organizationId ? `?organization_id=${organizationId}` : "";
+            router.replace(`/dashboard/dashboards/${id}/design${q}`);
+          }
         }
       })
       .catch(() => {});
@@ -416,55 +426,8 @@ export default function DashboardViewPage() {
 
   const widgets = useMemo(() => asWidgets(dashboard?.layout), [dashboard?.layout]);
 
-  if (loading) {
-    return (
-      <div
-        style={{
-          position: "fixed",
-          inset: 0,
-          zIndex: 9999,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "rgba(248, 250, 252, 0.75)",
-          backdropFilter: "blur(12px)",
-          WebkitBackdropFilter: "blur(12px)",
-        }}
-      >
-        <div
-          style={{
-            padding: "1.5rem 2.5rem",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "var(--surface, #ffffff)",
-            borderRadius: "1rem",
-            boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
-            border: "1px solid var(--border, #e2e8f0)",
-            pointerEvents: "none",
-          }}
-        >
-          <div
-            className="effective-spinner"
-            style={{ width: 50, height: 50, borderWidth: 4 }}
-          />
-          <span
-            className="effective-spinner-text"
-            style={{
-              marginTop: "0.85rem",
-              fontSize: "1.15rem",
-              fontWeight: 700,
-              color: "#0f172a",
-              letterSpacing: "0.01em",
-              whiteSpace: "nowrap",
-            }}
-          >
-            Loading dashboard data...
-          </span>
-        </div>
-      </div>
-    );
+  if (loading && !dashboard) {
+    return <PageLoader text="Loading dashboard…" size="large" minHeight={400} />;
   }
 
   if (error || (userPermissions && !userPermissions.can_view)) {
@@ -503,26 +466,28 @@ export default function DashboardViewPage() {
     >
       <DashboardViewContent
         dashboard={dashboard}
+        currentUser={currentUser}
         userPermissions={userPermissions}
         syncInfo={syncInfo}
         syncing={syncing}
         handleSync={handleSync}
-          widgets={widgets}
-          refreshCount={refreshCount}
-          org={org}
-          selectedPeriodType={selectedPeriodType}
-          setSelectedPeriodType={setSelectedPeriodType}
-          selectedPeriod={selectedPeriod}
-          setSelectedPeriod={setSelectedPeriod}
-          customPeriods={customPeriods}
-          periodOptions={periodOptions}
-        />
-      </DashboardCustomizationProvider>
+        widgets={widgets}
+        refreshCount={refreshCount}
+        org={org}
+        selectedPeriodType={selectedPeriodType}
+        setSelectedPeriodType={setSelectedPeriodType}
+        selectedPeriod={selectedPeriod}
+        setSelectedPeriod={setSelectedPeriod}
+        customPeriods={customPeriods}
+        periodOptions={periodOptions}
+      />
+    </DashboardCustomizationProvider>
   );
 }
 
 function DashboardViewContent({
   dashboard,
+  currentUser,
   userPermissions,
   syncInfo,
   syncing,
@@ -538,6 +503,7 @@ function DashboardViewContent({
   periodOptions,
 }: {
   dashboard: DashboardDetail;
+  currentUser: CurrentUser | null;
   userPermissions: {
     can_view: boolean;
     can_edit: boolean;
@@ -751,6 +717,76 @@ function DashboardViewContent({
               {dashboard.description}
             </p>
           )}
+          {currentUser && (
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                marginTop: "0.45rem",
+                padding: "0.2rem 0.6rem",
+                borderRadius: "6px",
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                fontSize: "0.78rem",
+                color: "var(--muted)",
+                flexWrap: "wrap",
+              }}
+            >
+              <span>
+                Viewing as: <strong style={{ color: "var(--text)" }}>{currentUser.full_name?.trim() || currentUser.username}</strong> ({formatUserRole(currentUser.role)})
+              </span>
+              <span style={{ color: "var(--border)" }}>•</span>
+              {userPermissions.can_use_unique_value && currentUser.unique_user_key ? (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.3rem",
+                    padding: "1px 6px",
+                    borderRadius: "4px",
+                    background: "rgba(59, 130, 246, 0.08)",
+                    color: "var(--accent, #2563eb)",
+                    fontWeight: 600,
+                  }}
+                  title="Data on this dashboard is scoped to your department / assigned key"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                  </svg>
+                  Scoped: {currentUser.unique_user_key}
+                </span>
+              ) : (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.3rem",
+                    padding: "1px 6px",
+                    borderRadius: "4px",
+                    background: "rgba(16, 185, 129, 0.08)",
+                    color: "#059669",
+                    fontWeight: 600,
+                  }}
+                  title="Viewing unrestricted organization-wide data"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="2" y1="12" x2="22" y2="12"/>
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1 4-10z"/>
+                  </svg>
+                  Full Organization View
+                </span>
+              )}
+              {(currentUser.organization_name || org?.name) && (
+                <>
+                  <span style={{ color: "var(--border)" }}>•</span>
+                  <span>{currentUser.organization_name || org?.name}</span>
+                </>
+              )}
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
           {/* Specific Column Data Fetching Filter */}
@@ -912,113 +948,10 @@ function DashboardViewContent({
         </div>
       )}
 
-      {/* === FULL-PAGE SPINNER: shown during initial cold load to prevent empty-shell flash === */}
-      {(hasNeverLoaded || isInitialLoad) && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 9999,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(248, 250, 252, 0.75)",
-            backdropFilter: "blur(12px)",
-            WebkitBackdropFilter: "blur(12px)",
-          }}
-        >
-          <div
-            style={{
-              padding: "1.5rem 2.5rem",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "var(--surface, #ffffff)",
-              borderRadius: "1rem",
-              boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
-              border: "1px solid var(--border, #e2e8f0)",
-              pointerEvents: "none",
-            }}
-          >
-            <div
-              className="effective-spinner"
-              style={{ width: 50, height: 50, borderWidth: 4 }}
-            />
-            <span
-              className="effective-spinner-text"
-              style={{
-                marginTop: "0.85rem",
-                fontSize: "1.15rem",
-                fontWeight: 700,
-                color: "#0f172a",
-                letterSpacing: "0.01em",
-                whiteSpace: "nowrap",
-              }}
-            >
-              Loading dashboard data...
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Main dashboard page section with relative positioning for local backdrop blur */}
+      {/* Main dashboard page section with relative positioning for local subtle progress bar */}
       <div style={{ position: "relative", minHeight: "220px", width: "100%" }}>
-        {/* === REFRESH OVERLAY: shown only during GLOBAL filter/period re-fetches over widgets only (header remains clear; local widget filters do not blur the page) === */}
-        {isGlobalFilterLoading && !isInitialLoad && !hasNeverLoaded && (
-          <>
-            {/* Backdrop blur covering widgets area */}
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                zIndex: 49,
-                background: "rgba(248, 250, 252, 0.65)",
-                backdropFilter: "blur(8px)",
-                WebkitBackdropFilter: "blur(8px)",
-                borderRadius: "var(--radius, 12px)",
-                pointerEvents: "auto",
-              }}
-            />
-            <div
-              style={{
-                position: "fixed",
-                top: "50%",
-                left: "50%",
-                transform: "translate(-50%, -50%)",
-                zIndex: 100,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "var(--surface, #ffffff)",
-                padding: "1.25rem 2rem",
-                borderRadius: "1rem",
-                boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
-                border: "1px solid var(--border, #e2e8f0)",
-                pointerEvents: "none",
-              }}
-            >
-              <div
-                className="effective-spinner"
-                style={{ width: 50, height: 50, borderWidth: 4 }}
-              />
-              <span
-                className="effective-spinner-text"
-                style={{
-                  marginTop: "0.85rem",
-                  fontSize: "1.15rem",
-                  fontWeight: 700,
-                  color: "#0f172a",
-                  letterSpacing: "0.01em",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                Applying filter...
-              </span>
-            </div>
-          </>
-        )}
+        {/* Unified spinner overlay with blurred backdrop during filter/period re-fetches */}
+        <ContentLoader show={isGlobalFilterLoading} text="Updating dashboard data…" size="large" />
         {syncInfo?.has_odoo_graphs && userPermissions.can_load_lms && (
           <div
             style={{
@@ -1066,11 +999,14 @@ function DashboardViewContent({
         ) : (
           /* ── Dashboard Views: Normal Grid or Focused Linked View (both in normal document flow) ── */
           <div>
+            {hasNeverLoaded && (
+              <PageLoader text="Loading dashboard…" size="large" minHeight={420} />
+            )}
 
             {/* ── VIEW 1: Normal full-dashboard widget grid ── */}
             <div
               style={{
-                display: activeLinkedCardId && activeLinkedCard ? "none" : "grid",
+                display: hasNeverLoaded ? "none" : (activeLinkedCardId && activeLinkedCard ? "none" : "grid"),
                 gap: "1rem",
                 gridTemplateColumns: `repeat(${DASHBOARD_GRID_COLUMNS}, minmax(0, 1fr))`,
               }}
@@ -1103,7 +1039,7 @@ function DashboardViewContent({
             {/* ── VIEW 2: Linked widgets focused view — normal document flow so page scrolls naturally ── */}
             <div
               style={{
-                display: activeLinkedCardId && activeLinkedCard ? "block" : "none",
+                display: !hasNeverLoaded && activeLinkedCardId && activeLinkedCard ? "block" : "none",
               }}
             >
               <div style={{ display: "grid", gap: "1.25rem" }}>
@@ -1191,15 +1127,9 @@ function DashboardViewContent({
                       }}
                     >
                       {loadingRemoteDashboards ? (
-                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.75rem" }}>
-                          <div className="spinner" style={{ width: 26, height: 26 }} />
-                          <p style={{ margin: 0, fontSize: "0.95rem", color: "var(--text)", fontWeight: 500 }}>
-                            Loading linked widgets from dashboards...
-                          </p>
-                        </div>
+                        <WidgetSpinnerLoader size="medium" text="Loading linked widgets from dashboards…" minHeight={160} />
                       ) : (
                         <>
-                          <div style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>🔍</div>
                           <p style={{ margin: 0, fontSize: "1rem", color: "var(--text)", fontWeight: 600 }}>
                             No detailed widgets are available for this dashboard card.
                           </p>

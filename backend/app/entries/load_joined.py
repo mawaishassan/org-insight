@@ -59,12 +59,22 @@ async def load_joined_multi_line_rows(
             if src_entry:
                 src_rows = await load_multi_line_row_dicts(db, entry_id=src_entry.id, field=src_field)
                 psub_keys = mapping.get("primary_sub_field_keys")
+                primary_col_aliases = mapping.get("primary_column_aliases") or {}
                 for _, r_data in src_rows:
                     if psub_keys is not None and len(psub_keys) > 0:
                         filtered = {k: v for k, v in r_data.items() if k in psub_keys}
-                        combined_rows.append(filtered)
                     else:
-                        combined_rows.append(r_data.copy())
+                        filtered = r_data.copy()
+                    # Remap to alias keys if wizard aliases are present
+                    if primary_col_aliases:
+                        remapped = {}
+                        for orig_key, val in filtered.items():
+                            alias_info = primary_col_aliases.get(orig_key)
+                            alias_key = alias_info.get("key") if isinstance(alias_info, dict) else None
+                            remapped[alias_key or orig_key] = val
+                        combined_rows.append(remapped)
+                    else:
+                        combined_rows.append(filtered)
     else:
         for src in sources:
             src_kpi_id = src.get("kpi_id")

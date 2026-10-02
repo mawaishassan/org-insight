@@ -90,7 +90,7 @@ export default function LoginPage() {
       }>("/auth/me", { token: res.access_token });
 
       if (res.force_password_reset || me.force_password_reset) {
-        toast("Password reset required before continuing.", { icon: "🔒" });
+        toast("Password reset required before continuing.", );
         router.push("/reset-password");
         router.refresh();
         return;
@@ -122,6 +122,13 @@ export default function LoginPage() {
       // If a default dashboard is configured for this user, automatically open it
       if (me.default_dashboard_id) {
         router.push(`/dashboard/dashboards/${me.default_dashboard_id}?organization_id=${orgId}`);
+        router.refresh();
+        return;
+      }
+
+      // University Admin (ORG_ADMIN) always lands on the KPI entries workspace.
+      if (me.role === "ORG_ADMIN") {
+        router.push("/dashboard/entries");
         router.refresh();
         return;
       }

@@ -9,6 +9,7 @@ import { z } from "zod";
 import { getAccessToken, canEditKpis, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { KpiSearchInput } from "@/components/KpiSearchInput";
+import { PageLoader } from "@/components/PageLoader";
 
 function qs(params: Record<string, string | number | undefined>) {
   const entries = Object.entries(params)
@@ -459,7 +460,7 @@ export default function KPIsPage() {
     }
   };
 
-  if (loading && list.length === 0 && !userRole) return <p>Loading…</p>;
+  if (loading && list.length === 0 && !userRole) return <PageLoader text="Loading KPIs…" />;
 
   return (
     <div>

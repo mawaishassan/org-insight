@@ -8,6 +8,7 @@ import { z } from "zod";
 import { getAccessToken, canEditDomainsAndCategories, type UserRole } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
+import { PageLoader } from "@/components/PageLoader";
 
 interface DomainSummary {
   category_count: number;
@@ -240,37 +241,7 @@ export default function DomainsPage() {
       )}
 
       {loading && list.length === 0 ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
-          {[1, 2, 3].map((i) => (
-            <div
-              key={i}
-              className="card"
-              style={{
-                minHeight: 260,
-                marginBottom: 0,
-                opacity: 0.7,
-              }}
-            >
-              <div style={{ height: "1.25rem", width: "60%", background: "var(--border)", borderRadius: 4, marginBottom: "0.75rem" }} />
-              <div style={{ height: "2.6em", background: "var(--bg-subtle)", borderRadius: 4, marginBottom: "0.75rem" }} />
-              <div style={{ display: "flex", gap: "1rem", marginBottom: "0.5rem" }}>
-                <div style={{ height: "1rem", width: 80, background: "var(--border)", borderRadius: 4 }} />
-                <div style={{ height: "1rem", width: 60, background: "var(--border)", borderRadius: 4 }} />
-              </div>
-              <div style={{ marginTop: "0.5rem", paddingTop: "0.5rem", borderTop: "1px solid var(--border)" }}>
-                <div style={{ height: "1rem", width: "40%", background: "var(--border)", borderRadius: 4, marginBottom: "0.5rem" }} />
-                <div style={{ display: "flex", gap: "0.5rem" }}>
-                  <div style={{ height: "0.875rem", width: 70, background: "var(--bg-subtle)", borderRadius: 4 }} />
-                  <div style={{ height: "0.875rem", width: 50, background: "var(--bg-subtle)", borderRadius: 4 }} />
-                  <div style={{ height: "0.875rem", width: 75, background: "var(--bg-subtle)", borderRadius: 4 }} />
-                </div>
-              </div>
-              <div style={{ marginTop: "1rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)", display: "flex", gap: "0.5rem" }}>
-                <div style={{ height: 36, width: 90, background: "var(--border)", borderRadius: 8 }} />
-              </div>
-            </div>
-          ))}
-        </div>
+        <PageLoader text="Loading domains…" size="large" minHeight={260} />
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem", alignItems: "stretch" }}>
           {list.map((d) => (

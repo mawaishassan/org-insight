@@ -8,6 +8,7 @@ export type MultiItemsFilterPayloadV2 = {
     op: string;
     value?: unknown;
     values?: string[];
+    cell_type?: string;
     reference_resolution?: {
       compare_field_key?: string;
       compare_sub_field_key?: string;
@@ -33,6 +34,7 @@ export type MultiFilterConditionRow = {
   value: string;
   multiValues: string[];
   logicWithPrev: "and" | "or";
+  cell_type?: string;
   referenceChainPaths: string[];
 };
 
@@ -55,6 +57,7 @@ export function operatorsForMultiItemSubField(fieldType: string | undefined): re
   const text = MULTI_ITEM_WHERE_OPS.filter((o) =>
     ["eq", "neq", "contains", "not_contains", "starts_with", "ends_with"].includes(o.value)
   );
+  if (ft === "dynamic" || ft === "mixed") return MULTI_ITEM_WHERE_OPS;
   if (ft === "number" || ft === "date") return cmp;
   if (ft === "boolean") return MULTI_ITEM_WHERE_OPS.filter((o) => ["eq", "neq"].includes(o.value));
   if (ft === "reference" || ft === "multi_reference") return text;
@@ -199,6 +202,7 @@ export function payloadToFilterDraft(payload: MultiItemsFilterPayloadV2 | null):
       value: valueStr,
       multiValues: multiVals,
       logicWithPrev: i === 0 ? "and" : c.logic === "or" ? "or" : "and",
+      cell_type: c.cell_type ? String(c.cell_type) : undefined,
       referenceChainPaths: rrToPathStrings(c.reference_resolution),
     };
   });
@@ -239,6 +243,9 @@ export function filterDraftToPayload(rows: MultiFilterConditionRow[], subFields:
       op: resolvedOp,
       ...(valuesOut ? { values: valuesOut } : { value: valueOut }),
     };
+    if (r.cell_type) {
+      base.cell_type = r.cell_type;
+    }
     if (i > 0) base.logic = r.logicWithPrev;
 
     if (ft === "reference" || ft === "multi_reference") {
@@ -259,7 +266,8 @@ export function filterDraftToPayload(rows: MultiFilterConditionRow[], subFields:
       valuesOut != null ||
       typeof valueOut === "boolean" ||
       (typeof valueOut === "number" && !Number.isNaN(valueOut)) ||
-      (typeof valueOut === "string" && valueOut !== "");
+      (typeof valueOut === "string" && valueOut !== "") ||
+      Boolean(r.cell_type);
     if (!hasValue) continue;
     conditions.push(base);
   }

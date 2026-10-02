@@ -8,6 +8,8 @@ import {
   Sparkles,
   ArrowRight,
 } from "./Icons";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
+import { ContentLoader } from "@/components/ContentLoader";
 
 interface ActivityAnalyticsChartsProps {
   summary: ActivitySummaryResponse | null;
@@ -53,20 +55,10 @@ export const ActivityAnalyticsCharts: React.FC<ActivityAnalyticsChartsProps> = (
   const [activeSeries, setActiveSeries] = useState<"all" | "actions" | "logins">("all");
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
-  // Loading Skeleton
+  // Unified Spinner Loader
   if (loading && !summary) {
     return (
-      <div className="space-y-6 animate-pulse">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-28 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700" />
-          ))}
-        </div>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 h-80 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700" />
-          <div className="h-80 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700" />
-        </div>
-      </div>
+      <WidgetSpinnerLoader minHeight={360} size="large" text="Loading analytics & trends…" />
     );
   }
 
@@ -225,7 +217,8 @@ export const ActivityAnalyticsCharts: React.FC<ActivityAnalyticsChartsProps> = (
   const activePoint = hoveredIdx !== null && trends[hoveredIdx] ? trends[hoveredIdx] : null;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" style={{ position: "relative" }}>
+      <ContentLoader show={loading && !!summary} text="Updating analytics…" size="large" />
       {/* ── 1. Executive Operations Matrix Cards (4 Interactive Stat Cards) ── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Card 1: Reports & Exports */}

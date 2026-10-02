@@ -12,6 +12,7 @@ import MultiReferenceInput from "@/components/MultiReferenceInput";
 import { isSubFieldVisible as evaluateSubFieldVisible } from "@/lib/conditionalRules";
 import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
 import { CustomDatePicker } from "@/components/CustomDatePicker";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 function asWidgets(layout: any): Widget[] {
   if (!layout) return [];
@@ -1105,7 +1106,7 @@ export default function MultiItemRowDetail() {
 
       <div className="card" style={{ padding: "1rem" }}>
         {loading ? (
-          <p style={{ color: "var(--muted)" }}>Loading…</p>
+          <WidgetSpinnerLoader text="Loading row details…" size="medium" minHeight={150} />
         ) : (
           <>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
@@ -1698,7 +1699,12 @@ export default function MultiItemRowDetail() {
             );
               })}
             <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem", justifyContent: "flex-end", alignItems: "center" }}>
-              {!entryId && <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Loading entry…</span>}
+              {!entryId && (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.85rem", color: "var(--muted)" }}>
+                  <span className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
+                  Loading entry…
+                </span>
+              )}
             </div>
           </>
         )}

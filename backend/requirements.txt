@@ -30,3 +30,11 @@ httpx>=0.27.0
 
 # Chat / NLP
 openai>=1.12.0
+
+# Cloud Storage Backends
+boto3>=1.34.0
+google-cloud-storage>=2.14.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

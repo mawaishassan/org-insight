@@ -54,15 +54,16 @@ export function logUserActivity(params: LogActivityParams): void {
   try {
     const url = getApiUrl("activity-logs/event");
     const payload = JSON.stringify({
-      module: params.module,
-      resource_type: params.resourceType || null,
-      resource_id: params.resourceId || null,
+      module: params.module || "SYSTEM",
+      resource_type: params.resourceType || params.module || "general",
+      resource_id: params.resourceId != null ? String(params.resourceId) : null,
       resource_name: params.resourceName || null,
-      action_type: params.actionType,
+      action_type: params.actionType || "VIEW",
       reporting_period: params.period || null,
       period: params.period || null,
       action_details: params.details || null,
       details: params.details || null,
+      meta_data: params.metadata || null,
       metadata: params.metadata || null,
       status: params.status || "SUCCESS",
     });

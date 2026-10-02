@@ -1196,7 +1196,7 @@ export function MliFormulaBuilderModal({
                 >
                   {validationResult.is_valid ? (
                     <div>
-                      <div style={{ fontWeight: 600 }}>✓ Formula Valid</div>
+                      <div style={{ fontWeight: 600 }}>Formula Valid</div>
                       {validationResult.sample_equation && (
                         <div style={{ marginTop: "0.25rem", fontSize: "0.75rem", fontFamily: "monospace" }}>
                           Sample Result: {validationResult.sample_equation}
@@ -1205,7 +1205,7 @@ export function MliFormulaBuilderModal({
                     </div>
                   ) : (
                     <div>
-                      <div style={{ fontWeight: 600 }}>⚠ Formula Error</div>
+                      <div style={{ fontWeight: 600 }}>Formula Error</div>
                       <div style={{ fontSize: "0.75rem", fontFamily: "monospace", marginTop: "0.15rem" }}>{validationResult.error}</div>
                     </div>
                   )}

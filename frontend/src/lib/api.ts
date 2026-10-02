@@ -231,20 +231,177 @@ export async function openKpiStoredFileInNewTab(ref: unknown, token: string | nu
   displayBlobInBrowser(blob, res, ref, trimmed);
 }
 
+const SESSION_CACHE_PREFIX = "org_insight_api_cache::";
+const DEFAULT_CACHE_TTL_MS = 60_000; // 1 minute default memory TTL
+const DEFAULT_SESSION_MAX_AGE_MS = 10 * 60_000; // 10 minutes session TTL
+
+const inflightRequests = new Map<string, Promise<unknown>>();
+const responseCache = new Map<string, { ts: number; data: unknown }>();
+const meCacheByToken = new Map<string, { ts: number; data: unknown }>();
+
+function normalizeCachePath(path: string): string {
+  let p = path.startsWith("/") ? path : `/${path}`;
+  if (p.startsWith("/api/")) p = p.substring(4);
+  return p;
+}
+
+function getSessionCacheKey(normPath: string): string {
+  return `${SESSION_CACHE_PREFIX}${normPath}`;
+}
+
+function getNormalizedUrlFromCacheKey(key: string): string | null {
+  const parts = key.split(" ");
+  if (parts.length < 2) return null;
+  const rawUrl = parts[1];
+  try {
+    let p = rawUrl;
+    if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+      const u = new URL(rawUrl);
+      p = u.pathname + u.search;
+    }
+    return normalizeCachePath(p);
+  } catch {
+    return null;
+  }
+}
+
+export function getCachedApiResponse<T>(path: string, options?: { maxAgeMs?: number }): T | null {
+  if (typeof window === "undefined") return null;
+  const normPath = normalizeCachePath(path);
+  const maxAge = options?.maxAgeMs ?? DEFAULT_SESSION_MAX_AGE_MS;
+  const now = Date.now();
+  const currentToken = getAccessToken() || "";
+
+  // 1. Check in-memory cache
+  for (const [key, entry] of responseCache.entries()) {
+    if (key.includes("token=") && !key.includes(`token=${currentToken}`)) {
+      continue;
+    }
+    if (getNormalizedUrlFromCacheKey(key) === normPath && now - entry.ts < maxAge) {
+      return entry.data as T;
+    }
+  }
+
+  // 2. Check sessionStorage
+  try {
+    const raw = sessionStorage.getItem(getSessionCacheKey(normPath));
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.ts === "number" && now - parsed.ts < maxAge) {
+        // Hydrate back to memory cache
+        responseCache.set(`GET ${getApiUrl(normPath)} token=${currentToken} body=`, { ts: parsed.ts, data: parsed.data });
+        return parsed.data as T;
+      } else {
+        sessionStorage.removeItem(getSessionCacheKey(normPath));
+      }
+    }
+  } catch {
+    // Ignore storage parse errors
+  }
+
+  return null;
+}
+
+export function setCachedApiResponse<T>(
+  path: string,
+  data: T,
+  options?: { ttlMs?: number; persistSession?: boolean }
+): void {
+  if (typeof window === "undefined" || data === undefined) return;
+  const normPath = normalizeCachePath(path);
+  const now = Date.now();
+  const fullUrl = getApiUrl(normPath);
+  const dedupeKey = `GET ${fullUrl} token=${getAccessToken() || ""} body=`;
+
+  responseCache.set(dedupeKey, { ts: now, data });
+
+  if (options?.persistSession !== false) {
+    try {
+      const sKey = getSessionCacheKey(normPath);
+      sessionStorage.setItem(sKey, JSON.stringify({ ts: now, data }));
+    } catch {
+      // Storage quota exceeded or disabled
+    }
+  }
+}
+
+export function invalidateApiCache(patternOrPrefix?: string): void {
+  if (!patternOrPrefix) {
+    responseCache.clear();
+    if (typeof window !== "undefined") {
+      try {
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const k = sessionStorage.key(i);
+          if (k && k.startsWith(SESSION_CACHE_PREFIX)) {
+            keysToRemove.push(k);
+          }
+        }
+        keysToRemove.forEach((k) => sessionStorage.removeItem(k));
+      } catch {}
+    }
+    return;
+  }
+
+  const needle = normalizeCachePath(patternOrPrefix).toLowerCase();
+
+  // Remove from memory
+  for (const k of Array.from(responseCache.keys())) {
+    if (k.toLowerCase().includes(needle)) {
+      responseCache.delete(k);
+    }
+  }
+
+  // Remove from sessionStorage
+  if (typeof window !== "undefined") {
+    try {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith(SESSION_CACHE_PREFIX) && k.toLowerCase().includes(needle)) {
+          keysToRemove.push(k);
+        }
+      }
+      keysToRemove.forEach((k) => sessionStorage.removeItem(k));
+    } catch {}
+  }
+}
+
 export async function api<T>(
   path: string,
-  options: RequestInit & { token?: string; useCache?: boolean; cacheTTL?: number } = {}
+  options: RequestInit & { token?: string; useCache?: boolean; cacheTTL?: number; persistSession?: boolean } = {}
 ): Promise<T> {
-  const { token: tokenFromOpts, body, useCache, cacheTTL, ...init } = options;
+  const { token: tokenFromOpts, body, useCache = true, cacheTTL, persistSession = true, ...init } = options;
   const token = tokenFromOpts || (typeof window !== "undefined" ? getAccessToken() : undefined);
   const url = getApiUrl(path);
   const method = (init.method || "GET").toUpperCase();
 
   const isGet = method === "GET" || method === "HEAD";
+  const normPath = normalizeCachePath(path);
 
-  // Invalidate cache on mutate
-  if (!isGet) {
-    responseCache.clear();
+  // Targeted cache invalidation on mutations (POST, PUT, DELETE, PATCH).
+  // Note: /widget-data requests use POST solely for complex query payloads (read-only), so skip invalidation for them.
+  if (!isGet && !normPath.startsWith("/widget-data")) {
+    if (normPath.startsWith("/organizations")) {
+      invalidateApiCache("/organizations");
+    } else if (normPath.startsWith("/dashboards")) {
+      invalidateApiCache("/dashboards");
+      invalidateApiCache("/widget-data");
+    } else if (normPath.startsWith("/entries") || normPath.startsWith("/kpis")) {
+      invalidateApiCache("/entries");
+      invalidateApiCache("/kpis");
+      invalidateApiCache("/widget-data");
+    } else if (normPath.startsWith("/reports") || normPath.startsWith("/custom-reports")) {
+      invalidateApiCache("/reports");
+      invalidateApiCache("/custom-reports");
+    } else if (normPath.startsWith("/users") || normPath.startsWith("/roles") || normPath.startsWith("/access")) {
+      invalidateApiCache("/users");
+      invalidateApiCache("/roles");
+      invalidateApiCache("/access");
+    } else {
+      // General invalidation for unknown mutation
+      invalidateApiCache(normPath.split("/")[1] || undefined);
+    }
   }
 
   const dedupeKey = (() => {
@@ -265,28 +422,43 @@ export async function api<T>(
 
   const canDedupe = isGet;
 
-  // Cache hit check
+  // 1. Memory Cache check
   if (canDedupe && useCache) {
     const cached = responseCache.get(dedupeKey);
-    const ttl = cacheTTL !== undefined ? cacheTTL : CACHE_TTL_MS;
+    const ttl = cacheTTL !== undefined ? cacheTTL : DEFAULT_CACHE_TTL_MS;
     if (cached && Date.now() - cached.ts < ttl) {
       return cached.data as T;
     }
   }
 
-  if (isGet && url.endsWith("/api/auth/me") && token) {
+  // 2. Specialized /auth/me check
+  if (isGet && (normPath === "/auth/me" || url.endsWith("/api/auth/me")) && token) {
     const cached = meCacheByToken.get(token);
-    if (cached && Date.now() - cached.ts < ME_CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.ts < DEFAULT_CACHE_TTL_MS) {
       return cached.data as T;
+    }
+    // Check session storage for /auth/me
+    const sessionMe = getCachedApiResponse<T>("/auth/me", { maxAgeMs: DEFAULT_SESSION_MAX_AGE_MS });
+    if (sessionMe) {
+      meCacheByToken.set(token, { ts: Date.now(), data: sessionMe });
+      return sessionMe;
     }
   }
 
+  // 3. SessionStorage Cache hit check for general GETs
+  if (canDedupe && useCache) {
+    const sessionCached = getCachedApiResponse<T>(normPath, { maxAgeMs: cacheTTL ?? DEFAULT_SESSION_MAX_AGE_MS });
+    if (sessionCached !== null) {
+      responseCache.set(dedupeKey, { ts: Date.now(), data: sessionCached });
+      return sessionCached;
+    }
+  }
+
+  // 4. Inflight deduplication
   if (canDedupe) {
     const existing = inflightRequests.get(dedupeKey);
     if (existing) return existing as Promise<T>;
   }
-
-  const cancelKey = `${method} ${path}`;
 
   let controller: AbortController | undefined = undefined;
   if (isGet && !options.signal) {
@@ -321,7 +493,7 @@ export async function api<T>(
             /failed to fetch|network|load failed|econnrefused/i.test(fetchErr?.message || ""))
         ) {
           try {
-            await new Promise((resolve) => setTimeout(resolve, 400));
+            await new Promise((resolve) => setTimeout(resolve, 300));
             res = await fetch(url, { ...init, body, headers });
           } catch (retryErr: any) {
             throw retryErr || fetchErr;
@@ -333,6 +505,7 @@ export async function api<T>(
       if (!res.ok) {
         if (res.status === 401 && typeof window !== "undefined") {
           clearTokens();
+          invalidateApiCache();
           window.location.href = "/login";
           // Suspend promise chain so we don't throw errors or trigger catches while redirecting
           await new Promise(() => {});
@@ -349,11 +522,17 @@ export async function api<T>(
       }
       if (res.status === 204) return undefined as T;
       const json = (await res.json()) as T;
-      if (isGet && url.endsWith("/api/auth/me") && token) {
+
+      if (isGet && (normPath === "/auth/me" || url.endsWith("/api/auth/me")) && token) {
         meCacheByToken.set(token, { ts: Date.now(), data: json as unknown });
+        setCachedApiResponse("/auth/me", json, { persistSession: true });
       }
+
       if (canDedupe && useCache) {
         responseCache.set(dedupeKey, { ts: Date.now(), data: json });
+        if (persistSession) {
+          setCachedApiResponse(normPath, json, { persistSession: true });
+        }
       }
       return json;
     } catch (error: any) {
@@ -383,7 +562,7 @@ export async function api<T>(
   return run;
 }
 
-api.get = function <T>(path: string, options?: RequestInit & { token?: string; useCache?: boolean; cacheTTL?: number }): Promise<T> {
+api.get = function <T>(path: string, options?: RequestInit & { token?: string; useCache?: boolean; cacheTTL?: number; persistSession?: boolean }): Promise<T> {
   return api<T>(path, { ...options, method: "GET" });
 };
 api.post = function <T>(path: string, body?: any, options?: RequestInit & { token?: string }): Promise<T> {
@@ -398,14 +577,6 @@ api.patch = function <T>(path: string, body?: any, options?: RequestInit & { tok
 api.delete = function <T>(path: string, options?: RequestInit & { token?: string }): Promise<T> {
   return api<T>(path, { ...options, method: "DELETE" });
 };
-
-const inflightRequests = new Map<string, Promise<unknown>>();
-const responseCache = new Map<string, { ts: number; data: unknown }>();
-const activeControllers = new Map<string, AbortController>();
-const CACHE_TTL_MS = 30_000;
-
-const ME_CACHE_TTL_MS = 30_000;
-const meCacheByToken = new Map<string, { ts: number; data: unknown }>();
 
 /** Human-readable duration for bulk-upload timing (toasts and summaries). */
 export function formatElapsedMs(ms: number): string {

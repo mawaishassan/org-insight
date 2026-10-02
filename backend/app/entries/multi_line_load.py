@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import datetime
 import logging
 
 from sqlalchemy import select, and_, or_
@@ -17,8 +18,37 @@ logger = logging.getLogger(__name__)
 
 def _cell_value_raw(c: KpiMultiLineCell) -> Any:
     """Return the raw value for a typed multi-line cell (mirrors legacy row dict semantics)."""
+    cell_type = getattr(c, "cell_type", None)
+    if cell_type:
+        ct = str(cell_type).strip().lower()
+        if ct == "number" and getattr(c, "value_number", None) is not None:
+            return c.value_number
+        if ct == "boolean" and getattr(c, "value_boolean", None) is not None:
+            return c.value_boolean
+        if ct == "date":
+            if getattr(c, "value_date", None) is not None:
+                try:
+                    return c.value_date.isoformat()
+                except Exception:
+                    return str(c.value_date)
+            if getattr(c, "value_text", None) is not None:
+                return c.value_text
+        if ct in ("reference", "multi_reference", "mixed_list", "attachment", "json") and getattr(c, "value_json", None) is not None:
+            return c.value_json
+        if ct == "single_line_text" and getattr(c, "value_text", None) is not None:
+            return c.value_text
+
     if getattr(c, "value_json", None) is not None:
         return c.value_json
+    if getattr(c, "value_number", None) is not None and getattr(c, "value_text", None) is None:
+        return c.value_number
+    if getattr(c, "value_boolean", None) is not None and getattr(c, "value_text", None) is None:
+        return c.value_boolean
+    if getattr(c, "value_date", None) is not None and getattr(c, "value_text", None) is None:
+        try:
+            return c.value_date.isoformat()
+        except Exception:
+            return str(c.value_date)
     if getattr(c, "value_text", None) is not None:
         return c.value_text
     if getattr(c, "value_number", None) is not None:
@@ -44,7 +74,6 @@ async def load_multi_line_row_dicts(
     resolve_links: bool = False,
 ) -> list[tuple[int, dict]]:
     """Optimized direct load of multi_line rows and cells to scale efficiently for large entries."""
-    import datetime
     from app.core.models import KPI
     kpi_res = await db.execute(select(KPI).where(KPI.id == field.kpi_id))
     kpi = kpi_res.scalar_one_or_none()
@@ -185,7 +214,8 @@ async def load_multi_line_row_dicts(
                     KpiMultiLineCell.value_boolean,
                     KpiMultiLineCell.value_date,
                     KpiMultiLineCell.value_json,
-                    KPIFieldSubField.key
+                    KPIFieldSubField.key,
+                    KpiMultiLineCell.cell_type,
                 )
                 .join(KPIFieldSubField, KPIFieldSubField.id == KpiMultiLineCell.sub_field_id)
                 .where(KpiMultiLineCell.row_id.in_(chunk_ids))
@@ -194,21 +224,45 @@ async def load_multi_line_row_dicts(
             
         from collections import defaultdict
         cells_by_row = defaultdict(dict)
-        for row_id, vt, vn, vb, vd, vj, sf_key in cells_list:
+        for row_id, vt, vn, vb, vd, vj, sf_key, ct in cells_list:
             raw_val = None
-            if vj is not None:
-                raw_val = vj
-            elif vt is not None:
-                raw_val = vt
-            elif vn is not None:
-                raw_val = vn
-            elif vb is not None:
-                raw_val = vb
-            elif vd is not None:
-                try:
-                    raw_val = vd.isoformat()
-                except Exception:
-                    raw_val = str(vd)
+            if ct:
+                ct_s = str(ct).strip().lower()
+                if ct_s == "number" and vn is not None:
+                    raw_val = vn
+                elif ct_s == "boolean" and vb is not None:
+                    raw_val = vb
+                elif ct_s == "date":
+                    if vd is not None:
+                        try:
+                            raw_val = vd.isoformat()
+                        except Exception:
+                            raw_val = str(vd)
+                    elif vt is not None:
+                        raw_val = vt
+                elif ct_s in ("reference", "multi_reference", "mixed_list", "attachment", "json") and vj is not None:
+                    raw_val = vj
+                elif ct_s == "single_line_text" and vt is not None:
+                    raw_val = vt
+
+            if raw_val is None:
+                if vj is not None:
+                    raw_val = vj
+                elif vn is not None and vt is None:
+                    raw_val = vn
+                elif vb is not None and vt is None:
+                    raw_val = vb
+                elif vt is not None:
+                    raw_val = vt
+                elif vn is not None:
+                    raw_val = vn
+                elif vb is not None:
+                    raw_val = vb
+                elif vd is not None:
+                    try:
+                        raw_val = vd.isoformat()
+                    except Exception:
+                        raw_val = str(vd)
             cells_by_row[row_id][str(sf_key)] = raw_val
 
         entry_row_lists = defaultdict(list)
@@ -272,6 +326,28 @@ async def load_multi_line_row_dicts(
             out = [(idx, processed[i]) for i, (idx, _) in enumerate(out)]
         except ValueError as exc:
             logger.warning("MLI extraction skipped (circular dependency): %s", exc)
+
+    # Apply virtual joined columns if this regular field has a joined_columns config
+    field_cfg = getattr(field, "config", None) or {}
+    if out and field_cfg.get("joined_columns") and isinstance(entry_id, (int,)) and kpi and not getattr(kpi, "is_joined", False):
+        try:
+            from app.entries.joined_wizard_service import apply_virtual_joined_columns
+            from app.core.models import KPIEntry
+            eid_single = entry_id if isinstance(entry_id, int) else entry_id[0]
+            entry_res2 = await db.execute(select(KPIEntry).where(KPIEntry.id == eid_single))
+            entry2 = entry_res2.scalar_one_or_none()
+            if entry2:
+                await apply_virtual_joined_columns(
+                    db,
+                    field=field,
+                    rows=out,
+                    organization_id=entry2.organization_id,
+                    year=entry2.year,
+                    period_key=entry2.period_key or "",
+                    current_user_id=current_user_id,
+                )
+        except Exception as exc:
+            logger.warning("Virtual joined columns resolution failed for field %s: %s", field.id, exc)
 
     return out
 

@@ -13,6 +13,9 @@ import { OdooMultiLineImportAdmin } from "@/components/OdooMultiLineImportConfig
 import { MLIExtractionRulesPanel } from "@/components/MLIExtractionRulesPanel";
 import { MliFormulaBuilderModal } from "@/components/MliFormulaBuilderModal";
 import { LinkedConfigUI } from "@/components/LinkedConfigUI";
+import { JoinMliWizardModal } from "@/components/JoinMliWizardModal";
+import { PageLoader } from "@/components/PageLoader";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 import { CustomDatePicker } from "@/components/CustomDatePicker";
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
@@ -37,7 +40,7 @@ const FIELD_TYPES = [
   "formula",
 ] as const;
 
-const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference", "attachment", "mixed_list", "formula"] as const;
+const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference", "attachment", "mixed_list", "formula", "dynamic"] as const;
 
 function slugifyKey(name: string): string {
   if (!name) return "";
@@ -372,6 +375,7 @@ export default function KpiFieldsPage() {
   } | null>(null);
   const [isCondModalOpen, setIsCondModalOpen] = useState(false);
   const [showLinkedConfigModal, setShowLinkedConfigModal] = useState<number | null>(null);
+  const [showJoinWizard, setShowJoinWizard] = useState(false);
   const [showExtractionModal, setShowExtractionModal] = useState<number | null>(null);
   const [showVisibilityModal, setShowVisibilityModal] = useState<string | number | null>(null);
   const [kpis, setKpis] = useState<Array<{ id: number; name: string }>>([]);
@@ -2068,7 +2072,7 @@ export default function KpiFieldsPage() {
   };
 
   if (!kpiId) return <p>Invalid KPI.</p>;
-  if (loading && list.length === 0 && !kpi) return <p>Loading...</p>;
+  if (loading && list.length === 0 && !kpi) return <PageLoader text="Loading fields…" />;
 
   const isOrgContext = kpi != null && (orgIdFromUrl != null || userRole === "ORG_ADMIN" || userRole === "SUPER_ADMIN");
 
@@ -4245,7 +4249,7 @@ export default function KpiFieldsPage() {
                               Configure automatic data copying and mapping from other Multi-line Item tables.
                             </div>
                             <div style={{ fontSize: "0.78rem", color: isLinked ? "var(--primary)" : "var(--muted)", fontWeight: 600, marginTop: "0.25rem" }}>
-                              {isLinked ? `🔗 Linked to ${sourceKpiName || "Source KPI"}` : "Manual data entry"}
+                              {isLinked ? `Linked to ${sourceKpiName || "Source KPI"}` : "Manual data entry"}
                             </div>
                           </div>
                           <button
@@ -4266,7 +4270,33 @@ export default function KpiFieldsPage() {
                         </div>
                       )}
 
-                      {/* 3. Conditional Visibility Rules */}
+                      {/* 2b. Join MLI Wizard (Only for MLI) */}
+                      {isMultiTab && (
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", border: "1px solid var(--border)", borderRadius: 10, padding: "0.85rem 1rem", background: "var(--surface)", flexWrap: "wrap" }}>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: "0.9rem" }}>Join MLI Wizard</div>
+                            <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "0.15rem" }}>
+                              Combine columns from two Multi-Line Item tables using a shared join key. Supports creating a new joined KPI or enriching an existing one with virtual columns.
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => setShowJoinWizard(true)}
+                            style={{
+                              backgroundColor: "var(--primary-subtle, #eff6ff)",
+                              color: "var(--primary, #2563eb)",
+                              border: "1px solid rgba(var(--primary-rgb, 37, 99, 235), 0.25)",
+                              fontWeight: 600,
+                              padding: "0.45rem 1.1rem",
+                              borderRadius: 8
+                            }}
+                          >
+                            Open Wizard
+                          </button>
+                        </div>
+                      )}
+
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", border: "1px solid var(--border)", borderRadius: 10, padding: "0.85rem 1rem", background: "var(--surface)", flexWrap: "wrap" }}>
                         <div>
                           <div style={{ fontWeight: 700, fontSize: "0.9rem" }}>Conditional Visibility Rules</div>
@@ -4274,7 +4304,7 @@ export default function KpiFieldsPage() {
                             Configure fields to dynamically show or hide based on the value of another field.
                           </div>
                           <div style={{ fontSize: "0.78rem", color: allRules.length > 0 ? "var(--primary)" : "var(--muted)", fontWeight: 600, marginTop: "0.25rem" }}>
-                            {allRules.length > 0 ? `👁️ ${allRules.length} visibility rule(s) configured` : "No conditional rules"}
+                            {allRules.length > 0 ? `${allRules.length} visibility rule(s) configured` : "No conditional rules"}
                           </div>
                         </div>
                         <button
@@ -5731,7 +5761,10 @@ export default function KpiFieldsPage() {
             <div style={{ marginTop: "0.75rem", padding: "0.75rem", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-subtle, #f8f9fa)" }}>
               <div style={{ fontWeight: 650, marginBottom: "0.35rem" }}>Impact</div>
               {deleteFieldSummaryLoading ? (
-                <div style={{ color: "var(--muted)" }}>Loading…</div>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", color: "var(--muted)", fontSize: "0.85rem" }}>
+                  <div className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
+                  <span>Loading impact summary…</span>
+                </div>
               ) : deleteFieldSummaryError ? (
                 <div className="form-error">{deleteFieldSummaryError}</div>
               ) : (
@@ -6043,6 +6076,30 @@ export default function KpiFieldsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {showJoinWizard && (
+        <JoinMliWizardModal
+          orgId={orgId}
+          token={token ?? ""}
+          onClose={() => setShowJoinWizard(false)}
+          onSuccess={({ kpi_id, kpi_name: _kpi_name, mode }) => {
+            setShowJoinWizard(false);
+            if (mode === "create_new" && kpi_id) {
+              router.push(`/dashboard/kpis/${kpi_id}/fields?tab=fields`);
+            } else {
+              // Reload field list if enriched
+              void (async () => {
+                const q = orgId != null ? `&organization_id=${orgId}` : "";
+                const updated = await api<{ id: number; name: string; field_type: string; key: string; sub_fields: unknown[]; config: unknown }[]>(
+                  `/fields?kpi_id=${kpiId}${q}`,
+                  { token: token ?? "" }
+                ).catch(() => null);
+                if (updated) setList(updated as typeof list);
+              })();
+            }
+          }}
+        />
       )}
 
       {showLinkedConfigModal != null && (() => {
@@ -7026,7 +7083,7 @@ function FormulaBuilder({
       {currentMliSubFields && currentMliSubFields.length > 0 && (
         <div style={{ marginBottom: "0.85rem", padding: "0.75rem", background: "var(--surface)", border: "1px solid var(--primary)", borderRadius: 8 }}>
           <div style={{ fontSize: "0.82rem", fontWeight: 700, color: "var(--primary)", marginBottom: "0.4rem", display: "flex", alignItems: "center", gap: "0.35rem" }}>
-            <span>⚡ Same Row Sub-field (Formula for Each Row)</span>
+            <span>Same Row Sub-field (Formula for Each Row)</span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
             <select
@@ -7587,7 +7644,10 @@ function FormulaBuilder({
                         />
                       )
                     ) : (
-                      <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Loading values...</span>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.85rem", color: "var(--muted)" }}>
+                        <span className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
+                        Loading values...
+                      </span>
                     )
                   ) : (
                     <input
@@ -8409,7 +8469,7 @@ function JoinedKpiConfigPanel({
   };
 
   if (loading) {
-    return <p style={{ color: "var(--muted)" }}>Loading other KPIs...</p>;
+    return <WidgetSpinnerLoader text="Loading other KPIs…" size="medium" minHeight={150} />;
   }
 
   return (

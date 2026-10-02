@@ -7,6 +7,7 @@ import toast from "react-hot-toast";
 import { getAccessToken, clearTokens } from "@/lib/auth";
 import { api, formatElapsedClockSec, formatElapsedMs, getApiUrl, postFormDataWithUploadProgress } from "@/lib/api";
 import { fetchMultiLineRowsForEntry } from "@/lib/fetchMultiItemsRows";
+import { PageLoader } from "@/components/PageLoader";
 import {
   coerceScalarValueTextFromApi,
   getAttachmentDisplayName,
@@ -355,7 +356,7 @@ export default function DomainKpiDetailPage() {
       ) {
         toast(
           "This KPI has been modified since its last submission. Please submit it again to publish the latest changes for organizational users, reports, and dashboards.",
-          { duration: 8000, icon: "⚠️" }
+          { duration: 8000, icon: "!" }
         );
       }
       prevIsDraftRef.current = entry.is_draft;
@@ -1636,7 +1637,7 @@ export default function DomainKpiDetailPage() {
 
   if (!kpiId) return <p>Invalid KPI.</p>;
   // Don't block the whole page behind Loading... if we already have data.
-  if (loading && fields.length === 0) return <p>Loading...</p>;
+  if (loading && fields.length === 0) return <PageLoader text="Loading…" />;
   if (effectiveOrgId == null) return <p>Organization context required.</p>;
 
   return (
@@ -2027,7 +2028,7 @@ export default function DomainKpiDetailPage() {
                         alignItems: "center",
                       }}
                     >
-                      ✓ Submitted
+                      Submitted
                     </span>
                   )}
                 </>
@@ -3101,7 +3102,10 @@ export default function DomainKpiDetailPage() {
               orgRoles.length > 0 && (
                 <div style={{ marginBottom: "1.5rem" }}>
                 {columnAccessByRoleLoading ? (
-                  <p style={{ color: "var(--muted)" }}>Loading…</p>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "1rem 0", color: "var(--muted)" }}>
+                    <div className="effective-spinner effective-spinner--sm" style={{ width: 16, height: 16 }} />
+                    <span>Loading permissions…</span>
+                  </div>
                 ) : (
                   <div style={{ overflowX: "auto" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
@@ -3630,7 +3634,10 @@ export default function DomainKpiDetailPage() {
                               Users with full access
                             </div>
                             {fullRowAccessLoadingFieldId === f.id ? (
-                              <p style={{ margin: 0, color: "var(--muted)", fontSize: "0.8rem" }}>Loading...</p>
+                              <div style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.8rem", color: "var(--muted)", margin: "0.25rem 0" }}>
+                                <div className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
+                                <span>Loading users…</span>
+                              </div>
                             ) : (fullRowAccessByField[f.id] || []).length === 0 ? (
                               <p style={{ margin: 0, color: "var(--muted)", fontSize: "0.8rem" }}>
                                 No users currently have full row access for the selected entry.
@@ -3679,7 +3686,10 @@ export default function DomainKpiDetailPage() {
                           style={{ padding: "0.6rem", marginTop: "0.5rem", overflowX: "auto" }}
                         >
                           {columnAccessByRoleLoading ? (
-                            <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+                            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.5rem 0", color: "var(--muted)" }}>
+                              <div className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
+                              <span>Loading permissions…</span>
+                            </div>
                           ) : orgRoles.length === 0 ? (
                             <p style={{ color: "var(--muted)", margin: 0 }}>
                               No roles. Create roles and assign users in Full access control.
@@ -4712,7 +4722,10 @@ export default function DomainKpiDetailPage() {
                       {(columnAccessExpandedByFieldId[f.id] ?? false) && (
                         <div className="card" style={{ padding: "0.75rem", overflowX: "auto" }}>
                           {columnAccessByRoleLoading ? (
-                            <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+                            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.5rem 0", color: "var(--muted)" }}>
+                              <div className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
+                              <span>Loading permissions…</span>
+                            </div>
                           ) : orgRoles.length === 0 ? (
                             <p style={{ color: "var(--muted)", margin: 0 }}>No roles. Create roles and assign users in Full access control.</p>
                           ) : (
@@ -5296,7 +5309,10 @@ export default function DomainKpiDetailPage() {
                     {(columnAccessExpandedByFieldId[f.id] ?? false) && (
                       <div className="card" style={{ padding: "0.75rem", overflowX: "auto" }}>
                         {columnAccessByRoleLoading ? (
-                          <p style={{ color: "var(--muted)", margin: 0 }}>Loading…</p>
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.5rem 0", color: "var(--muted)" }}>
+                            <div className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
+                            <span>Loading permissions…</span>
+                          </div>
                         ) : orgRoles.length === 0 ? (
                           <p style={{ color: "var(--muted)", margin: 0 }}>No roles. Create roles and assign users in Full access control.</p>
                         ) : (
@@ -5603,7 +5619,10 @@ export default function DomainKpiDetailPage() {
               Set view or edit per field for this user. If you clear all, they use the KPI-level permission for every field.
             </p>
             {fieldRightsLoading ? (
-              <p style={{ color: "var(--muted)" }}>Loading…</p>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem 0", color: "var(--muted)" }}>
+                <div className="effective-spinner effective-spinner--sm" style={{ width: 20, height: 20 }} />
+                <span style={{ marginLeft: "0.5rem" }}>Loading permissions…</span>
+              </div>
             ) : (
               <>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>

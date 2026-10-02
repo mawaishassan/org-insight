@@ -15,6 +15,8 @@ import {
 import { getAttachmentDisplayName, getAttachmentUrl, parseAttachmentList } from "@/lib/attachmentCellValue";
 import { downloadBlob } from "@/lib/download";
 import toast from "react-hot-toast";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
+import { ContentLoader } from "@/components/ContentLoader";
 import type { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
 import {
   buildMultiItemsApiRequestExample,
@@ -2387,7 +2389,10 @@ export default function FullPageMultiItems() {
                   )}
                 </select>
                 {availableSourceYearsLoading && (
-                  <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Loading years…</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.8rem", color: "var(--muted)", margin: "0.25rem 0" }}>
+                    <div className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
+                    <span>Loading years…</span>
+                  </div>
                 )}
                 {availableSourceYearsError && (
                   <div className="form-error" style={{ fontSize: "0.85rem" }}>{availableSourceYearsError}</div>
@@ -3017,7 +3022,7 @@ export default function FullPageMultiItems() {
           </>
         )}
         {loading ? (
-          <p style={{ color: "var(--muted)" }}>Loading rows…</p>
+          <WidgetSpinnerLoader text="Loading rows…" size="medium" minHeight={160} />
         ) : rows.length === 0 ? (
           <p style={{ color: "var(--muted)" }}>
             {canEditKpi ? 'No rows yet. Use "Add row" above to create one.' : "No rows in this field."}
@@ -3790,7 +3795,7 @@ export default function FullPageMultiItems() {
               {/* Success summary */}
               {uploadTaskStatus === "COMPLETED" && uploadTaskStats && (
                 <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "1rem", background: "var(--surface)", fontSize: "0.9rem" }}>
-                  <div style={{ fontWeight: 600, color: "var(--success)", marginBottom: "0.5rem" }}>✓ Summary of changes:</div>
+                  <div style={{ fontWeight: 600, color: "var(--success)", marginBottom: "0.5rem" }}>Summary of changes:</div>
                   <ul style={{ margin: 0, paddingLeft: "1.25rem", display: "flex", flexDirection: "column", gap: "0.25rem" }}>
                     <li>Added: <strong>{uploadTaskStats.added}</strong> rows</li>
                     <li>Updated: <strong>{uploadTaskStats.updated}</strong> rows</li>
@@ -3856,7 +3861,7 @@ export default function FullPageMultiItems() {
                   </button>
                 ) : (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", color: "var(--muted)" }}>
-                    <div className="spinner" style={{ width: 16, height: 16, border: "2px solid var(--border)", borderTopColor: "var(--primary)", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+                    <div className="effective-spinner effective-spinner--sm" style={{ width: 16, height: 16 }} />
                     Please do not close this tab...
                   </div>
                 )}

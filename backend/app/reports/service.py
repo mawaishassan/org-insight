@@ -173,8 +173,37 @@ REPORT_DATA_CACHE = _report_data_cache
 
 
 def _ml_cell_raw(c: KpiMultiLineCell):
+    cell_type = getattr(c, "cell_type", None)
+    if cell_type:
+        ct = str(cell_type).strip().lower()
+        if ct == "number" and getattr(c, "value_number", None) is not None:
+            return c.value_number
+        if ct == "boolean" and getattr(c, "value_boolean", None) is not None:
+            return c.value_boolean
+        if ct == "date":
+            if getattr(c, "value_date", None) is not None:
+                try:
+                    return c.value_date.isoformat()
+                except Exception:
+                    return str(c.value_date)
+            if getattr(c, "value_text", None) is not None:
+                return c.value_text
+        if ct in ("reference", "multi_reference", "mixed_list", "attachment", "json") and getattr(c, "value_json", None) is not None:
+            return c.value_json
+        if ct == "single_line_text" and getattr(c, "value_text", None) is not None:
+            return c.value_text
+
     if getattr(c, "value_json", None) is not None:
         return c.value_json
+    if getattr(c, "value_number", None) is not None and getattr(c, "value_text", None) is None:
+        return c.value_number
+    if getattr(c, "value_boolean", None) is not None and getattr(c, "value_text", None) is None:
+        return c.value_boolean
+    if getattr(c, "value_date", None) is not None and getattr(c, "value_text", None) is None:
+        try:
+            return c.value_date.isoformat()
+        except Exception:
+            return str(c.value_date)
     if getattr(c, "value_text", None) is not None:
         return c.value_text
     if getattr(c, "value_number", None) is not None:

@@ -9,6 +9,8 @@ import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer, clearClientWidgetCache, type DrillDownRequestPayload } from "../widgets";
 import { WidgetDrillDownModal } from "@/components/WidgetDrillDownModal";
+import { PageLoader } from "@/components/PageLoader";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 import { DashboardCustomizationProvider, useDashboardCustomization } from "../DashboardCustomizationContext";
 import { WidgetFullScreenNavigationProvider, useWidgetFullScreenNavigation } from "../WidgetFullScreenContext";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
@@ -1853,7 +1855,7 @@ export default function DashboardDesignPage() {
       .finally(() => setLoading(false));
   }, [id, token, orgIdFromQuery]);
 
-  if (loading) return <p style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>Loading dashboard design...</p>;
+  if (loading) return <PageLoader text="Loading dashboard design…" />;
   if (error) {
     return (
       <AccessDenied
@@ -3550,7 +3552,7 @@ function DashboardDesignContent({
                 }}
                 onClick={() => setDashboardSettingsOpen(!dashboardSettingsOpen)}
               >
-                ⚙️ Dashboard Settings
+                Dashboard Settings
               </button>
             </div>
           )}
@@ -4037,15 +4039,9 @@ function DashboardDesignContent({
                   }}
                 >
                   {loadingRemoteDashboards ? (
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.75rem" }}>
-                      <div className="spinner" style={{ width: 26, height: 26 }} />
-                      <p style={{ margin: 0, fontSize: "0.95rem", color: "var(--text)", fontWeight: 500 }}>
-                        Loading linked widgets from dashboards...
-                      </p>
-                    </div>
+                    <WidgetSpinnerLoader size="medium" text="Loading linked widgets from dashboards…" minHeight={160} />
                   ) : (
                     <>
-                      <div style={{ fontSize: "1.75rem", marginBottom: "0.5rem" }}>🔍</div>
                       <p style={{ margin: 0, fontSize: "1rem", color: "var(--text)", fontWeight: 600 }}>
                         No detailed widgets are linked to this card.
                       </p>

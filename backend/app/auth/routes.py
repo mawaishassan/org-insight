@@ -1,6 +1,7 @@
 """Auth API routes."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -13,7 +14,7 @@ from app.auth.service import (
     upsert_external_auth_config,
 )
 from app.auth.dependencies import get_current_user, require_super_admin
-from app.core.models import User
+from app.core.models import User, Organization
 from app.auth.captcha import create_captcha_challenge, verify_and_consume_captcha
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -108,16 +109,28 @@ async def me(current_user: User = Depends(get_current_user), db: AsyncSession = 
         can_access = await user_can_access_dashboard(db, current_user.id, default_d_id, "view")
         if not can_access:
             default_d_id = None
+    org_name = None
+    if current_user.organization_id:
+        try:
+            org_res = await db.execute(select(Organization.name).where(Organization.id == current_user.organization_id))
+            org_name = org_res.scalar_one_or_none()
+        except Exception:
+            org_name = None
+
+    role_val = getattr(current_user.role, "value", str(current_user.role))
+
     return UserInResponse(
         id=current_user.id,
         username=current_user.username,
         email=current_user.email,
         full_name=current_user.full_name,
-        role=current_user.role,
+        role=role_val,
         organization_id=current_user.organization_id,
         is_active=current_user.is_active,
         force_password_reset=bool(current_user.force_password_reset),
         default_dashboard_id=default_d_id,
+        unique_user_key=current_user.unique_user_key,
+        organization_name=org_name,
     )
 
 

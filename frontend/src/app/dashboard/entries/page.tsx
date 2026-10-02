@@ -3,9 +3,10 @@
 import { useEffect, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { api, getCachedApiResponse } from "@/lib/api";
 import { KpiCardsGrid } from "@/components/KpiCardsGrid";
 import { canManageKpis } from "@/lib/auth";
+import { PageLoader } from "@/components/PageLoader";
 
 const currentYear = new Date().getFullYear();
 
@@ -46,10 +47,11 @@ export default function EntriesPage() {
   const tagIdParam = searchParams?.get("tag_id");
   const status = (searchParams?.get("status") as "all" | "submitted" | "draft" | "not_entered" | "no_user_assigned") ?? "all";
 
-  const [organizationId, setOrganizationId] = useState<number | null>(null);
-  const [userRole, setUserRole] = useState<string | null>(null);
+  const cachedMe = getCachedApiResponse<{ organization_id: number | null; role: string }>("/auth/me");
+  const [organizationId, setOrganizationId] = useState<number | null>(() => cachedMe?.organization_id ?? null);
+  const [userRole, setUserRole] = useState<string | null>(() => cachedMe?.role ?? null);
   const [kpisOverride, setKpisOverride] = useState<KpiRow[] | undefined>(undefined);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !cachedMe);
   const [error, setError] = useState<string | null>(null);
   const [domainName, setDomainName] = useState<string | null>(null);
   const [categoryName, setCategoryName] = useState<string | null>(null);
@@ -77,7 +79,8 @@ export default function EntriesPage() {
   }, [token]);
 
   useEffect(() => {
-    if (!token || !organizationId || isOrgAdmin) return;
+    // Wait until userRole is known — avoids redirecting ORG_ADMINs before their role loads.
+    if (!token || !organizationId || !userRole || isOrgAdmin) return;
     api<Array<{ id: number }>>(
       `/entries/available-kpis?organization_id=${organizationId}&limit=1`,
       { token }
@@ -94,7 +97,7 @@ export default function EntriesPage() {
         }
       })
       .catch(() => {});
-  }, [token, organizationId, isOrgAdmin, router]);
+  }, [token, organizationId, userRole, isOrgAdmin, router]);
 
   useEffect(() => {
     if (!token || !organizationId || !canFetchKpis || !hasKpiFilters) {
@@ -167,7 +170,7 @@ export default function EntriesPage() {
   }
   if (q.trim()) filterTags.push({ key: "q", label: `Search: ${q.trim()}` });
 
-  if (loading && organizationId == null) return <p>Loading...</p>;
+  if (loading && organizationId == null) return <PageLoader text="Loading KPIs…" />;
 
   return (
     <div>

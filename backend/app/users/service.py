@@ -50,15 +50,25 @@ async def create_user(
         if invalid_rts:
             raise HTTPException(status_code=400, detail=f"Report template IDs do not belong to this organization: {sorted(list(invalid_rts))}")
 
+    username_clean = data.username.strip()
+    existing_user = await db.execute(
+        select(User.id).where(User.organization_id == org_id, User.username == username_clean)
+    )
+    if existing_user.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Username '{username_clean}' already exists in this organization.",
+        )
+
     user = User(
         organization_id=org_id,
-        username=data.username,
-        email=data.email,
-        full_name=data.full_name,
+        username=username_clean,
+        email=data.email.strip() if data.email and data.email.strip() else None,
+        full_name=data.full_name.strip() if data.full_name and data.full_name.strip() else None,
         hashed_password=get_password_hash(data.password),
         role=data.role,
         is_active=True,
-        unique_user_key=data.unique_user_key,
+        unique_user_key=data.unique_user_key.strip() if data.unique_user_key and data.unique_user_key.strip() else None,
     )
     db.add(user)
     await db.flush()
@@ -97,12 +107,22 @@ async def create_external_user(
     because the column is non-nullable. We use a random dummy hash.
     """
     dummy_password = f"external:{uuid4().hex}"
+    username_clean = data.username.strip()
+    existing_user = await db.execute(
+        select(User.id).where(User.organization_id == org_id, User.username == username_clean)
+    )
+    if existing_user.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Username '{username_clean}' already exists in this organization.",
+        )
+
     val_key = data.unique_user_key.strip() if data.unique_user_key and data.unique_user_key.strip() else None
     user = User(
         organization_id=org_id,
-        username=data.username,
+        username=username_clean,
         email=None,
-        full_name=data.full_name,
+        full_name=data.full_name.strip() if data.full_name and data.full_name.strip() else None,
         unique_user_key=val_key,
         hashed_password=get_password_hash(dummy_password),
         role=UserRole.USER,

@@ -17,6 +17,7 @@ import {
 } from "@/lib/multiItemsFiltersHelper";
 import MultiItemsAdvancedFiltersPanel from "@/components/MultiItemsAdvancedFiltersPanel";
 import { isFieldVisible } from "@/lib/conditionalRules";
+import { PageLoader } from "@/components/PageLoader";
 
 interface KpiSectionInfo {
   id: number;
@@ -485,7 +486,7 @@ export default function KpiReportBuilder() {
               ({cfg.selected_columns.length} cols)
             </span>
             {warning && (
-              <span style={{ color: "var(--error)", fontSize: "0.75rem" }}>⚠️ Limit Exceeded</span>
+              <span style={{ color: "var(--error)", fontSize: "0.75rem" }}>Limit Exceeded</span>
             )}
           </div>
           <span>{isExpanded ? "▲" : "▼"}</span>
@@ -930,12 +931,7 @@ export default function KpiReportBuilder() {
 
   if (loading) {
     return (
-      <div className="container" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "60vh" }}>
-        <div className="report-load-progress-bar">
-          <div className="report-load-progress-bar__fill" />
-        </div>
-        <p style={{ marginTop: "1rem", color: "var(--text-secondary)" }}>Loading Report Builder configurations...</p>
-      </div>
+      <PageLoader text="Loading Report Builder configurations…" size="large" minHeight={360} />
     );
   }
 
@@ -987,9 +983,7 @@ export default function KpiReportBuilder() {
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
           {pdfJobStatus && (
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-              <span className="report-load-progress-bar" style={{ minWidth: "100px" }}>
-                <span className="report-load-progress-bar__fill" />
-              </span>
+              <span className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
               <span style={{ fontSize: "0.85rem", color: "var(--text-secondary)" }}>
                 Generating...
               </span>

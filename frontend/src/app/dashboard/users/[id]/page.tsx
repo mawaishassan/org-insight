@@ -10,6 +10,7 @@ import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { AccessDenied } from "@/components/AccessDenied";
+import { PageLoader } from "@/components/PageLoader";
 import {
   type UserRow,
 } from "../shared";
@@ -198,7 +199,7 @@ export default function UserDetailPage() {
     }
   };
 
-  if (loading && !user) return <p style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>Loading user details...</p>;
+  if (loading && !user) return <PageLoader text="Loading user details…" />;
   if (error) {
     return (
       <AccessDenied

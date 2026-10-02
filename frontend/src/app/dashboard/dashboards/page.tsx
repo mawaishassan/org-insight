@@ -5,8 +5,8 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
-import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
+import { api, getCachedApiResponse } from "@/lib/api";
+import { PageLoader } from "@/components/PageLoader";
 
 interface DashboardRow {
   id: number;
@@ -30,12 +30,16 @@ export default function DashboardsPage() {
   const orgIdParam = searchParams?.get("organization_id");
   const queryOrgId = orgIdParam ? Number(orgIdParam) : null;
   const orgKey = queryOrgId ? String(queryOrgId) : "all";
+  const url = queryOrgId ? `/dashboards?organization_id=${queryOrgId}` : "/dashboards";
 
-  const [list, setList] = useState<DashboardRow[]>(() => cachedDashboards[orgKey] ?? []);
-  const [loading, setLoading] = useState(() => !cachedDashboards[orgKey]);
+  const cached = getCachedApiResponse<DashboardRow[]>(url) ?? cachedDashboards[orgKey];
+  const [list, setList] = useState<DashboardRow[]>(() => cached ?? []);
+  const [loading, setLoading] = useState(() => !cached || cached.length === 0);
   const [error, setError] = useState<string | null>(null);
-  const [userRole, setUserRole] = useState<string | null>(null);
-  const [organizationId, setOrganizationId] = useState<number | null>(null);
+
+  const cachedMe = getCachedApiResponse<{ role: string; organization_id: number | null }>("/auth/me");
+  const [userRole, setUserRole] = useState<string | null>(() => cachedMe?.role ?? null);
+  const [organizationId, setOrganizationId] = useState<number | null>(() => cachedMe?.organization_id ?? null);
 
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [addName, setAddName] = useState("");
@@ -225,12 +229,7 @@ export default function DashboardsPage() {
   };
 
   if (loading && list.length === 0) {
-    return (
-      <div>
-        <h1 style={{ marginBottom: "1rem", fontSize: "1.5rem" }}>Dashboards</h1>
-        <WidgetSpinnerLoader text="Loading dashboards..." minHeight={300} />
-      </div>
-    );
+    return <PageLoader text="Loading dashboards…" size="large" minHeight={300} />;
   }
   if (error) return <p className="form-error">{error}</p>;
 

@@ -209,7 +209,9 @@ export default function MultiItemsAdvancedFiltersPanel({
         {filterDraft.map((c, idx) => {
           const sfCond = subFields.find((s) => s.key === c.field);
           const ftCond = sfCond?.field_type ?? "";
-          const opChoices = operatorsForMultiItemSubField(ftCond);
+          const isDynamic = ftCond === "dynamic" || ftCond === "mixed";
+          const effectiveFt = isDynamic && c.cell_type ? c.cell_type : ftCond;
+          const opChoices = operatorsForMultiItemSubField(effectiveFt);
           const opSelectValue = opChoices.some((o) => o.value === c.op) ? c.op : (opChoices[0]?.value ?? "eq");
           const refCfg = sfCond?.config as { reference_source_kpi_id?: number } | undefined;
           const sourceKpiIdForRef = refCfg?.reference_source_kpi_id;
@@ -265,6 +267,7 @@ export default function MultiItemsAdvancedFiltersPanel({
                       field: key,
                       op: nextOps[0]?.value ?? "eq",
                       value: "",
+                      cell_type: undefined,
                       multiValues: [],
                       referenceChainPaths: [],
                     });
@@ -279,6 +282,32 @@ export default function MultiItemsAdvancedFiltersPanel({
                   ))}
                 </select>
               </div>
+              {isDynamic && (
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>
+                    Cell Type
+                  </label>
+                  <select
+                    value={c.cell_type ?? ""}
+                    onChange={(e) => {
+                      const nextCt = e.target.value || undefined;
+                      const nextEffectiveFt = nextCt || ftCond;
+                      const nextOps = operatorsForMultiItemSubField(nextEffectiveFt);
+                      setRow(idx, {
+                        cell_type: nextCt,
+                        op: nextOps.some((o) => o.value === c.op) ? c.op : (nextOps[0]?.value ?? "eq"),
+                      });
+                    }}
+                    style={{ minWidth: "120px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                  >
+                    <option value="">Any type</option>
+                    <option value="number">Number</option>
+                    <option value="single_line_text">Text</option>
+                    <option value="date">Date</option>
+                    <option value="boolean">Boolean</option>
+                  </select>
+                </div>
+              )}
               {(ftCond === "reference" || ftCond === "multi_reference") &&
                 sfCond &&
                 sourceKpiIdForRef != null &&
@@ -467,7 +496,7 @@ export default function MultiItemsAdvancedFiltersPanel({
                             style={{ padding: "0.35rem 0.5rem", fontSize: "0.85rem", height: "34px", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
                             title="Type manually"
                           >
-                            ✏️
+                            Edit
                           </button>
                         </div>
                       );
@@ -478,7 +507,7 @@ export default function MultiItemsAdvancedFiltersPanel({
                     <div style={{ display: "flex", gap: "0.35rem", alignItems: "center", width: "100%", maxWidth: "420px" }}>
                       <div style={{ flex: 1 }}>
                         {(() => {
-                          if (ftCond === "boolean") {
+                          if (effectiveFt === "boolean") {
                             return (
                               <select
                                 value={c.value === "true" || c.value === "false" ? c.value : ""}
@@ -491,7 +520,7 @@ export default function MultiItemsAdvancedFiltersPanel({
                               </select>
                             );
                           }
-                          if (ftCond === "number") {
+                          if (effectiveFt === "number") {
                             return (
                               <input
                                 type="number"
@@ -499,11 +528,11 @@ export default function MultiItemsAdvancedFiltersPanel({
                                 value={c.value}
                                 onChange={(e) => setRow(idx, { value: e.target.value })}
                                 style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                                placeholder="Number"
+                                placeholder={c.cell_type ? "Number (optional)" : "Number"}
                               />
                             );
                           }
-                          if (ftCond === "date") {
+                          if (effectiveFt === "date") {
                             return (
                               <CustomDatePicker
                                 value={c.value.length >= 10 ? c.value.slice(0, 10) : c.value}
@@ -618,7 +647,7 @@ export default function MultiItemsAdvancedFiltersPanel({
                                 value={c.value}
                                 onChange={(e) => setRow(idx, { value: e.target.value })}
                                 style={{ width: "100%", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                                placeholder={fieldUniqueVals.length > 0 ? "Type or select value..." : "Value"}
+                                placeholder={fieldUniqueVals.length > 0 ? "Type or select value..." : (c.cell_type ? "Value (optional)" : "Value")}
                               />
                               {fieldUniqueVals.length > 0 && (
                                 <datalist id={`unique-vals-${c.field}`}>
@@ -644,7 +673,7 @@ export default function MultiItemsAdvancedFiltersPanel({
                           style={{ padding: "0.35rem 0.5rem", fontSize: "0.85rem", height: "34px", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
                           title="Select from list"
                         >
-                          📋
+                          Copy
                         </button>
                       )}
                     </div>

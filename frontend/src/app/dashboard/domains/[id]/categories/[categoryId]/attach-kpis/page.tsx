@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 interface CategoryInfo {
   id: number;
@@ -281,7 +282,7 @@ export default function AttachKpisPage() {
 
       <div className="card">
         {loading && kpis.length === 0 ? (
-          <p style={{ color: "var(--muted)" }}>Loading KPIs…</p>
+          <WidgetSpinnerLoader text="Loading KPIs…" size="medium" minHeight={150} />
         ) : filteredKpis.length === 0 ? (
           <p style={{ color: "var(--muted)" }}>
             {kpis.length === 0 ? "No KPIs in this organization." : "No KPIs match your search."}

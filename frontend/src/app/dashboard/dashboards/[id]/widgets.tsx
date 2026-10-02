@@ -13,6 +13,7 @@ import { SmartChartViewer } from "./SmartChartViewer";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
 import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
+import { ContentLoader } from "@/components/ContentLoader";
 import {
   isLikelyAbortError,
   isWidgetDataBundleEnabled,
@@ -28,35 +29,28 @@ import {
   postDashboardTrendWidgetData,
   postDashboardUniversalBatch,
   postWidgetData,
+  computeWidgetCacheSignature,
+  getPersistentWidgetCache,
+  setPersistentWidgetCache,
+  clearClientWidgetCache,
 } from "@/lib/widgetData";
 
-function WidgetBlurPlaceholder({ minHeight = 120, showSpinner = true }: { minHeight?: number | string; showSpinner?: boolean }) {
-  const { isGlobalFilterLoading, hasNeverLoaded, isInitialLoad } = useDashboardCustomization();
-  // Never show individual widget spinners during global period shifting or initial load (the centered badge handles it)
-  const shouldSpin = showSpinner && !isGlobalFilterLoading && !hasNeverLoaded && !isInitialLoad;
+export { clearClientWidgetCache, computeWidgetCacheSignature, getPersistentWidgetCache, setPersistentWidgetCache };
+
+function WidgetBlurPlaceholder({ minHeight = 120 }: { minHeight?: number | string; text?: string; showSpinner?: boolean }) {
   return (
     <div
       style={{
-        width: "100%",
         minHeight,
-        borderRadius: 12,
+        width: "100%",
         display: "flex",
-        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        background: "rgba(248, 250, 252, 0.4)",
-        position: "relative",
       }}
-    >
-      {shouldSpin && (
-        <div
-          className="effective-spinner"
-          style={{ width: 36, height: 36, borderWidth: 3.5 }}
-        />
-      )}
-    </div>
+    />
   );
 }
+
 
 const openStateByWidgetKey: Record<string, boolean> = {};
 const activeTabByWidgetKey: Record<string, string> = {};
@@ -549,6 +543,13 @@ const pendingChartBatches = new Map<
 >();
 
 function enqueueDashboardChartBatch(req: Omit<PendingChart, "resolve" | "reject">): Promise<any> {
+  const itemSig = computeWidgetCacheSignature(req.widget);
+  const itemCacheKey = `${req.dashboardId}::${req.widgetId}::${itemSig}::${JSON.stringify(req.overrides ?? {})}`;
+  const cached = getPersistentWidgetCache(itemCacheKey);
+  if (cached) {
+    return Promise.resolve(cached);
+  }
+
   const key = `${req.token}::${req.organizationId}::${req.dashboardId}`;
   return new Promise((resolve, reject) => {
     const item: PendingChart = { ...req, resolve, reject };
@@ -575,8 +576,14 @@ function enqueueDashboardChartBatch(req: Omit<PendingChart, "resolve" | "reject"
           items.forEach((x, idx) => {
             const k = x.widgetId || `idx:${idx}`;
             const r = res?.results?.[k] ?? res?.results?.[`idx:${idx}`];
-            if (r && r.ok) x.resolve(r);
-            else x.reject(new Error(r?.error || "Chart batch failed"));
+            if (r && r.ok) {
+              const sig = computeWidgetCacheSignature(x.widget);
+              const cKey = `${x.dashboardId}::${x.widgetId}::${sig}::${JSON.stringify(x.overrides ?? {})}`;
+              setPersistentWidgetCache(cKey, r);
+              x.resolve(r);
+            } else {
+              x.reject(new Error(r?.error || "Chart batch failed"));
+            }
           });
         } catch (e) {
           items.forEach((x) => x.reject(e));
@@ -602,6 +609,13 @@ type PendingCard = {
 const pendingCardBatches = new Map<CardBatchKey, { timer: any; items: PendingCard[] }>();
 
 function enqueueDashboardCardBatch(req: Omit<PendingCard, "resolve" | "reject">): Promise<any> {
+  const itemSig = computeWidgetCacheSignature(req.widget);
+  const itemCacheKey = `${req.dashboardId}::${req.widgetId}::${itemSig}::${JSON.stringify(req.overrides ?? {})}`;
+  const cached = getPersistentWidgetCache(itemCacheKey);
+  if (cached) {
+    return Promise.resolve(cached);
+  }
+
   const key = `${req.token}::${req.organizationId}::${req.dashboardId}`;
   return new Promise((resolve, reject) => {
     const item: PendingCard = { ...req, resolve, reject };
@@ -624,8 +638,14 @@ function enqueueDashboardCardBatch(req: Omit<PendingCard, "resolve" | "reject">)
           items.forEach((x, idx) => {
             const k = x.widgetId || `idx:${idx}`;
             const r = res?.results?.[k] ?? res?.results?.[`idx:${idx}`];
-            if (r && r.ok) x.resolve(r);
-            else x.reject(new Error(r?.error || "Card batch failed"));
+            if (r && r.ok) {
+              const sig = computeWidgetCacheSignature(x.widget);
+              const cKey = `${x.dashboardId}::${x.widgetId}::${sig}::${JSON.stringify(x.overrides ?? {})}`;
+              setPersistentWidgetCache(cKey, r);
+              x.resolve(r);
+            } else {
+              x.reject(new Error(r?.error || "Card batch failed"));
+            }
           });
         } catch (e) {
           items.forEach((x) => x.reject(e));
@@ -658,43 +678,15 @@ const pendingUniversalBatches = new Map<
   UniversalBatchKey,
   { timer: any; items: PendingUniversal[] }
 >();
-const CLIENT_WIDGET_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const clientWidgetMemoryCache = new Map<string, { data: any; ts: number }>();
-
-export function clearClientWidgetCache(dashboardId?: number): void {
-  if (dashboardId != null) {
-    const prefix = `${dashboardId}::`;
-    for (const k of Array.from(clientWidgetMemoryCache.keys())) {
-      if (k.startsWith(prefix)) {
-        clientWidgetMemoryCache.delete(k);
-      }
-    }
-  } else {
-    clientWidgetMemoryCache.clear();
-  }
-}
-
-function computeWidgetCacheSignature(w: any): string {
-  if (!w || typeof w !== "object") return "";
-  const kpiId = w.kpi_id ?? "";
-  const type = w.type ?? "";
-  const srcKey = w.source_field_key ?? w.field_key ?? "";
-  const groupBy = w.group_by_sub_field_key ?? "";
-  const valKey = w.value_sub_field_key ?? "";
-  const agg = w.agg ?? "";
-  const fkeys = Array.isArray(w.field_keys) ? w.field_keys.join(",") : "";
-  const joins = Array.isArray(w.joins) ? JSON.stringify(w.joins) : "";
-  return `${kpiId}:${type}:${srcKey}:${groupBy}:${valKey}:${agg}:${fkeys}:${joins}`;
-}
 
 export function enqueueDashboardUniversalBatch(
   req: Omit<PendingUniversal, "resolve" | "reject">
 ): Promise<any> {
   const widgetSig = computeWidgetCacheSignature(req.widget);
   const cacheKey = `${req.dashboardId}::${req.widgetId}::${widgetSig}::${JSON.stringify(req.overrides ?? {})}`;
-  const cached = clientWidgetMemoryCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < CLIENT_WIDGET_CACHE_TTL_MS) {
-    return Promise.resolve(cached.data);
+  const cached = getPersistentWidgetCache(cacheKey);
+  if (cached) {
+    return Promise.resolve(cached);
   }
 
   const key = `${req.token}::${req.organizationId}::${req.dashboardId}`;
@@ -725,7 +717,7 @@ export function enqueueDashboardUniversalBatch(
             if (r && r.ok) {
               const itemSig = computeWidgetCacheSignature(x.widget);
               const itemCacheKey = `${x.dashboardId}::${x.widgetId}::${itemSig}::${JSON.stringify(x.overrides ?? {})}`;
-              clientWidgetMemoryCache.set(itemCacheKey, { data: r, ts: Date.now() });
+              setPersistentWidgetCache(itemCacheKey, r);
               x.resolve(r);
             } else {
               x.reject(new Error(r?.error || "Universal batch failed"));
@@ -739,6 +731,7 @@ export function enqueueDashboardUniversalBatch(
     pendingUniversalBatches.set(key, cur);
   });
 }
+
 
 /**
  * Global in-flight request deduplication cache.
@@ -1428,8 +1421,7 @@ function WidgetSettingsShell({
                     position: "fixed",
                     inset: 0,
                     zIndex: 99998,
-                    background: "rgba(241, 245, 249, 0.88)",
-                    backdropFilter: "blur(6px)",
+                    background: "rgba(241, 245, 249, 0.94)",
                   }}
                   onClick={() => setIsFullScreen(false)}
                   aria-label="Close Full Screen"

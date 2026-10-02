@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { PageLoader } from "@/components/PageLoader";
 
 interface DashboardRow {
   id: number;
@@ -42,6 +43,12 @@ export default function DashboardPage() {
           return;
         }
 
+        // University Admin (ORG_ADMIN) always lands on the KPI entries workspace.
+        if (me.role === "ORG_ADMIN") {
+          router.replace("/dashboard/entries");
+          return;
+        }
+
         setMsg("Checking your access…");
         const available = await api<Array<{ id: number }>>(
           `/entries/available-kpis?organization_id=${orgId}&limit=1`,
@@ -76,8 +83,6 @@ export default function DashboardPage() {
     })();
   }, [router]);
   return (
-    <div style={{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <p style={{ color: "var(--muted)" }}>{msg}</p>
-    </div>
+    <PageLoader text={msg} size="large" minHeight={300} />
   );
 }

@@ -31,6 +31,7 @@ class UserCreate(BaseModel):
     email: str | None = None
     full_name: str | None = None
     role: UserRole = UserRole.USER
+    organization_id: int | None = None
     unique_user_key: str | None = None
     kpi_ids: list[int] = Field(default_factory=list, description="Legacy: data_entry only")
     kpi_assignments: list[UserKpiAssignment] = Field(
@@ -45,6 +46,7 @@ class ExternalUserCreate(BaseModel):
 
     username: str = Field(..., min_length=1, max_length=100)
     full_name: str | None = None
+    organization_id: int | None = None
     unique_user_key: str | None = None
     description: str | None = None
     is_active: bool = True

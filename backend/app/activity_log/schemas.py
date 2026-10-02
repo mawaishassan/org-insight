@@ -7,11 +7,11 @@ PKT = timezone(timedelta(hours=5), name="PKT")
 
 class ClientActivityEvent(BaseModel):
     """Schema for client-side activity events posted from UI."""
-    module: str = Field(..., description="AUTH, REPORTS, DASHBOARDS, KPIS, SYSTEM")
-    resource_type: str = Field(..., description="session, report, custom_report, dashboard, widget, kpi, etc.")
-    resource_id: Optional[str] = None
+    module: str = Field(default="SYSTEM", description="AUTH, REPORTS, DASHBOARDS, KPIS, SYSTEM")
+    resource_type: Optional[str] = Field(default="general", description="session, report, custom_report, dashboard, widget, kpi, etc.")
+    resource_id: Optional[Any] = None
     resource_name: Optional[str] = None
-    action_type: str = Field(..., description="VIEW, OPEN, DOWNLOAD_PDF, DOWNLOAD_EXCEL, DOWNLOAD_WORD, DOWNLOAD_CSV, PRINT, DRILL_DOWN, etc.")
+    action_type: str = Field(default="VIEW", description="VIEW, OPEN, DOWNLOAD_PDF, DOWNLOAD_EXCEL, DOWNLOAD_WORD, DOWNLOAD_CSV, PRINT, DRILL_DOWN, etc.")
     action_details: Optional[str] = None
     details: Optional[str] = None
     reporting_period: Optional[str] = None
@@ -23,6 +23,7 @@ class ClientActivityEvent(BaseModel):
     status: str = Field(default="SUCCESS", description="SUCCESS, FAILED")
     error_message: Optional[str] = None
     meta_data: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class ActivityLogItem(BaseModel):

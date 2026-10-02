@@ -158,7 +158,7 @@ export default function ResetPasswordPage() {
               gap: "0.5rem",
             }}
           >
-            <span>⚠️</span>
+            
             <span>{error}</span>
           </div>
         )}

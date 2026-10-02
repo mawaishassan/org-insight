@@ -30,8 +30,28 @@ export interface CurrentUser {
   full_name: string | null;
   role: UserRole;
   organization_id: number | null;
+  organization_name?: string | null;
+  unique_user_key?: string | null;
   is_active: boolean;
   force_password_reset?: boolean;
+}
+
+export function formatUserRole(role?: UserRole | string | { value?: string } | null): string {
+  if (!role) return "User";
+  const raw = typeof role === "object" && role !== null && "value" in role ? role.value : role;
+  const roleStr = String(raw || "").trim().toUpperCase();
+  switch (roleStr) {
+    case "SUPER_ADMIN":
+      return "Super Admin";
+    case "ORG_ADMIN":
+      return "University Admin";
+    case "USER":
+      return "Data Entry User";
+    case "REPORT_VIEWER":
+      return "Report Viewer";
+    default:
+      return typeof raw === "string" && raw.trim() ? raw.trim() : "User";
+  }
 }
 
 export function canManageOrgs(role: UserRole): boolean {

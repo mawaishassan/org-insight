@@ -36,16 +36,19 @@ class UserInResponse(BaseModel):
 
     id: int
     username: str
-    email: str | None
-    full_name: str | None
-    role: UserRole
-    organization_id: int | None
-    is_active: bool
+    email: str | None = None
+    full_name: str | None = None
+    role: UserRole | str
+    organization_id: int | None = None
+    is_active: bool = True
     force_password_reset: bool = False
     default_dashboard_id: int | None = None
+    unique_user_key: str | None = None
+    organization_name: str | None = None
 
     class Config:
         from_attributes = True
+        use_enum_values = True
 
 
 class ResetForcedPasswordRequest(BaseModel):

@@ -136,7 +136,9 @@ export function MultiLineReportFilterPanel({ organizationId, token, dashboardId,
         {filterDraft.map((c, idx) => {
           const sfCond = subFields.find((s) => s.key === c.field);
           const ftCond = sfCond?.field_type ?? "";
-          const opChoices = operatorsForMultiItemSubField(ftCond);
+          const isDynamic = ftCond === "dynamic" || ftCond === "mixed";
+          const effectiveFt = isDynamic && c.cell_type ? c.cell_type : ftCond;
+          const opChoices = operatorsForMultiItemSubField(effectiveFt);
           const opSelectValue = opChoices.some((o) => o.value === c.op) ? c.op : (opChoices[0]?.value ?? "eq");
           const refCfg = sfCond?.config as { reference_source_kpi_id?: number } | undefined;
           const sourceKpiIdForRef = refCfg?.reference_source_kpi_id;
@@ -190,6 +192,7 @@ export function MultiLineReportFilterPanel({ organizationId, token, dashboardId,
                       field: key,
                       op: nextOps[0]?.value ?? "eq",
                       value: "",
+                      cell_type: undefined,
                       multiValues: [],
                       referenceChainPaths: [],
                     });
@@ -204,6 +207,32 @@ export function MultiLineReportFilterPanel({ organizationId, token, dashboardId,
                   ))}
                 </select>
               </div>
+              {isDynamic && (
+                <div>
+                  <label style={{ display: "block", fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.25rem" }}>
+                    Cell Type
+                  </label>
+                  <select
+                    value={c.cell_type ?? ""}
+                    onChange={(e) => {
+                      const nextCt = e.target.value || undefined;
+                      const nextEffectiveFt = nextCt || ftCond;
+                      const nextOps = operatorsForMultiItemSubField(nextEffectiveFt);
+                      setRow({
+                        cell_type: nextCt,
+                        op: nextOps.some((o) => o.value === c.op) ? c.op : (nextOps[0]?.value ?? "eq"),
+                      });
+                    }}
+                    style={{ minWidth: "120px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
+                  >
+                    <option value="">Any type</option>
+                    <option value="number">Number</option>
+                    <option value="single_line_text">Text</option>
+                    <option value="date">Date</option>
+                    <option value="boolean">Boolean</option>
+                  </select>
+                </div>
+              )}
               {(ftCond === "reference" || ftCond === "multi_reference") &&
                 sfCond &&
                 sourceKpiIdForRef != null &&
@@ -324,7 +353,7 @@ export function MultiLineReportFilterPanel({ organizationId, token, dashboardId,
                   <span style={{ fontSize: "0.85rem", color: "var(--muted)", display: "inline-block", padding: "0.35rem 0" }}>
                     Select a field first
                   </span>
-                ) : ftCond === "boolean" ? (
+                ) : effectiveFt === "boolean" ? (
                   <select
                     value={c.value === "true" || c.value === "false" ? c.value : ""}
                     onChange={(e) => setRow({ value: e.target.value })}
@@ -334,16 +363,16 @@ export function MultiLineReportFilterPanel({ organizationId, token, dashboardId,
                     <option value="true">Yes</option>
                     <option value="false">No</option>
                   </select>
-                ) : ftCond === "number" ? (
+                ) : effectiveFt === "number" ? (
                   <input
                     type="number"
                     step="any"
                     value={c.value}
                     onChange={(e) => setRow({ value: e.target.value })}
                     style={{ width: "100%", maxWidth: "200px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                    placeholder="Number"
+                    placeholder={c.cell_type ? "Number (optional)" : "Number"}
                   />
-                ) : ftCond === "date" ? (
+                ) : effectiveFt === "date" ? (
                   <CustomDatePicker
                     value={c.value.length >= 10 ? c.value.slice(0, 10) : c.value}
                     onChange={(nextVal) => setRow({ value: nextVal || "" })}
@@ -455,7 +484,7 @@ export function MultiLineReportFilterPanel({ organizationId, token, dashboardId,
                     value={c.value}
                     onChange={(e) => setRow({ value: e.target.value })}
                     style={{ minWidth: "180px", width: "100%", maxWidth: "360px", padding: "0.35rem 0.5rem", borderRadius: 6, border: "1px solid var(--border)" }}
-                    placeholder="Value"
+                    placeholder={c.cell_type ? "Value (optional)" : "Value"}
                   />
                 )}
               </div>

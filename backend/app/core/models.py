@@ -48,6 +48,7 @@ class FieldType(str, enum.Enum):
     formula = "formula"
     reference = "reference"  # Reference/Lookup: values from another KPI field
     multi_reference = "multi_reference"  # Multiple lookup values from one linked KPI field (stored as JSON list)
+    dynamic = "dynamic"  # Heterogeneous/variant cell type per row
 
 class TimeDimension(str, enum.Enum):
     """Time granularity: multi_year, yearly, half_yearly, quarterly, monthly."""
@@ -966,6 +967,7 @@ class KpiMultiLineCell(Base):
     sub_field_id = Column(
         Integer, ForeignKey("kpi_field_sub_fields.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    cell_type = Column(String(32), nullable=True)  # number, single_line_text, date, boolean, reference, etc.
     value_text = Column(Text, nullable=True)
     value_number = Column(Float, nullable=True)
     value_json = Column(JSON, nullable=True)

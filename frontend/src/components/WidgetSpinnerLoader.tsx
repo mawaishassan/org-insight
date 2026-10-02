@@ -13,15 +13,15 @@ interface WidgetSpinnerLoaderProps {
 
 export function WidgetSpinnerLoader({
   size = "medium",
-  text = "Loading data...",
+  text = "Loading data…",
   minHeight,
   overlay = false,
   style = {},
   className = "",
 }: WidgetSpinnerLoaderProps) {
   const isSmall = size === "small";
-  const spinnerSize = isSmall ? 26 : size === "large" ? 50 : 42;
-  const borderWidth = isSmall ? 2.5 : 4;
+  const spinnerSize = isSmall ? 26 : size === "large" ? 48 : 36;
+  const borderWidth = isSmall ? 2.5 : size === "large" ? 4 : 3.5;
 
   return (
     <div
@@ -31,11 +31,10 @@ export function WidgetSpinnerLoader({
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        padding: isSmall ? "0.5rem" : "1.5rem",
-        minHeight: minHeight ?? (isSmall ? 80 : size === "large" ? 220 : 140),
+        padding: isSmall ? "0.5rem" : "1.25rem",
+        minHeight: minHeight ?? (isSmall ? 80 : size === "large" ? 220 : 130),
         width: "100%",
         borderRadius: 12,
-        background: "transparent",
         ...style,
       }}
     >
@@ -46,9 +45,9 @@ export function WidgetSpinnerLoader({
           alignItems: "center",
           justifyContent: "center",
           background: "var(--surface, #ffffff)",
-          padding: isSmall ? "0.6rem 1rem" : "1.25rem 2rem",
-          borderRadius: isSmall ? "0.65rem" : "1rem",
-          boxShadow: isSmall ? "0 4px 12px rgba(0,0,0,0.08)" : "0 10px 30px rgba(0,0,0,0.18)",
+          padding: isSmall ? "0.6rem 1rem" : "1.1rem 1.8rem",
+          borderRadius: isSmall ? "0.65rem" : "0.95rem",
+          boxShadow: isSmall ? "0 4px 12px rgba(0,0,0,0.08)" : "0 10px 25px rgba(0,0,0,0.12)",
           border: "1px solid var(--border, #e2e8f0)",
           pointerEvents: "none",
         }}
@@ -65,10 +64,10 @@ export function WidgetSpinnerLoader({
           <span
             className="effective-spinner-text"
             style={{
-              marginTop: isSmall ? "0.45rem" : "0.85rem",
-              fontSize: isSmall ? "0.82rem" : "1.15rem",
-              fontWeight: 700,
-              color: "#0f172a",
+              marginTop: isSmall ? "0.45rem" : "0.75rem",
+              fontSize: isSmall ? "0.82rem" : "1rem",
+              fontWeight: 600,
+              color: "var(--text, #0f172a)",
               letterSpacing: "0.01em",
               whiteSpace: "nowrap",
             }}
@@ -82,3 +81,4 @@ export function WidgetSpinnerLoader({
 }
 
 export default WidgetSpinnerLoader;
+

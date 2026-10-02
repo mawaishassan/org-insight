@@ -17,6 +17,7 @@ SUB_FIELD_TYPES = (
     FieldType.attachment,
     FieldType.mixed_list,
     FieldType.formula,
+    FieldType.dynamic,
 )
 
 

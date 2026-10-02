@@ -461,3 +461,36 @@ class SubFieldUniqueValuesResponse(BaseModel):
     field_id: int = Field(..., description="KPI field ID")
     sub_field_key: str = Field(..., description="Subfield column key")
     unique_values: list[str] = Field(default_factory=list, description="List of unique post-extraction values")
+
+
+class JoinColumnMapping(BaseModel):
+    source_key: str
+    alias_key: str
+    alias_name: str
+    field_type: str = "single_line_text"
+
+
+class JoinMliWizardRequest(BaseModel):
+    mode: str = Field(..., description="'create_new' or 'enrich_existing'")
+    kpi1_id: int
+    kpi1_field_key: str
+    kpi2_id: int
+    kpi2_field_key: str
+    join_key_kpi1: str
+    join_key_kpi2: str
+    kpi1_columns: list[JoinColumnMapping]
+    kpi2_columns: list[JoinColumnMapping]
+    new_kpi_name: str | None = None
+    new_kpi_field_name: str | None = None
+    domain_id: int | None = None
+    target_kpi_id: int | None = None
+    target_field_key: str | None = None
+
+
+class JoinMliWizardResponse(BaseModel):
+    success: bool
+    mode: str
+    kpi_id: int
+    field_key: str
+    message: str
+    kpi_name: str | None = None

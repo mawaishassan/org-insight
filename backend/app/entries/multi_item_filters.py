@@ -51,9 +51,33 @@ def eval_v2_condition_row(
         resolved = resolution_maps.get((cond_idx, lab))
         return cmp_vals(resolved)
 
+    req_ct = cond.get("cell_type")
+    if req_ct:
+        rct = str(req_ct).strip().lower()
+        if rct == "number" and not isinstance(cell, (int, float)):
+            try:
+                float(str(cell).strip())
+            except Exception:
+                return False
+        elif rct == "date":
+            from app.formula_engine.evaluator import _to_date
+            if _to_date(cell) is None:
+                return False
+        elif rct == "boolean" and not isinstance(cell, bool) and str(cell).strip().lower() not in ("true", "false"):
+            return False
+        elif rct in ("single_line_text", "text"):
+            if isinstance(cell, bool):
+                return False
+
+    val_item = cond.get("value")
     vals_raw = cond.get("values")
-    if not vals_raw and isinstance(cond.get("value"), list):
-        vals_raw = cond.get("value")
+    if not vals_raw and isinstance(val_item, list):
+        vals_raw = val_item
+
+    # If cell_type was matched and no specific value or multi-values were requested, condition passes.
+    if req_ct and (val_item is None or str(val_item).strip() == "") and not vals_raw:
+        return True
+
     effective_op = "eq" if op == "in" else op
     if isinstance(vals_raw, list) and len(vals_raw) > 1:
         if effective_op == "eq":
@@ -61,7 +85,7 @@ def eval_v2_condition_row(
         if effective_op == "neq":
             return all(match_cell_value(cell, "neq", v) for v in vals_raw)
         return match_cell_value(cell, effective_op, vals_raw[0])
-    return match_cell_value(cell, effective_op, cond.get("value"))
+    return match_cell_value(cell, effective_op, val_item)
 
 
 def _eval_compare_ops(resolved: Any, op: str, cond: dict[str, Any]) -> bool:

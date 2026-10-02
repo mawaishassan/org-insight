@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 interface Symbol {
   id: number;
@@ -125,7 +126,7 @@ export function MLISymbolsPanel({ token }: Props) {
     }
   };
 
-  if (loading) return <div style={{ color: "var(--muted)", padding: "1rem" }}>Loading symbols…</div>;
+  if (loading) return <WidgetSpinnerLoader text="Loading symbols…" size="medium" minHeight={160} />;
 
   return (
     <div>

@@ -89,15 +89,32 @@ textarea {
   border-color: var(--border-focus);
 }
 
+.btn:disabled,
+.btn[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
+}
+
+.btn-primary:disabled,
+.btn-primary[disabled] {
+  background: var(--accent);
+  border-color: var(--accent);
+  opacity: 0.5;
+  cursor: not-allowed !important;
+  box-shadow: none !important;
 }
 
 /* Dashboard Widget Action Buttons (Layout, Fullscreen, Options) - Touch & Click Responsive */
@@ -367,6 +384,27 @@ input::-ms-clear {
   animation: report-load-progress 1.4s ease-in-out infinite;
 }
 
+.slim-dashboard-progress-bar {
+  position: absolute;
+  top: -6px;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(59, 130, 246, 0.15);
+  border-radius: 3px;
+  overflow: hidden;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.slim-dashboard-progress-bar__fill {
+  height: 100%;
+  width: 35%;
+  background: var(--accent, #3b82f6);
+  border-radius: 3px;
+  animation: report-load-progress 1.2s ease-in-out infinite;
+}
+
 /* Report design page: two-column grid stacks on narrow screens */
 @media (max-width: 768px) {
   .report-design-grid {
@@ -412,10 +450,12 @@ input::-ms-clear {
 
 @keyframes effective-pulse-text {
   0%, 100% {
-    opacity: 0.55;
+    opacity: 0.7;
+    transform: scale(0.99);
   }
   50% {
-    opacity: 0.95;
+    opacity: 1;
+    transform: scale(1);
   }
 }
 
@@ -424,28 +464,34 @@ input::-ms-clear {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 1rem;
+  padding: 1.25rem;
   min-height: 120px;
   width: 100%;
   border-radius: 12px;
-  background: transparent;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  transition: all 0.3s ease;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+[data-theme="dark"] .effective-spinner-container,
+.dark .effective-spinner-container {
+  background: rgba(15, 23, 42, 0.75);
 }
 
 .effective-spinner-container--overlay {
   position: absolute;
   inset: 0;
-  z-index: 10;
-  background: rgba(255, 255, 255, 0.45);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  z-index: 30;
+  background: rgba(255, 255, 255, 0.78);
+  border-radius: inherit;
+}
+
+[data-theme="dark"] .effective-spinner-container--overlay,
+.dark .effective-spinner-container--overlay {
+  background: rgba(15, 23, 42, 0.85);
 }
 
 .effective-spinner {
   border-style: solid;
-  border-color: rgba(99, 102, 241, 0.18);
+  border-color: rgba(99, 102, 241, 0.16);
   border-top-color: var(--primary, #4f46e5);
   border-right-color: var(--primary, #4f46e5);
   border-radius: 50%;
@@ -455,11 +501,58 @@ input::-ms-clear {
 
 .effective-spinner-text {
   margin-top: 0.65rem;
-  font-weight: 500;
-  color: var(--muted, #64748b);
+  font-weight: 600;
+  color: var(--text, #1e293b);
   letter-spacing: 0.015em;
   animation: effective-pulse-text 1.6s ease-in-out infinite;
 }
+
+/* ===== Skeleton shimmer ===== */
+@keyframes shimmer {
+  0%   { background-position: -600px 0; }
+  100% { background-position:  600px 0; }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--border, #e2e8f0) 25%,
+    var(--bg-subtle, #f1f5f9) 50%,
+    var(--border, #e2e8f0) 75%
+  );
+  background-size: 600px 100%;
+  animation: shimmer 1.5s infinite linear;
+  border-radius: 6px;
+}
+
+/* ===== PageLoader fade-in ===== */
+@keyframes fadeInLoader {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.page-loader-enter {
+  animation: fadeInLoader 0.12s ease both;
+}
+
+/* ===== ContentLoader overlay (clean semi-transparent backdrop without blur lag) ===== */
+.content-loader-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.78);
+  border-radius: inherit;
+  animation: fadeInLoader 0.12s ease both;
+}
+
+[data-theme="dark"] .content-loader-overlay,
+.dark .content-loader-overlay {
+  background: rgba(15, 23, 42, 0.85);
+}
+
 
 /* ===== Ultra-Attractive Dashboard Widget Entrance & Loading Animations ===== */
 

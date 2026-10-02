@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
+import { PageLoader } from "@/components/PageLoader";
 
 interface CustomHeaderRow {
   id: number;
@@ -305,11 +306,7 @@ export default function CustomHeadersPage() {
   };
 
   if (loading) {
-    return (
-      <div style={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: "200px" }}>
-        <p style={{ color: "var(--muted)" }}>Loading custom headers...</p>
-      </div>
-    );
+    return <PageLoader text="Loading custom headers…" size="large" minHeight={240} />;
   }
 
   if (error) {

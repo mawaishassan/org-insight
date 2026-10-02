@@ -94,7 +94,8 @@ async def create_org_user(
     current_user: User = Depends(require_org_admin),
 ):
     """Create user in organization and assign KPIs and report templates."""
-    org_id = _org_id(current_user, organization_id)
+    target_org_id = organization_id if organization_id is not None else body.organization_id
+    org_id = _org_id(current_user, target_org_id)
     user = await create_user(db, org_id, body)
     await db.commit()
     await db.refresh(user)
@@ -112,7 +113,8 @@ async def create_external_org_user(
     Create an external user authenticated via external XML-RPC (password is NOT stored/verified internally).
     Org Admin only.
     """
-    org_id = _org_id(current_user, organization_id)
+    target_org_id = organization_id if organization_id is not None else body.organization_id
+    org_id = _org_id(current_user, target_org_id)
     user = await create_external_user(db, org_id, body)
     await db.commit()
     await db.refresh(user)

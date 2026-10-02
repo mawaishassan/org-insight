@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 import { Widget } from "@/app/dashboard/dashboards/[id]/widgets";
 import { useDashboardCustomization } from "@/app/dashboard/dashboards/[id]/DashboardCustomizationContext";
 import { logDrillDownView, logDrillDownPdfExport } from "@/lib/activityLogger";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 export interface DrillDownDimensionFilter {
   sub_field_key?: string;
@@ -1076,7 +1077,11 @@ export function WidgetDrillDownModal({
         }
         .drilldown-spinner {
           border-radius: 50% !important;
-          animation: spin 0.8s linear infinite !important;
+          animation: effective-spin 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+          border-style: solid !important;
+          border-color: rgba(99, 102, 241, 0.18) !important;
+          border-top-color: var(--primary, #4f46e5) !important;
+          border-right-color: var(--primary, #4f46e5) !important;
           box-sizing: border-box !important;
           display: inline-block !important;
         }
@@ -1819,29 +1824,7 @@ export function WidgetDrillDownModal({
         {/* Content / Table Area */}
         <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", position: "relative", minHeight: "260px" }}>
           {!drillData ? (
-            <div
-              style={{
-                padding: "4.5rem 1.5rem",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                minHeight: "260px",
-              }}
-            >
-              <div
-                className="drilldown-spinner"
-                style={{
-                  width: "42px",
-                  height: "42px",
-                  border: "3.5px solid #e2e8f0",
-                  borderTopColor: "#2563eb",
-                }}
-              />
-              <span style={{ marginTop: "1rem", fontSize: "1.1rem", color: "#1e293b", fontWeight: 650, letterSpacing: "-0.01em" }}>
-                Fetching data...
-              </span>
-            </div>
+            <WidgetSpinnerLoader minHeight={260} size="large" text="Fetching data…" />
           ) : error ? (
             <div style={{ padding: "3rem 1.5rem", textAlign: "center" }}>
               <div style={{ color: "#ef4444", fontSize: "1rem", fontWeight: 600, marginBottom: "0.5rem" }}>
@@ -1907,7 +1890,9 @@ export function WidgetDrillDownModal({
                   style={{
                     position: "absolute",
                     inset: 0,
-                    background: "rgba(255, 255, 255, 0.45)",
+                    background: "rgba(255, 255, 255, 0.65)",
+                    backdropFilter: "blur(6px)",
+                    WebkitBackdropFilter: "blur(6px)",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",

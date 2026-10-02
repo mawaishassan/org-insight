@@ -6,6 +6,7 @@ import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { WidgetRenderer, type Widget, type DrillDownRequestPayload } from "../../widgets";
 import { WidgetDrillDownModal } from "@/components/WidgetDrillDownModal";
+import { PageLoader } from "@/components/PageLoader";
 
 interface DashboardDetail {
   id: number;
@@ -52,7 +53,7 @@ export default function DashboardWidgetFullPage() {
   const widgets = useMemo(() => asWidgets(dashboard?.layout), [dashboard?.layout]);
   const widget = useMemo(() => widgets.find((w) => w.id === widgetId) ?? null, [widgets, widgetId]);
 
-  if (loading) return <p>Loading…</p>;
+  if (loading) return <PageLoader text="Loading widget…" />;
   if (error) return <p className="form-error">{error}</p>;
   if (!dashboard) return null;
   if (!widget) return <p className="form-error">Widget not found.</p>;

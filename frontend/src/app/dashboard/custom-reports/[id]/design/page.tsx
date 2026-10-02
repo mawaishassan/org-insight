@@ -7,6 +7,7 @@ import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
 import { generatePeriodOptions } from "@/lib/periodHelpers";
+import { PageLoader } from "@/components/PageLoader";
 import { downloadBlob } from "@/lib/download";
 import { getApiUrl } from "@/lib/api";
 import {
@@ -148,6 +149,7 @@ const SUB_FIELD_TYPES = [
   "attachment",
   "mixed_list",
   "formula",
+  "dynamic",
 ] as const;
 
 const SUB_FIELD_TYPE_LABELS: Record<string, string> = {
@@ -161,6 +163,7 @@ const SUB_FIELD_TYPE_LABELS: Record<string, string> = {
   attachment: "Attachment/File",
   mixed_list: "Mixed List",
   formula: "Formula",
+  dynamic: "Dynamic (Variant / Mixed)",
 };
 
 function slugifyKey(name: string): string {
@@ -573,7 +576,7 @@ function FormulaBuilder({
       {currentMliSubFields && currentMliSubFields.length > 0 && (
         <div style={{ marginBottom: "0.85rem", padding: "0.75rem", background: "var(--surface)", border: "1px solid var(--primary)", borderRadius: 8 }}>
           <div style={{ fontSize: "0.82rem", fontWeight: 700, color: "var(--primary)", marginBottom: "0.4rem", display: "flex", alignItems: "center", gap: "0.35rem" }}>
-            <span>⚡ Same Row Sub-field (Formula for Each Row)</span>
+            <span>Same Row Sub-field (Formula for Each Row)</span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
             <select
@@ -1127,7 +1130,10 @@ function FormulaBuilder({
                         />
                       )
                     ) : (
-                      <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>Loading values...</span>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", fontSize: "0.85rem", color: "var(--muted)" }}>
+                        <span className="effective-spinner effective-spinner--sm" style={{ width: 14, height: 14 }} />
+                        Loading values...
+                      </span>
                     )
                   ) : (
                     <input
@@ -2673,7 +2679,7 @@ export default function CustomReportDesignPage() {
   const selectedPeriodType = localPeriodType || "by_default";
   const token = getAccessToken();
 
-  if (loading) return <p style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>Loading report builder workspace...</p>;
+  if (loading) return <PageLoader text="Loading report builder…" />;
   if (error) return <p className="form-error" style={{ margin: "2rem" }}>{error}</p>;
 
   const activeType = activeItem.type;
@@ -2867,7 +2873,7 @@ export default function CustomReportDesignPage() {
                 }}
                 onClick={() => setShowValidationPanel(!showValidationPanel)}
               >
-                ⚠ {validationIssues.length} Layout Issues
+                {validationIssues.length} Layout Issues
               </button>
             )}
           </div>
@@ -3103,7 +3109,7 @@ export default function CustomReportDesignPage() {
                                         }
                                       }}
                                     >
-                                      ⚙️ Configure
+                                      Configure
                                     </button>
                                     <button
                                       type="button"
@@ -3335,7 +3341,7 @@ export default function CustomReportDesignPage() {
                             onClick={() => setShowDateConfigModal(true)}
                             style={{ padding: "2px 8px", fontSize: "0.72rem", background: "white", border: "1px solid var(--border)", borderRadius: "4px" }}
                           >
-                            ⚙️ Configure
+                            Configure
                           </button>
                         )}
                       </div>
@@ -3368,7 +3374,7 @@ export default function CustomReportDesignPage() {
                             onClick={() => setShowLmsConfigModal(true)}
                             style={{ padding: "2px 8px", fontSize: "0.72rem", background: "white", border: "1px solid var(--border)", borderRadius: "4px" }}
                           >
-                            ⚙️ Configure
+                            Configure
                           </button>
                         )}
                       </div>
@@ -3566,7 +3572,7 @@ export default function CustomReportDesignPage() {
                       }}
                       style={{ fontSize: "0.75rem", padding: "3px 8px" }}
                     >
-                      ➕ Add Field Definition
+                      Add Field Definition
                     </button>
                   </div>
 
@@ -3658,8 +3664,8 @@ export default function CustomReportDesignPage() {
 
                             <div style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
                               {f.id && (
-                                <span title="Warning: Deleting this existing field will remove all its saved data and references." style={{ cursor: "help", color: "#d97706", fontSize: "0.95rem" }}>
-                                  ⚠️
+                                <span title="Warning: Deleting this existing field will remove all its saved data and references." style={{ cursor: "help", color: "#d97706", fontSize: "0.85rem", fontWeight: 700, padding: "0 4px" }}>
+                                  !
                                 </span>
                               )}
                               <button
@@ -3691,7 +3697,7 @@ export default function CustomReportDesignPage() {
                                   }}
                                   style={{ padding: "1px 6px", fontSize: "0.68rem", background: "white", border: "1px solid var(--border)", borderRadius: "4px" }}
                                 >
-                                  ⚡ Open Formula Builder
+                                  Open Formula Builder
                                 </button>
                               </div>
                               <input
@@ -3783,7 +3789,7 @@ export default function CustomReportDesignPage() {
                                         });
                                       }}
                                     >
-                                      ⚙️ Link
+                                      Link
                                     </button>
                                   )}
 
@@ -3819,7 +3825,7 @@ export default function CustomReportDesignPage() {
                                         });
                                       }}
                                     >
-                                      {sf.config?.formula_expression ? `⚙️ fx: ${sf.config.formula_expression}` : "⚙️ Config Formula"}
+                                      {sf.config?.formula_expression ? `fx: ${sf.config.formula_expression}` : "Config Formula"}
                                     </button>
                                   )}
 
@@ -3864,7 +3870,7 @@ export default function CustomReportDesignPage() {
                                   setNewKpiFields(next);
                                 }}
                               >
-                                ➕ Add Column Header
+                                Add Column Header
                               </button>
                             </div>
                           )}
@@ -4064,11 +4070,11 @@ export default function CustomReportDesignPage() {
                   {/* Config selector for MLIs */}
                   {f.field_type === "multi_line_items" ? (
                     <div style={{ display: "flex", borderBottom: "1px solid var(--border)", gap: "0.25rem", margin: "0.5rem 0" }}>
-                      <button type="button" className={`btn btn-sm ${activeMliTab === "columns" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("columns")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>📋 Columns & Headers</button>
-                      <button type="button" className={`btn btn-sm ${activeMliTab === "widths" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("widths")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>📐 Column Widths</button>
-                      <button type="button" className={`btn btn-sm ${activeMliTab === "filters" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("filters")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>🔍 Row Filters & Sort</button>
-                      <button type="button" className={`btn btn-sm ${activeMliTab === "footer" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("footer")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>📊 Table Footer</button>
-                      <button type="button" className={`btn btn-sm ${activeMliTab === "rename" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("rename")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>🏷️ Rename Table</button>
+                      <button type="button" className={`btn btn-sm ${activeMliTab === "columns" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("columns")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>Columns & Headers</button>
+                      <button type="button" className={`btn btn-sm ${activeMliTab === "widths" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("widths")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>Column Widths</button>
+                      <button type="button" className={`btn btn-sm ${activeMliTab === "filters" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("filters")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>Row Filters & Sort</button>
+                      <button type="button" className={`btn btn-sm ${activeMliTab === "footer" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("footer")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>Table Footer</button>
+                      <button type="button" className={`btn btn-sm ${activeMliTab === "rename" ? "btn-primary" : "btn-secondary"}`} onClick={() => setActiveMliTab("rename")} style={{ padding: "0.25rem 0.65rem", fontSize: "0.78rem" }}>Rename Table</button>
                     </div>
                   ) : (
                     <div style={{ display: "grid", gap: "1rem", background: "white", padding: "1rem", borderRadius: 8, border: "1px solid var(--border)" }}>
@@ -4104,7 +4110,7 @@ export default function CustomReportDesignPage() {
                               }}
                               style={{ padding: "2px 8px", fontSize: "0.72rem", background: "white", border: "1px solid var(--border)", borderRadius: "4px" }}
                             >
-                              ⚡ Open Formula Builder
+                              Open Formula Builder
                             </button>
                           </div>
                           <textarea
@@ -4382,7 +4388,7 @@ export default function CustomReportDesignPage() {
                             setEditingWidthsLoc({ secIdx: activeItem.secIdx!, fieldIdx: activeItem.fieldIdx! });
                           }}
                         >
-                          📐 Visual Width Resizer Board
+                          Visual Width Resizer Board
                         </button>
                       </div>
                       
@@ -4537,12 +4543,12 @@ export default function CustomReportDesignPage() {
                             setEditingFooterLoc({ secIdx: activeItem.secIdx!, fieldIdx: activeItem.fieldIdx! });
                           }}
                         >
-                          📊 Configure Footer Rows & Formulas
+                          Configure Footer Rows & Formulas
                         </button>
                       </div>
                       
                       <div style={{ background: "var(--bg-subtle)", padding: "0.5rem 0.75rem", borderRadius: 6, border: "1px solid var(--border)", fontSize: "0.78rem" }}>
-                        Footer Status: <span style={{ fontWeight: 600 }}>{(f.config as any)?.footer_config?.enabled ? "🟢 Enabled" : "⚪ Disabled"}</span>
+                        Footer Status: <span style={{ fontWeight: 600 }}>{(f.config as any)?.footer_config?.enabled ? "Enabled" : "Disabled"}</span>
                         {(f.config as any)?.footer_config?.enabled && (
                           <div>Rows Configured: <span style={{ fontWeight: 600 }}>{(f.config as any).footer_config.rows?.length || 0}</span></div>
                         )}

@@ -9,8 +9,10 @@ import { generatePeriodOptions } from "@/lib/periodHelpers";
 import { VirtualTable } from "@/components/VirtualTable";
 import toast from "react-hot-toast";
 import { downloadBlob } from "@/lib/download";
-import { buildReportPrintDocument, printReportDocument, ReportData } from "@/app/dashboard/reports/reportPrint";
+import { buildReportPrintDocument, printReportDocument, type ReportData } from "@/app/dashboard/reports/reportPrint";
 import { AccessDenied } from "@/components/AccessDenied";
+import { PageLoader } from "@/components/PageLoader";
+import { ContentLoader } from "@/components/ContentLoader";
 
 
 interface Field {
@@ -614,52 +616,14 @@ export default function CustomReportViewPage() {
           </button>
         </div>
       )}
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-
-      {/* Premium Loading Card (matches period shifting layout) */}
       {loading && !isShiftingPeriod && (
-        <div style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "6rem 1rem",
-          width: "100%"
-        }}>
-          <div style={{
-            background: "var(--surface)",
-            padding: "2.5rem 2rem",
-            borderRadius: 12,
-            boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05)",
-            border: "1px solid var(--border)",
-            textAlign: "center",
-            maxWidth: 420,
-            width: "calc(100% - 2rem)",
-            margin: "0 1rem"
-          }}>
-            <div style={{
-              display: "inline-block",
-              width: 36,
-              height: 36,
-              border: "3px solid var(--border)",
-              borderTopColor: "var(--accent)",
-              borderRadius: "50%",
-              animation: "spin 0.8s linear infinite",
-              marginBottom: "1.25rem"
-            }} />
-            <h3 style={{ fontSize: "1.3rem", fontWeight: 700, color: "var(--text)", margin: "0 0 0.5rem 0", letterSpacing: "-0.02em" }}>
-              Loading Report Data
-            </h3>
-            <p style={{ fontSize: "0.9rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.5 }}>
-              Please wait while we fetch and compile the report...
-            </p>
-          </div>
-        </div>
+        <PageLoader text="Loading Report Data…" size="large" minHeight={360} />
       )}
 
       {/* Main Report View */}
       {error && (
         <div style={{ padding: "1rem", background: "#fef2f2", border: "1px solid #fee2e2", borderRadius: 8, color: "#b91c1c", marginBottom: "1.5rem", fontWeight: 500 }}>
-          ⚠️ {error}
+          {error}
         </div>
       )}
 
@@ -672,49 +636,7 @@ export default function CustomReportViewPage() {
       {!loading && (
         <div style={{ position: "relative", minHeight: (isShiftingPeriod || shiftError) ? "280px" : "auto" }}>
         {/* Shifting period overlay */}
-        {isShiftingPeriod && (
-          <div style={{
-            position: "absolute",
-            inset: 0,
-            backgroundColor: "rgba(248, 250, 252, 0.65)",
-            backdropFilter: "blur(2px)",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            zIndex: 40,
-            borderRadius: 12,
-            paddingTop: "6rem"
-          }}>
-            <div style={{
-              background: "var(--surface)",
-              padding: "2.5rem 2rem",
-              borderRadius: 12,
-              boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05)",
-              border: "1px solid var(--border)",
-              textAlign: "center",
-              maxWidth: 420,
-              width: "calc(100% - 2rem)",
-              margin: "0 1rem"
-            }}>
-              <div style={{
-                display: "inline-block",
-                width: 36,
-                height: 36,
-                border: "3px solid var(--border)",
-                borderTopColor: "var(--accent)",
-                borderRadius: "50%",
-                animation: "spin 0.8s linear infinite",
-                marginBottom: "1.25rem"
-              }} />
-              <h3 style={{ fontSize: "1.3rem", fontWeight: 700, color: "var(--text)", margin: "0 0 0.5rem 0", letterSpacing: "-0.02em" }}>
-                Adjusting Report Period
-              </h3>
-              <p style={{ fontSize: "0.9rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.5 }}>
-                Recalculating and updating report data…
-              </p>
-            </div>
-          </div>
-        )}
+        <ContentLoader show={isShiftingPeriod} text="Recalculating and updating report data…" size="large" />
 
         {/* Shifting error card */}
         {shiftError && (
@@ -752,7 +674,7 @@ export default function CustomReportViewPage() {
                 fontSize: "1.5rem",
                 marginBottom: "1.25rem"
               }}>
-                ⚠️
+                !
               </div>
               <h3 style={{ fontSize: "1.25rem", fontWeight: 700, color: "var(--error)", margin: "0 0 0.5rem 0", letterSpacing: "-0.02em" }}>
                 Period Adjustment Failed
@@ -776,7 +698,7 @@ export default function CustomReportViewPage() {
                     fontWeight: 600
                   }}
                 >
-                  🔄 Retry Adjustment
+                  Retry Adjustment
                 </button>
                 <button
                   type="button"
@@ -846,7 +768,7 @@ export default function CustomReportViewPage() {
                   return (
                     <div key={f.id} style={{ marginTop: "1rem" }}>
                       <h3 style={{ fontSize: "0.95rem", fontWeight: 600, color: "#475569", display: "flex", alignItems: "center", gap: "0.4rem", margin: "0 0 0.5rem 0" }}>
-                        📊 {f.number} {f.field_name}
+                        {f.number} {f.field_name}
                         {f.loading && (
                           <span style={{ fontSize: "0.75rem", background: "#fef3c7", color: "#d97706", padding: "0.1rem 0.4rem", borderRadius: 4, animation: "pulse 1.5s infinite" }}>
                             Progressive Loading...
@@ -896,7 +818,7 @@ export default function CustomReportViewPage() {
                       />
                       <div>
                         <div style={{ fontSize: "0.95rem", fontWeight: 600, color: "#1e293b", marginBottom: "0.15rem" }}>
-                          📎 {att.title}
+                          {att.title}
                         </div>
                         <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
                           Source KPI: {att.kpi_name} — Field: {att.field_name}

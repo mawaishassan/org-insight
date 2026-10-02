@@ -11,9 +11,13 @@ import json
 import math
 import asyncio
 import logging
+import re
+import calendar
+import datetime
 from typing import Any, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
+_log = logger
 
 from sqlalchemy import and_, bindparam, cast, func, or_, select, text
 from sqlalchemy.sql import nulls_last
@@ -32,7 +36,6 @@ from app.core.models import (
     KpiMultiLineRow,
     User,
     Dashboard,
-    DashboardAccessPermission,
     Organization,
     CustomReportHeader,
     DashboardLabelCustomization,
@@ -41,9 +44,16 @@ from app.entries.multi_item_filters import row_passes_filters
 from app.entries.reference_filter_resolve import build_reference_resolution_map
 from app.entries.multi_line_load import load_multi_line_row_dicts
 from app.dashboards.service import can_view_dashboard_for_kpi_chart
-from app.entries.service import _normalize_reference_value, can_view_kpi_for_user
+from app.entries.service import (
+    _normalize_reference_value,
+    can_view_kpi_for_user,
+    _load_other_kpi_values,
+    _load_other_kpi_multi_line_data,
+    extract_cross_kpi_mli_references,
+    _topological_sort_subfields,
+)
 from app.fields.service import get_field_with_subfields_only, list_kpi_field_definitions
-from app.formula_engine.evaluator import match_cell_value
+from app.formula_engine.evaluator import match_cell_value, evaluate_formula, apply_conditional_logic
 from app.widget_data.multiline_chart_sql import (
     compile_multiline_row_filters_sql,
     fetch_multiline_bar_agg_buckets,
@@ -250,6 +260,187 @@ def get_widget_date_col_key(config: dict, kpi_id: int, source_key: str, field_de
                 return sf.key
 
     return None
+
+
+def _get_config_val(config: Any, key: str, default: Any = None) -> Any:
+    if hasattr(config, key):
+        val = getattr(config, key)
+        return val if val is not None else default
+    if isinstance(config, dict):
+        val = config.get(key)
+        return val if val is not None else default
+    return default
+
+
+def resolve_date_range_for_period(config: Any, selected_period: str, period_type: str | None = None) -> tuple[datetime.date, datetime.date, int]:
+    if str(selected_period).strip().lower() in ("by_default", "data entry", "data_entry") or (period_type and str(period_type).strip().lower() in ("by_default", "data entry", "data_entry")):
+        raise ValueError("Cannot resolve date range for default period")
+
+    # Try to find a matching custom period configuration from config.custom_periods if it exists
+    custom_periods = _get_config_val(config, "custom_periods")
+    if custom_periods and isinstance(custom_periods, list):
+        matched_config = None
+        if period_type:
+            for cp in custom_periods:
+                if isinstance(cp, dict) and _get_config_val(cp, "custom_period_name") == period_type:
+                    matched_config = cp
+                    break
+        if not matched_config:
+            for cp in custom_periods:
+                if not isinstance(cp, dict):
+                    continue
+                # Get prefix, suffix, and display format for this configuration
+                prefix = _get_config_val(cp, "custom_period_prefix") or ""
+                suffix = _get_config_val(cp, "custom_period_suffix") or ""
+                display_format = _get_config_val(cp, "custom_period_display_format") or "YYYY"
+                
+                val = selected_period
+                if prefix and not val.startswith(prefix):
+                    continue
+                if suffix and not val.endswith(suffix):
+                    continue
+                    
+                if prefix:
+                    val = val[len(prefix):]
+                if suffix:
+                    val = val[:-len(suffix)] if len(suffix) > 0 else val
+                val = val.strip()
+                
+                # Check pattern matching based on display format
+                matched = False
+                if display_format == "YYYY":
+                    matched = bool(re.match(r'^\d{4}$', val))
+                elif display_format in ("YYYY/YY", "YYYY-YY", "YYYY-YYYY", "YYYY–YYYY"):
+                    matched = bool(re.match(r'^\d{4}[/\-–]\d{2,4}$', val))
+                elif display_format == "YY/YYYY":
+                    matched = bool(re.match(r'^\d{2}/\d{4}$', val))
+                else:
+                    matched = bool(re.search(r'\b\d{4}\b', val))
+                    
+                if matched:
+                    matched_config = cp
+                    break
+        
+        if matched_config:
+            config = matched_config
+
+    prefix = _get_config_val(config, "custom_period_prefix") or ""
+    suffix = _get_config_val(config, "custom_period_suffix") or ""
+    display_format = _get_config_val(config, "custom_period_display_format") or "YYYY"
+    start_month = int(_get_config_val(config, "custom_period_start_month", 1))
+    start_day = int(_get_config_val(config, "custom_period_start_day", 1))
+    duration_months = int(_get_config_val(config, "custom_period_duration_months", 12))
+    
+    val = selected_period
+    if prefix and val.startswith(prefix):
+        val = val[len(prefix):]
+    if suffix and val.endswith(suffix):
+        val = val[:-len(suffix)] if len(suffix) > 0 else val
+        
+    start_year = datetime.date.today().year
+    val = val.strip()
+    
+    if display_format == "YYYY":
+        try:
+            start_year = int(val)
+        except ValueError:
+            pass
+    elif display_format in ("YYYY/YY", "YYYY-YY", "YYYY-YYYY", "YYYY–YYYY"):
+        try:
+            start_year = int(val[:4])
+        except ValueError:
+            pass
+    elif display_format == "YY/YYYY":
+        try:
+            end_year = int(val[-4:])
+            years_diff = math.ceil(duration_months / 12)
+            start_year = end_year - years_diff
+        except ValueError:
+            pass
+    else:
+        match = re.search(r'\b\d{4}\b', val)
+        if match:
+            start_year = int(match.group(0))
+            
+    start_date = datetime.date(start_year, start_month, start_day)
+    
+    month = start_date.month - 1 + duration_months
+    end_year = start_date.year + (month // 12)
+    end_month = (month % 12) + 1
+    max_days = calendar.monthrange(end_year, end_month)[1]
+    end_day = min(start_date.day, max_days)
+    end_date = datetime.date(end_year, end_month, end_day)
+    
+    entry_year = start_year
+    if start_month > 1:
+        entry_year = start_year + 1
+    return start_date, end_date, entry_year
+
+
+def parse_fiscal_year_to_int(val: Any, org: Any = None, period_type: str | None = None) -> int:
+    """Safely convert any year or period representation (e.g. 2026, '2026', '2025/26', '2025-2026')
+    to an integer entry year. Never raises ValueError or TypeError.
+    """
+    if val is None:
+        return 0
+    if isinstance(val, (int, float)):
+        try:
+            return int(val)
+        except (ValueError, TypeError, OverflowError):
+            return 0
+
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in ("by_default", "data entry", "data_entry", "none", "null"):
+        return 0
+
+    # 1. Direct integer string: "2026"
+    if val_str.isdigit():
+        try:
+            return int(val_str)
+        except ValueError:
+            pass
+
+    # 2. Try org-aware resolve_date_range_for_period if org is available
+    if org:
+        try:
+            _, _, entry_year = resolve_date_range_for_period(org, val_str, period_type=period_type)
+            if entry_year:
+                return int(entry_year)
+        except Exception:
+            pass
+
+    # 3. Known period formats: "2025/26", "2025-26", "2025–26"
+    # For fiscal periods spanning two calendar years (e.g. July-June),
+    # the KPIEntry year is the ending calendar year (e.g. 2026).
+    m2 = re.match(r'^(\d{4})[/\-–](\d{2})$', val_str)
+    if m2:
+        try:
+            start_yr = int(m2.group(1))
+            end_2d = int(m2.group(2))
+            century = (start_yr // 100) * 100
+            end_yr = century + end_2d
+            return end_yr
+        except Exception:
+            pass
+
+    # 4. Spanning 4-digit years: "2025/2026", "2025-2026", "2025–2026"
+    m4 = re.match(r'^(\d{4})[/\-–](\d{4})$', val_str)
+    if m4:
+        try:
+            return int(m4.group(2))
+        except Exception:
+            pass
+
+    # 5. Fallback: extract first 4-digit year
+    m = re.search(r'\b\d{4}\b', val_str)
+    if m:
+        try:
+            return int(m.group(0))
+        except Exception:
+            pass
+
+    return 0
+
 
 def _clean_by_default_overrides(mod_overrides: dict[str, Any], by_default_bypass: bool) -> None:
     if by_default_bypass:
@@ -484,11 +675,11 @@ async def resolve_dashboard_chart_widget_data_batch(
         await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))
     ).scalar_one_or_none()
     is_date_fetching = False
-    org = _org  # may be None if dashboard doesn't use date-fetching
+    org = _org
+    if org is None:
+        org = await _get_org(db, org_id)
     if dashboard and getattr(dashboard, "fetch_data_with_date", False):
         is_date_fetching = True
-        if org is None:
-            org = await _get_org(db, org_id)
 
     # ---- Caches ----
     fields_cache: dict[int, list[KPIField]] = {}
@@ -565,14 +756,17 @@ async def resolve_dashboard_chart_widget_data_batch(
             by_default_bypass = True
         _clean_by_default_overrides(mod_overrides, by_default_bypass)
 
+        # Ensure period string is safely converted to integer year
+        orig_period = mod_overrides.get("__original_period")
+        orig_period_type = mod_overrides.get("__period_type") or None
+        selected_period = orig_period or (overrides or {}).get("year") or w.get("year")
+        period_type = orig_period_type or (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
+        if selected_period and selected_period not in ("by_default", "By Default") and not by_default_bypass:
+            parsed_y = parse_fiscal_year_to_int(selected_period, org, period_type)
+            if parsed_y:
+                mod_overrides["year"] = parsed_y
+
         if is_date_fetching and org and not by_default_bypass:
-            # Prefer __original_period (set by resolve_dashboard_universal_batch) over
-            # the already-resolved integer year, so Fiscal Year "2025/26" isn't
-            # misidentified as Calendrical Year 2026.
-            orig_period = mod_overrides.get("__original_period")
-            orig_period_type = mod_overrides.get("__period_type") or None
-            selected_period = orig_period or (overrides or {}).get("year") or w.get("year")
-            period_type = orig_period_type or (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
             if period_type and selected_period and selected_period not in ("by_default", "By Default") and str(period_type).strip().lower() not in ("by_default", "data entry", "data_entry"):
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period), period_type=period_type)
@@ -612,10 +806,12 @@ async def resolve_dashboard_chart_widget_data_batch(
             mod_overrides["normal_filters"] = normal_filters
         
         merged = _merge_overrides(w, mod_overrides)
+        if merged.get("year"):
+            merged["year"] = parse_fiscal_year_to_int(merged.get("year"), org, merged.get("period_type"))
         parsed.append((key, merged, mod_overrides, date_range))
         info_by_key[key] = {
             "kpi_id": int(merged.get("kpi_id") or 0),
-            "year": int(merged.get("year") or 0),
+            "year": parse_fiscal_year_to_int(merged.get("year"), org, merged.get("period_type")),
             "period_key": _period_key_norm(merged.get("period_key")),
         }
 
@@ -696,8 +892,9 @@ async def resolve_dashboard_chart_widget_data_batch(
             results[key] = {"ok": False, "error": "unsupported_widget_type"}
             continue
         kpi_id = int(w.get("kpi_id") or 0)
-        year = int(w.get("year") or 0)
-        period_key = w.get("period_key")
+        year = parse_fiscal_year_to_int(w.get("year"), org, w.get("period_type"))
+        w["year"] = year
+        period_key = _ov.get("period_key") if isinstance(_ov, dict) and _ov.get("period_key") is not None else w.get("period_key")
         if not kpi_id or not year:
             results[key] = {"ok": False, "error": "missing kpi_id or year"}
             continue
@@ -849,7 +1046,6 @@ async def resolve_dashboard_chart_widget_data_batch(
             reference_field_types=ref_types,
             resolved_label_sets=resolved_label_sets,
         )
-        from app.entries.service import extract_cross_kpi_mli_references
         # Collect which sub-field keys have cross-KPI formula expressions
         formula_sub_keys: set[str] = set()
         for sf in (getattr(f_full, "sub_fields", None) or []):
@@ -993,7 +1189,7 @@ async def resolve_dashboard_chart_widget_data_batch(
         for key in keys:
             info = info_by_key.get(key) or {}
             kpi_id = int(info.get("kpi_id") or 0)
-            year = int(info.get("year") or 0)
+            year = parse_fiscal_year_to_int(info.get("year"), org)
             pk = info.get("period_key")
             fmap = fmap_cache.get(kpi_id) or {}
             results[key] = {
@@ -1174,123 +1370,8 @@ def _merge_overrides(w: dict[str, Any], overrides: dict[str, Any] | None) -> dic
     return out
 
 
-def _get_config_val(config: Any, key: str, default: Any = None) -> Any:
-    if hasattr(config, key):
-        val = getattr(config, key)
-        return val if val is not None else default
-    if isinstance(config, dict):
-        val = config.get(key)
-        return val if val is not None else default
-    return default
 
 
-def resolve_date_range_for_period(config: Any, selected_period: str, period_type: str | None = None) -> tuple[datetime.date, datetime.date, int]:
-    if str(selected_period).strip().lower() in ("by_default", "data entry", "data_entry") or (period_type and str(period_type).strip().lower() in ("by_default", "data entry", "data_entry")):
-        raise ValueError("Cannot resolve date range for default period")
-    import datetime as dt
-    import calendar
-    import re
-    import math
-
-    # Try to find a matching custom period configuration from config.custom_periods if it exists
-    custom_periods = _get_config_val(config, "custom_periods")
-    if custom_periods and isinstance(custom_periods, list):
-        matched_config = None
-        if period_type:
-            for cp in custom_periods:
-                if isinstance(cp, dict) and _get_config_val(cp, "custom_period_name") == period_type:
-                    matched_config = cp
-                    break
-        if not matched_config:
-            for cp in custom_periods:
-                if not isinstance(cp, dict):
-                    continue
-                # Get prefix, suffix, and display format for this configuration
-                prefix = _get_config_val(cp, "custom_period_prefix") or ""
-                suffix = _get_config_val(cp, "custom_period_suffix") or ""
-                display_format = _get_config_val(cp, "custom_period_display_format") or "YYYY"
-                
-                val = selected_period
-                if prefix and not val.startswith(prefix):
-                    continue
-                if suffix and not val.endswith(suffix):
-                    continue
-                    
-                if prefix:
-                    val = val[len(prefix):]
-                if suffix:
-                    val = val[:-len(suffix)] if len(suffix) > 0 else val
-                val = val.strip()
-                
-                # Check pattern matching based on display format
-                matched = False
-                if display_format == "YYYY":
-                    matched = bool(re.match(r'^\d{4}$', val))
-                elif display_format in ("YYYY/YY", "YYYY-YY", "YYYY-YYYY", "YYYY–YYYY"):
-                    matched = bool(re.match(r'^\d{4}[/\-–]\d{2,4}$', val))
-                elif display_format == "YY/YYYY":
-                    matched = bool(re.match(r'^\d{2}/\d{4}$', val))
-                else:
-                    matched = bool(re.search(r'\b\d{4}\b', val))
-                    
-                if matched:
-                    matched_config = cp
-                    break
-        
-        if matched_config:
-            config = matched_config
-
-    prefix = _get_config_val(config, "custom_period_prefix") or ""
-    suffix = _get_config_val(config, "custom_period_suffix") or ""
-    display_format = _get_config_val(config, "custom_period_display_format") or "YYYY"
-    start_month = int(_get_config_val(config, "custom_period_start_month", 1))
-    start_day = int(_get_config_val(config, "custom_period_start_day", 1))
-    duration_months = int(_get_config_val(config, "custom_period_duration_months", 12))
-    
-    val = selected_period
-    if prefix and val.startswith(prefix):
-        val = val[len(prefix):]
-    if suffix and val.endswith(suffix):
-        val = val[:-len(suffix)] if len(suffix) > 0 else val
-        
-    start_year = dt.date.today().year
-    val = val.strip()
-    
-    if display_format == "YYYY":
-        try:
-            start_year = int(val)
-        except ValueError:
-            pass
-    elif display_format in ("YYYY/YY", "YYYY-YY", "YYYY-YYYY", "YYYY–YYYY"):
-        try:
-            start_year = int(val[:4])
-        except ValueError:
-            pass
-    elif display_format == "YY/YYYY":
-        try:
-            end_year = int(val[-4:])
-            years_diff = math.ceil(duration_months / 12)
-            start_year = end_year - years_diff
-        except ValueError:
-            pass
-    else:
-        match = re.search(r'\b\d{4}\b', val)
-        if match:
-            start_year = int(match.group(0))
-            
-    start_date = dt.date(start_year, start_month, start_day)
-    
-    month = start_date.month - 1 + duration_months
-    end_year = start_date.year + (month // 12)
-    end_month = (month % 12) + 1
-    max_days = calendar.monthrange(end_year, end_month)[1]
-    end_day = min(start_date.day, max_days)
-    end_date = dt.date(end_year, end_month, end_day)
-    
-    entry_year = start_year
-    if start_month > 1:
-        entry_year = start_year + 1
-    return start_date, end_date, entry_year
 
 
 def _get_spanned_years(org: Organization | None, start_date: datetime.date, end_date: datetime.date) -> list[int]:
@@ -1336,7 +1417,6 @@ async def preprocess_dashboard_date_fetching(
     w: dict[str, Any],
     overrides: dict[str, Any] | None
 ) -> tuple[dict[str, Any], dict[str, Any] | None, tuple[datetime.date, datetime.date, str] | None]:
-    import datetime as dt
     merged = _merge_overrides(w, overrides)
     if dashboard_id is None:
         return merged, overrides, None
@@ -1688,7 +1768,7 @@ async def fetch_scalar_bar_chart_bundle(
     e_ts: Any = None
     fv_by_id: dict[int, KPIFieldValue] = {}
     for r in flat:
-        fid, key, name, _so, e_row_id, e_row_ts, fv = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
+        fid, key, name, _, e_row_id, e_row_ts, fv = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
         if fid is None:
             continue
         if key is not None and str(key).strip():
@@ -1779,18 +1859,39 @@ def _row_matches_specific_column_filter(r: dict[str, Any], column_filter: dict[s
     val = r.get(col_key)
     if val is None:
         return False
-    if isinstance(val, dict):
-        val_str = str(val.get("label") or val.get("name") or val.get("value") or "").strip()
-    else:
-        val_str = str(val).strip()
+
+    req_cell_type = column_filter.get("cell_type")
+    if req_cell_type:
+        rct = str(req_cell_type).strip().lower()
+        if rct == "number" and not isinstance(val, (int, float)):
+            try:
+                float(str(val).strip())
+            except Exception:
+                return False
+        elif rct == "date":
+            from app.formula_engine.evaluator import _to_date
+            if _to_date(val) is None:
+                return False
+        elif rct == "boolean" and not isinstance(val, bool) and str(val).strip().lower() not in ("true", "false"):
+            return False
+        elif rct in ("single_line_text", "text"):
+            if isinstance(val, bool):
+                return False
 
     expected_val = column_filter.get("value")
     expected_vals = column_filter.get("values")
+    
+    if req_cell_type and (expected_val is None or str(expected_val).strip() == "") and not expected_vals:
+        return True
+
+    from app.formula_engine.evaluator import match_cell_value
     if expected_vals and isinstance(expected_vals, list):
-        valid_exp = [str(v).strip().lower() for v in expected_vals if str(v).strip()]
-        return val_str.lower() in valid_exp if valid_exp else True
+        valid_exp = [v for v in expected_vals if v is not None and str(v).strip()]
+        if not valid_exp:
+            return True
+        return any(match_cell_value(val, "eq", exp_v) for exp_v in valid_exp)
     if expected_val is not None and str(expected_val).strip() != "":
-        return val_str.lower() == str(expected_val).strip().lower()
+        return match_cell_value(val, "eq", expected_val)
     return True
 
 
@@ -1907,15 +2008,6 @@ async def recalculate_multi_line_rows_formulas(
     ]
     if not formula_subs:
         return rows
-
-    from app.entries.service import (
-        extract_cross_kpi_mli_references,
-        _load_other_kpi_multi_line_data,
-        _load_other_kpi_values,
-        _topological_sort_subfields,
-    )
-    from app.formula_engine.evaluator import evaluate_formula, apply_conditional_logic
-    import re
 
     refs = set()
     for sf in sub_fields:
@@ -2095,7 +2187,8 @@ async def _kpi_bar_chart_payload(
     No permission checks — callers must enforce KPI or dashboard access.
     """
     kpi_id = int(w.get("kpi_id") or 0)
-    year = int(w.get("year") or 0)
+    year = parse_fiscal_year_to_int(w.get("year"))
+    w["year"] = year
     period_key = w.get("period_key")
     mode = w.get("mode") or "fields"
     if not kpi_id or not year:
@@ -2227,7 +2320,6 @@ async def _kpi_bar_chart_payload(
         gid, fid, vid = None, None, None
         if use_sql_agg:
             f_full = await get_field_with_subfields_only(db, int(f_obj.id), org_id) or f_obj
-            from app.entries.service import extract_cross_kpi_mli_references
             # Identify which sub_field keys have cross-KPI formula expressions
             formula_sub_keys: set[str] = set()
             for sf in (getattr(f_full, "sub_fields", None) or []):
@@ -2479,7 +2571,8 @@ async def _resolve_kpi_bar_chart(
     db: AsyncSession, user: User, org_id: int, w: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     kpi_id = int(w.get("kpi_id") or 0)
-    year = int(w.get("year") or 0)
+    year = parse_fiscal_year_to_int(w.get("year"))
+    w["year"] = year
     period_key = w.get("period_key")
     if not kpi_id or not year:
         return (
@@ -2731,7 +2824,8 @@ async def _resolve_kpi_line_chart(
 
 async def _resolve_kpi_table(db: AsyncSession, user: User, org_id: int, w: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     kpi_id = int(w.get("kpi_id") or 0)
-    year = int(w.get("year") or 0)
+    year = parse_fiscal_year_to_int(w.get("year"))
+    w["year"] = year
     period_key = w.get("period_key")
     if not kpi_id or not year:
         return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
@@ -2768,7 +2862,8 @@ async def _resolve_kpi_single_value(
     db: AsyncSession, user: User, org_id: int, w: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     kpi_id = int(w.get("kpi_id") or 0)
-    year = int(w.get("year") or 0)
+    year = parse_fiscal_year_to_int(w.get("year"))
+    w["year"] = year
     period_key = w.get("period_key")
     field_key = (w.get("field_key") or "").strip()
     if not kpi_id or not year or not field_key:
@@ -2806,7 +2901,8 @@ async def _resolve_kpi_card_single_value(
     db: AsyncSession, user: User, org_id: int, w: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     kpi_id = int(w.get("kpi_id") or 0)
-    year = int(w.get("year") or 0)
+    year = parse_fiscal_year_to_int(w.get("year"))
+    w["year"] = year
     period_key = w.get("period_key")
     if not kpi_id or not year:
         return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
@@ -2837,7 +2933,6 @@ async def _resolve_kpi_card_single_value(
                     eid, e_ts = await get_entry_id_updated(db, org_id=org_id, kpi_id=kpi_id, year=year, period_key=period_key)
                 except Exception as ex:
                     logger.error("Failed to sync joined KPI in _resolve_kpi_card_single_value: %s", ex)
-        fid = fmap["id_by_key"].get(fk)
         f_obj = next((fld for fld in fields if fld.key == fk), None)
         c_flt = w.get("column_filter")
         n_flt = w.get("normal_filters")
@@ -2904,7 +2999,8 @@ async def _resolve_kpi_multi_line_table(
     db: AsyncSession, user: User, org_id: int, w: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     kpi_id = int(w.get("kpi_id") or 0)
-    year = int(w.get("year") or 0)
+    year = parse_fiscal_year_to_int(w.get("year"))
+    w["year"] = year
     period_key = w.get("period_key")
     mls = (w.get("source_field_key") or "").strip()
     if not kpi_id or not year or not mls:
@@ -3062,8 +3158,16 @@ async def resolve_dashboard_chart_widget_data(
     if date_ctx and not by_default_bypass:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
+    elif not mod_overrides.get("year") or not str(mod_overrides.get("year")).isdigit():
+        sel_p = (overrides or {}).get("year") or widget.get("year")
+        p_t = (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None)
+        py = parse_fiscal_year_to_int(sel_p, period_type=p_t)
+        if py:
+            mod_overrides["year"] = py
 
     merged = _merge_overrides(widget, mod_overrides)
+    if merged.get("year"):
+        merged["year"] = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
     if str(merged.get("type") or "") != "kpi_bar_chart":
         return (
             {"error": "unsupported_widget_type"},
@@ -3215,7 +3319,6 @@ async def evaluate_kpi_scalar_formula_field(
                 value_by_key[fld.key] = n_val
 
     formula_expr = f.formula_expression or (f.config.get("formula_expression") if isinstance(f.config, dict) else "") or ""
-    import re
     expr_tokens = set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', formula_expr))
 
     # Fast-path for simple COUNT_ITEMS(table, ...) formulas via direct SQL aggregation:
@@ -3379,12 +3482,6 @@ async def evaluate_kpi_scalar_formula_field(
             if hasattr(db, "info"):
                 db.info[mli_cache_key] = rows
 
-    from app.entries.service import (
-        _load_other_kpi_values,
-        _load_other_kpi_multi_line_data,
-        extract_cross_kpi_mli_references,
-        _topological_sort_subfields,
-    )
     # Only load other KPI values if the formula or any referenced subfield formula actually needs other KPIs:
     needs_other_kpis = (
         "KPI_FIELD(" in (formula_expr or "").upper()
@@ -3428,8 +3525,6 @@ async def evaluate_kpi_scalar_formula_field(
                 filtered_r_rows = [r for r in filtered_r_rows if _row_matches_normal_filters(r, normal_filters)]
             other_kpi_mli_data[(ref_kpi_id, ref_field_key)] = filtered_r_rows
 
-    from app.formula_engine.evaluator import evaluate_formula
-
     raw = evaluate_formula(
         formula_expr or "",
         value_by_key,
@@ -3449,7 +3544,8 @@ async def _dashboard_card_payload(
     - Reads only the requested field value (or returns static).
     """
     kpi_id = int(merged.get("kpi_id") or 0)
-    year = int(merged.get("year") or 0)
+    year = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
+    merged["year"] = year
     period_key = merged.get("period_key")
     if not kpi_id or not year:
         return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, None)
@@ -3563,7 +3659,6 @@ async def _dashboard_card_payload(
             sub_id_by_key=sub_id_by_key,
         )
 
-        from app.entries.service import extract_cross_kpi_mli_references
         has_cross_kpi_formula_subfields = any(
             isinstance(sf.config, dict) and sf.config.get("formula_expression") and
             bool(extract_cross_kpi_mli_references(sf.config.get("formula_expression")))
@@ -3687,8 +3782,16 @@ async def resolve_dashboard_card_widget_data(
     if date_ctx and not by_default_bypass:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
+    elif not mod_overrides.get("year") or not str(mod_overrides.get("year")).isdigit():
+        sel_p = (overrides or {}).get("year") or widget.get("year")
+        p_t = (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None)
+        py = parse_fiscal_year_to_int(sel_p, period_type=p_t)
+        if py:
+            mod_overrides["year"] = py
 
     merged = _merge_overrides(widget, mod_overrides)
+    if merged.get("year"):
+        merged["year"] = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
     if str(merged.get("type") or "") != "kpi_card_single_value":
         return (
             {"error": "unsupported_widget_type"},
@@ -3752,12 +3855,12 @@ async def resolve_dashboard_card_widget_data_batch(
         await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))
     ).scalar_one_or_none()
     is_date_fetching = False
-    org = _org  # may be None if dashboard doesn't use date-fetching
+    org = _org
+    if org is None:
+        org = await _get_org(db, org_id)
     config = {}
     if dashboard and getattr(dashboard, "fetch_data_with_date", False):
         is_date_fetching = True
-        if org is None:
-            org = await _get_org(db, org_id)
         config = getattr(dashboard, "date_fetching_config", None) or {}
 
     is_column_fetching = False
@@ -3812,14 +3915,17 @@ async def resolve_dashboard_card_widget_data_batch(
             by_default_bypass = True
         _clean_by_default_overrides(mod_overrides, by_default_bypass)
 
+        # Ensure period string is safely converted to integer year
+        orig_period = mod_overrides.get("__original_period")
+        orig_period_type = mod_overrides.get("__period_type") or None
+        selected_period = orig_period or (overrides or {}).get("year") or w.get("year")
+        period_type = orig_period_type or (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
+        if selected_period and selected_period not in ("by_default", "By Default") and not by_default_bypass:
+            parsed_y = parse_fiscal_year_to_int(selected_period, org, period_type)
+            if parsed_y:
+                mod_overrides["year"] = parsed_y
+
         if is_date_fetching and org and not by_default_bypass:
-            # Prefer __original_period (set by resolve_dashboard_universal_batch) over
-            # the already-resolved integer year, so Fiscal Year "2025/26" isn't
-            # misidentified as Calendrical Year 2026.
-            orig_period = mod_overrides.get("__original_period")
-            orig_period_type = mod_overrides.get("__period_type") or None
-            selected_period = orig_period or (overrides or {}).get("year") or w.get("year")
-            period_type = orig_period_type or (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
             if period_type and selected_period and selected_period not in ("by_default", "By Default") and str(period_type).strip().lower() not in ("by_default", "data entry", "data_entry"):
                 try:
                     start_date, end_date, start_year = resolve_date_range_for_period(org, str(selected_period), period_type=period_type)
@@ -3861,6 +3967,8 @@ async def resolve_dashboard_card_widget_data_batch(
             mod_overrides["normal_filters"] = normal_filters
 
         merged = _merge_overrides(w, mod_overrides)
+        if merged.get("year"):
+            merged["year"] = parse_fiscal_year_to_int(merged.get("year"), org, merged.get("period_type"))
         merged["date_fetching_config"] = config
         wid = merged.get("id")
         key = str(wid) if wid is not None else f"idx:{idx}"
@@ -3882,7 +3990,8 @@ async def resolve_dashboard_card_widget_data_batch(
         if not kpi_id or not allowed_kpi.get(kpi_id, False):
             out[key] = {"ok": False, "error": "forbidden" if kpi_id else "missing kpi_id"}
             continue
-        year = int(w.get("year") or 0)
+        year = parse_fiscal_year_to_int(w.get("year"), org, w.get("period_type"))
+        w["year"] = year
         if not year:
             out[key] = {"ok": False, "error": "missing year"}
             continue
@@ -4024,8 +4133,16 @@ async def resolve_dashboard_table_widget_data(
     if date_ctx and not by_default_bypass:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
+    elif not mod_overrides.get("year") or not str(mod_overrides.get("year")).isdigit():
+        sel_p = (overrides or {}).get("year") or widget.get("year")
+        p_t = (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None)
+        py = parse_fiscal_year_to_int(sel_p, period_type=p_t)
+        if py:
+            mod_overrides["year"] = py
 
     merged = _merge_overrides(widget, mod_overrides)
+    if merged.get("year"):
+        merged["year"] = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
     if str(merged.get("type") or "") != "kpi_multi_line_table":
         return (
             {"error": "unsupported_widget_type"},
@@ -4105,7 +4222,8 @@ async def _dashboard_multi_line_table_payload(
     - Avoids loading full KPI field definitions/map.
     """
     kpi_id = int(w.get("kpi_id") or 0)
-    year = int(w.get("year") or 0)
+    year = parse_fiscal_year_to_int(w.get("year"), period_type=w.get("period_type"))
+    w["year"] = year
     period_key = w.get("period_key")
     mls = (w.get("source_field_key") or "").strip()
     if not kpi_id or not year or not mls:
@@ -4125,9 +4243,8 @@ async def _dashboard_multi_line_table_payload(
         )
     ).scalars().first()
     f_obj = await get_field_with_subfields_only(db, int(f_light.id), org_id) if f_light is not None else None
-
-    tbl_eid = eid
-    tbl_erev = e_rev
+    tbl_eid: Any = None
+    tbl_erev: Any = None
     if date_range:
         entries_res = await db.execute(
             select(KPIEntry.id)
@@ -4322,15 +4439,24 @@ async def resolve_dashboard_table_rows_widget_data(
     if date_ctx and not by_default_bypass:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
+    elif not mod_overrides.get("year") or not str(mod_overrides.get("year")).isdigit():
+        sel_p = (overrides or {}).get("year") or widget.get("year")
+        p_t = (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None)
+        py = parse_fiscal_year_to_int(sel_p, period_type=p_t)
+        if py:
+            mod_overrides["year"] = py
 
     merged = _merge_overrides(widget, mod_overrides)
+    if merged.get("year"):
+        merged["year"] = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
     if str(merged.get("type") or "") != "kpi_multi_line_table":
         return ({"error": "unsupported_widget_type"}, {"type": merged.get("type")}, "error", None)
     kpi_id = int(merged.get("kpi_id") or 0)
     if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
 
-    year = int(merged.get("year") or 0)
+    year = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
+    merged["year"] = year
     period_key = merged.get("period_key")
     mls = str(merged.get("source_field_key") or "").strip()
     if not kpi_id or not year or not mls:
@@ -4396,13 +4522,12 @@ async def resolve_dashboard_table_rows_widget_data(
         
         if date_range:
             start_date, end_date, date_col_key = date_range
-            import datetime as dt
             def _parse_cell_date(v):
-                if isinstance(v, dt.date):
+                if isinstance(v, datetime.date):
                     return v
                 if isinstance(v, str):
                     try:
-                        return dt.date.fromisoformat(v[:10])
+                        return datetime.date.fromisoformat(v[:10])
                     except Exception:
                         pass
                 return None
@@ -4776,9 +4901,18 @@ async def resolve_dashboard_widget_drill_down(
     if date_ctx and not by_default_bypass:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
+    elif not mod_overrides.get("year") or not str(mod_overrides.get("year")).isdigit():
+        sel_p = (overrides or {}).get("year") or widget.get("year")
+        p_t = (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None)
+        py = parse_fiscal_year_to_int(sel_p, period_type=p_t)
+        if py:
+            mod_overrides["year"] = py
 
     merged = _merge_overrides(widget, mod_overrides)
-    year = int(merged.get("year") or 0)
+    if merged.get("year"):
+        merged["year"] = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
+    year = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
+    merged["year"] = year
     period_key = merged.get("period_key")
 
     mls = str(merged.get("linked_table_field_key") or merged.get("source_field_key") or "").strip()
@@ -5468,8 +5602,16 @@ async def resolve_dashboard_single_value_widget_data(
     if date_ctx:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
+    elif not mod_overrides.get("year") or not str(mod_overrides.get("year")).isdigit():
+        sel_p = (overrides or {}).get("year") or widget.get("year")
+        p_t = (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None)
+        py = parse_fiscal_year_to_int(sel_p, period_type=p_t)
+        if py:
+            mod_overrides["year"] = py
 
     merged = _merge_overrides(widget, mod_overrides)
+    if merged.get("year"):
+        merged["year"] = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
     if str(merged.get("type") or "") != "kpi_single_value":
         return (
             {"error": "unsupported_widget_type"},
@@ -5480,7 +5622,8 @@ async def resolve_dashboard_single_value_widget_data(
     kpi_id = int(merged.get("kpi_id") or 0)
     if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
-    year = int(merged.get("year") or 0)
+    year = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
+    merged["year"] = year
     period_key = merged.get("period_key")
     fk = (merged.get("field_key") or "").strip()
     if not kpi_id or not year or not fk:
@@ -5850,8 +5993,16 @@ async def resolve_dashboard_kpi_table_widget_data(
     if date_ctx:
         _start_date, _end_date, start_year, _config = date_ctx
         mod_overrides["year"] = start_year
+    elif not mod_overrides.get("year") or not str(mod_overrides.get("year")).isdigit():
+        sel_p = (overrides or {}).get("year") or widget.get("year")
+        p_t = (overrides or {}).get("period_type") or (widget.get("period_type") if isinstance(widget, dict) else None)
+        py = parse_fiscal_year_to_int(sel_p, period_type=p_t)
+        if py:
+            mod_overrides["year"] = py
 
     merged = _merge_overrides(widget, mod_overrides)
+    if merged.get("year"):
+        merged["year"] = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
     if str(merged.get("type") or "") != "kpi_table":
         return (
             {"error": "unsupported_widget_type"},
@@ -5862,7 +6013,8 @@ async def resolve_dashboard_kpi_table_widget_data(
     kpi_id = int(merged.get("kpi_id") or 0)
     if not await can_view_dashboard_for_kpi_chart(db, user, dashboard_id, org_id, kpi_id):
         return ({"error": "forbidden"}, {"error": "forbidden"}, "error", None)
-    year = int(merged.get("year") or 0)
+    year = parse_fiscal_year_to_int(merged.get("year"), period_type=merged.get("period_type"))
+    merged["year"] = year
     period_key = merged.get("period_key")
     if not kpi_id or not year:
         return ({"kpi_id": kpi_id, "row_count": 0}, {"error": "missing parameters"}, "error", None)
@@ -6043,11 +6195,10 @@ async def resolve_dashboard_universal_batch(
     trace("resolve_dashboard_universal_batch: resolving dashboard date-fetching config")
     dashboard = (await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))).scalar_one_or_none()
     is_date_fetching = False
-    org = None
+    org = await _get_org(db, org_id)
     d_config: dict[str, Any] = {}
     if dashboard and getattr(dashboard, "fetch_data_with_date", False):
         is_date_fetching = True
-        org = await _get_org(db, org_id)
         d_config = getattr(dashboard, "date_fetching_config", None) or {}
     db.info["org"] = org
 
@@ -6136,6 +6287,18 @@ async def resolve_dashboard_universal_batch(
             by_default_bypass = True
         _clean_by_default_overrides(mod_overrides, by_default_bypass)
 
+        # Parse year string (e.g. '2025/26') into an integer calendar year immediately
+        raw_year = mod_overrides.get("year") or (overrides or {}).get("year") or w.get("year")
+        p_type = mod_overrides.get("period_type") or (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
+        if raw_year and raw_year not in ("by_default", "By Default"):
+            parsed_y = parse_fiscal_year_to_int(raw_year, org, p_type)
+            if parsed_y:
+                mod_overrides["year"] = parsed_y
+                if isinstance(raw_year, str) and ("/" in raw_year or "-" in raw_year):
+                    mod_overrides["__original_period"] = str(raw_year)
+                    if p_type:
+                        mod_overrides["__period_type"] = str(p_type)
+
         if is_date_fetching and org and not by_default_bypass:
             selected_period = (overrides or {}).get("year") or w.get("year")
             period_type = (overrides or {}).get("period_type") or (w.get("period_type") if isinstance(w, dict) else None)
@@ -6192,6 +6355,8 @@ async def resolve_dashboard_universal_batch(
                 mod_overrides["normal_filters"] = normal_filters
 
         merged = _merge_overrides(w, mod_overrides)
+        if merged.get("year") and merged.get("year") not in ("by_default", "By Default"):
+            merged["year"] = parse_fiscal_year_to_int(merged.get("year"), org, merged.get("period_type"))
         wtype = str(merged.get("type") or "")
         wid = merged.get("id")
         key = str(wid) if wid is not None else f"idx:{idx}"
@@ -6255,26 +6420,46 @@ async def resolve_dashboard_universal_batch(
     async def _resolve_chart_batch() -> dict[str, dict[str, Any]]:
         if not chart_items:
             return {}
-        async with AsyncSessionLocal() as session:
-            return await resolve_dashboard_chart_widget_data_batch(
-                session, user, org_id, dashboard_id, chart_items,
-                _dashboard=dashboard,
-                _org=org,
-                _user_filters=user_filters,
-                _col_fetching_config=_prefetch_col_config,
-            )
+        try:
+            async with AsyncSessionLocal() as session:
+                return await resolve_dashboard_chart_widget_data_batch(
+                    session, user, org_id, dashboard_id, chart_items,
+                    _dashboard=dashboard,
+                    _org=org,
+                    _user_filters=user_filters,
+                    _col_fetching_config=_prefetch_col_config,
+                )
+        except Exception as exc:
+            _log.exception("universal_batch: chart batch failed")
+            return {
+                (it.get("widget", {}).get("id") or f"idx:{idx}"): {
+                    "ok": False,
+                    "error": str(exc),
+                }
+                for idx, it in enumerate(chart_items)
+            }
 
     async def _resolve_card_batch() -> dict[str, dict[str, Any]]:
         if not card_items:
             return {}
-        async with AsyncSessionLocal() as session:
-            return await resolve_dashboard_card_widget_data_batch(
-                session, user, org_id, dashboard_id, card_items,
-                _dashboard=dashboard,
-                _org=org,
-                _user_filters=user_filters,
-                _col_fetching_config=_prefetch_col_config,
-            )
+        try:
+            async with AsyncSessionLocal() as session:
+                return await resolve_dashboard_card_widget_data_batch(
+                    session, user, org_id, dashboard_id, card_items,
+                    _dashboard=dashboard,
+                    _org=org,
+                    _user_filters=user_filters,
+                    _col_fetching_config=_prefetch_col_config,
+                )
+        except Exception as exc:
+            _log.exception("universal_batch: card batch failed")
+            return {
+                (it.get("widget", {}).get("id") or f"idx:{idx}"): {
+                    "ok": False,
+                    "error": str(exc),
+                }
+                for idx, it in enumerate(card_items)
+            }
 
     # ------------------------------------------------------------------
     # 6. Resolve "other" light widget types (line, trend, single_value,

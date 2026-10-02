@@ -4,11 +4,11 @@ import { useEffect, useState, Fragment } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { getAccessToken } from "@/lib/auth";
-import { api, getApiUrl } from "@/lib/api";
+import { api, getApiUrl, getCachedApiResponse } from "@/lib/api";
 import { downloadBlob } from "@/lib/download";
 import { generatePeriodOptions } from "@/lib/periodHelpers";
 import toast from "react-hot-toast";
-import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
+import { PageLoader } from "@/components/PageLoader";
 
 interface CustomReportRow {
   id: number;
@@ -52,12 +52,14 @@ export default function CustomReportsPage() {
   });
 
   const orgKey = selectedOrgId ? String(selectedOrgId) : "all";
+  const queryPath = selectedOrgId ? `/custom-reports?organization_id=${selectedOrgId}` : "/custom-reports";
+  const initialCached = getCachedApiResponse<CustomReportRow[]>(queryPath) || cachedCustomReports[orgKey];
 
   const [list, setList] = useState<CustomReportRow[]>(() => {
-    return cachedCustomReports[orgKey] ?? [];
+    return initialCached ?? [];
   });
   const [loading, setLoading] = useState(() => {
-    return !cachedCustomReports[orgKey];
+    return !initialCached || initialCached.length === 0;
   });
   const [error, setError] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
@@ -353,7 +355,7 @@ export default function CustomReportsPage() {
     }
   };
 
-  if (userRole !== "SUPER_ADMIN") return <p style={{ padding: "1.5rem" }}>Loading authorization...</p>;
+  if (userRole !== "SUPER_ADMIN") return <PageLoader text="Verifying authorization…" size="large" minHeight={240} />;
 
   // Group reports by group_id
   const groupedReports = (() => {
@@ -572,7 +574,7 @@ export default function CustomReportsPage() {
       {error && <p className="form-error" style={{ marginBottom: "1.5rem" }}>{error}</p>}
 
       {loading && list.length === 0 ? (
-        <WidgetSpinnerLoader text="Loading templates..." minHeight={200} />
+        <PageLoader text="Loading custom reports…" size="large" minHeight={240} />
       ) : list.length === 0 ? (
         <div className="card" style={{ padding: "2rem", textAlign: "center", background: "var(--surface)" }}>
           <p style={{ color: "var(--muted)", margin: 0 }}>No custom report templates designed for this organization yet.</p>
@@ -1079,8 +1081,7 @@ export default function CustomReportsPage() {
                         boxShadow: selectedFormat === "pdf" ? "0 2px 8px rgba(239, 68, 68, 0.15)" : "none",
                       }}
                     >
-                      <div style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>📄</div>
-                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "pdf" ? "#b91c1c" : "#1e293b" }}>PDF</div>
+                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "pdf" ? "#b91c1c" : "#1e293b", marginTop: "0.25rem" }}>PDF</div>
                       <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Document</div>
                     </div>
 
@@ -1098,8 +1099,7 @@ export default function CustomReportsPage() {
                         boxShadow: selectedFormat === "xlsx" ? "0 2px 8px rgba(16, 185, 129, 0.15)" : "none",
                       }}
                     >
-                      <div style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>📊</div>
-                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "xlsx" ? "#047857" : "#1e293b" }}>Excel</div>
+                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "xlsx" ? "#047857" : "#1e293b", marginTop: "0.25rem" }}>Excel</div>
                       <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Spreadsheet</div>
                     </div>
 
@@ -1117,8 +1117,7 @@ export default function CustomReportsPage() {
                         boxShadow: selectedFormat === "docx" ? "0 2px 8px rgba(37, 99, 235, 0.15)" : "none",
                       }}
                     >
-                      <div style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>📝</div>
-                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "docx" ? "#1d4ed8" : "#1e293b" }}>Word</div>
+                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: selectedFormat === "docx" ? "#1d4ed8" : "#1e293b", marginTop: "0.25rem" }}>Word</div>
                       <div style={{ fontSize: "0.75rem", color: "#64748b" }}>Document</div>
                     </div>
                   </div>

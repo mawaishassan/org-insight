@@ -67,6 +67,10 @@ def _joined_cell_date(sid_param: str) -> str:
     return f"{_wf_alias(sid_param)}.value_date"
 
 
+def _joined_cell_type(sid_param: str) -> str:
+    return f"{_wf_alias(sid_param)}.cell_type"
+
+
 def _parse_filters_dict(raw_filters: Any) -> dict[str, Any] | None:
     if raw_filters is None or raw_filters == {}:
         return None
@@ -147,6 +151,38 @@ def _compile_v2_one(
     num = _joined_cell_numeric(sid_key)
     dte = _joined_cell_date(sid_key)
 
+    req_ct = cond.get("cell_type")
+    ct_pred: str | None = None
+    rct: str | None = None
+    if req_ct:
+        rct = str(req_ct).strip().lower()
+        cell_type_col = _joined_cell_type(sid_key)
+        if rct == "number":
+            ct_pred = f"({cell_type_col} = 'number' OR ({cell_type_col} IS NULL AND {num} IS NOT NULL))"
+        elif rct == "date":
+            ct_pred = f"({cell_type_col} = 'date' OR ({cell_type_col} IS NULL AND {dte} IS NOT NULL))"
+        elif rct == "boolean":
+            ct_pred = f"({cell_type_col} = 'boolean' OR ({cell_type_col} IS NULL AND {_wf_alias(sid_key)}.value_boolean IS NOT NULL))"
+        elif rct in ("single_line_text", "text"):
+            ct_pred = f"({cell_type_col} IN ('single_line_text', 'text') OR ({cell_type_col} IS NULL AND {_wf_alias(sid_key)}.value_text IS NOT NULL AND {num} IS NULL))"
+        elif rct in ("reference", "multi_reference"):
+            ct_pred = f"({cell_type_col} IN ('reference', 'multi_reference') OR ({cell_type_col} IS NULL AND {_wf_alias(sid_key)}.value_json IS NOT NULL))"
+
+    def _with_ct(pred: str | None) -> str | None:
+        if pred is None:
+            return None
+        return f"({ct_pred} AND {pred})" if ct_pred else pred
+
+    # If pure cell_type filter with no value condition
+    raw_val = cond.get("value")
+    vals_raw = cond.get("values")
+    if not vals_raw and isinstance(raw_val, list):
+        vals_raw = raw_val
+
+    has_val = (raw_val is not None and str(raw_val).strip() != "") or (bool(vals_raw) and len(vals_raw) > 0)
+    if not has_val:
+        return ct_pred
+
     # reference_resolution: compile as label IN allowed_labels when pre-resolved by caller
     rr = cond.get("reference_resolution")
     if isinstance(rr, dict):
@@ -156,15 +192,12 @@ def _compile_v2_one(
         arr_key = f"wf_{cond_idx}_allowed"
         params[arr_key] = sorted({str(x).strip() for x in allowed if str(x).strip()})
         if op == "eq":
-            return f"({lbl} IS NOT NULL AND TRIM(BOTH FROM COALESCE({lbl}, '')) = ANY(CAST(:{arr_key} AS text[])))"
+            return _with_ct(f"({lbl} IS NOT NULL AND TRIM(BOTH FROM COALESCE({lbl}, '')) = ANY(CAST(:{arr_key} AS text[])))")
         if op == "neq":
-            return f"({lbl} IS NULL OR NOT (TRIM(BOTH FROM COALESCE({lbl}, '')) = ANY(CAST(:{arr_key} AS text[]))))"
+            return _with_ct(f"({lbl} IS NULL OR NOT (TRIM(BOTH FROM COALESCE({lbl}, '')) = ANY(CAST(:{arr_key} AS text[]))))")
         # Other operators over resolved values are not supported in SQL compilation yet.
         return None
 
-    vals_raw = cond.get("values")
-    if not vals_raw and isinstance(cond.get("value"), list):
-        vals_raw = cond.get("value")
     if isinstance(vals_raw, list) and len(vals_raw) > 1:
         if op not in ("eq", "neq"):
             return None
@@ -181,24 +214,23 @@ def _compile_v2_one(
                     f"({lbl} IS NULL OR LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) IS DISTINCT FROM LOWER(TRIM(BOTH FROM CAST(:{pkey} AS text))))"
                 )
         joined = " OR " if op == "eq" else " AND "
-        return "(" + joined.join(parts) + ")"
+        return _with_ct("(" + joined.join(parts) + ")")
 
-    raw_val = cond.get("value")
     vkey = f"wf_{cond_idx}_v0"
 
     if op in ("contains", "not_contains"):
         params[vkey] = str(raw_val).strip() if raw_val is not None else ""
         inner = f"POSITION(LOWER(CAST(:{vkey} AS text)) IN LOWER(COALESCE({lbl}, ''))) > 0"
-        return f"(NOT ({inner}))" if op == "not_contains" else f"({inner})"
+        return _with_ct(f"(NOT ({inner}))" if op == "not_contains" else f"({inner})")
 
     if op == "starts_with":
         params[vkey] = str(raw_val).strip() if raw_val is not None else ""
         # Postgres has no starts_with() function; use LIKE.
-        return f"(LOWER(TRIM(COALESCE({lbl}, ''))) LIKE LOWER(TRIM(CAST(:{vkey} AS text))) || '%')"
+        return _with_ct(f"(LOWER(TRIM(COALESCE({lbl}, ''))) LIKE LOWER(TRIM(CAST(:{vkey} AS text))) || '%')")
 
     if op == "ends_with":
         params[vkey] = str(raw_val).strip() if raw_val is not None else ""
-        return f"(LOWER(TRIM(COALESCE({lbl}, ''))) LIKE '%' || LOWER(TRIM(CAST(:{vkey} AS text))))"
+        return _with_ct(f"(LOWER(TRIM(COALESCE({lbl}, ''))) LIKE '%' || LOWER(TRIM(CAST(:{vkey} AS text))))")
 
     if op in cmp_ops:
         # Reference-like sub-fields: comparisons are text-only on their display label.
@@ -207,26 +239,26 @@ def _compile_v2_one(
                 return None
             params[vkey] = str(raw_val).strip() if raw_val is not None else ""
             if op == "eq":
-                return (
+                return _with_ct(
                     f"({lbl} IS NOT NULL AND LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) = "
                     f"LOWER(TRIM(BOTH FROM CAST(:{vkey} AS text))))"
                 )
-            return (
+            return _with_ct(
                 f"({lbl} IS NULL OR LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) IS DISTINCT FROM "
                 f"LOWER(TRIM(BOTH FROM CAST(:{vkey} AS text))))"
             )
 
-        if ft == "date" and op in ("gt", "gte", "lt", "lte", "eq", "neq"):
+        if (ft == "date" or rct == "date") and op in ("gt", "gte", "lt", "lte", "eq", "neq"):
             dv = _sql_date(raw_val)
             if dv is None:
                 return None
             params[vkey] = dv
             if op == "eq":
-                return f"({dte} IS NOT NULL AND {dte} = CAST(:{vkey} AS date))"
+                return _with_ct(f"({dte} IS NOT NULL AND {dte} = CAST(:{vkey} AS date))")
             if op == "neq":
-                return f"({dte} IS NULL OR {dte} IS DISTINCT FROM CAST(:{vkey} AS date))"
+                return _with_ct(f"({dte} IS NULL OR {dte} IS DISTINCT FROM CAST(:{vkey} AS date))")
             sym = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[op]
-            return f"({dte} IS NOT NULL AND {dte} {sym} CAST(:{vkey} AS date))"
+            return _with_ct(f"({dte} IS NOT NULL AND {dte} {sym} CAST(:{vkey} AS date))")
 
         fn = _sql_float(raw_val)
         if fn is None and op in ("gt", "gte", "lt", "lte"):
@@ -234,14 +266,14 @@ def _compile_v2_one(
         if op in ("gt", "gte", "lt", "lte"):
             params[vkey] = fn
             sym = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[op]
-            return f"({num} IS NOT NULL AND {num} {sym} CAST(:{vkey} AS double precision))"
+            return _with_ct(f"({num} IS NOT NULL AND {num} {sym} CAST(:{vkey} AS double precision))")
 
         if op == "eq":
             if fn is not None:
                 params[vkey] = fn
-                return f"({num} IS NOT NULL AND {num} = CAST(:{vkey} AS double precision))"
+                return _with_ct(f"({num} IS NOT NULL AND {num} = CAST(:{vkey} AS double precision))")
             params[vkey] = str(raw_val).strip() if raw_val is not None else ""
-            return (
+            return _with_ct(
                 f"({lbl} IS NOT NULL AND LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) = "
                 f"LOWER(TRIM(BOTH FROM CAST(:{vkey} AS text))))"
             )
@@ -249,9 +281,9 @@ def _compile_v2_one(
         if op == "neq":
             if fn is not None:
                 params[vkey] = fn
-                return f"({num} IS DISTINCT FROM CAST(:{vkey} AS double precision))"
+                return _with_ct(f"({num} IS DISTINCT FROM CAST(:{vkey} AS double precision))")
             params[vkey] = str(raw_val).strip() if raw_val is not None else ""
-            return (
+            return _with_ct(
                 f"({lbl} IS NULL OR LOWER(TRIM(BOTH FROM COALESCE({lbl}, ''))) IS DISTINCT FROM "
                 f"LOWER(TRIM(BOTH FROM CAST(:{vkey} AS text))))"
             )

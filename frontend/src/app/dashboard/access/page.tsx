@@ -5,10 +5,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
-import { api, getApiUrl } from "@/lib/api";
+import { api, getApiUrl, getCachedApiResponse } from "@/lib/api";
+import { PageLoader } from "@/components/PageLoader";
 import type { UserRow } from "../users/shared";
 import { PasswordResetManagementTab } from "./PasswordResetManagementTab";
-import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 interface MeInfo {
   id: number;
@@ -70,11 +70,17 @@ function AccessDashboardContent() {
     router.replace(`/dashboard/access?tab=${tab}`, { scroll: false });
   };
 
-  const [me, setMe] = useState<MeInfo | null>(null);
-  const [org, setOrg] = useState<OrgInfo | null>(null);
-  const [users, setUsers] = useState<UserRow[]>([]);
-  const [roles, setRoles] = useState<OrgRole[]>([]);
-  const [loading, setLoading] = useState(true);
+  const cachedMe = getCachedApiResponse<MeInfo>("/auth/me");
+  const [me, setMe] = useState<MeInfo | null>(() => cachedMe);
+  const initialOrgId = cachedMe?.organization_id ?? null;
+  const cachedOrg = initialOrgId ? getCachedApiResponse<OrgInfo>(`/organizations/${initialOrgId}`) : null;
+  const cachedUsers = initialOrgId ? getCachedApiResponse<UserRow[]>(`/users?organization_id=${initialOrgId}`) : null;
+  const cachedRoles = initialOrgId ? getCachedApiResponse<OrgRole[]>(`/organizations/${initialOrgId}/roles`) : null;
+
+  const [org, setOrg] = useState<OrgInfo | null>(() => cachedOrg);
+  const [users, setUsers] = useState<UserRow[]>(() => cachedUsers ?? []);
+  const [roles, setRoles] = useState<OrgRole[]>(() => cachedRoles ?? []);
+  const [loading, setLoading] = useState(() => !cachedMe || (!cachedUsers && !cachedRoles));
   const [error, setError] = useState<string | null>(null);
 
   const [roleCreateModal, setRoleCreateModal] = useState(false);
@@ -209,7 +215,9 @@ function AccessDashboardContent() {
       setLoading(false);
       return;
     }
-    setLoading(true);
+    if (users.length === 0 && roles.length === 0) {
+      setLoading(true);
+    }
     setError(null);
     api<MeInfo>("/auth/me", { token })
       .then(async (meInfo) => {
@@ -301,8 +309,10 @@ function AccessDashboardContent() {
     );
   }
 
-  if (loading) {
-    return <WidgetSpinnerLoader size="large" text="Loading access dashboard..." minHeight={350} />;
+  if (loading && users.length === 0 && roles.length === 0) {
+    return (
+      <PageLoader text="Loading access rules…" size="large" minHeight={240} />
+    );
   }
 
   if (!isOrgAdmin && !isSuperAdmin) {
@@ -729,14 +739,39 @@ function AccessDashboardContent() {
 
                 {newUserType === "internal" && (
                   <div>
-                    <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.15rem" }}>
-                      Password * (min 8 chars)
-                    </label>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.15rem" }}>
+                      <label style={{ fontSize: "0.8rem" }}>
+                        Password * (min 8 chars)
+                      </label>
+                      {newUserPassword.length > 0 && (
+                        <span
+                          style={{
+                            fontSize: "0.72rem",
+                            color: newUserPassword.length >= 8 ? "#10b981" : "#ef4444",
+                            fontWeight: 500,
+                          }}
+                        >
+                          {newUserPassword.length >= 8 ? "✓ Valid" : `${newUserPassword.length}/8 chars`}
+                        </span>
+                      )}
+                    </div>
                     <input
                       type="password"
                       value={newUserPassword}
-                      onChange={(e) => setNewUserPassword(e.target.value)}
-                      style={{ width: "100%", padding: "0.35rem 0.5rem", fontSize: "0.85rem" }}
+                      onChange={(e) => {
+                        setNewUserPassword(e.target.value);
+                        if (createUserError) setCreateUserError(null);
+                      }}
+                      placeholder="At least 8 characters"
+                      style={{
+                        width: "100%",
+                        padding: "0.35rem 0.5rem",
+                        fontSize: "0.85rem",
+                        borderColor:
+                          newUserPassword.length > 0 && newUserPassword.length < 8
+                            ? "#ef4444"
+                            : undefined,
+                      }}
                     />
                   </div>
                 )}
@@ -808,29 +843,41 @@ function AccessDashboardContent() {
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={
-                  createUserSaving ||
-                  !newUserUsername.trim() ||
-                  (newUserType === "internal" &&
-                    (!newUserPassword || newUserPassword.length < 8))
-                }
+                disabled={createUserSaving}
                 onClick={async () => {
-                  if (!token || !orgId) return;
+                  if (!token) {
+                    toast.error("You must be logged in.");
+                    return;
+                  }
+                  if (!orgId) {
+                    toast.error("Organization context is missing. Please refresh the page.");
+                    return;
+                  }
+                  if (!newUserUsername.trim()) {
+                    const msg = "Username is required.";
+                    setCreateUserError(msg);
+                    toast.error(msg);
+                    return;
+                  }
                   if (newUserType === "internal") {
-                    if (!newUserUsername.trim() || !newUserPassword || newUserPassword.length < 8) {
-                      setCreateUserError("Username and password (min 8 chars) are required.");
+                    if (!newUserPassword) {
+                      const msg = "Password is required (min 8 chars).";
+                      setCreateUserError(msg);
+                      toast.error(msg);
                       return;
                     }
-                  }
-                  if (newUserType === "external" && !newUserUsername.trim()) {
-                    setCreateUserError("Username is required.");
-                    return;
+                    if (newUserPassword.length < 8) {
+                      const msg = `Password must be at least 8 characters (currently ${newUserPassword.length}).`;
+                      setCreateUserError(msg);
+                      toast.error(msg);
+                      return;
+                    }
                   }
                   setCreateUserError(null);
                   setCreateUserSaving(true);
                   try {
                     if (newUserType === "internal") {
-                      await api<UserRow>("/users", {
+                      await api<UserRow>(`/users?organization_id=${orgId}`, {
                         method: "POST",
                         body: JSON.stringify({
                           username: newUserUsername.trim(),
@@ -844,7 +891,7 @@ function AccessDashboardContent() {
                         token,
                       });
                     } else {
-                      await api<UserRow>("/users/external", {
+                      await api<UserRow>(`/users/external?organization_id=${orgId}`, {
                         method: "POST",
                         body: JSON.stringify({
                           username: newUserUsername.trim(),
@@ -852,6 +899,7 @@ function AccessDashboardContent() {
                           unique_user_key: newUserUniqueKey.trim() || null,
                           description: newExternalDescription.trim() || null,
                           is_active: newExternalIsActive,
+                          organization_id: orgId,
                         }),
                         token,
                       });
@@ -1939,7 +1987,7 @@ function AccessDashboardContent() {
 
 export default function AccessDashboardPage() {
   return (
-    <Suspense fallback={<WidgetSpinnerLoader size="large" text="Loading access dashboard..." minHeight={350} />}>
+    <Suspense fallback={null}>
       <AccessDashboardContent />
     </Suspense>
   );

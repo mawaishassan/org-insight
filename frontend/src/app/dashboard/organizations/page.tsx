@@ -6,9 +6,9 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { api, getCachedApiResponse } from "@/lib/api";
 import toast from "react-hot-toast";
-import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
+import { PageLoader } from "@/components/PageLoader";
 
 /** Settings icon (gear) for organization card - links to org Settings tab. */
 function SettingsIcon({ orgId }: { orgId: number }) {
@@ -48,8 +48,10 @@ type CreateFormData = z.infer<typeof createSchema>;
 let cachedOrgs: OrgListItem[] = [];
 
 export default function OrganizationsPage() {
-  const [list, setList] = useState<OrgListItem[]>(() => cachedOrgs);
-  const [loading, setLoading] = useState(() => cachedOrgs.length === 0);
+  const rawCached = getCachedApiResponse<OrgListItem[]>("/organizations");
+  const initialCached = Array.isArray(rawCached) ? rawCached : (Array.isArray(cachedOrgs) ? cachedOrgs : []);
+  const [list, setList] = useState<OrgListItem[]>(() => initialCached);
+  const [loading, setLoading] = useState(() => initialCached.length === 0);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
 
@@ -57,12 +59,13 @@ export default function OrganizationsPage() {
 
   const loadList = () => {
     if (!token) return;
-    setLoading(true);
+    if (!Array.isArray(list) || list.length === 0) setLoading(true);
     // This page only needs the organizations list; summary counts are expensive (and grow with data volume).
     api<OrgListItem[]>(`/organizations`, { token })
       .then((data) => {
-        setList(data);
-        cachedOrgs = data;
+        const safeData = Array.isArray(data) ? data : [];
+        setList(safeData);
+        cachedOrgs = safeData;
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
       .finally(() => setLoading(false));
@@ -111,13 +114,13 @@ export default function OrganizationsPage() {
     }
   };
 
-  if (loading && list.length === 0) {
+  if (loading && (!Array.isArray(list) || list.length === 0)) {
     return (
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
           <h1 style={{ fontSize: "1.5rem" }}>Organizations</h1>
         </div>
-        <WidgetSpinnerLoader text="Loading organizations..." minHeight={300} />
+        <PageLoader text="Loading organizations…" size="large" minHeight={300} />
       </div>
     );
   }
@@ -190,7 +193,7 @@ export default function OrganizationsPage() {
       )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
-        {list.map((o) => (
+        {(Array.isArray(list) ? list : []).map((o) => (
           <div key={o.id} className="card" style={{ marginBottom: 0, display: "flex", flexDirection: "column", minHeight: 200 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem", flex: 1, minWidth: 0 }}>
               <Link

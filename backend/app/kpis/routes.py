@@ -58,6 +58,8 @@ from app.kpis.schemas import (
     KPIReportHeaderRef,
     KPIFormulaValidateRequest,
     KPIFormulaValidateResponse,
+    JoinMliWizardRequest,
+    JoinMliWizardResponse,
 )
 from app.kpis.service import (
     create_kpi,
@@ -310,6 +312,23 @@ async def create_org_kpi(
     await db.commit()
     k = await get_kpi_with_tags(db, kpi.id, org_id)
     return _kpi_to_response(k)
+
+
+@router.post("/join-wizard", response_model=JoinMliWizardResponse)
+async def run_join_mli_wizard(
+    body: JoinMliWizardRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_org_admin),
+):
+    """
+    Join MLI Wizard: combine Multi-Line Item columns from 2 KPIs.
+
+    Modes:
+    - create_new: Creates a new 3rd Joined (Virtual) KPI combining KPI 1 and KPI 2 MLI fields.
+    - enrich_existing: Adds dynamic virtual lookup columns from KPI 2 into KPI 1's existing MLI field (or vice versa).
+    """
+    from app.entries.joined_wizard_service import execute_join_mli_wizard
+    return await execute_join_mli_wizard(db, current_user, body)
 
 
 @router.get("/{kpi_id}", response_model=KPIResponse)

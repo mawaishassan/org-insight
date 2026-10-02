@@ -2879,17 +2879,75 @@ async def add_multi_items_row(
         ft_s = ft.value if hasattr(ft, "value") else str(ft)
         
         # Odoo API returns boolean False for empty fields. Normalize to None for non-boolean fields.
-        if ft_s != "boolean" and raw_val in (False, "False", "false"):
+        if ft_s != "boolean" and raw_val in (False, "False", "false") and ft_s not in ("dynamic", "mixed"):
             raw_val = None
 
         if raw_val is None:
             pass
+        elif ft_s in ("dynamic", "mixed"):
+            explicit_type = None
+            if isinstance(raw_val, dict) and ("type" in raw_val or "cell_type" in raw_val) and "value" in raw_val and len(raw_val) <= 3:
+                explicit_type = str(raw_val.get("cell_type") or raw_val.get("type")).strip().lower()
+                raw_val = raw_val.get("value")
+
+            if raw_val is not None:
+                if explicit_type == "number":
+                    c.cell_type = "number"
+                    try:
+                        c.value_number = float(raw_val)
+                    except Exception:
+                        pass
+                    c.value_text = str(raw_val)
+                elif explicit_type == "boolean":
+                    c.cell_type = "boolean"
+                    c.value_boolean = bool(raw_val)
+                    c.value_text = "True" if raw_val else "False"
+                elif explicit_type == "date":
+                    c.cell_type = "date"
+                    c.value_text = str(raw_val)
+                elif explicit_type in ("single_line_text", "text"):
+                    c.cell_type = "single_line_text"
+                    c.value_text = str(raw_val)
+                elif isinstance(raw_val, bool):
+                    c.cell_type = "boolean"
+                    c.value_boolean = raw_val
+                    c.value_text = "True" if raw_val else "False"
+                elif isinstance(raw_val, (int, float)):
+                    c.cell_type = "number"
+                    c.value_number = float(raw_val)
+                    c.value_text = str(raw_val)
+                elif isinstance(raw_val, (dict, list)):
+                    c.cell_type = "reference" if isinstance(raw_val, dict) and ("label" in raw_val or "id" in raw_val) else "json"
+                    c.value_json = raw_val
+                else:
+                    v_str = str(raw_val).strip()
+                    is_d = False
+                    if len(v_str) in (10, 19, 20, 23, 24, 25) and ("-" in v_str or "/" in v_str):
+                        try:
+                            import datetime as dt_mod
+                            _ = dt_mod.datetime.fromisoformat(v_str.replace("Z", "+00:00"))
+                            c.cell_type = "date"
+                            c.value_text = v_str
+                            is_d = True
+                        except Exception:
+                            pass
+                    if not is_d:
+                        try:
+                            num = float(v_str)
+                            c.cell_type = "number"
+                            c.value_number = num
+                            c.value_text = v_str
+                        except Exception:
+                            c.cell_type = "single_line_text"
+                            c.value_text = v_str
         elif ft_s == "number":
+            c.cell_type = "number"
             try:
                 c.value_number = float(raw_val)
             except Exception:
                 c.value_text = str(raw_val)
         elif ft_s == "boolean":
+            c.cell_type = "boolean"
             if isinstance(raw_val, bool):
                 c.value_boolean = raw_val
             else:
@@ -2901,14 +2959,16 @@ async def add_multi_items_row(
                 else:
                     c.value_text = str(raw_val)
         elif ft_s == "date":
-            # UI often stores ISO date string; keep it as text for consistency.
+            c.cell_type = "date"
             c.value_text = str(raw_val)
         elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
+            c.cell_type = ft_s
             if isinstance(raw_val, (dict, list)):
                 c.value_json = raw_val
             else:
                 c.value_text = str(raw_val)
         else:
+            c.cell_type = "single_line_text"
             if isinstance(raw_val, (dict, list)):
                 c.value_json = raw_val
             else:
@@ -2983,18 +3043,77 @@ async def update_multi_items_row(
         ft_s = ft.value if hasattr(ft, "value") else str(ft)
 
         # Odoo API returns boolean False for empty fields. Normalize to None for non-boolean fields.
-        if ft_s != "boolean" and raw_val in (False, "False", "false"):
+        if ft_s != "boolean" and raw_val in (False, "False", "false") and ft_s not in ("dynamic", "mixed"):
             raw_val = None
 
         if raw_val is None:
             return
+        if ft_s in ("dynamic", "mixed"):
+            explicit_type = None
+            if isinstance(raw_val, dict) and ("type" in raw_val or "cell_type" in raw_val) and "value" in raw_val and len(raw_val) <= 3:
+                explicit_type = str(raw_val.get("cell_type") or raw_val.get("type")).strip().lower()
+                raw_val = raw_val.get("value")
+
+            if raw_val is not None:
+                if explicit_type == "number":
+                    cell.cell_type = "number"
+                    try:
+                        cell.value_number = float(raw_val)
+                    except Exception:
+                        pass
+                    cell.value_text = str(raw_val)
+                elif explicit_type == "boolean":
+                    cell.cell_type = "boolean"
+                    cell.value_boolean = bool(raw_val)
+                    cell.value_text = "True" if raw_val else "False"
+                elif explicit_type == "date":
+                    cell.cell_type = "date"
+                    cell.value_text = str(raw_val)
+                elif explicit_type in ("single_line_text", "text"):
+                    cell.cell_type = "single_line_text"
+                    cell.value_text = str(raw_val)
+                elif isinstance(raw_val, bool):
+                    cell.cell_type = "boolean"
+                    cell.value_boolean = raw_val
+                    cell.value_text = "True" if raw_val else "False"
+                elif isinstance(raw_val, (int, float)):
+                    cell.cell_type = "number"
+                    cell.value_number = float(raw_val)
+                    cell.value_text = str(raw_val)
+                elif isinstance(raw_val, (dict, list)):
+                    cell.cell_type = "reference" if isinstance(raw_val, dict) and ("label" in raw_val or "id" in raw_val) else "json"
+                    cell.value_json = raw_val
+                else:
+                    v_str = str(raw_val).strip()
+                    is_d = False
+                    if len(v_str) in (10, 19, 20, 23, 24, 25) and ("-" in v_str or "/" in v_str):
+                        try:
+                            import datetime as dt_mod
+                            _ = dt_mod.datetime.fromisoformat(v_str.replace("Z", "+00:00"))
+                            cell.cell_type = "date"
+                            cell.value_text = v_str
+                            is_d = True
+                        except Exception:
+                            pass
+                    if not is_d:
+                        try:
+                            num = float(v_str)
+                            cell.cell_type = "number"
+                            cell.value_number = num
+                            cell.value_text = v_str
+                        except Exception:
+                            cell.cell_type = "single_line_text"
+                            cell.value_text = v_str
+            return
         if ft_s == "number":
+            cell.cell_type = "number"
             try:
                 cell.value_number = float(raw_val)
             except Exception:
                 cell.value_text = str(raw_val)
             return
         if ft_s == "boolean":
+            cell.cell_type = "boolean"
             if isinstance(raw_val, bool):
                 cell.value_boolean = raw_val
             else:
@@ -3007,14 +3126,17 @@ async def update_multi_items_row(
                     cell.value_text = str(raw_val)
             return
         if ft_s == "date":
+            cell.cell_type = "date"
             cell.value_text = str(raw_val)
             return
         if ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
+            cell.cell_type = ft_s
             if isinstance(raw_val, (dict, list)):
                 cell.value_json = raw_val
             else:
                 cell.value_text = str(raw_val)
             return
+        cell.cell_type = "single_line_text"
         if isinstance(raw_val, (dict, list)):
             cell.value_json = raw_val
         else:
@@ -3153,48 +3275,7 @@ async def update_multi_items_row_cell(
         raw_val = coerce_mixed_list_raw(value) or None
 
     # Typed set (similar to update_multi_items_row)
-    cell.value_text = None
-    cell.value_number = None
-    cell.value_json = None
-    cell.value_boolean = None
-    cell.value_date = None
-    ft = getattr(sub, "field_type", None)
-    ft_s = ft.value if hasattr(ft, "value") else str(ft)
-
-    # Odoo API returns boolean False for empty fields. Normalize to None for non-boolean fields.
-    if ft_s != "boolean" and raw_val in (False, "False", "false"):
-        raw_val = None
-
-    if raw_val is None:
-        pass
-    elif ft_s == "number":
-        try:
-            cell.value_number = float(raw_val)
-        except Exception:
-            cell.value_text = str(raw_val)
-    elif ft_s == "boolean":
-        if isinstance(raw_val, bool):
-            cell.value_boolean = raw_val
-        else:
-            s = str(raw_val).strip().lower()
-            if s in ("true", "yes", "1"):
-                cell.value_boolean = True
-            elif s in ("false", "no", "0"):
-                cell.value_boolean = False
-            else:
-                cell.value_text = str(raw_val)
-    elif ft_s == "date":
-        cell.value_text = str(raw_val)
-    elif ft_s in ("reference", "multi_reference", "mixed_list", "attachment"):
-        if isinstance(raw_val, (dict, list)):
-            cell.value_json = raw_val
-        else:
-            cell.value_text = str(raw_val)
-    else:
-        if isinstance(raw_val, (dict, list)):
-            cell.value_json = raw_val
-        else:
-            cell.value_text = str(raw_val)
+    _set_cell_value(cell, sub, raw_val)
 
     await mark_entry_modified(db, entry, current_user.id)
     await propagate_formula_recalculations(db, entry_id=entry.id, org_id=org_id)

@@ -13,6 +13,7 @@ import {
   printReportDocument,
   type ReportData,
 } from "@/app/dashboard/reports/reportPrint";
+import { PageLoader } from "@/components/PageLoader";
 
 interface TemplateRow {
   id: number;
@@ -786,7 +787,7 @@ export default function ReportsPage() {
     );
   };
 
-  if (loading) return null;
+  if (loading) return <PageLoader text="Loading reports…" size="large" minHeight={300} />;
   if (error) return <p className="form-error">{error}</p>;
 
   if (!isAdmin) {

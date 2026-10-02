@@ -10,6 +10,7 @@ import toast from "react-hot-toast";
 import { MultiLineReportFilterPanel } from "@/components/MultiLineReportFilterPanel";
 import type { MultiFilterSubField, MultiItemsFilterPayloadV2 } from "@/lib/multi-line-filter-payload";
 import { api, getApiUrl } from "@/lib/api";
+import { PageLoader } from "@/components/PageLoader";
 import {
   buildReportPrintDocument,
   openReportPrintWindow,
@@ -1332,9 +1333,9 @@ export default function ReportDesignPage() {
     }
   };
 
-  if (designAllowed === null) return <p style={{ padding: "1rem" }}>Checking access…</p>;
-  if (designAllowed === false) return <p style={{ padding: "1rem" }}>Redirecting…</p>;
-  if (loading) return <p>Loading…</p>;
+  if (designAllowed === null) return <PageLoader text="Checking access…" size="small" minHeight={120} />;
+  if (designAllowed === false) return <PageLoader text="Redirecting…" size="small" minHeight={120} />;
+  if (loading) return <PageLoader text="Loading report builder…" />;
   if (error) return <p className="form-error">{error}</p>;
   if (!detail) return null;
 
@@ -1554,7 +1555,7 @@ export default function ReportDesignPage() {
                 border: "1px solid var(--border)",
               }}
             >
-              ⚙️ Settings
+              Settings
             </button>
           </div>
         </div>
@@ -2808,7 +2809,7 @@ function BlockCard({
                   gap: "0.35rem",
                 }}
               >
-                <span style={{ opacity: 0.9 }}>✎</span> Custom names…
+                Custom names…
               </button>
               <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Override labels for fields and sub-fields in the report</span>
             </div>

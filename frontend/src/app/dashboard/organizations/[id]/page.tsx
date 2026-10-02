@@ -8,10 +8,9 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import toast from "react-hot-toast";
 import { getAccessToken, clearTokens, type UserRole } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { api, getCachedApiResponse, setCachedApiResponse } from "@/lib/api";
 import { KpiSearchInput } from "@/components/KpiSearchInput";
 import { ApiExportContent } from "./ApiExportContent";
-import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 import {
   buildReportPrintDocument,
   openReportPrintWindow,
@@ -19,6 +18,8 @@ import {
 } from "@/app/dashboard/reports/reportPrint";
 import { ReportLoadProgress } from "@/app/dashboard/reports/ReportLoadProgress";
 import { MLISymbolsPanel } from "@/components/MLISymbolsPanel";
+import { PageLoader } from "@/components/PageLoader";
+import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 const FIELD_TYPES = [
   "single_line_text",
@@ -31,7 +32,7 @@ const FIELD_TYPES = [
   "formula",
 ] as const;
 
-const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference", "attachment"] as const;
+const SUB_FIELD_TYPES = ["single_line_text", "multi_line_text", "number", "date", "boolean", "reference", "multi_reference", "attachment", "dynamic"] as const;
 
 const GROUP_FUNCTIONS = [
   { value: "SUM_ITEMS", label: "SUM (total)" },
@@ -390,7 +391,9 @@ export default function OrganizationDetailPage() {
       ? tabFromUrl
       : "overview";
 
-  const [org, setOrg] = useState<OrgInfo | null>(null);
+  const [org, setOrg] = useState<OrgInfo | null>(() => {
+    return Number.isFinite(orgId) ? getCachedApiResponse<OrgInfo>(`/organizations/${orgId}`) : null;
+  });
   const [tab, setTab] = useState<TabId>(initialTab);
   const [settingsSub, setSettingsSub] = useState<SettingsSubId>(
     settingsSubFromUrl && SETTINGS_SUB_IDS.includes(settingsSubFromUrl) ? settingsSubFromUrl : "storage"
@@ -409,14 +412,18 @@ export default function OrganizationDetailPage() {
     }
   }, [tab, settingsSubFromUrl]);
   const [orgTags, setOrgTags] = useState<OrgTagRow[]>([]);
-  const [kpis, setKpis] = useState<KpiRow[]>([]);
+  const [kpis, setKpis] = useState<KpiRow[]>(() => {
+    return Number.isFinite(orgId) ? getCachedApiResponse<KpiRow[]>(`/kpis?${qs({ organization_id: orgId })}`) ?? [] : [];
+  });
   const [categories, setCategories] = useState<CategoryRow[]>([]);
   const [kpiFilterName, setKpiFilterName] = useState("");
   const [kpiFilterDomainId, setKpiFilterDomainId] = useState<number | null>(null);
   const [kpiFilterCategoryId, setKpiFilterCategoryId] = useState<number | null>(null);
   const [kpiFilterTagId, setKpiFilterTagId] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [kpisLoading, setKpisLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [kpisLoading, setKpisLoading] = useState(() => {
+    return Number.isFinite(orgId) ? !getCachedApiResponse<KpiRow[]>(`/kpis?${qs({ organization_id: orgId })}`) : true;
+  });
   const [error, setError] = useState<string | null>(null);
   const latestKpiSearchIdRef = useRef(0);
 
@@ -458,7 +465,7 @@ export default function OrganizationDetailPage() {
     dashboardCount: number;
     customReportCount: number;
   } | null>(() => {
-    return cachedOverviewSummaries[orgId] ?? null;
+    return (Number.isFinite(orgId) ? getCachedApiResponse<any>(`/overview-summary-${orgId}`) : null) ?? cachedOverviewSummaries[orgId] ?? null;
   });
 
   useEffect(() => {
@@ -467,7 +474,10 @@ export default function OrganizationDetailPage() {
 
   useEffect(() => {
     if (!token || !orgId) return;
-    setOverviewSummary(cachedOverviewSummaries[orgId] ?? null);
+    const existing = (Number.isFinite(orgId) ? getCachedApiResponse<any>(`/overview-summary-${orgId}`) : null) ?? cachedOverviewSummaries[orgId];
+    if (existing) {
+      setOverviewSummary(existing);
+    }
     Promise.all([
       api<DomainWithSummary[]>(`/domains?${qs({ organization_id: orgId, with_summary: true })}`, { token, useCache: true }),
       api<KpiRow[]>(`/kpis?${qs({ organization_id: orgId })}`, { token, useCache: true }),
@@ -493,8 +503,9 @@ export default function OrganizationDetailPage() {
         };
         setOverviewSummary(summaryData);
         cachedOverviewSummaries[orgId] = summaryData;
+        setCachedApiResponse(`/overview-summary-${orgId}`, summaryData);
       })
-      .catch(() => setOverviewSummary(null));
+      .catch(() => {});
   }, [orgId, token]);
 
   const loadOrg = () => {
@@ -529,14 +540,20 @@ export default function OrganizationDetailPage() {
   const loadKpis = () => {
     if (!token || !orgId) return;
     setError(null);
-    setKpisLoading(true);
     const searchId = ++latestKpiSearchIdRef.current;
     const params: Record<string, string | number> = { organization_id: orgId };
     if (kpiFilterName?.trim()) params.name = kpiFilterName.trim();
     if (kpiFilterDomainId != null) params.domain_id = kpiFilterDomainId;
     if (kpiFilterCategoryId != null) params.category_id = kpiFilterCategoryId;
     if (kpiFilterTagId != null) params.organization_tag_id = kpiFilterTagId;
-    api<KpiRow[]>(`/kpis?${qs(params)}`, { token, useCache: true })
+    const path = `/kpis?${qs(params)}`;
+    const cached = getCachedApiResponse<KpiRow[]>(path);
+    if (cached) {
+      setKpis(cached);
+    } else if (kpis.length === 0) {
+      setKpisLoading(true);
+    }
+    api<KpiRow[]>(path, { token, useCache: true })
       .then((data) => {
         if (searchId === latestKpiSearchIdRef.current) {
           setKpis(data);
@@ -733,7 +750,23 @@ function OrganizationOverviewCards({
   userRole: UserRole | null;
 }) {
   if (!summary) {
-    return <WidgetSpinnerLoader text="Loading overview..." minHeight={300} />;
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: "1.25rem", padding: "1rem 0" }}>
+        {[1, 2, 3, 4, 5, 6].map((i) => (
+          <div
+            key={i}
+            className="card"
+            style={{
+              height: "140px",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "8px",
+              opacity: 0.5,
+            }}
+          />
+        ))}
+      </div>
+    );
   }
   const cards: { id: string; title: string; icon: React.ReactNode; lines: string[]; href?: string; onClick?: () => void }[] = [
     {
@@ -1417,7 +1450,7 @@ function SettingsPage({
                     setFormSuffix("");
                   }}
                 >
-                  ➕ Add Custom Period
+                  Add Custom Period
                 </button>
               </div>
             )}
@@ -1697,7 +1730,7 @@ function AdminUserSettingsSection({ orgId, token }: { orgId: number; token: stri
       </p>
       {adminSaveError && <p className="form-error" style={{ marginBottom: "0.75rem" }}>{adminSaveError}</p>}
       {loadingAdmin ? (
-        <p style={{ color: "var(--muted)" }}>Loading admin…</p>
+        <WidgetSpinnerLoader size="small" text="Loading admin…" minHeight={120} />
       ) : adminUser ? (
         <form onSubmit={adminForm.handleSubmit(onAdminSubmit)}>
           <div className="form-group">
@@ -1785,7 +1818,7 @@ function ExternalAuthConfigSection({ token }: { token: string }) {
       .finally(() => setSaving(false));
   };
 
-  if (loading) return <p style={{ color: "var(--muted)" }}>Loading external auth config…</p>;
+  if (loading) return <WidgetSpinnerLoader size="medium" text="Loading external auth config…" minHeight={150} />;
 
   return (
     <div style={{ maxWidth: "32rem" }}>
@@ -1928,9 +1961,7 @@ function OdooConfigSection({ orgId, token }: { orgId: number; token: string }) {
       .finally(() => setSaving(false));
   };
 
-  if (loading) return <p style={{ color: "var(--muted)" }}>Loading Odoo config…</p>;
-
-  if (loading) return <p style={{ color: "var(--muted)" }}>Loading Odoo config…</p>;
+  if (loading) return <WidgetSpinnerLoader size="medium" text="Loading Odoo config…" minHeight={150} />;
 
   return (
     <div style={{ width: "100%" }}>
@@ -2140,7 +2171,7 @@ function OdooEndpointsSection({ orgId, token }: { orgId: number; token: string }
       </div>
 
       {loading ? (
-        <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Loading endpoints…</p>
+        <WidgetSpinnerLoader size="small" text="Loading endpoints…" minHeight={120} />
       ) : endpoints.length === 0 ? (
         <div style={{ padding: "1.5rem", background: "var(--surface, #f9f9f9)", borderRadius: "6px", textAlign: "center", color: "var(--muted)", fontSize: "0.9rem" }}>
           No endpoints configured yet. Click "+ Add Endpoint" to create your first Odoo endpoint.
@@ -2367,7 +2398,7 @@ function StorageConfigSection({ orgId, token }: { orgId: number; token: string }
     setForm((prev) => ({ ...prev, params: { ...prev.params, [key]: value } }));
   };
 
-  if (loading) return <p style={{ color: "var(--muted)" }}>Loading storage config…</p>;
+  if (loading) return <WidgetSpinnerLoader size="medium" text="Loading storage config…" minHeight={150} />;
 
   return (
     <div style={{ maxWidth: "32rem" }}>
@@ -3377,7 +3408,7 @@ function KpisSection({
         </div>
       )}
       {loading && list.length === 0 ? (
-        <WidgetSpinnerLoader text="Loading KPIs..." minHeight={200} />
+        <PageLoader text="Loading…" size="medium" minHeight={180} />
       ) : list.length === 0 ? (
         <div className="card">
           <p style={{ color: "var(--muted)" }}>No KPIs yet. Add one above.</p>
@@ -5237,7 +5268,7 @@ function ReportsSection({
           <p className="form-error" style={{ marginTop: "0.75rem" }}>{error}</p>
         )}
         {loading ? (
-          <p style={{ color: "var(--muted)" }}>Loading…</p>
+          <WidgetSpinnerLoader size="small" text="Loading templates…" minHeight={100} />
         ) : list.length === 0 ? (
           <p style={{ color: "var(--muted)" }}>No templates yet.</p>
         ) : (

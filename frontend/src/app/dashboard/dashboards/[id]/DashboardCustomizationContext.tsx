@@ -419,10 +419,20 @@ export function DashboardCustomizationProvider({
     }
   }, [hasNeverLoaded, isAnyWidgetLoading]);
 
+  // Safety fallback: ensure initial loading overlay does not linger if an individual widget stalls
+  useEffect(() => {
+    if (hasNeverLoaded) {
+      const timer = setTimeout(() => {
+        setHasNeverLoaded(false);
+      }, 4500);
+      return () => clearTimeout(timer);
+    }
+  }, [hasNeverLoaded]);
+
   const observedLoadingSinceFilterRef = useRef(false);
 
   // Clear isGlobalFilterLoading only after widgets have started AND finished loading,
-  // or after a fallback grace delay if resolved synchronously from memory cache.
+  // or after a minimal fallback delay if resolved synchronously from memory cache.
   useEffect(() => {
     if (!isGlobalFilterLoading) {
       observedLoadingSinceFilterRef.current = false;
@@ -445,7 +455,7 @@ export function DashboardCustomizationProvider({
         setIsGlobalFilterLoading(false);
         observedLoadingSinceFilterRef.current = false;
       }
-    }, 300);
+    }, 40);
 
     return () => clearTimeout(fallbackTimer);
   }, [isGlobalFilterLoading, isAnyWidgetLoading]);
@@ -570,8 +580,7 @@ function IndividualEditModal({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "rgba(15, 23, 42, 0.45)",
-        backdropFilter: "blur(4px)",
+        background: "rgba(15, 23, 42, 0.55)",
         padding: "1.5rem",
       }}
       onClick={(e) => e.target === e.currentTarget && onClose()}
@@ -706,8 +715,7 @@ function GlobalEditModal({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "rgba(15, 23, 42, 0.45)",
-        backdropFilter: "blur(4px)",
+        background: "rgba(15, 23, 42, 0.55)",
         padding: "1.5rem",
       }}
       onClick={(e) => e.target === e.currentTarget && onClose()}

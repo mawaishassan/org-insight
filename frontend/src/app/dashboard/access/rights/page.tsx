@@ -5,7 +5,8 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { api, getCachedApiResponse } from "@/lib/api";
+import { PageLoader } from "@/components/PageLoader";
 import { WidgetSpinnerLoader } from "@/components/WidgetSpinnerLoader";
 
 // ===========================================================================
@@ -1042,8 +1043,8 @@ function ManageRightsTable({
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8} style={{ padding: "3rem", textAlign: "center", color: "#64748b" }}>
-                  Loading permissions...
+                <td colSpan={8} style={{ padding: "2rem 1rem", textAlign: "center" }}>
+                  <WidgetSpinnerLoader size="medium" text="Loading permissions…" minHeight={120} />
                 </td>
               </tr>
             ) : items.length === 0 ? (
@@ -1451,7 +1452,7 @@ function EditRightDrawer({
                 Multi-Line Column Restrictions:
               </div>
               {loadingColumns ? (
-                <div style={{ fontSize: "0.8rem", color: "#64748b" }}>Loading MLI columns...</div>
+                <WidgetSpinnerLoader size="small" text="Loading MLI columns…" minHeight={60} />
               ) : availableColumns.length === 0 ? (
                 <div style={{ fontSize: "0.8rem", color: "#64748b" }}>No MLI columns found for this resource.</div>
               ) : (
@@ -2633,7 +2634,7 @@ function AccessConfigStep({
             Multi-Line Item (MLI) Column Mapping
           </h4>
           {loadingColumns ? (
-            <div style={{ padding: "1rem", color: "#64748b" }}>Loading MLI columns...</div>
+            <WidgetSpinnerLoader size="small" text="Loading MLI columns…" minHeight={60} />
           ) : mliGroups.length === 0 ? (
             <div style={{ padding: "0.75rem", background: "#fef2f2", color: "#991b1b", borderRadius: "6px", fontSize: "0.85rem" }}>
               No MLI fields found in selected resources.
@@ -3042,7 +3043,7 @@ function AssignRightsWizard({
   };
 
   if (loadingInitial) {
-    return <div style={{ padding: "3rem", textAlign: "center", color: "#64748b" }}>Loading wizard resources...</div>;
+    return <PageLoader text="Loading wizard resources…" size="medium" minHeight={200} />;
   }
 
   const steps = [
@@ -3468,7 +3469,7 @@ function UserCentricView({
         </div>
         <div style={{ flex: 1, overflowY: "auto" }}>
           {loadingUsers ? (
-            <div style={{ padding: "2rem 1rem", textAlign: "center", color: "#64748b" }}>Loading...</div>
+            <WidgetSpinnerLoader size="small" text="Loading users…" minHeight={120} />
           ) : (
             filteredUsers.map((u) => {
               const isSelected = selectedUserId === u.id;
@@ -3495,7 +3496,7 @@ function UserCentricView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
         {loadingSummary ? (
-          <div style={{ background: "#ffffff", padding: "3rem", textAlign: "center", borderRadius: "10px", color: "#64748b" }}>Loading user rights...</div>
+          <WidgetSpinnerLoader size="medium" text="Loading user rights…" minHeight={200} />
         ) : summary ? (
           <>
             <div style={{ background: "#ffffff", padding: "1.25rem 1.5rem", borderRadius: "10px", border: "1px solid #e2e8f0", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "1rem" }}>
@@ -3520,7 +3521,7 @@ function UserCentricView({
                       }}
                       title="Default Dashboard"
                     >
-                      ★ Default: {summary.dashboards.find((d) => d.resource_id === summary.default_dashboard_id)?.resource_name || `#${summary.default_dashboard_id}`}
+                      Default: {summary.dashboards.find((d) => d.resource_id === summary.default_dashboard_id)?.resource_name || `#${summary.default_dashboard_id}`}
                     </span>
                   )}
                 </div>
@@ -3579,7 +3580,7 @@ function UserCentricView({
                                   }}
                                   title="Default dashboard for this user"
                                 >
-                                  ★ Default
+                                  Default
                                 </span>
                               )}
                             </div>
@@ -3906,7 +3907,7 @@ function ResourceCentricView({
       </div>
 
       {loadingSummary ? (
-        <div style={{ background: "#ffffff", padding: "4rem", textAlign: "center", borderRadius: "10px", color: "#64748b" }}>Loading summary...</div>
+        <WidgetSpinnerLoader size="medium" text="Loading summary…" minHeight={200} />
       ) : summary ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
           <div style={{ background: "#ffffff", padding: "1.25rem 1.5rem", borderRadius: "10px", border: "1px solid #e2e8f0", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "1rem" }}>
@@ -4130,7 +4131,7 @@ function AuditHistoryView({
 
     <div style={{ background: "#ffffff", borderRadius: "10px", border: "1px solid #e2e8f0", overflow: "hidden" }}>
       {loading ? (
-        <div style={{ padding: "4rem", textAlign: "center", color: "#64748b" }}>Loading audit history...</div>
+        <WidgetSpinnerLoader size="medium" text="Loading audit history…" minHeight={200} />
       ) : logs.length === 0 ? (
         <div style={{ padding: "3rem", textAlign: "center", color: "#64748b" }}>No audit records found.</div>
       ) : (
@@ -4243,8 +4244,9 @@ function RightsManagementContent() {
   const userIdParam = searchParams?.get("user_id") ? Number(searchParams.get("user_id")) : null;
 
   const [activeTab, setActiveTab] = useState<ActiveTab>(tabParam);
-  const [me, setMe] = useState<MeInfo | null>(null);
-  const [loadingMe, setLoadingMe] = useState(true);
+  const cachedMe = getCachedApiResponse<MeInfo>("/auth/me");
+  const [me, setMe] = useState<MeInfo | null>(() => cachedMe);
+  const [loadingMe, setLoadingMe] = useState(() => !cachedMe);
   const [dataVersion, setDataVersion] = useState(0);
 
   const triggerRefresh = () => setDataVersion((v) => v + 1);
@@ -4257,7 +4259,7 @@ function RightsManagementContent() {
 
   useEffect(() => {
     if (!token) return;
-    setLoadingMe(true);
+    if (!me) setLoadingMe(true);
     api<MeInfo>("/auth/me", { token })
       .then((data) => setMe(data))
       .catch(() => {})
@@ -4294,8 +4296,10 @@ function RightsManagementContent() {
     );
   }
 
-  if (loadingMe) {
-    return <WidgetSpinnerLoader size="large" text="Loading rights management..." minHeight={400} />;
+  if (loadingMe && !me) {
+    return (
+      <PageLoader text="Loading access & permissions…" size="large" minHeight={300} />
+    );
   }
 
   const isOrgAdmin = me?.role === "ORG_ADMIN" || me?.role === "SUPER_ADMIN";
@@ -4440,7 +4444,7 @@ function RightsManagementContent() {
 
 export default function RightsManagementPage() {
   return (
-    <Suspense fallback={<WidgetSpinnerLoader size="large" text="Loading rights management..." minHeight={400} />}>
+    <Suspense fallback={null}>
       <RightsManagementContent />
     </Suspense>
   );

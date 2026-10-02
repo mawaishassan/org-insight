@@ -5,7 +5,8 @@ import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import { getAccessToken } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { api, getCachedApiResponse } from "@/lib/api";
+import { PageLoader } from "@/components/PageLoader";
 
 function qs(params: Record<string, string | number | undefined>) {
   return new URLSearchParams(
@@ -90,17 +91,22 @@ export default function AccessControlPage() {
   const searchParams = useSearchParams();
   const orgId = Number(params?.id);
   const token = getAccessToken();
-  const [org, setOrg] = useState<OrgInfo | null>(null);
-  const [kpis, setKpis] = useState<KpiRow[]>([]);
-  const [users, setUsers] = useState<UserRef[]>([]);
+  const cachedOrg = Number.isFinite(orgId) ? getCachedApiResponse<OrgInfo>(`/organizations/${orgId}`) : null;
+  const [org, setOrg] = useState<OrgInfo | null>(() => cachedOrg);
+  const [kpis, setKpis] = useState<KpiRow[]>(() => {
+    return Number.isFinite(orgId) ? getCachedApiResponse<KpiRow[]>(`/kpis?${qs({ organization_id: orgId })}`) ?? [] : [];
+  });
+  const [users, setUsers] = useState<UserRef[]>(() => {
+    return Number.isFinite(orgId) ? getCachedApiResponse<UserRef[]>(`/users?${qs({ organization_id: orgId })}`) ?? [] : [];
+  });
   const kpiIdFromUrl = searchParams?.get("kpi_id");
   const [selectedKpiId, setSelectedKpiId] = useState<number | null>(null);
   const [assignments, setAssignments] = useState<{ id: number; username: string; full_name: string | null; permission: string }[]>([]);
   const [fields, setFields] = useState<FieldDef[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !cachedOrg);
   const [error, setError] = useState<string | null>(null);
 
-  const [me, setMe] = useState<MeInfo | null>(null);
+  const [me, setMe] = useState<MeInfo | null>(() => getCachedApiResponse<MeInfo>("/auth/me"));
   const isSuperAdmin = me?.role === "SUPER_ADMIN";
 
   const [externalLoginUrl, setExternalLoginUrl] = useState<string>("");
@@ -132,7 +138,9 @@ export default function AccessControlPage() {
   const [addUserToRowAccess, setAddUserToRowAccess] = useState<"edit" | "edit_delete">("edit_delete");
   const [addUserToRowSaving, setAddUserToRowSaving] = useState(false);
   // Organization roles
-  const [roles, setRoles] = useState<OrgRole[]>([]);
+  const [roles, setRoles] = useState<OrgRole[]>(() => {
+    return Number.isFinite(orgId) ? getCachedApiResponse<OrgRole[]>(`/organizations/${orgId}/roles`) ?? [] : [];
+  });
   const [roleCreateModal, setRoleCreateModal] = useState(false);
   const [roleEditModal, setRoleEditModal] = useState<OrgRole | null>(null);
   const [roleUsersModal, setRoleUsersModal] = useState<OrgRole | null>(null);
@@ -452,10 +460,10 @@ export default function AccessControlPage() {
     );
   }
 
-  if (loading) {
+  if (loading && !org) {
     return (
-      <div style={{ padding: "2rem" }}>
-        <p style={{ color: "var(--muted)" }}>Loading access control…</p>
+      <div style={{ maxWidth: 1000, margin: "0 auto", padding: "2rem" }}>
+        <PageLoader text="Loading access settings…" size="large" minHeight={240} />
       </div>
     );
   }

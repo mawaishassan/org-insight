@@ -317,7 +317,7 @@ export function SmartChartViewer({
             }}
           >
             <span>
-              💡 Dataset contains <strong>{rawCount} categories</strong>. A Bar Chart provides significantly better readability.
+              Dataset contains <strong>{rawCount} categories</strong>. A Bar Chart provides significantly better readability.
             </span>
             <div style={{ display: "flex", gap: "0.35rem" }}>
               <button

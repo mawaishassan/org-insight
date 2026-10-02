@@ -9,6 +9,7 @@ import { z } from "zod";
 import { getAccessToken } from "@/lib/auth";
 import { api } from "@/lib/api";
 import toast from "react-hot-toast";
+import { PageLoader } from "@/components/PageLoader";
 import {
   type UserRow,
   type KpiOption,
@@ -104,7 +105,8 @@ export default function UsersPage() {
     setError(null);
     try {
       const kpi_assignments = buildKpiAssignmentsPayload(createKpiPermissions);
-      await api("/users", {
+      const postUrl = orgIdFromQuery ? `/users?organization_id=${orgIdFromQuery}` : "/users";
+      await api(postUrl, {
         method: "POST",
         body: JSON.stringify({
           username: data.username,
@@ -130,7 +132,7 @@ export default function UsersPage() {
     }
   };
 
-  if (loading && list.length === 0) return <p>Loading...</p>;
+  if (loading && list.length === 0) return <PageLoader text="Loading users…" />;
 
   return (
     <div>
