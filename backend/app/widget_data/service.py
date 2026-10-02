@@ -6543,7 +6543,7 @@ async def resolve_dashboard_universal_batch(
             return key, {"ok": False, "error": str(exc)}
 
     # Run all resolution tasks concurrently
-    heavy_tasks = [_resolve_heavy_item(key, wtype, merged, dr) for key, wtype, merged, dr in heavy_items]
+    heavy_tasks = [_resolve_heavy_item(key, wtype, merged, dr) for key, wtype, merged, dr, _w, _ov in heavy_items]
 
     gathered = await asyncio.gather(
         _resolve_chart_batch(),
